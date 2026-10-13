@@ -3230,3 +3230,7 @@ mod original_domains;
 #[cfg(target_os = "linux")]
 #[path = "tests/receipt_authority.rs"]
 mod receipt_authority;
+
+#[cfg(target_os = "linux")]
+#[path = "tests/state_authority.rs"]
+mod state_authority;

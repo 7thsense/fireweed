@@ -59,6 +59,7 @@ pub mod queue_original_authority;
 pub mod queue_planner;
 pub mod queue_recovery;
 pub mod queue_runtime;
+pub mod queue_state_authority;
 pub mod queue_storage_layout;
 pub mod queue_unique_stream;
 pub mod schema_validation;

@@ -121,6 +121,7 @@ pub struct RecoveredQueue {
     pub target_next_offset: u64,
     original_identity_present: Option<bool>,
     original_authority: Option<Arc<AdmittedOriginalAuthority>>,
+    state_authority: Option<Arc<fireweed_engine::queue_state_authority::AdmittedStateAuthority>>,
 }
 /// On return, cancellation or unwind, release the operation permit before the
 /// final task reservation owner can notify shutdown waiters.
@@ -135,6 +136,7 @@ struct RecoveryTask {
     address: QueueAddress,
     identity: Option<(u8, String)>,
     originals: Option<ColdOriginalTracker>,
+    states: Option<fireweed_engine::queue_state_authority::ColdStateTracker>,
     _headers: OwnedQueueBufferCharge,
     job: Arc<QueueReservation>,
 }
@@ -230,7 +232,7 @@ impl QueueRecoveryPipeline {
         address: QueueAddress,
         job: Arc<QueueReservation>,
     ) -> QueueResult<RecoveredQueue> {
-        self.recover_checked(address, None, None, job).await
+        self.recover_checked(address, None, None, None, job).await
     }
     pub(super) async fn recover_request(
         self: &Arc<Self>,
@@ -240,8 +242,14 @@ impl QueueRecoveryPipeline {
         job: Arc<QueueReservation>,
     ) -> QueueResult<RecoveredQueue> {
         let originals = ColdOriginalTracker::new_request(&address, domain, &identity, &job)?;
-        self.recover_checked(address, Some((domain, identity)), Some(originals), job)
-            .await
+        self.recover_checked(
+            address,
+            Some((domain, identity)),
+            Some(originals),
+            None,
+            job,
+        )
+        .await
     }
     async fn recover_batch(
         self: &Arc<Self>,
@@ -249,7 +257,7 @@ impl QueueRecoveryPipeline {
         job: Arc<QueueReservation>,
     ) -> QueueResult<RecoveredQueue> {
         let originals = ColdOriginalTracker::new(request, &job)?;
-        self.recover_checked(request.queue.clone(), None, Some(originals), job)
+        self.recover_checked(request.queue.clone(), None, Some(originals), None, job)
             .await
     }
     async fn recover_checked(
@@ -257,6 +265,7 @@ impl QueueRecoveryPipeline {
         address: QueueAddress,
         identity: Option<(u8, String)>,
         originals: Option<ColdOriginalTracker>,
+        states: Option<fireweed_engine::queue_state_authority::ColdStateTracker>,
         job: Arc<QueueReservation>,
     ) -> QueueResult<RecoveredQueue> {
         address.validate()?;
@@ -278,6 +287,7 @@ impl QueueRecoveryPipeline {
             address,
             identity,
             originals,
+            states,
             _headers: headers,
             job,
         };
@@ -389,6 +399,9 @@ impl RecoveryTask {
             history.observe(offset, record.bytes())?;
             if let Some(originals) = &mut self.originals {
                 originals.observe(offset, &record)?;
+            }
+            if let Some(states) = &mut self.states {
+                states.observe(offset, &record)?;
             }
             if let Some((domain, id)) = &self.identity {
                 let present = match view.payload() {
@@ -502,6 +515,31 @@ impl RecoveryTask {
                     .map(Arc::new)
             })
             .transpose()?;
+        let state_authority = self
+            .states
+            .take()
+            .map(|states| {
+                let genesis = encode_checked_genesis(
+                    genesis_epoch,
+                    &self.address,
+                    history.definition()?,
+                    history.cursor_secret()?,
+                    pipeline.hard_record_bytes,
+                    &self.job,
+                )?;
+                states
+                    .finish(
+                        &history,
+                        &genesis,
+                        (
+                            target_next_offset,
+                            history.insertion_sequence(),
+                            history.historical_epoch(),
+                        ),
+                    )
+                    .map(Arc::new)
+            })
+            .transpose()?;
         if let Some((_, id)) = &self.identity {
             let present = original_authority
                 .as_ref()
@@ -522,6 +560,7 @@ impl RecoveryTask {
             target_next_offset,
             original_identity_present,
             original_authority,
+            state_authority,
         })
     }
 }

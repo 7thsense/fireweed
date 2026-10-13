@@ -94,6 +94,85 @@ impl Serialize for InsertsRef<'_> {
         seq.end()
     }
 }
+/// Canonical public Fields encoding, counted and hashed without an owned copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FieldsFingerprint {
+    pub encoded_bytes: u64,
+    pub sha256: [u8; 32],
+}
+struct FingerprintWriter {
+    bytes: u64,
+    hash: Sha256,
+}
+impl std::io::Write for FingerprintWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| std::io::Error::other("field fingerprint length overflow"))?;
+        self.hash.update(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+fn fields_fingerprint<T: Serialize>(fields: &T) -> PublicationResult<FieldsFingerprint> {
+    let writer = postcard::to_io(
+        fields,
+        FingerprintWriter {
+            bytes: 0,
+            hash: Sha256::new(),
+        },
+    )
+    .map_err(|_| PublicationError::Invalid("field fingerprint serialization failed"))?;
+    Ok(FieldsFingerprint {
+        encoded_bytes: writer.bytes,
+        sha256: writer.hash.finalize().into(),
+    })
+}
+pub fn borrowed_fields_fingerprint(fields: FieldsRef<'_>) -> PublicationResult<FieldsFingerprint> {
+    fields_fingerprint(&PublicFields(fields))
+}
+pub fn owned_fields_fingerprint(fields: &Fields) -> PublicationResult<FieldsFingerprint> {
+    fields_fingerprint(fields)
+}
+
+// Match Bytes::serialize without traversing the value byte by byte for a count.
+struct PublicStateValue<'a>(&'a [u8]);
+impl Serialize for PublicStateValue<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(self.0)
+    }
+}
+
+/// Exact public StateRecord serialization length from a borrowed resolved mutation.
+pub fn state_record_encoded_len(
+    collection: &str,
+    key: &str,
+    version: u64,
+    fields: FieldsRef<'_>,
+    value: &[u8],
+) -> PublicationResult<u64> {
+    #[derive(Serialize)]
+    struct Record<'a> {
+        collection: &'a str,
+        key: &'a str,
+        version: u64,
+        fields: PublicFields<'a>,
+        value: PublicStateValue<'a>,
+    }
+    let record = Record {
+        collection,
+        key,
+        version,
+        fields: PublicFields(fields),
+        value: PublicStateValue(value),
+    };
+    encoded_len(&record)
+        .map_err(|_| PublicationError::Invalid("state record length serialization failed"))
+}
+
 struct PublicFields<'a>(FieldsRef<'a>);
 impl Serialize for PublicFields<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {

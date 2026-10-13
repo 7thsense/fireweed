@@ -27,7 +27,9 @@ mod work_fragment;
 pub use work_fragment::*;
 mod receipt_projection;
 pub use receipt_projection::{
-    CommitReceiptProjection, ReceiptLookupProjection, receipt_outcome_heap_bound,
+    CommitReceiptProjection, FieldsFingerprint, ReceiptLookupProjection,
+    borrowed_fields_fingerprint, owned_fields_fingerprint, receipt_outcome_heap_bound,
+    state_record_encoded_len,
 };
 #[cfg(test)]
 mod replay_tests;

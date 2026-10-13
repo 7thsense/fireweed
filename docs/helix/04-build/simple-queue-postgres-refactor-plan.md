@@ -93,7 +93,12 @@ production mappings remain documentary. Ordered receipt lookups bind the whole
 request vector, including aliases and empty requests, before native reads;
 cached outcomes require the same source metadata and byte checks.
 `check_lookups.py` bounds vector scope, order and duplicate-source rejection.
-Current work/state rows and selection indexes still require full cached integrity.
+Addressed state reads bind ordered keys and their current presence/high-water
+history to the checked cut. Source-derived exact response sizes precede payload
+admission; cached metadata, complete fields and values require source agreement.
+`check_state_authority.py` bounds predecessor, scope, cache and size ordering.
+State mutation/query paths, current work and selection indexes still require
+full cached integrity.
 Fresh catalog-known missing indexes and previously observed malformed authority
 fail closed across reopen, independent handles and later metadata deletion.
 Native S3 conditional writes classify typed conflicts and never retry a lost

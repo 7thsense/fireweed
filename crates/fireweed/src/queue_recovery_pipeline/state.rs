@@ -26,6 +26,18 @@ impl CoveredRead for StateReadRequest {
     fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
         RequestPreflight::preflight(self, limits)
     }
+    fn recover<'a>(
+        &'a self,
+        pipeline: &'a Arc<QueueRecoveryPipeline>,
+        job: Arc<QueueReservation>,
+    ) -> QueueFuture<'a, RecoveredQueue> {
+        Box::pin(async move {
+            let states = fireweed_engine::queue_state_authority::ColdStateTracker::new(self, &job)?;
+            pipeline
+                .recover_checked(self.queue.clone(), None, None, Some(states), job)
+                .await
+        })
+    }
     fn read<'a>(
         &'a self,
         pipeline: &'a Arc<QueueRecoveryPipeline>,
@@ -38,6 +50,13 @@ impl CoveredRead for StateReadRequest {
                 .projection
                 .read_state_records(
                     StateReadInput {
+                        authority: Some(
+                            recovered
+                                .state_authority
+                                .as_ref()
+                                .ok_or_else(|| unknown("state source proof missing"))?
+                                .clone(),
+                        ),
                         genesis: pipeline.original_genesis(&self.queue, recovered, job)?,
                         request: self.clone(),
                         limits,

@@ -34,7 +34,7 @@ impl CoveredRead for ReceiptReadRequest {
         Box::pin(async move {
             let originals = ColdOriginalTracker::new_lookup(self, &job)?;
             pipeline
-                .recover_checked(self.queue.clone(), None, Some(originals), job)
+                .recover_checked(self.queue.clone(), None, Some(originals), None, job)
                 .await
         })
     }
