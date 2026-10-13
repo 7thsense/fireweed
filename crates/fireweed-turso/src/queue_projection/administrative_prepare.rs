@@ -371,7 +371,7 @@ impl NativeTransactionWork for Worker {
                     connection,
                     native.queue_id,
                     &group.request_id,
-                    expected,
+                    Some(expected),
                     descriptor,
                 )
                 .await?

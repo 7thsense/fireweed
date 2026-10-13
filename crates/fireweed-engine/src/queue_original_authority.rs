@@ -6,7 +6,9 @@ use crate::{
     queue_namespace::{encode_address, framed_address_len, view_address},
     queue_recovery::ColdQueueHistory,
 };
-use fireweed_core::queue_contract::{CommitBatch, QueueAddress, QueueError, QueueResult};
+use fireweed_core::queue_contract::{
+    CommitBatch, QueueAddress, QueueError, QueueResult, ReceiptReadRequest,
+};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 fn unknown(reason: &str) -> QueueError {
@@ -61,6 +63,7 @@ impl ColdOriginalTracker {
             &batch.queue,
             2,
             batch.groups.iter().map(|group| group.request_id.as_str()),
+            false,
             job,
         )
     }
@@ -71,12 +74,26 @@ impl ColdOriginalTracker {
         id: &str,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<Self> {
-        Self::new_ids(queue, domain, std::iter::once(id), job)
+        Self::new_ids(queue, domain, std::iter::once(id), false, job)
+    }
+    /// Ordered receipt lookups retain duplicate positions and valid empty lists.
+    pub fn new_lookup(
+        request: &ReceiptReadRequest,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Self> {
+        Self::new_ids(
+            &request.queue,
+            2,
+            request.request_ids.iter().map(String::as_str),
+            true,
+            job,
+        )
     }
     fn new_ids<'a>(
         queue: &QueueAddress,
         domain: u8,
         ids: impl ExactSizeIterator<Item = &'a str> + Clone,
+        allow_duplicates: bool,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<Self> {
         queue.validate()?;
@@ -101,7 +118,9 @@ impl ColdOriginalTracker {
         let charge = job.owned_buffer(capacity)?;
         let mut entries = Vec::with_capacity(ids.len());
         for id in ids {
-            if id.is_empty() || entries.iter().any(|entry: &Entry| entry.id == id) {
+            if id.is_empty()
+                || (!allow_duplicates && entries.iter().any(|entry: &Entry| entry.id == id))
+            {
                 return Err(QueueError::Invalid(
                     "original IDs must be nonempty and unique".into(),
                 ));
@@ -160,20 +179,24 @@ impl ColdOriginalTracker {
                     if receipt.domain != self.domain {
                         continue;
                     }
-                    if let Some(entry) = self
+                    let mut positions = self
                         .entries
                         .iter_mut()
-                        .find(|entry| entry.id == receipt.request_id)
-                    {
-                        if entry.descriptor.is_some() {
-                            return Err(unknown("duplicate source original identity"));
-                        }
-                        entry.descriptor = Some(OriginalDescriptor {
+                        .filter(|entry| entry.id == receipt.request_id)
+                        .peekable();
+                    if positions.peek().is_some() {
+                        let descriptor = OriginalDescriptor {
                             fingerprint_format: receipt.fingerprint_format,
                             fingerprint: *receipt.fingerprint,
                             outcome_bytes: receipt.encoded_outcome().len() as u64,
                             outcome_sha256: Sha256::digest(receipt.encoded_outcome()).into(),
-                        });
+                        };
+                        for entry in positions {
+                            if entry.descriptor.is_some() {
+                                return Err(unknown("duplicate source original identity"));
+                            }
+                            entry.descriptor = Some(descriptor);
+                        }
                     }
                 }
                 self.insertion_sequence = summary.final_sequence;
@@ -269,6 +292,29 @@ impl AdmittedOriginalAuthority {
         {
             return Err(unknown(
                 "snapshot operation/address/genesis/progress/position mismatch",
+            ));
+        }
+        Ok(())
+    }
+    /// Bind the complete ordered lookup, including multiplicity and empty vectors.
+    pub fn validate_lookup(
+        &self,
+        request: &ReceiptReadRequest,
+        genesis: &OwnedQueueLogRecord,
+        progress: (u64, u64, u64),
+        job: &QueueReservation,
+    ) -> QueueResult<()> {
+        self.validate_cut(&request.queue, genesis, progress, job)?;
+        if self.domain != 2
+            || self.entries.len() != request.request_ids.len()
+            || self
+                .entries
+                .iter()
+                .zip(&request.request_ids)
+                .any(|(entry, id)| &entry.id != id)
+        {
+            return Err(unknown(
+                "receipt lookup domain or ordered positions mismatch",
             ));
         }
         Ok(())
@@ -618,6 +664,140 @@ mod domain_tests {
     use super::tests::{batch, records};
     use super::*;
     use crate::queue_admission::QueueAdmission;
+    #[test]
+    fn lookup_aliases_bind_whole_order_empty_scope_and_duplicate_source_poison() {
+        let batch = batch();
+        let job = Arc::new(QueueAdmission::new(1, 4 << 20).unwrap().reserve(0).unwrap());
+        let source = records(&batch, &job);
+        let request = ReceiptReadRequest {
+            queue: batch.queue.clone(),
+            request_ids: vec![
+                "known".into(),
+                "fresh".into(),
+                "known".into(),
+                "fresh".into(),
+            ],
+            max_bytes: 1 << 20,
+        };
+        let fold = |request: &ReceiptReadRequest| {
+            let mut tracker = ColdOriginalTracker::new_lookup(request, &job).unwrap();
+            let mut history = ColdQueueHistory::new(&batch.queue, &job).unwrap();
+            for (offset, record) in source.iter().enumerate() {
+                history.observe(offset as u64, record.bytes()).unwrap();
+                tracker.observe(offset as u64, record).unwrap();
+            }
+            (tracker, history)
+        };
+        let (tracker, history) = fold(&request);
+        let proof = tracker.finish(&history, &source[0], (2, 0, 1)).unwrap();
+        proof
+            .validate_lookup(&request, &source[0], (2, 0, 1), &job)
+            .unwrap();
+        assert_eq!(
+            proof.descriptor(0, "known").unwrap(),
+            proof.descriptor(2, "known").unwrap()
+        );
+        assert!(proof.descriptor(0, "known").unwrap().is_some());
+        assert_eq!(proof.descriptor(1, "fresh").unwrap(), None);
+        assert_eq!(proof.descriptor(3, "fresh").unwrap(), None);
+        for ids in [
+            vec!["fresh", "known", "known", "fresh"],
+            vec!["known", "fresh", "known"],
+            vec!["known", "fresh", "fresh", "fresh"],
+        ] {
+            let mut changed = request.clone();
+            changed.request_ids = ids.into_iter().map(str::to_owned).collect();
+            assert!(
+                proof
+                    .validate_lookup(&changed, &source[0], (2, 0, 1), &job)
+                    .is_err()
+            );
+        }
+        let (mut tracker, mut history) = fold(&request);
+        history.observe(2, source[1].bytes()).unwrap();
+        assert!(tracker.observe(2, &source[1]).is_err());
+        assert!(tracker.finish(&history, &source[0], (3, 0, 1)).is_err());
+        let empty = ReceiptReadRequest {
+            request_ids: vec![],
+            ..request
+        };
+        let (tracker, history) = fold(&empty);
+        let mut empty_proof = tracker.finish(&history, &source[0], (2, 0, 1)).unwrap();
+        empty_proof
+            .validate_lookup(&empty, &source[0], (2, 0, 1), &job)
+            .unwrap();
+        assert!(
+            empty_proof
+                .validate_lookup(&empty, &source[0], (1, 0, 1), &job)
+                .is_err()
+        );
+        let other = Arc::new(QueueAdmission::new(1, 4 << 20).unwrap().reserve(0).unwrap());
+        assert!(
+            empty_proof
+                .validate_lookup(&empty, &source[0], (2, 0, 1), &other)
+                .is_err()
+        );
+        empty_proof.domain = 1;
+        assert!(
+            empty_proof
+                .validate_lookup(&empty, &source[0], (2, 0, 1), &job)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn lookup_alias_and_empty_header_admission_is_exact_and_position_retains_owner() {
+        let batch = batch();
+        for ids in [
+            vec![],
+            vec![
+                "known".to_string(),
+                "known".to_string(),
+                "absent".to_string(),
+            ],
+        ] {
+            let request = ReceiptReadRequest {
+                queue: batch.queue.clone(),
+                request_ids: ids,
+                max_bytes: 1 << 20,
+            };
+            let admission = QueueAdmission::new(1, 4 << 20).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
+            let tracker = ColdOriginalTracker::new_lookup(&request, &job).unwrap();
+            let exact = admission.usage().unwrap().1;
+            drop(tracker);
+            let fit = QueueAdmission::new(1, exact).unwrap();
+            let fit_job = Arc::new(fit.reserve(0).unwrap());
+            drop(ColdOriginalTracker::new_lookup(&request, &fit_job).unwrap());
+            let short = QueueAdmission::new(1, exact - 1).unwrap();
+            let short_job = Arc::new(short.reserve(0).unwrap());
+            assert!(matches!(
+                ColdOriginalTracker::new_lookup(&request, &short_job),
+                Err(QueueError::OutcomeUnknown(_))
+            ));
+            assert_eq!(short.usage().unwrap().1, 0);
+            let source = records(&batch, &job);
+            let mut tracker = ColdOriginalTracker::new_lookup(&request, &job).unwrap();
+            let mut history = ColdQueueHistory::new(&batch.queue, &job).unwrap();
+            for (offset, record) in source.iter().enumerate() {
+                history.observe(offset as u64, record.bytes()).unwrap();
+                tracker.observe(offset as u64, record).unwrap();
+            }
+            let proof = Arc::new(tracker.finish(&history, &source[0], (2, 0, 1)).unwrap());
+            let position =
+                (!request.request_ids.is_empty()).then(|| proof.position(1, "known").unwrap());
+            drop(source);
+            drop(history);
+            drop(proof);
+            assert_eq!(
+                admission.usage().unwrap().1,
+                if position.is_some() { exact } else { 0 }
+            );
+            drop(position);
+            assert_eq!(admission.usage().unwrap().1, 0);
+        }
+    }
+
     #[test]
     fn same_literal_has_three_independent_originals_and_scoped_duplicate_poison() {
         use crate::{

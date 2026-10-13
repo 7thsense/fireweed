@@ -89,8 +89,11 @@ original result. Matching callers cannot trust an unwitnessed cached expiry;
 independently proven caller conflicts retain their existing precedence.
 `check_domains.py` bounds domain/identity proof use, including proved absence;
 `check_originals.py` bounds metadata and opaque-outcome classification. Their
-production mappings remain documentary. Arbitrary receipt lookups, current
-work/state rows and selection indexes still require full cached integrity.
+production mappings remain documentary. Ordered receipt lookups bind the whole
+request vector, including aliases and empty requests, before native reads;
+cached outcomes require the same source metadata and byte checks.
+`check_lookups.py` bounds vector scope, order and duplicate-source rejection.
+Current work/state rows and selection indexes still require full cached integrity.
 Fresh catalog-known missing indexes and previously observed malformed authority
 fail closed across reopen, independent handles and later metadata deletion.
 Native S3 conditional writes classify typed conflicts and never retry a lost

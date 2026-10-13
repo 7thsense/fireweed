@@ -4829,7 +4829,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "12fecee9909999b9a723b7f25742685b1107d266826aecba3ce7bd7c5150cd38",
+  "scan_sha256": "f3ca1ba36c135dc92abede59ad4a321ec8aa8ec517d02a2ca6f00a5f084f22d5",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -17064,7 +17064,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 94505,
+      "last_match_line": 94809,
       "line": 1,
       "markers": [
         "e3",
@@ -17521,6 +17521,42 @@
       "operations": [
         "constant"
       ],
+      "path": "scripts/formal/check_lookups.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 57,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 57,
+      "line": 46,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/check_lookups.py",
+      "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 2,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 2,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
       "path": "scripts/formal/check_originals.py",
       "symbol": "<module>"
     },
@@ -17652,6 +17688,24 @@
         "constant"
       ],
       "path": "scripts/formal/test_handoff.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 1,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/test_lookups.py",
       "symbol": "<module>"
     },
     {

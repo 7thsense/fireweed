@@ -55,7 +55,7 @@ storage choice affects construction, durability mechanisms and measured cost.
 | `fireweed-turso` | Native projection, indexed selection, snapshot reads and atomic apply | Internal projection adapter | Core, engine, spool, relational translation and Turso SDK | Consumer workflow policy and object-log authority redefinition |
 | `fireweed-objectlog` | Full-address namespace, bounded record transport, authoritative head/fence and publication | Internal log adapter | Core, engine, object-log/S3 integration and admitted workers | PostgreSQL/Turso SQL policy and consumer workflow rules |
 | `fireweed` queue facade | Concrete construction and delegation; shared clone/shutdown ownership | API-007 and construction Contract | Internal mandatory port and selected adapters | Public vendor/session handles, optional ordinary-operation guarantees and direct database work in `queue.rs` |
-| `fireweed-conformance` | Shared scenarios, workload generation and outcome oracles | Mandatory tests for both constructors | Core and engine; adapters only in test fixtures | Backend-dependent skipped semantics or weaker baseline assertions |
+| `fireweed-conformance` | Shared scenarios, workload generation and outcome oracles | Mandatory tests for both constructors | Core, engine and backend-neutral future combinators for owned workload cleanup; adapters only in test fixtures | Backend-dependent skipped semantics or weaker baseline assertions |
 | Snorri adapter | Workflow mapping, definition pins, transition/await state versions | Snorri integration Contract | Concrete queue facade and Snorri domain | Storage SDKs, broad claim/client filter and consumer side-record APIs |
 
 **Integration Owners**: PostgreSQL → `fireweed-postgres`; Turso → `fireweed-turso`;

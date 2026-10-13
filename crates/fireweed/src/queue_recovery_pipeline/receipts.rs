@@ -26,6 +26,18 @@ impl CoveredRead for ReceiptReadRequest {
     fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
         self.validate(limits)
     }
+    fn recover<'a>(
+        &'a self,
+        pipeline: &'a Arc<QueueRecoveryPipeline>,
+        job: Arc<QueueReservation>,
+    ) -> QueueFuture<'a, RecoveredQueue> {
+        Box::pin(async move {
+            let originals = ColdOriginalTracker::new_lookup(self, &job)?;
+            pipeline
+                .recover_checked(self.queue.clone(), None, Some(originals), job)
+                .await
+        })
+    }
     fn read<'a>(
         &'a self,
         pipeline: &'a Arc<QueueRecoveryPipeline>,
@@ -38,6 +50,13 @@ impl CoveredRead for ReceiptReadRequest {
                 .projection
                 .read_commit_receipts(
                     ReceiptReadInput {
+                        originals: Some(
+                            recovered
+                                .original_authority
+                                .as_ref()
+                                .ok_or_else(|| unknown("receipt lookup source proof missing"))?
+                                .clone(),
+                        ),
                         genesis: pipeline.original_genesis(&self.queue, recovered, job)?,
                         request: self.clone(),
                         limits,

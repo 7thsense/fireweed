@@ -10,6 +10,8 @@ use fireweed_engine::{
 };
 
 pub struct ReceiptReadInput {
+    pub originals:
+        Option<Arc<fireweed_engine::queue_original_authority::AdmittedOriginalAuthority>>,
     pub genesis: OwnedQueueLogRecord,
     pub request: ReceiptReadRequest,
     pub limits: QueueLimits,
@@ -107,6 +109,7 @@ impl QueueProjection {
         let lookup_identity = original.group.request_id.clone();
         self.dispatch_receipts(
             ReceiptReadInput {
+                originals: None,
                 genesis: input.genesis,
                 request: ReceiptReadRequest {
                     queue: lookup_queue,
@@ -217,6 +220,21 @@ impl NativeTransactionWork for ReceiptWorker {
                 self.input.required_last_record_epoch,
             ),
         )?;
+        if let Some(authority) = &self.input.originals {
+            if self.original.is_some() {
+                return Err(unknown("ambiguous lookup and original-group authority"));
+            }
+            authority.validate_lookup(
+                &self.input.request,
+                &self.input.genesis,
+                (
+                    self.input.required_next_offset,
+                    self.input.required_insertion_sequence,
+                    self.input.required_last_record_epoch,
+                ),
+                &self.job,
+            )?;
+        }
         if let Some(original) = &self.original {
             original.group.validate_for(
                 &original.queue,
@@ -227,8 +245,19 @@ impl NativeTransactionWork for ReceiptWorker {
         // Retain independently charged raw outcomes first. FWQP fixed lengths
         // cannot decide the public Postcard response budget.
         let mut raw = Vec::new();
-        for identity in &self.input.request.request_ids {
-            let value = if let Some(authority) = self
+        for (position, identity) in self.input.request.request_ids.iter().enumerate() {
+            let value = if let Some(authority) = &self.input.originals {
+                super::receipt_authority::load_raw_authoritative(
+                    connection,
+                    snapshot.queue_id,
+                    identity,
+                    None,
+                    authority.descriptor(position, identity)?,
+                    &self.job,
+                    &mut self.charges,
+                )
+                .await?
+            } else if let Some(authority) = self
                 .original
                 .as_ref()
                 .and_then(|original| original.authority.as_ref())
@@ -248,8 +277,10 @@ impl NativeTransactionWork for ReceiptWorker {
                     connection,
                     snapshot.queue_id,
                     identity,
-                    self.expected
-                        .ok_or_else(|| unknown("proved original fingerprint missing"))?,
+                    Some(
+                        self.expected
+                            .ok_or_else(|| unknown("proved original fingerprint missing"))?,
+                    ),
                     descriptor,
                     &self.job,
                     &mut self.charges,
@@ -326,6 +357,7 @@ impl NativeTransactionWork for ReceiptWorker {
 mod tests {
     use super::super::tests::{
         address, apply_group_record, bootstrap, execute_for_test, group, inspect, patch, seed,
+        seed_record,
     };
     use super::*;
     use fireweed_engine::{
@@ -339,6 +371,7 @@ mod tests {
         head: u64,
     ) -> ReceiptReadInput {
         ReceiptReadInput {
+            originals: None,
             genesis: encode_checked_genesis(1, &address(), definition, &[31; 32], 1 << 20, job)
                 .unwrap(),
             request: ReceiptReadRequest {
@@ -352,6 +385,195 @@ mod tests {
             required_last_record_epoch: 1,
         }
     }
+    fn lookup_proof(
+        input: &ReceiptReadInput,
+        job: &Arc<QueueReservation>,
+    ) -> Arc<fireweed_engine::queue_original_authority::AdmittedOriginalAuthority> {
+        use fireweed_engine::{
+            queue_original_authority::ColdOriginalTracker, queue_recovery::ColdQueueHistory,
+        };
+        let mut tracker = ColdOriginalTracker::new_lookup(&input.request, job).unwrap();
+        let mut history = ColdQueueHistory::new(&input.request.queue, job).unwrap();
+        history.observe(0, input.genesis.bytes()).unwrap();
+        tracker.observe(0, &input.genesis).unwrap();
+        Arc::new(tracker.finish(&history, &input.genesis, (1, 0, 1)).unwrap())
+    }
+
+    #[tokio::test]
+    async fn lookup_authority_validates_whole_vector_before_native_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = QueueAdmission::new(3, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 2).unwrap();
+        let (projection, definition) =
+            bootstrap(&directory.path().join("proof.db"), &job, &workers).await;
+        let mut source = input(&definition, &job, vec!["a".into(), "b".into()], 65536, 1);
+        source.required_insertion_sequence = 0;
+        let proof = lookup_proof(&source, &job);
+        for ids in [
+            vec![],
+            vec!["a".into()],
+            vec!["b".into(), "a".into()],
+            vec!["a".into(), "a".into()],
+        ] {
+            let mut request = input(&definition, &job, ids, 65536, 1);
+            request.required_insertion_sequence = 0;
+            request.originals = Some(proof.clone());
+            assert!(matches!(
+                projection
+                    .read_commit_receipts(request, &job, &workers)
+                    .await,
+                Err(QueueError::OutcomeUnknown(_))
+            ));
+        }
+        // An empty request must still validate reservation ownership.
+        let other = Arc::new(admission.reserve(0).unwrap());
+        let other_definition = AdmittedQueueDefinition::from_raw(definition.raw(), &other).unwrap();
+        let mut empty = input(&other_definition, &other, vec![], 65536, 1);
+        empty.required_insertion_sequence = 0;
+        let other_proof = lookup_proof(&empty, &other);
+        let mut request = input(&definition, &job, vec![], 65536, 1);
+        request.required_insertion_sequence = 0;
+        request.originals = Some(other_proof);
+        assert!(matches!(
+            projection
+                .read_commit_receipts(request, &job, &workers)
+                .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        let mut ambiguous = input(&definition, &job, vec!["a".into()], 65536, 1);
+        ambiguous.required_insertion_sequence = 0;
+        ambiguous.originals = Some(lookup_proof(&ambiguous, &job));
+        let original = OriginalGroup {
+            authority: None,
+            queue: address(),
+            group: group("a"),
+            _charge: job.owned_buffer(65536).unwrap(),
+        };
+        assert!(
+            matches!(projection.dispatch_receipts(ambiguous, None, Some(original), &job, &workers).await,
+            Err(QueueError::OutcomeUnknown(message)) if message.contains("ambiguous"))
+        );
+        let mut valid = source;
+        valid.originals = Some(proof);
+        let result = projection
+            .read_commit_receipts(valid, &job, &workers)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.receipts(),
+            &[ReceiptLookup::Absent, ReceiptLookup::Absent]
+        );
+        drop(result);
+        // Keep the snapshot valid at head 1, but prove a different genuine cut.
+        let mut changed_cut = input(&definition, &job, vec![], 65536, 1);
+        changed_cut.required_insertion_sequence = 0;
+        use fireweed_engine::{
+            queue_original_authority::ColdOriginalTracker, queue_recovery::ColdQueueHistory,
+        };
+        let (_, record) = seed_record(&definition, &job, false);
+        let mut tracker = ColdOriginalTracker::new_lookup(&changed_cut.request, &job).unwrap();
+        let mut history = ColdQueueHistory::new(&address(), &job).unwrap();
+        for (offset, record) in [&changed_cut.genesis, &record].into_iter().enumerate() {
+            history.observe(offset as u64, record.bytes()).unwrap();
+            tracker.observe(offset as u64, record).unwrap();
+        }
+        changed_cut.originals = Some(Arc::new(
+            tracker
+                .finish(&history, &changed_cut.genesis, (2, 2, 1))
+                .unwrap(),
+        ));
+        assert!(matches!(
+            projection
+                .read_commit_receipts(changed_cut, &job, &workers)
+                .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        workers.close_and_drain().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lookup_proof_owner_survives_native_panic_and_cancel_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = QueueAdmission::new(2, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 2).unwrap();
+        let (projection, definition) =
+            bootstrap(&directory.path().join("owner.db"), &job, &workers).await;
+        let baseline = admission.usage().unwrap();
+        for panic in [true, false] {
+            let terminal = Arc::new(tokio::sync::Notify::new());
+            let signal = terminal.clone();
+            let owned_job = Arc::new(
+                admission
+                    .reserve(0)
+                    .unwrap()
+                    .with_terminal_callback(move || signal.notify_one())
+                    .unwrap(),
+            );
+            let owned_definition =
+                AdmittedQueueDefinition::from_raw(definition.raw(), &owned_job).unwrap();
+            let mut request = input(&owned_definition, &owned_job, vec![], 65536, 1);
+            request.required_insertion_sequence = 0;
+            let proof = lookup_proof(&request, &owned_job);
+            let weak = Arc::downgrade(&proof);
+            request.originals = Some(proof);
+            drop(owned_definition);
+            let pause = Arc::new(ApplyPause {
+                after_commit: false,
+                fail_reply: false,
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::watch::channel(false).0,
+            });
+            *projection.pause.lock().await = Some(pause.clone());
+            projection
+                .panic_after_command
+                .store(panic, std::sync::atomic::Ordering::Release);
+            let caller = tokio::spawn({
+                let projection = projection.clone();
+                let workers = workers.clone();
+                async move {
+                    projection
+                        .read_commit_receipts(request, &owned_job, &workers)
+                        .await
+                }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(30), pause.entered.notified())
+                .await
+                .unwrap();
+            assert!(weak.upgrade().is_some());
+            assert!(admission.usage().unwrap().1 > baseline.1);
+            if !panic {
+                caller.abort();
+                assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+                assert!(
+                    weak.upgrade().is_some(),
+                    "physical worker still owns proof after caller cancellation"
+                );
+                pause.release.send(true).unwrap();
+            } else {
+                pause.release.send(true).unwrap();
+                assert!(matches!(
+                    caller.await.unwrap(),
+                    Err(QueueError::OutcomeUnknown(_))
+                ));
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(30), terminal.notified())
+                .await
+                .unwrap();
+            assert!(weak.upgrade().is_none());
+            assert_eq!(admission.usage().unwrap(), baseline);
+            let writer = projection.writer.lock().await;
+            assert!(
+                writer
+                    .as_ref()
+                    .is_none_or(|connection| matches!(connection.is_autocommit(), Ok(true)))
+            );
+            drop(writer);
+        }
+        workers.close_and_drain().await.unwrap();
+    }
+
     #[tokio::test]
     async fn original_receipts_survive_deletion_preserve_duplicates_and_fit_exact_public_budget() {
         let directory = tempfile::tempdir().unwrap();

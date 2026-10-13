@@ -85,7 +85,7 @@ pub(super) async fn read_original_metadata(
     connection: &Connection,
     queue_id: i64,
     identity: &str,
-    expected: (u8, [u8; 32]),
+    expected: Option<(u8, [u8; 32])>,
     authority: Option<fireweed_engine::queue_original_authority::OriginalDescriptor>,
 ) -> QueueResult<ReceiptMetadata> {
     read_authoritative_receipt_metadata(
@@ -110,7 +110,12 @@ pub(super) async fn read_receipt_metadata_with_authority(
     match authority {
         Some(authority) => {
             read_authoritative_receipt_metadata(
-                connection, queue_id, domain, identity, expected, authority,
+                connection,
+                queue_id,
+                domain,
+                identity,
+                Some(expected),
+                authority,
             )
             .await
         }
@@ -122,7 +127,7 @@ async fn read_authoritative_receipt_metadata(
     queue_id: i64,
     domain: ReceiptDomain,
     identity: &str,
-    expected: (u8, [u8; 32]),
+    expected: Option<(u8, [u8; 32])>,
     authority: Option<fireweed_engine::queue_original_authority::OriginalDescriptor>,
 ) -> QueueResult<ReceiptMetadata> {
     let cached = read_fixed_receipt_metadata(connection, queue_id, domain, identity).await?;
@@ -135,7 +140,9 @@ async fn read_authoritative_receipt_metadata(
     {
         return Err(unknown("cached original fingerprint differs from source"));
     }
-    if expected != (authority.fingerprint_format, authority.fingerprint) {
+    if expected
+        .is_some_and(|expected| expected != (authority.fingerprint_format, authority.fingerprint))
+    {
         return Err(QueueError::RequestConflict);
     }
     if cached.expired != Some(0) {

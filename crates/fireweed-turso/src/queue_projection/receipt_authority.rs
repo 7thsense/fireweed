@@ -55,7 +55,7 @@ pub(super) async fn load_raw_authoritative(
     connection: &Connection,
     queue_id: i64,
     identity: &str,
-    expected: (u8, [u8; 32]),
+    expected: Option<(u8, [u8; 32])>,
     authority: Option<fireweed_engine::queue_original_authority::OriginalDescriptor>,
     job: &Arc<QueueReservation>,
     charges: &mut Vec<OwnedQueueBufferCharge>,

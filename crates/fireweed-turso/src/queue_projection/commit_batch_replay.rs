@@ -137,7 +137,7 @@ impl NativeTransactionWork for Worker {
                 connection,
                 native.queue_id,
                 &group.request_id,
-                (format, group.fingerprint(&self.input.request.queue)?),
+                Some((format, group.fingerprint(&self.input.request.queue)?)),
                 self.input
                     .originals
                     .descriptor(position, &group.request_id)?,

@@ -2375,6 +2375,7 @@ mod tests {
         let read = reopened
             .read_commit_receipts(
                 ReceiptReadInput {
+                    originals: None,
                     genesis: encode_checked_genesis(
                         1,
                         &queue,

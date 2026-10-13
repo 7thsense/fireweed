@@ -240,7 +240,7 @@ impl NativeTransactionWork for Worker {
                     connection,
                     native.queue_id,
                     &group.request_id,
-                    expected,
+                    Some(expected),
                     descriptor,
                 )
                 .await?
@@ -547,6 +547,7 @@ mod tests {
         let lookup = projection
             .read_commit_receipts(
                 ReceiptReadInput {
+                    originals: None,
                     genesis: input(&definition, &job, checks.clone(), 5, 2).genesis,
                     request: ReceiptReadRequest {
                         queue: address(),
@@ -746,6 +747,7 @@ mod tests {
         let lookups = projection
             .read_commit_receipts(
                 ReceiptReadInput {
+                    originals: None,
                     genesis: input(&definition, &job, transition.clone(), 4, 3).genesis,
                     request: ReceiptReadRequest {
                         queue: address(),

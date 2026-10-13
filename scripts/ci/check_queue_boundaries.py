@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PURE = {
     "fireweed-core": {"bytes", "sha2", "postcard", "serde", "serde_json", "axon-esf"},
     "fireweed-engine": {"async-trait", "fireweed-core", "axon-esf", "bytes", "base64", "sha2", "getrandom", "serde", "serde_json", "postcard", "serde_path_to_error", "futures"},
-    "fireweed-conformance": {"fireweed-core", "fireweed-engine", "bytes", "tokio", "serde_json"},
+    "fireweed-conformance": {"fireweed-core", "fireweed-engine", "bytes", "tokio", "serde_json", "futures"},
     "fireweed-queue-spool": {"fireweed-core", "fireweed-engine", "tempfile", "postcard", "sha2", "serde", "tokio"},
 }
 ADAPTERS = {
@@ -198,6 +198,28 @@ def manifest_controls(scratch: Path) -> None:
         (root / "Cargo.toml").write_text('[workspace]\nmembers=["engine","excluded"]\nexclude=["excluded"]\n')
         if "excluded" not in load_graph(root):
             raise ValueError("explicit member incorrectly excluded")
+
+    # Backend-neutral future combinators stay with the conformance workload owner.
+    with tempfile.TemporaryDirectory(prefix="boundary-conformance-", dir=scratch) as name:
+        root = Path(name)
+        (root / "Cargo.toml").write_text('[workspace]\nmembers=["conformance","core"]\n')
+        for folder, package in [("conformance", "fireweed-conformance"), ("core", "fireweed-core")]:
+            (root / folder).mkdir()
+            (root / folder / "Cargo.toml").write_text(f'[package]\nname="{package}"\nversion="0.1.0"\n[dependencies]\n')
+        manifest = root / "conformance/Cargo.toml"
+        base = manifest.read_text()
+        manifest.write_text(base + 'futures="0.3"\n')
+        if violations(load_graph(root)):
+            raise ValueError("backend-neutral conformance future combinators rejected")
+        for dependency in ['backend={package="fireweed-turso",version="1"}', 'sdk={package="aws-sdk-s3",version="1"}']:
+            manifest.write_text(base + dependency + '\n')
+            if not any("forbidden pure edge: fireweed-conformance" in error for error in violations(load_graph(root))):
+                raise ValueError("conformance backend/SDK edge escaped")
+        manifest.write_text(base)
+        core = root / "core/Cargo.toml"
+        core.write_text(core.read_text() + 'futures="0.3"\n')
+        if not any("forbidden pure edge: fireweed-core -> futures" in error for error in violations(load_graph(root))):
+            raise ValueError("core future dependency escaped")
 
 
 

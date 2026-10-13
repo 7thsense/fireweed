@@ -3226,3 +3226,7 @@ async fn native_batch_original_authority_rejects_corrupt_cache_real_s3() {
 #[cfg(target_os = "linux")]
 #[path = "tests/original_domains.rs"]
 mod original_domains;
+
+#[cfg(target_os = "linux")]
+#[path = "tests/receipt_authority.rs"]
+mod receipt_authority;
