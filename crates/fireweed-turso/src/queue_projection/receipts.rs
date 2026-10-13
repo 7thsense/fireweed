@@ -46,6 +46,7 @@ impl AdmittedCommitReceipts {
     }
 }
 struct OriginalGroup {
+    authority: Option<fireweed_engine::queue_original_authority::AdmittedOriginalPosition>,
     queue: QueueAddress,
     group: CommitGroup,
     _charge: OwnedQueueBufferCharge,
@@ -91,6 +92,7 @@ impl QueueProjection {
                 .ok_or(QueueError::TooLarge)?,
         )?;
         let original = OriginalGroup {
+            authority: input.original,
             queue: input.queue,
             group: input.group,
             _charge: charge,
@@ -226,7 +228,34 @@ impl NativeTransactionWork for ReceiptWorker {
         // cannot decide the public Postcard response budget.
         let mut raw = Vec::new();
         for identity in &self.input.request.request_ids {
-            raw.push(
+            let value = if let Some(authority) = self
+                .original
+                .as_ref()
+                .and_then(|original| original.authority.as_ref())
+            {
+                let descriptor = authority.validate(
+                    &self.input.request.queue,
+                    identity,
+                    &self.input.genesis,
+                    (
+                        self.input.required_next_offset,
+                        self.input.required_insertion_sequence,
+                        self.input.required_last_record_epoch,
+                    ),
+                    &self.job,
+                )?;
+                super::receipt_authority::load_raw_authoritative(
+                    connection,
+                    snapshot.queue_id,
+                    identity,
+                    self.expected
+                        .ok_or_else(|| unknown("proved original fingerprint missing"))?,
+                    descriptor,
+                    &self.job,
+                    &mut self.charges,
+                )
+                .await?
+            } else {
                 super::receipt_authority::load_raw(
                     connection,
                     snapshot.queue_id,
@@ -235,8 +264,9 @@ impl NativeTransactionWork for ReceiptWorker {
                     &self.job,
                     &mut self.charges,
                 )
-                .await?,
-            );
+                .await?
+            };
+            raw.push(value);
         }
         let mut public = Vec::new();
         for (identity, raw) in self.input.request.request_ids.iter().zip(&raw) {
@@ -747,6 +777,7 @@ mod tests {
         let original_input = |request: CommitGroup| {
             let read = input(&definition, &job, vec![], 1 << 20, 4);
             super::super::commit_prepare::CommitPreparationInput {
+                original: None,
                 genesis: read.genesis,
                 queue: address(),
                 group: request,

@@ -354,15 +354,38 @@ impl NativeTransactionWork for Worker {
         let group = &input.group;
         group.validate_for(&input.queue, schema, &input.limits)?;
         if matches!(self.mode, Mode::Publish { .. }) {
-            match super::receipt_metadata::read_receipt_metadata(
-                connection,
-                native.queue_id,
-                super::receipt_metadata::ReceiptDomain::Commit,
-                &group.request_id,
-                Some((4, group.fingerprint(&input.queue)?)),
-            )
-            .await?
-            {
+            let expected = (4, group.fingerprint(&input.queue)?);
+            let metadata = if let Some(original) = &input.original {
+                let descriptor = original.validate(
+                    &input.queue,
+                    &group.request_id,
+                    &input.genesis,
+                    (
+                        input.required_next_offset,
+                        input.required_insertion_sequence,
+                        input.required_last_record_epoch,
+                    ),
+                    &self.job,
+                )?;
+                super::receipt_metadata::read_original_metadata(
+                    connection,
+                    native.queue_id,
+                    &group.request_id,
+                    expected,
+                    descriptor,
+                )
+                .await?
+            } else {
+                super::receipt_metadata::read_receipt_metadata(
+                    connection,
+                    native.queue_id,
+                    super::receipt_metadata::ReceiptDomain::Commit,
+                    &group.request_id,
+                    Some(expected),
+                )
+                .await?
+            };
+            match metadata {
                 super::receipt_metadata::ReceiptMetadata::Absent => {}
                 super::receipt_metadata::ReceiptMetadata::Expired => {
                     return Err(QueueError::RequestExpired);

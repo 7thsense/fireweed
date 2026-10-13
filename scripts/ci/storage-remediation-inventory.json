@@ -16904,6 +16904,46 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_local",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_local",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_local"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_real_s3",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_real_s3",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_real_s3"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop",
           "--",
           "--exact"
@@ -41017,6 +41057,34 @@
       "expected_ran": 1,
       "harness_id": "queue_original_authority::tests::original_header_admission_and_unique_positions_precede_allocation",
       "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_original_authority::tests::original_header_admission_and_unique_positions_precede_allocation",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--lib",
+        "queue_original_authority::tests::sealed_original_header_exact_capacity_and_one_byte_short",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_original_authority::tests::sealed_original_header_exact_capacity_and_one_byte_short",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_original_authority::tests::sealed_original_header_exact_capacity_and_one_byte_short",
       "listed_kind": "test",
       "package": "fireweed-engine",
       "target": "fireweed_engine",
@@ -83889,6 +83957,62 @@
         "-p",
         "fireweed",
         "--lib",
+        "queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_local",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_local",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_local",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
+        "queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_real_s3",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_real_s3",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_real_s3",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
         "queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop",
         "--",
         "--exact"
@@ -94597,7 +94721,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "a4fd6bbad65bde4df845389ade548096ea23bf25d015bd9a5edb3b433a612d8f",
+  "source_inventory_sha256": "4dbe2660a3c37dfc1a993f1fb74d1bf5b9b078c3e71d5a680689c886210a906f",
   "workspaces": [
     {
       "listing_error_sha256": "",

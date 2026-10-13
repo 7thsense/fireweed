@@ -46,7 +46,7 @@ def load_runtime():
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument('--max-states', type=int, default=100000)
     parser.add_argument('--output', type=Path, default=Path('target/api007-formal/originals.json'))
     arguments = list(sys.argv[1:] if argv is None else argv)

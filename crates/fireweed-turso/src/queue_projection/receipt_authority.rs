@@ -60,30 +60,14 @@ pub(super) async fn load_raw_authoritative(
     job: &Arc<QueueReservation>,
     charges: &mut Vec<OwnedQueueBufferCharge>,
 ) -> QueueResult<Option<(u8, Option<Vec<u8>>)>> {
-    use super::receipt_metadata::{ReceiptDomain, read_fixed_receipt_metadata};
-    let cached =
-        read_fixed_receipt_metadata(connection, queue_id, ReceiptDomain::Commit, identity).await?;
-    let (cached, authority) = match (cached, authority) {
-        (None, None) => return Ok(None),
-        (Some(cached), Some(authority)) => (cached, authority),
-        _ => return Err(unknown("cached original presence differs from source")),
-    };
-    if cached.format != authority.fingerprint_format || cached.fingerprint != authority.fingerprint
-    {
-        return Err(unknown("cached original fingerprint differs from source"));
-    }
-    if expected != (authority.fingerprint_format, authority.fingerprint) {
-        return Err(QueueError::RequestConflict);
-    }
-    if cached.expired != Some(0) {
-        return Err(unknown("cached expiry has no durable source witness"));
-    }
-    let size = u64::try_from(cached.outcome_size).map_err(unknown)?;
-    if size != authority.outcome_bytes {
-        return Err(unknown(
-            "cached original outcome length differs from source",
-        ));
-    }
+    use super::receipt_metadata::{ReceiptMetadata, read_original_metadata};
+    let (format, size) =
+        match read_original_metadata(connection, queue_id, identity, expected, authority).await? {
+            ReceiptMetadata::Absent => return Ok(None),
+            ReceiptMetadata::Present { format, size } => (format, size),
+            ReceiptMetadata::Expired => return Err(unknown("authoritative expiry unavailable")),
+        };
+    let authority = authority.ok_or_else(|| unknown("original source descriptor missing"))?;
     charges.push(
         job.owned_buffer(
             size.checked_mul(4)
@@ -95,5 +79,5 @@ pub(super) async fn load_raw_authoritative(
     let row = one(connection,"SELECT outcome FROM q7_requests WHERE queue_id=?1 AND domain=2 AND identity_hash=?2 AND identity=?3",vec![Value::Integer(queue_id),blob(&hash),blob(identity.as_bytes())],1).await?.ok_or_else(||unknown("original vanished in native snapshot"))?;
     let raw = bytes(&row[0])?;
     authority.verify_outcome(raw)?;
-    Ok(Some((cached.format, Some(raw.to_vec()))))
+    Ok(Some((format, Some(raw.to_vec()))))
 }

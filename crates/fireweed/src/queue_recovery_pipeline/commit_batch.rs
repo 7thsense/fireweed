@@ -41,7 +41,7 @@ impl AdmittedQueueCommitBatch {
     }
 }
 struct BatchRead {
-    request: CommitBatch,
+    request: Arc<CommitBatch>,
 }
 impl IncomingHeaders for BatchRead {
     fn headers(&self) -> QueueResult<u64> {
@@ -54,7 +54,7 @@ impl CoveredRead for BatchRead {
         &self.request.queue
     }
     fn encoded_size(&self) -> QueueResult<u64> {
-        encoded_len(&self.request)
+        encoded_len(self.request.as_ref())
     }
     fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
         self.request.preflight(limits)?;
@@ -84,7 +84,7 @@ impl CoveredRead for BatchRead {
                             .clone()
                             .ok_or_else(|| unknown("batch original authority missing"))?,
                         genesis: pipeline.original_genesis(&self.request.queue, recovered, job)?,
-                        request: self.request.clone(),
+                        request: self.request.as_ref().clone(),
                         limits,
                         response_max_bytes: limits.max_response_bytes,
                         required_next_offset: recovered.target_next_offset,
@@ -108,7 +108,7 @@ impl CoveredRead for BatchRead {
 struct BatchTask {
     _slot: OwnedSemaphorePermit,
     pipeline: Arc<QueueRecoveryPipeline>,
-    request: CommitBatch,
+    request: Arc<CommitBatch>,
     limits: QueueLimits,
     clock: Arc<dyn Clock>,
     _input: OwnedQueueBufferCharge,
@@ -151,7 +151,7 @@ impl QueueRecoveryPipeline {
         let task = BatchTask {
             _slot: slot,
             pipeline: self.clone(),
-            request,
+            request: Arc::new(request),
             limits,
             clock,
             _input: input,
@@ -169,7 +169,7 @@ impl QueueRecoveryPipeline {
 }
 impl BatchTask {
     async fn execute(self) -> QueueResult<AdmittedQueueCommitBatch> {
-        let classification = ReadExecution::new(
+        let (classification, coverage) = ReadExecution::new(
             self.pipeline.clone(),
             BatchRead {
                 request: self.request.clone(),
@@ -177,8 +177,9 @@ impl BatchTask {
             self.limits,
             self.job.clone(),
         )?
-        .execute()
+        .execute_with_coverage()
         .await?;
+        let mut coverage = Some(coverage);
         let count = self.request.groups.len();
         if classification.known().len() != count {
             return Err(unknown("batch classification count changed"));
@@ -214,11 +215,17 @@ impl BatchTask {
                     self.clock.clone(),
                     self.job.clone(),
                 ) {
-                    Ok(execution) => execution.execute().await,
+                    Ok(execution) => {
+                        execution
+                            .with_batch(self.request.clone())
+                            .execute_covered(coverage.take())
+                            .await
+                    }
                     Err(error) => Err(error),
                 };
                 match result {
-                    Ok(fresh) => {
+                    Ok((fresh, next_coverage)) => {
+                        coverage = Some(next_coverage);
                         // Keep the whole owner before moving any receipt DTO.
                         output.fresh.push(fresh);
                         output

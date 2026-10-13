@@ -10,6 +10,7 @@ use fireweed_engine::{
     queue_publication::{PublicationReceipt, encode_publication_pinned},
 };
 pub struct CommitPreparationInput {
+    pub original: Option<fireweed_engine::queue_original_authority::AdmittedOriginalPosition>,
     pub genesis: OwnedQueueLogRecord,
     pub queue: QueueAddress,
     pub group: CommitGroup,
@@ -222,15 +223,38 @@ impl NativeTransactionWork for Worker {
         let group = &self.input.group;
         group.validate_for(&self.input.queue, schema, &self.input.limits)?;
         if matches!(self.mode, Mode::Publish { .. }) {
-            match read_receipt_metadata(
-                connection,
-                native.queue_id,
-                ReceiptDomain::Commit,
-                &group.request_id,
-                Some((3, group.fingerprint(&self.input.queue)?)),
-            )
-            .await?
-            {
+            let expected = (3, group.fingerprint(&self.input.queue)?);
+            let metadata = if let Some(original) = &self.input.original {
+                let descriptor = original.validate(
+                    &self.input.queue,
+                    &group.request_id,
+                    &self.input.genesis,
+                    (
+                        self.input.required_next_offset,
+                        self.input.required_insertion_sequence,
+                        self.input.required_last_record_epoch,
+                    ),
+                    &self.job,
+                )?;
+                super::receipt_metadata::read_original_metadata(
+                    connection,
+                    native.queue_id,
+                    &group.request_id,
+                    expected,
+                    descriptor,
+                )
+                .await?
+            } else {
+                read_receipt_metadata(
+                    connection,
+                    native.queue_id,
+                    ReceiptDomain::Commit,
+                    &group.request_id,
+                    Some(expected),
+                )
+                .await?
+            };
+            match metadata {
                 ReceiptMetadata::Absent => {}
                 ReceiptMetadata::Expired => return Err(QueueError::RequestExpired),
                 ReceiptMetadata::Present { .. } => return Ok(None),
@@ -344,6 +368,7 @@ mod tests {
     ) -> CommitPreparationInput {
         let definition = AdmittedQueueDefinition::from_raw(definition.raw(), job).unwrap();
         CommitPreparationInput {
+            original: None,
             genesis: encode_checked_genesis(1, &address(), &definition, &[31; 32], 16 << 20, job)
                 .unwrap(),
             queue: address(),

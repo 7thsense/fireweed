@@ -17,6 +17,7 @@ pub(super) async fn input(
     let definition = AdmittedQueueDefinition::from_raw(definition.raw(), job).unwrap();
     AdministrativePreparationInput {
         commit: CommitPreparationInput {
+            original: None,
             genesis: encode_checked_genesis(1, &address(), &definition, &[31; 32], 16 << 20, job)
                 .unwrap(),
             queue: address(),

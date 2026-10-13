@@ -98,6 +98,10 @@ pub struct QueueRecoveryPipeline {
     after_commit_replay: StagePause,
     #[cfg(test)]
     after_batch_read: StagePause,
+    #[cfg(test)]
+    before_handoff_check: StagePause,
+    #[cfg(test)]
+    after_handoff_check: StagePause,
 }
 #[cfg(test)]
 impl Drop for QueueRecoveryPipeline {
@@ -183,6 +187,10 @@ impl QueueRecoveryPipeline {
             after_commit_replay: std::sync::Mutex::new(None),
             #[cfg(test)]
             after_batch_read: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            before_handoff_check: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            after_handoff_check: std::sync::Mutex::new(None),
         }))
     }
     pub(super) fn original_genesis(

@@ -7,28 +7,32 @@ pub(super) trait OriginalMutation: Sync {
     fn address(&self) -> &QueueAddress;
     fn identity(&self) -> (u8, &str);
     fn job(&self) -> &Arc<QueueReservation>;
+    fn recover<'a>(&'a self) -> QueueFuture<'a, RecoveredQueue> {
+        Box::pin(async move {
+            let (domain, id) = self.identity();
+            self.pipeline()
+                .recover_request(
+                    self.address().clone(),
+                    domain,
+                    id.to_owned(),
+                    self.job().clone(),
+                )
+                .await
+        })
+    }
     fn replay<'a>(&'a self, recovered: &'a RecoveredQueue)
     -> QueueFuture<'a, Option<Self::Output>>;
 }
 pub(super) async fn recover_original<M: OriginalMutation>(
     mutation: &M,
 ) -> QueueResult<RecoveredQueue> {
-    let (domain, id) = mutation.identity();
-    mutation
-        .pipeline()
-        .recover_request(
-            mutation.address().clone(),
-            domain,
-            id.to_owned(),
-            mutation.job().clone(),
-        )
-        .await
+    mutation.recover().await
 }
 // Keep the single admitted recovery owner inline. Boxing it would add a
 // second allocation at the proof/handoff boundary solely to reduce stack size.
 #[allow(clippy::large_enum_variant)]
 pub(super) enum Submission<T> {
-    Resolved(T),
+    Resolved(T, RecoveredQueue),
     Reprepare(RecoveredQueue),
 }
 pub(super) fn check_preparation<T>(
@@ -74,7 +78,7 @@ pub(super) async fn resolve_submission<M: OriginalMutation>(
                 if recovered.original_identity_present != Some(true) {
                     return Err(unknown("phantom cached original response"));
                 }
-                return Ok(Submission::Resolved(response));
+                return Ok(Submission::Resolved(response, recovered));
             }
             Ok(None) => {
                 if recovered.original_identity_present != Some(false) {

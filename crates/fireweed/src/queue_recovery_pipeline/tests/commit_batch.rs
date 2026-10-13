@@ -73,6 +73,7 @@ async fn one_permit_batch_validates_all_siblings_replays_before_fresh_and_finish
             .unwrap();
     let clock = Arc::new(TestClock::default());
     clock.set(100);
+    let before_batch = pipeline.diagnostics.snapshot();
     let first = patch_group("first", 1, 7);
     let stale = patch_group("stale", 1, 8);
     let final_group = patch_group("final", 2, 9);
@@ -97,6 +98,20 @@ async fn one_permit_batch_validates_all_siblings_replays_before_fresh_and_finish
         output.receipts()[2].outcome,
         GroupOutcome::Committed { .. }
     ));
+    let measured = pipeline
+        .diagnostics
+        .snapshot()
+        .checked_delta(before_batch)
+        .unwrap();
+    assert_eq!(
+        (
+            measured.attempts,
+            measured.succeeded,
+            measured.admitted_raw_records
+        ),
+        (4, 4, 14)
+    );
+    let replay_before = pipeline.diagnostics.snapshot();
     let expected = output.receipts().to_vec();
     drop(output);
     let output = pipeline
@@ -117,6 +132,12 @@ async fn one_permit_batch_validates_all_siblings_replays_before_fresh_and_finish
         ]
     );
     drop(output);
+    let replay = pipeline
+        .diagnostics
+        .snapshot()
+        .checked_delta(replay_before)
+        .unwrap();
+    assert_eq!((replay.attempts, replay.admitted_raw_records), (1, 5));
     let before = pipeline
         .recover(address(), job.clone())
         .await
@@ -357,4 +378,209 @@ async fn one_permit_batch_validates_all_siblings_replays_before_fresh_and_finish
     drop(store);
     assert_eq!(admission.usage().unwrap(), (0, 0));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+async fn confirmed_handoff_recovers_after_head_and_fence_changes(s3: bool) {
+    for kind in ["head", "fence", "cancel"] {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("fireweed-handoff-{s3}-{kind}-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let prefix = s3.then(|| format!("api007-handoff-{kind}-{nonce}"));
+        let store = Arc::new(native_log_fixture(&root, prefix.as_deref()).await);
+        let admission = QueueAdmission::new(2, 256 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(2, 2).unwrap();
+        provision(&store, &job, &workers).await;
+        append_insert(&store, &job, &workers).await;
+        let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
+            .await
+            .unwrap();
+        let pipeline = test_pipeline(
+            store.clone(),
+            projection,
+            workers.clone(),
+            65536,
+            1 << 20,
+            &root,
+        )
+        .await
+        .unwrap();
+        let clock = Arc::new(TestClock::default());
+        let initial_entered = Arc::new(tokio::sync::Notify::new());
+        let initial_release = Arc::new(tokio::sync::Notify::new());
+        let second_entered = Arc::new(tokio::sync::Notify::new());
+        let second_release = Arc::new(tokio::sync::Notify::new());
+        let pause = if kind != "fence" {
+            &pipeline.before_handoff_check
+        } else {
+            &pipeline.after_handoff_check
+        };
+        *pause.lock().unwrap() = Some((initial_entered.clone(), initial_release.clone()));
+        let caller = tokio::spawn({
+            let pipeline = pipeline.clone();
+            let job = job.clone();
+            let clock = clock.clone();
+            async move {
+                pipeline
+                    .commit_batch(
+                        batch(vec![
+                            patch_group("first", 1, 7),
+                            patch_group("next", 2, 8),
+                            patch_group("tail", 3, 9),
+                        ]),
+                        QueueLimits::default(),
+                        clock,
+                        job,
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            initial_entered.notified(),
+        )
+        .await
+        .unwrap();
+        *pause.lock().unwrap() = Some((second_entered.clone(), second_release.clone()));
+        initial_release.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            second_entered.notified(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            pipeline.diagnostics.snapshot().succeeded,
+            2,
+            "initial cut and first post-publication cut completed"
+        );
+        if kind == "head" {
+            let other_projection = QueueProjection::open(&root.join("other.db"), &job, &workers)
+                .await
+                .unwrap();
+            let other = test_pipeline(
+                store.clone(),
+                other_projection,
+                workers.clone(),
+                65536,
+                1 << 20,
+                &root,
+            )
+            .await
+            .unwrap();
+            drop(
+                other
+                    .commit(
+                        address(),
+                        patch_group("next", 2, 88),
+                        QueueLimits::default(),
+                        clock.clone(),
+                        job.clone(),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            drop(other);
+        } else if kind == "fence" {
+            let namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
+            drop(
+                store
+                    .acquire_api007_state(namespace, &job, &workers)
+                    .await
+                    .unwrap(),
+            );
+        }
+        if kind == "cancel" {
+            caller.abort();
+            assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+            second_release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                while pipeline.operation_slots.available_permits() != 64 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(pipeline.diagnostics.snapshot().succeeded, 4);
+        } else {
+            second_release.notify_one();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(60), caller)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                result.receipts()[0].outcome,
+                GroupOutcome::Committed { .. }
+            ));
+            if kind == "head" {
+                assert_eq!(result.receipts()[1].outcome, GroupOutcome::RequestConflict);
+            } else {
+                assert!(matches!(
+                    result.receipts()[1].outcome,
+                    GroupOutcome::Committed { .. }
+                ));
+            }
+            assert!(matches!(
+                result.receipts()[2].outcome,
+                GroupOutcome::Committed { .. }
+            ));
+        }
+        let measured = pipeline.diagnostics.snapshot();
+        if kind == "fence" {
+            assert_eq!(
+                (
+                    measured.attempts,
+                    measured.succeeded,
+                    measured.admitted_raw_records
+                ),
+                (5, 5, 17)
+            );
+        }
+        let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
+        assert_eq!(
+            recovered.target_next_offset, 5,
+            "exactly one source original per declared ID"
+        );
+        drop(recovered);
+        let raw = pipeline
+            .read_commit(
+                ReceiptReadRequest {
+                    queue: address(),
+                    request_ids: vec!["first".into(), "next".into(), "tail".into()],
+                    max_bytes: 1 << 20,
+                },
+                QueueLimits::default(),
+                job.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            raw.receipts()
+                .iter()
+                .all(|receipt| matches!(receipt, ReceiptLookup::Found(_)))
+        );
+        drop(raw);
+        drop(pipeline);
+        workers.close_and_drain().await.unwrap();
+        drop(workers);
+        drop(job);
+        drop(store);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn confirmed_batch_handoff_recovers_head_and_fence_races_local() {
+    confirmed_handoff_recovers_after_head_and_fence_changes(false).await;
+}
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn confirmed_batch_handoff_recovers_head_and_fence_races_real_s3() {
+    confirmed_handoff_recovers_after_head_and_fence_changes(true).await;
 }

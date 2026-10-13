@@ -6,7 +6,7 @@ use crate::{
     queue_namespace::{encode_address, framed_address_len, view_address},
     queue_recovery::ColdQueueHistory,
 };
-use fireweed_core::queue_contract::{CommitBatch, QueueError, QueueResult};
+use fireweed_core::queue_contract::{CommitBatch, QueueAddress, QueueError, QueueResult};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 fn unknown(reason: &str) -> QueueError {
@@ -215,13 +215,8 @@ impl AdmittedOriginalAuthority {
         progress: (u64, u64, u64),
         job: &QueueReservation,
     ) -> QueueResult<()> {
-        if !std::ptr::eq(self._charge.reservation(), job)
-            || !genesis.belongs_to(job)
-            || view_address(&self.address)?.tenant != batch.queue.tenant
-            || view_address(&self.address)?.queue != batch.queue.queue
-            || self.progress != progress
-            || self.genesis_sha256 != <[u8; 32]>::from(Sha256::digest(genesis.bytes()))
-            || self.entries.len() != batch.groups.len()
+        self.validate_cut(&batch.queue, genesis, progress, job)?;
+        if self.entries.len() != batch.groups.len()
             || self
                 .entries
                 .iter()
@@ -234,6 +229,37 @@ impl AdmittedOriginalAuthority {
         }
         Ok(())
     }
+    fn validate_cut(
+        &self,
+        queue: &QueueAddress,
+        genesis: &OwnedQueueLogRecord,
+        progress: (u64, u64, u64),
+        job: &QueueReservation,
+    ) -> QueueResult<()> {
+        if !std::ptr::eq(self._charge.reservation(), job)
+            || !genesis.belongs_to(job)
+            || view_address(&self.address)?.tenant != queue.tenant
+            || view_address(&self.address)?.queue != queue.queue
+            || self.progress != progress
+            || self.genesis_sha256 != <[u8; 32]>::from(Sha256::digest(genesis.bytes()))
+        {
+            return Err(unknown(
+                "original operation/address/genesis/progress mismatch",
+            ));
+        }
+        Ok(())
+    }
+    pub fn position(
+        self: &Arc<Self>,
+        position: usize,
+        id: &str,
+    ) -> QueueResult<AdmittedOriginalPosition> {
+        self.descriptor(position, id)?;
+        Ok(AdmittedOriginalPosition {
+            authority: self.clone(),
+            position,
+        })
+    }
     pub fn descriptor(&self, position: usize, id: &str) -> QueueResult<Option<OriginalDescriptor>> {
         let entry = self
             .entries
@@ -241,6 +267,27 @@ impl AdmittedOriginalAuthority {
             .filter(|entry| entry.id == id)
             .ok_or_else(|| unknown("original position mismatch"))?;
         Ok(entry.descriptor)
+    }
+}
+
+/// A declared literal-ID position retaining the complete admitted proof owner.
+/// Some(handle) with an absent descriptor never means an unproved lookup.
+#[derive(Clone)]
+pub struct AdmittedOriginalPosition {
+    authority: Arc<AdmittedOriginalAuthority>,
+    position: usize,
+}
+impl AdmittedOriginalPosition {
+    pub fn validate(
+        &self,
+        queue: &QueueAddress,
+        id: &str,
+        genesis: &OwnedQueueLogRecord,
+        progress: (u64, u64, u64),
+        job: &QueueReservation,
+    ) -> QueueResult<Option<OriginalDescriptor>> {
+        self.authority.validate_cut(queue, genesis, progress, job)?;
+        self.authority.descriptor(self.position, id)
     }
 }
 
@@ -331,11 +378,12 @@ mod tests {
     }
     #[test]
     fn exact_source_descriptors_bind_position_scope_genesis_job_and_cut() {
-        let job = Arc::new(QueueAdmission::new(1, 4 << 20).unwrap().reserve(0).unwrap());
+        let admission = QueueAdmission::new(1, 4 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
         let batch = batch();
         let records = records(&batch, &job);
         let (tracker, history) = fold(&batch, &records, &job);
-        let proof = tracker.finish(&history, &records[0], (2, 0, 1)).unwrap();
+        let proof = Arc::new(tracker.finish(&history, &records[0], (2, 0, 1)).unwrap());
         proof
             .validate(&batch, &records[0], (2, 0, 1), &job)
             .unwrap();
@@ -352,6 +400,32 @@ mod tests {
             .unwrap();
         assert!(descriptor.verify_outcome(&[0xff; 2]).is_err());
         assert_eq!(proof.descriptor(1, "fresh").unwrap(), None);
+        let present = proof.position(0, "known").unwrap();
+        let absent = proof.position(1, "fresh").unwrap();
+        assert_eq!(
+            present
+                .validate(&batch.queue, "known", &records[0], (2, 0, 1), &job)
+                .unwrap(),
+            Some(descriptor)
+        );
+        assert_eq!(
+            absent
+                .validate(&batch.queue, "fresh", &records[0], (2, 0, 1), &job)
+                .unwrap(),
+            None
+        );
+        assert!(
+            absent
+                .validate(&batch.queue, "known", &records[0], (2, 0, 1), &job)
+                .is_err()
+        );
+        assert!(
+            absent
+                .validate(&batch.queue, "fresh", &records[0], (1, 0, 1), &job)
+                .is_err()
+        );
+        assert!(proof.position(0, "fresh").is_err());
+
         assert!(proof.descriptor(0, "fresh").is_err());
         assert!(
             proof
@@ -408,6 +482,21 @@ mod tests {
                 .validate(&batch, &changed_genesis, (2, 0, 1), &job)
                 .is_err()
         );
+        drop(changed_genesis);
+        drop(definition);
+        drop(other);
+        drop(records);
+        drop(history);
+        drop(proof);
+        drop(present);
+        assert!(
+            admission.usage().unwrap().1 > 0,
+            "absent handle retains whole admitted proof"
+        );
+        drop(absent);
+        assert_eq!(admission.usage().unwrap(), (1, 0));
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
     }
     #[test]
     fn late_duplicate_source_poison_and_incomplete_prefix_cannot_finish() {
@@ -421,6 +510,27 @@ mod tests {
         assert!(tracker.observe(2, &records[1]).is_err());
         assert!(tracker.observe(2, &records[1]).is_err());
         assert!(tracker.finish(&history, &records[0], (3, 0, 1)).is_err());
+    }
+    #[test]
+    fn sealed_original_header_exact_capacity_and_one_byte_short() {
+        let request = batch();
+        let admitted = QueueAdmission::new(1, 4 << 20).unwrap();
+        let job = Arc::new(admitted.reserve(0).unwrap());
+        let tracker = ColdOriginalTracker::new(&request, &job).unwrap();
+        let exact = admitted.usage().unwrap().1;
+        drop(tracker);
+        assert_eq!(admitted.usage().unwrap(), (1, 0));
+        let fit = QueueAdmission::new(1, exact).unwrap();
+        let fit_job = Arc::new(fit.reserve(0).unwrap());
+        drop(ColdOriginalTracker::new(&request, &fit_job).unwrap());
+        assert_eq!(fit.usage().unwrap(), (1, 0));
+        let short = QueueAdmission::new(1, exact - 1).unwrap();
+        let short_job = Arc::new(short.reserve(0).unwrap());
+        assert!(matches!(
+            ColdOriginalTracker::new(&request, &short_job),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        assert_eq!(short.usage().unwrap(), (1, 0));
     }
     #[test]
     fn original_header_admission_and_unique_positions_precede_allocation() {

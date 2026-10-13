@@ -326,6 +326,7 @@ mod tests {
             .prepare_administration(
                 AdministrativePreparationInput {
                     commit: CommitPreparationInput {
+                        original: None,
                         genesis: encode_checked_genesis(
                             1,
                             &address(),
@@ -342,7 +343,7 @@ mod tests {
                         required_insertion_sequence: 2,
                         required_last_record_epoch: 1,
                     },
-                    scratch_root: root,
+                    scratch_root: root.clone(),
                     scratch_quota: fireweed_queue_spool::ScratchDiskQuota::new(64 << 20).unwrap(),
                 },
                 1,
@@ -425,6 +426,182 @@ mod tests {
                 .await,
             Err(QueueError::TooLarge)
         ));
+        // Proofs collected from actual immutable source records must survive
+        // the single-original preparation/replay seam, including FP4.
+        let original_input = |group: CommitGroup| {
+            let proved = input(vec![group.clone()], 1 << 20);
+            CommitPreparationInput {
+                original: Some(proved.originals.position(0, &group.request_id).unwrap()),
+                genesis: proved.genesis,
+                queue: proved.request.queue,
+                group,
+                limits: proved.limits,
+                required_next_offset: proved.required_next_offset,
+                required_insertion_sequence: proved.required_insertion_sequence,
+                required_last_record_epoch: proved.required_last_record_epoch,
+            }
+        };
+        for known in [&first, &administrative] {
+            let proved = original_input(known.clone());
+            if known.administration.is_some() {
+                assert!(
+                    projection
+                        .prepare_administration(
+                            AdministrativePreparationInput {
+                                commit: proved,
+                                scratch_root: root.clone(),
+                                scratch_quota: fireweed_queue_spool::ScratchDiskQuota::new(
+                                    16 << 20
+                                )
+                                .unwrap(),
+                            },
+                            2,
+                            16 << 20,
+                            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+                            &job,
+                            &workers
+                        )
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            } else {
+                assert!(
+                    projection
+                        .prepare_ordinary_commit(
+                            proved,
+                            2,
+                            16 << 20,
+                            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+                            &job,
+                            &workers
+                        )
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            drop(
+                projection
+                    .replay_commit(original_input(known.clone()), &job, &workers)
+                    .await
+                    .unwrap(),
+            );
+            // Corruption after proof collection must be Unknown, never a
+            // caller conflict manufactured from cached fixed metadata.
+            let proved = original_input(known.clone());
+            execute_for_test(
+                &projection,
+                "UPDATE q7_requests SET fingerprint=?1 WHERE identity=?2",
+                vec![blob(&[0x55; 32]), blob(known.request_id.as_bytes())],
+            )
+            .await;
+            assert!(matches!(
+                projection.replay_commit(proved, &job, &workers).await,
+                Err(QueueError::OutcomeUnknown(_))
+            ));
+            let rejected = if known.administration.is_some() {
+                matches!(
+                    projection
+                        .prepare_administration(
+                            AdministrativePreparationInput {
+                                commit: original_input(known.clone()),
+                                scratch_root: root.clone(),
+                                scratch_quota: fireweed_queue_spool::ScratchDiskQuota::new(
+                                    16 << 20
+                                )
+                                .unwrap(),
+                            },
+                            2,
+                            16 << 20,
+                            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+                            &job,
+                            &workers
+                        )
+                        .await,
+                    Err(QueueError::OutcomeUnknown(_))
+                )
+            } else {
+                matches!(
+                    projection
+                        .prepare_ordinary_commit(
+                            original_input(known.clone()),
+                            2,
+                            16 << 20,
+                            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+                            &job,
+                            &workers
+                        )
+                        .await,
+                    Err(QueueError::OutcomeUnknown(_))
+                )
+            };
+            assert!(rejected);
+            execute_for_test(
+                &projection,
+                "UPDATE q7_requests SET fingerprint=?1 WHERE identity=?2",
+                vec![
+                    blob(&known.fingerprint(&address()).unwrap()),
+                    blob(known.request_id.as_bytes()),
+                ],
+            )
+            .await;
+        }
+        let mut phantom = first.clone();
+        phantom.request_id = "proved-absent".into();
+        let proved = original_input(phantom.clone());
+        let hash =
+            fireweed_engine::queue_storage_layout::discovery_digest(phantom.request_id.as_bytes());
+        execute_for_test(&projection,
+            "INSERT INTO q7_requests(queue_id,domain,identity_hash,identity,fingerprint_format,fingerprint,expired,outcome) SELECT queue_id,domain,?1,?2,fingerprint_format,?3,expired,outcome FROM q7_requests WHERE identity=?4",
+            vec![blob(&hash),blob(phantom.request_id.as_bytes()),blob(&phantom.fingerprint(&address()).unwrap()),blob(b"first")]).await;
+        assert!(matches!(
+            projection.replay_commit(proved, &job, &workers).await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        assert!(matches!(
+            projection
+                .prepare_ordinary_commit(
+                    original_input(phantom.clone()),
+                    2,
+                    16 << 20,
+                    Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+                    &job,
+                    &workers
+                )
+                .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        execute_for_test(
+            &projection,
+            "DELETE FROM q7_requests WHERE identity=?1",
+            vec![blob(phantom.request_id.as_bytes())],
+        )
+        .await;
+        let proved = original_input(first.clone());
+        execute_for_test(
+            &projection,
+            "UPDATE q7_requests SET outcome=x'0103' WHERE identity=?1",
+            vec![blob(b"first")],
+        )
+        .await;
+        assert!(matches!(
+            projection.replay_commit(proved, &job, &workers).await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        let source = records[2].view().unwrap();
+        let fireweed_engine::queue_log_record::QueueLogPayload::Publication(frame) =
+            source.payload()
+        else {
+            panic!("publication");
+        };
+        let raw = frame.receipts().next().unwrap().unwrap();
+        execute_for_test(
+            &projection,
+            "UPDATE q7_requests SET outcome=?1 WHERE identity=?2",
+            vec![blob(raw.encoded_outcome()), blob(b"first")],
+        )
+        .await;
         execute_for_test(
             &projection,
             "UPDATE q7_requests SET expired=1,outcome=x'ff' WHERE identity=?1",

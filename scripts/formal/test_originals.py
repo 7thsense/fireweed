@@ -95,6 +95,19 @@ class OriginalGateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             gate.model.Originals('typo')
 
+    def test_abbreviated_output_option_is_refused(self):
+        root = Path(__file__).resolve().parents[2]
+        output = root / 'target/api007-formal/test-originals-abbreviation.json'
+        command = [sys.executable, str(root / 'scripts/formal/check_originals.py'), '--output', str(output)]
+        try:
+            self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
+            result = subprocess.run(command + ['--out', str(output)], capture_output=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(b'unrecognized arguments: --out', result.stderr)
+            self.assertEqual(json.loads(output.read_text())['status'], 'FAIL')
+        finally:
+            output.unlink(missing_ok=True)
+
     def test_executed_runner_body_is_captured(self):
         path = str(Path(gate.__file__).resolve())
         self.assertIn(path, gate.helper.LOADED_SOURCES)

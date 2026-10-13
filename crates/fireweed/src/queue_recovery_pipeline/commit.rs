@@ -21,6 +21,7 @@ pub(super) struct CommitExecution {
     queue: QueueAddress,
     group: CommitGroup,
     limits: QueueLimits,
+    batch: Option<Arc<fireweed_core::queue_contract::CommitBatch>>,
     clock: Arc<dyn Clock>,
     _input: OwnedQueueBufferCharge,
     job: Arc<QueueReservation>,
@@ -106,13 +107,79 @@ impl CommitExecution {
             queue,
             group,
             limits,
+            batch: None,
             clock,
             _input: input,
             job,
         })
     }
+    pub(super) fn with_batch(
+        mut self,
+        batch: Arc<fireweed_core::queue_contract::CommitBatch>,
+    ) -> Self {
+        self.batch = Some(batch);
+        self
+    }
+    fn batch_position(
+        &self,
+        recovered: &RecoveredQueue,
+    ) -> QueueResult<Option<fireweed_engine::queue_original_authority::AdmittedOriginalPosition>>
+    {
+        let Some(batch) = &self.batch else {
+            return Ok(None);
+        };
+        let authority = recovered
+            .original_authority
+            .as_ref()
+            .ok_or_else(|| unknown("batch recovery proof missing"))?;
+        let genesis = self
+            .pipeline
+            .original_genesis(&self.queue, recovered, &self.job)?;
+        authority.validate(
+            batch,
+            &genesis,
+            (
+                recovered.target_next_offset,
+                recovered.history.insertion_sequence(),
+                recovered.history.historical_epoch(),
+            ),
+            &self.job,
+        )?;
+        let position = batch
+            .groups
+            .iter()
+            .position(|group| group.request_id == self.group.request_id)
+            .ok_or_else(|| unknown("original outside declared batch"))?;
+        authority
+            .position(position, &self.group.request_id)
+            .map(Some)
+    }
+    fn bind_batch_original(&self, recovered: &mut RecoveredQueue) -> QueueResult<()> {
+        if let Some(original) = self.batch_position(recovered)? {
+            let genesis = self
+                .pipeline
+                .original_genesis(&self.queue, recovered, &self.job)?;
+            recovered.original_identity_present = Some(
+                original
+                    .validate(
+                        &self.queue,
+                        &self.group.request_id,
+                        &genesis,
+                        (
+                            recovered.target_next_offset,
+                            recovered.history.insertion_sequence(),
+                            recovered.history.historical_epoch(),
+                        ),
+                        &self.job,
+                    )?
+                    .is_some(),
+            );
+        }
+        Ok(())
+    }
     fn input(&self, recovered: &RecoveredQueue) -> QueueResult<CommitPreparationInput> {
         Ok(CommitPreparationInput {
+            original: self.batch_position(recovered)?,
             genesis: self
                 .pipeline
                 .original_genesis(&self.queue, recovered, &self.job)?,
@@ -155,12 +222,48 @@ impl CommitExecution {
         result
     }
     pub(super) async fn execute(self) -> QueueResult<AdmittedCommitReceipts> {
-        let mut covered = None;
+        self.execute_covered(None)
+            .await
+            .map(|(response, _)| response)
+    }
+    pub(super) async fn execute_covered(
+        self,
+        mut covered: Option<RecoveredQueue>,
+    ) -> QueueResult<(AdmittedCommitReceipts, RecoveredQueue)> {
         for _ in 0..32 {
-            let recovered = match covered.take() {
-                Some(value) => value,
+            let mut recovered = match covered.take() {
+                Some(value) => {
+                    #[cfg(test)]
+                    {
+                        let pause = self.pipeline.before_handoff_check.lock().unwrap().take();
+                        if let Some((entered, release)) = pause {
+                            entered.notify_one();
+                            release.notified().await;
+                        }
+                    }
+                    if self
+                        .pipeline
+                        .head_matches(&self.queue, &value, &self.job)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        #[cfg(test)]
+                        {
+                            let pause = self.pipeline.after_handoff_check.lock().unwrap().take();
+                            if let Some((entered, release)) = pause {
+                                entered.notify_one();
+                                release.notified().await;
+                            }
+                        }
+                        value
+                    } else {
+                        drop(value);
+                        super::mutation::recover_original(&self).await?
+                    }
+                }
                 None => super::mutation::recover_original(&self).await?,
             };
+            self.bind_batch_original(&mut recovered)?;
             let input = self.input(&recovered)?;
             let prepared = if input.group.administration.is_some() {
                 self.pipeline
@@ -196,7 +299,9 @@ impl CommitExecution {
                 return match super::mutation::resolve_submission(&self, None, Some(recovered))
                     .await?
                 {
-                    super::mutation::Submission::Resolved(response) => Ok(response),
+                    super::mutation::Submission::Resolved(response, coverage) => {
+                        Ok((response, coverage))
+                    }
                     super::mutation::Submission::Reprepare(_) => {
                         Err(unknown("known original cannot be reprepared"))
                     }
@@ -223,7 +328,9 @@ impl CommitExecution {
                 .publish_prepared(namespace, record, expected_head, epoch, &self.job)
                 .await?;
             match super::mutation::resolve_submission(&self, Some(epoch), None).await? {
-                super::mutation::Submission::Resolved(response) => return Ok(response),
+                super::mutation::Submission::Resolved(response, coverage) => {
+                    return Ok((response, coverage));
+                }
                 super::mutation::Submission::Reprepare(next) => covered = Some(next),
             }
         }
@@ -244,6 +351,24 @@ impl super::mutation::OriginalMutation for CommitExecution {
     }
     fn job(&self) -> &Arc<QueueReservation> {
         &self.job
+    }
+    fn recover<'a>(&'a self) -> fireweed_engine::queue_contract::QueueFuture<'a, RecoveredQueue> {
+        Box::pin(async move {
+            let mut recovered = if let Some(batch) = &self.batch {
+                self.pipeline.recover_batch(batch, self.job.clone()).await?
+            } else {
+                self.pipeline
+                    .recover_request(
+                        self.queue.clone(),
+                        2,
+                        self.group.request_id.clone(),
+                        self.job.clone(),
+                    )
+                    .await?
+            };
+            self.bind_batch_original(&mut recovered)?;
+            Ok(recovered)
+        })
     }
     fn replay<'a>(
         &'a self,

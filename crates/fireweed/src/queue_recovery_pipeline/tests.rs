@@ -2482,13 +2482,11 @@ fn operation_completion_releases_permit_before_terminal_notification_on_every_dr
 }
 
 #[cfg(target_os = "linux")]
-async fn native_port_fixture(
+async fn native_log_fixture(
     root: &std::path::Path,
-    projection_name: &str,
     s3_prefix: Option<&str>,
-    clock: Arc<fireweed_conformance::queue_contract::TestClock>,
-) -> NativeQueueStore {
-    let store = if let Some(prefix) = s3_prefix {
+) -> ObjectLogEngineStore {
+    if let Some(prefix) = s3_prefix {
         let env = fireweed_objectlog::test_s3::shared_s3_test_env();
         ObjectLogEngineStore::open_s3_with_prefixes(
             &env.endpoint,
@@ -2506,7 +2504,16 @@ async fn native_port_fixture(
         ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
             .await
             .unwrap()
-    };
+    }
+}
+#[cfg(target_os = "linux")]
+async fn native_port_fixture(
+    root: &std::path::Path,
+    projection_name: &str,
+    s3_prefix: Option<&str>,
+    clock: Arc<fireweed_conformance::queue_contract::TestClock>,
+) -> NativeQueueStore {
+    let store = native_log_fixture(root, s3_prefix).await;
     let workers = ScratchWorkers::new(2, 8).unwrap();
     let admission = QueueAdmission::new(1, 512 << 20).unwrap();
     let job = Arc::new(admission.reserve(0).unwrap());

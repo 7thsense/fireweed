@@ -133,7 +133,7 @@ impl ClaimTask {
                 return match super::mutation::resolve_submission(&self, None, Some(recovered))
                     .await?
                 {
-                    super::mutation::Submission::Resolved(response) => Ok(response),
+                    super::mutation::Submission::Resolved(response, _) => Ok(response),
                     super::mutation::Submission::Reprepare(_) => {
                         Err(unknown("known original cannot be reprepared"))
                     }
@@ -160,7 +160,7 @@ impl ClaimTask {
                 .publish_prepared(namespace, record, expected_head, epoch, &self.job)
                 .await?;
             match super::mutation::resolve_submission(&self, Some(epoch), None).await? {
-                super::mutation::Submission::Resolved(response) => return Ok(response),
+                super::mutation::Submission::Resolved(response, _) => return Ok(response),
                 super::mutation::Submission::Reprepare(next) => covered = Some(next),
             }
         }

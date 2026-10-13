@@ -93,6 +93,7 @@ impl CoveredRead for PreviewRead {
     ) -> QueueFuture<'a, Self::Output> {
         Box::pin(async move {
             let input = CommitPreparationInput {
+                original: None,
                 genesis: pipeline.original_genesis(&self.request.queue, recovered, job)?,
                 queue: self.request.queue.clone(),
                 group: self.request.group.clone(),

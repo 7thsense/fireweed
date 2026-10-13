@@ -79,3 +79,40 @@ pub(super) async fn read_receipt_metadata(
         size: u64::try_from(outcome_size).map_err(unknown)?,
     })
 }
+
+/// Source agreement precedes caller classification; absence is authoritative.
+pub(super) async fn read_original_metadata(
+    connection: &Connection,
+    queue_id: i64,
+    identity: &str,
+    expected: (u8, [u8; 32]),
+    authority: Option<fireweed_engine::queue_original_authority::OriginalDescriptor>,
+) -> QueueResult<ReceiptMetadata> {
+    let cached =
+        read_fixed_receipt_metadata(connection, queue_id, ReceiptDomain::Commit, identity).await?;
+    let (cached, authority) = match (cached, authority) {
+        (None, None) => return Ok(ReceiptMetadata::Absent),
+        (Some(cached), Some(authority)) => (cached, authority),
+        _ => return Err(unknown("cached original presence differs from source")),
+    };
+    if cached.format != authority.fingerprint_format || cached.fingerprint != authority.fingerprint
+    {
+        return Err(unknown("cached original fingerprint differs from source"));
+    }
+    if expected != (authority.fingerprint_format, authority.fingerprint) {
+        return Err(QueueError::RequestConflict);
+    }
+    if cached.expired != Some(0) {
+        return Err(unknown("cached expiry has no durable source witness"));
+    }
+    let size = u64::try_from(cached.outcome_size).map_err(unknown)?;
+    if size != authority.outcome_bytes {
+        return Err(unknown(
+            "cached original outcome length differs from source",
+        ));
+    }
+    Ok(ReceiptMetadata::Present {
+        format: cached.format,
+        size,
+    })
+}

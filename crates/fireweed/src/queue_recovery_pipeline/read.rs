@@ -108,6 +108,9 @@ impl<R: CoveredRead> ReadExecution<R> {
         })
     }
     pub(super) async fn execute(self) -> QueueResult<R::Output> {
+        self.execute_with_coverage().await.map(|(output, _)| output)
+    }
+    pub(super) async fn execute_with_coverage(self) -> QueueResult<(R::Output, RecoveredQueue)> {
         for _ in 0..3 {
             let recovered = match self.request.recover(&self.pipeline, self.job.clone()).await {
                 Ok(recovered) => recovered,
@@ -134,7 +137,7 @@ impl<R: CoveredRead> ReadExecution<R> {
                 .head_matches(self.request.address(), &recovered, &self.job)
                 .await
             {
-                Ok(true) => return result,
+                Ok(true) => return result.map(|output| (output, recovered)),
                 _ => drop(result),
             }
         }

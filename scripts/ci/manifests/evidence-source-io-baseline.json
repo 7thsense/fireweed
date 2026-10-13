@@ -4829,7 +4829,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "99792d5f3542ef6784c34bb93060217993e8a0d6678d0e36f54abab3efd41420",
+  "scan_sha256": "d14fdb03cbd7c69a67d9204d9cca8a0cfd7797f024e9b0e727ba784e1cbaec12",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -17064,7 +17064,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 94133,
+      "last_match_line": 94257,
       "line": 1,
       "markers": [
         "e3",
@@ -17449,6 +17449,42 @@
       "operations": [
         "constant"
       ],
+      "path": "scripts/formal/check_handoff.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 57,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 57,
+      "line": 46,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/check_handoff.py",
+      "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 2,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 2,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
       "path": "scripts/formal/check_originals.py",
       "symbol": "<module>"
     },
@@ -17545,6 +17581,24 @@
       ],
       "path": "scripts/formal/run_replay.py",
       "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 1,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/test_handoff.py",
+      "symbol": "<module>"
     },
     {
       "evidence_paths": [],
