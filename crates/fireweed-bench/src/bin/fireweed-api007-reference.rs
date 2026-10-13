@@ -254,18 +254,25 @@ fn provenance() -> Result<Value, String> {
         json!({"head":head.trim(), "dirty_status_sha256":sha256(git(&["status", "--porcelain"])?), "dirty_patch_sha256":sha256(git(&["diff", "HEAD", "--binary"])?), "source_hashes":hashes,"executable_sha256":executable_sha256()?}),
     )
 }
-async fn construct(c: &Config) -> QueueResult<Box<dyn QueueStore>> {
+type Constructed = (
+    Box<dyn QueueStore>,
+    Option<Arc<fireweed::queue_recovery_pipeline::RecoveryCounters>>,
+);
+async fn construct(c: &Config) -> QueueResult<Constructed> {
     let clock: Arc<dyn Clock> = Arc::new(FixedClock);
     if let Some(pg) = &c.pg {
-        return Ok(Box::new(
-            fireweed_postgres::PostgresQueueStore::connect_with_runtime(
-                pg,
-                clock,
-                limits(),
-                2,
-                c.runtime.clone(),
-            )
-            .await?,
+        return Ok((
+            Box::new(
+                fireweed_postgres::PostgresQueueStore::connect_with_runtime(
+                    pg,
+                    clock,
+                    limits(),
+                    2,
+                    c.runtime.clone(),
+                )
+                .await?,
+            ),
+            None,
         ));
     }
     use fireweed::queue_recovery_pipeline::{
@@ -325,8 +332,10 @@ async fn construct(c: &Config) -> QueueResult<Box<dyn QueueStore>> {
             scratch,
             quota,
         )?;
-        NativeQueueStore::new(pipeline, limits(), c.runtime.retained_bytes.unwrap(), clock)
-            .map(|store| Box::new(store) as Box<dyn QueueStore>)
+        let store =
+            NativeQueueStore::new(pipeline, limits(), c.runtime.retained_bytes.unwrap(), clock)?;
+        let diagnostics = store.recovery_diagnostics();
+        Ok((Box::new(store) as Box<dyn QueueStore>, Some(diagnostics)))
     })
     .catch_unwind()
     .await;
@@ -387,19 +396,33 @@ async fn execute(c: Config, source: Value) -> Result<bool, String> {
     .catch_unwind()
     .await;
     let construction_ns = construction.elapsed().as_nanos();
-    let (workload, mut passed) = match result {
-        Ok(Ok(store)) => {
+    let (workload, mut passed, recovery) = match result {
+        Ok(Ok((store, diagnostics))) => {
+            let before = diagnostics.as_ref().map(|counter| counter.snapshot());
             let outcome = run_owned(&*store, queue, c.workload.clone(), None).await;
-            (outcome.report, outcome.passed)
+            let recovery = diagnostics.zip(before).map(|(counter, before)| {
+                let after = counter.snapshot();
+                let delta = if outcome.report["shutdown"] == "completed" {
+                    after.checked_delta(before)
+                } else { None };
+                json!({"interval":"after construction; warmup, provision, insertion, lifecycle, verification, owned shutdown",
+                       "scope":"admitted framed records, not physical provider reads; elapsed is sum of recovery-task durations including waits and may exceed wall time",
+                       "snapshot_after_successful_drain":outcome.report["shutdown"] == "completed",
+                       "overflow":after.overflow,
+                       "delta":delta.map(|d| json!({"attempts":d.attempts,"succeeded":d.succeeded,"failed":d.failed,"abandoned":d.abandoned,"admitted_raw_records":d.admitted_raw_records,"admitted_raw_bytes":d.admitted_raw_bytes,"summed_recovery_task_elapsed_ns":d.summed_recovery_task_elapsed_ns}))})
+            });
+            (outcome.report, outcome.passed, recovery)
         }
         Ok(Err(_)) | Err(_) => (
             json!({"correctness":"failed", "phase":"construction", "failure":"backend constructor failed; details suppressed to avoid credential disclosure"}),
             false,
+            None,
         ),
     };
     let source_matches = provenance().is_ok_and(|current| current == source);
     passed &= source_matches;
     let mut report = json!({"qualification":"internal-port reference; histogram only; not TP-005 or public-facade acceptance", "backend":c.backend,"native_flush_profile":c.profile,"profile_effect":if c.pg.is_some() {"no PostgreSQL behavior change"} else {"configured native linger only; budget, durability and recovery waits remain"}, "source":source,"compiled_source_scope":"listed benchmark/common sources and manifests/locks; remaining backend source is identified by HEAD and dirty patch", "source_matches_after_drain":source_matches, "command":std::env::args().collect::<Vec<_>>(), "build_profile":if cfg!(debug_assertions) {"debug"} else {"release"}, "clock":"fixed0", "postgres_pool_size":c.pg.as_ref().map(|_|2), "operation_slots":8, "scratch_workers":2, "retained_bytes":512u64<<20, "scratch_bytes":64u64<<20, "queue_limits":limits(),"native_settings":if c.pg.is_none() { Some(json!({"provision_operations":8,"provision_retry_delay_ms":125,"metadata_bytes":65536,"hard_record_bytes":256u64<<20,"flush":format!("{:?}",c.flush),"turso_cache_kib":4096,"turso_cache_scope":"SDK soft cache setting; hard RAM qualification pending"})) } else { None }, "construction_ns":construction_ns,"namespace_prefix":c.prefix,"local_root":c.root,"s3_endpoint":c.s3.as_ref().map(|s3| &s3.endpoint),"s3_bucket":c.s3.as_ref().map(|s3| &s3.bucket),"s3_region":c.s3.as_ref().map(|s3| &s3.region),"postgres_config_source":c.pg.as_ref().map(|_| "FIREWEED_API007_PG_TEST_URL (credentials omitted)"),"host":std::fs::read_to_string("/proc/sys/kernel/hostname").ok().map(|v| v.trim().to_owned()), "client_peak_rss_kib":client_peak_rss_kib(), "service_memory":"unmeasured; client RSS is not backend-total RAM", "remote_storage_and_cost":"unmeasured", "workload":workload, "passed":passed});
+    report["native_recovery"] = recovery.unwrap_or(Value::Null);
     if !source_matches {
         report["workload"]["correctness"] = json!("failed_provenance");
         report["workload"]["settled_per_second"] = Value::Null;

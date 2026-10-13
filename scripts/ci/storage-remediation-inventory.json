@@ -16764,6 +16764,46 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::diagnostics::tests::panic_and_failure_merge_admitted_work_without_success",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::diagnostics::tests::panic_and_failure_merge_admitted_work_without_success",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::diagnostics::tests::panic_and_failure_merge_admitted_work_without_success"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::diagnostics::tests::saturation_and_backward_snapshots_cannot_fabricate_deltas",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::diagnostics::tests::saturation_and_backward_snapshots_cannot_fabricate_deltas",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::diagnostics::tests::saturation_and_backward_snapshots_cannot_fabricate_deltas"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::store::tests::abandoned_dispatch_and_cancelled_shutdown_retain_final_ownership",
           "--",
           "--exact"
@@ -83653,6 +83693,62 @@
         "-p",
         "fireweed",
         "--lib",
+        "queue_recovery_pipeline::diagnostics::tests::panic_and_failure_merge_admitted_work_without_success",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::diagnostics::tests::panic_and_failure_merge_admitted_work_without_success",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::diagnostics::tests::panic_and_failure_merge_admitted_work_without_success",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
+        "queue_recovery_pipeline::diagnostics::tests::saturation_and_backward_snapshots_cannot_fabricate_deltas",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::diagnostics::tests::saturation_and_backward_snapshots_cannot_fabricate_deltas",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::diagnostics::tests::saturation_and_backward_snapshots_cannot_fabricate_deltas",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
         "queue_recovery_pipeline::store::tests::abandoned_dispatch_and_cancelled_shutdown_retain_final_ownership",
         "--",
         "--exact"
@@ -94501,7 +94597,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "b979458431ca358660ca071677bca4dfde332c462c14cf59e89c7929ec9ac667",
+  "source_inventory_sha256": "a4fd6bbad65bde4df845389ade548096ea23bf25d015bd9a5edb3b433a612d8f",
   "workspaces": [
     {
       "listing_error_sha256": "",

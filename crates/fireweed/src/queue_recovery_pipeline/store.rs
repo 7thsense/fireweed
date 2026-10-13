@@ -17,6 +17,7 @@ struct StoreInner {
     runtime: Arc<QueueOperationRuntime>,
     limits: QueueLimits,
     clock: Arc<dyn Clock>,
+    diagnostics: Arc<RecoveryCounters>,
 }
 #[derive(Clone)]
 pub struct NativeQueueStore {
@@ -56,14 +57,20 @@ impl NativeQueueStore {
             pipeline.operation_slots.available_permits(),
             retained_bytes,
         )?;
+        let diagnostics = pipeline.diagnostics.clone();
         Ok(Self {
             inner: Arc::new(StoreInner {
                 pipeline: Mutex::new(Some(Arc::new(pipeline))),
                 runtime,
                 limits,
                 clock,
+                diagnostics,
             }),
         })
+    }
+    /// Counters only: retaining this handle never retains store resources.
+    pub fn recovery_diagnostics(&self) -> Arc<RecoveryCounters> {
+        self.inner.diagnostics.clone()
     }
     async fn dispatch<T: Send + 'static, O: Send + 'static, F, Fut>(
         &self,
@@ -313,6 +320,7 @@ mod tests {
             Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
         )
         .unwrap();
+        let diagnostic_handle = store.recovery_diagnostics();
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let caller = store.clone();
@@ -361,6 +369,8 @@ mod tests {
         assert!(store.inner.pipeline.lock().unwrap().is_none());
         store.shutdown().await.unwrap();
         drop(store);
+        assert_eq!(Arc::strong_count(&diagnostic_handle), 1);
+        assert_eq!(diagnostic_handle.snapshot().attempts, 0);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -51,3 +51,10 @@ setting; PostgreSQL behavior is unchanged. Compare profiles with the same rebuil
 executable, workload, and capacities on fresh roots, sequentially. The experiment
 isolates configured linger; it does not remove budget, durability, or recovery
 waiting and does not change production defaults.
+
+Native recovery diagnostics cover the interval after construction through owned
+shutdown, including warmup and verification. They count admitted framed records
+and bytes, excluding failed allocations and provider requests. Elapsed time sums
+recovery-task durations, including waits, and may exceed wall time with overlap.
+Counters have fixed storage; overflow or unsuccessful drain suppresses numerical
+deltas. PostgreSQL reports these native-only diagnostics as unavailable.

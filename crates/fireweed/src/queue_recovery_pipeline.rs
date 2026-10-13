@@ -2,6 +2,8 @@
 //! Coverage is operation-scoped; this is not a consumer transaction or readiness cache.
 use fireweed_core::queue_contract::{QueueAddress, QueueError, QueueResult};
 mod claim;
+mod diagnostics;
+pub use diagnostics::{RecoveryCounters, RecoverySnapshot};
 mod commit;
 mod commit_batch;
 pub use commit_batch::AdmittedQueueCommitBatch;
@@ -67,6 +69,7 @@ pub struct QueueRecoveryPipeline {
     operation_slots: Arc<Semaphore>,
     metadata_bytes: usize,
     hard_record_bytes: u64,
+    diagnostics: Arc<RecoveryCounters>,
     #[cfg(test)]
     before_drop: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -151,6 +154,7 @@ impl QueueRecoveryPipeline {
             operation_slots: Arc::new(Semaphore::new(options.operations)),
             metadata_bytes: options.metadata_bytes,
             hard_record_bytes: options.hard_record_bytes,
+            diagnostics: Arc::new(RecoveryCounters::default()),
             #[cfg(test)]
             before_drop: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -294,6 +298,17 @@ fn verify_prefix(
 }
 impl RecoveryTask {
     async fn execute(mut self) -> QueueResult<RecoveredQueue> {
+        let mut span = self.pipeline.diagnostics.begin();
+        let result = self.execute_scanned(&mut span).await;
+        span.finish(result.is_ok());
+        // Merge before self drops the final operation reservation.
+        drop(span);
+        result
+    }
+    async fn execute_scanned(
+        &mut self,
+        span: &mut diagnostics::RecoverySpan,
+    ) -> QueueResult<RecoveredQueue> {
         let pipeline = &self.pipeline;
         let namespace = pipeline
             .store
@@ -352,6 +367,7 @@ impl RecoveryTask {
                 .await?
                 .ok_or_else(|| unknown("early EOF before acquired target"))?;
             let (actual, record) = read.into_record(&self.job)?;
+            span.record(record.bytes().len());
             let view = record.view()?;
             if actual != offset
                 || view.format() != QueueLogFormat::ChecksummedV2
@@ -454,6 +470,7 @@ impl RecoveryTask {
         verify_prefix(&history, &final_checkpoint)?;
         let original_authority = self
             .originals
+            .take()
             .map(|originals| {
                 let genesis = encode_checked_genesis(
                     genesis_epoch,

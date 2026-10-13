@@ -776,6 +776,17 @@ async fn cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target
         (2, 1)
     );
     drop(third);
+    let measured = pipeline.diagnostics.snapshot();
+    assert_eq!(
+        (
+            measured.attempts,
+            measured.succeeded,
+            measured.failed,
+            measured.admitted_raw_records
+        ),
+        (3, 3, 0, 5)
+    );
+    assert!(measured.admitted_raw_bytes > 0);
     append_empty(&store, &job, &workers).await;
     // A different but well-framed cache at the same cursor must reject its
     // prefix before touching the legitimate suffix.
@@ -819,6 +830,16 @@ async fn cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target
         assert!(
             matches!(bad_pipeline.recover(address(),job.clone()).await,Err(QueueError::OutcomeUnknown(message)) if message.contains("disagrees with authoritative prefix"))
         );
+        let failed = bad_pipeline.diagnostics.snapshot();
+        assert_eq!(
+            (
+                failed.attempts,
+                failed.succeeded,
+                failed.failed,
+                failed.admitted_raw_records
+            ),
+            (1, 0, 1, 2)
+        );
         let genesis =
             encode_checked_genesis(1, &address(), &definition, &[17; 32], 1 << 20, &job).unwrap();
         assert_eq!(
@@ -846,6 +867,15 @@ async fn cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target
         limited.recover(address(), job.clone()).await,
         Err(QueueError::TooLarge)
     ));
+    let rejected = limited.diagnostics.snapshot();
+    assert_eq!(
+        (
+            rejected.attempts,
+            rejected.failed,
+            rejected.admitted_raw_records
+        ),
+        (1, 1, 0)
+    );
     drop(limited);
     // Occupy the only native worker; the owned orchestration must survive
     // its caller disappearing while a subsequent stage is queued.
@@ -891,6 +921,17 @@ async fn cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target
     .unwrap();
     assert_eq!(pipeline.slots.available_permits(), 64);
     assert_eq!(admission.usage().unwrap(), (0, 0));
+    let drained = pipeline.diagnostics.snapshot();
+    assert_eq!(
+        (
+            drained.attempts,
+            drained.succeeded,
+            drained.failed,
+            drained.abandoned,
+            drained.admitted_raw_records
+        ),
+        (4, 4, 0, 0, 8)
+    );
     let job = Arc::new(admission.reserve(0).unwrap());
     let definition =
         AdmittedQueueDefinition::from_raw(&encode_definition(&schema()).unwrap(), &job).unwrap();
