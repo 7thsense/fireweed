@@ -535,6 +535,43 @@
     },
     {
       "groups": [
+        "conformance"
+      ],
+      "lines": [
+        239,
+        273,
+        281,
+        324,
+        331,
+        333,
+        334,
+        343,
+        348,
+        349,
+        395,
+        397,
+        416,
+        425,
+        426,
+        431,
+        444,
+        445,
+        446,
+        447,
+        477,
+        478,
+        479,
+        481,
+        482,
+        486,
+        491,
+        500
+      ],
+      "path": "crates/fireweed-conformance/src/queue_benchmark.rs",
+      "symbol": "run"
+    },
+    {
+      "groups": [
         "evidence"
       ],
       "lines": [
@@ -675,6 +712,36 @@
       ],
       "path": "crates/fireweed-postgres/src/relational.rs",
       "symbol": "set_emission_cursor"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        36,
+        45,
+        52,
+        73,
+        132
+      ],
+      "path": "crates/fireweed-postgres/tests/queue_benchmark.rs",
+      "symbol": "shared_settled_work_reference"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        143,
+        165,
+        166,
+        167,
+        168,
+        174,
+        175
+      ],
+      "path": "crates/fireweed-postgres/tests/queue_benchmark.rs",
+      "symbol": "failed_reference_retains_evidence_and_drains_postgres"
     },
     {
       "groups": [
@@ -3624,12 +3691,11 @@
         "script"
       ],
       "lines": [
-        1292,
-        1320,
+        1306,
         1334,
         1348,
         1362,
-        1404,
+        1376,
         1418,
         1432,
         1446,
@@ -3651,65 +3717,66 @@
         1670,
         1684,
         1698,
-        1726,
+        1712,
         1740,
         1754,
         1768,
         1782,
-        1824,
-        1852,
+        1796,
+        1838,
         1866,
         1880,
         1894,
         1908,
         1922,
-        2076,
-        2132,
+        1936,
+        2090,
         2146,
-        2174,
+        2160,
         2188,
-        2216,
-        2300,
+        2202,
+        2230,
         2314,
         2328,
         2342,
-        2370,
-        2440,
+        2356,
+        2384,
         2454,
-        2482,
-        2510,
-        2538,
-        2566,
+        2468,
+        2496,
+        2524,
+        2552,
         2580,
         2594,
         2608,
         2622,
-        2650,
+        2636,
         2664,
-        2706,
-        2944,
+        2678,
+        2720,
         2958,
         2972,
-        3000,
-        3140,
-        3182,
+        2986,
+        3014,
+        3154,
         3196,
         3210,
         3224,
-        3280,
-        3308,
+        3238,
+        3294,
         3322,
         3336,
         3350,
-        3504,
+        3364,
         3518,
-        3756,
-        3938,
-        4050,
-        6479,
-        6535,
-        6577,
-        6717
+        3532,
+        3770,
+        3952,
+        4064,
+        6493,
+        6549,
+        6591,
+        6731
       ],
       "path": "scripts/ci/storage-remediation-inventory.json",
       "symbol": "<module>"
@@ -3827,6 +3894,15 @@
       "calls": [
         "run"
       ],
+      "line": 149,
+      "path": "crates/fireweed-conformance/src/queue_benchmark.rs",
+      "symbol": "run_owned"
+    },
+    {
+      "call_depth": 2,
+      "calls": [
+        "run"
+      ],
       "line": 1338,
       "path": "crates/fireweed-postgres/src/queue_store/administration.rs",
       "symbol": "drop"
@@ -3852,6 +3928,7 @@
     {
       "call_depth": 2,
       "calls": [
+        "run_owned",
         "write_e3_contract"
       ],
       "line": 312,
@@ -4097,6 +4174,26 @@
       "line": 383,
       "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
       "symbol": "repeated_large_exact_tuple_retains_constant_owner_admission"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "git",
+        "output",
+        "run_owned"
+      ],
+      "line": 30,
+      "path": "crates/fireweed-postgres/tests/queue_benchmark.rs",
+      "symbol": "shared_settled_work_reference"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "run_owned"
+      ],
+      "line": 140,
+      "path": "crates/fireweed-postgres/tests/queue_benchmark.rs",
+      "symbol": "failed_reference_retains_evidence_and_drains_postgres"
     },
     {
       "call_depth": 3,
@@ -4695,7 +4792,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "a920b3b3faaad74de1fa506167a58dcddb4474370cbfda6f57c6b1ebb5336d3e",
+  "scan_sha256": "abdd4f3ac8deba961c5e463cc0325e36221ba24db0552d0e95cf3b144f5bbea5",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -6224,6 +6321,60 @@
     },
     {
       "evidence_paths": [],
+      "first_match_line": 137,
+      "groups": [
+        "conformance"
+      ],
+      "last_match_line": 146,
+      "line": 129,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-conformance/src/queue_benchmark.rs",
+      "symbol": "ordinal"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 176,
+      "groups": [
+        "conformance"
+      ],
+      "last_match_line": 181,
+      "line": 149,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 4,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-conformance/src/queue_benchmark.rs",
+      "symbol": "run_owned"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 237,
+      "groups": [
+        "conformance"
+      ],
+      "last_match_line": 503,
+      "line": 237,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-conformance/src/queue_benchmark.rs",
+      "symbol": "run"
+    },
+    {
+      "evidence_paths": [],
       "first_match_line": 1,
       "groups": [
         "conformance"
@@ -6895,6 +7046,42 @@
       ],
       "path": "crates/fireweed-postgres/src/relational.rs",
       "symbol": "set_emission_cursor"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 134,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 134,
+      "line": 30,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-postgres/tests/queue_benchmark.rs",
+      "symbol": "shared_settled_work_reference"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 140,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 140,
+      "line": 140,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-postgres/tests/queue_benchmark.rs",
+      "symbol": "failed_reference_retains_evidence_and_drains_postgres"
     },
     {
       "evidence_paths": [],
@@ -16804,7 +16991,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 93758,
+      "last_match_line": 93857,
       "line": 1,
       "markers": [
         "e3",
@@ -16815,7 +17002,7 @@
         "td008",
         "tp003"
       ],
-      "match_count": 1148,
+      "match_count": 1151,
       "operations": [
         "constant",
         "public_identity",

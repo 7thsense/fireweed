@@ -1427,6 +1427,7 @@ dependencies = [
  "fireweed-engine",
  "fireweed-memory",
  "fireweed-objectlog",
+ "futures",
  "serde_json",
  "tokio",
 ]

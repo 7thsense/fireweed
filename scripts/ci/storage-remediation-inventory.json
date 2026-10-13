@@ -362,9 +362,23 @@
           "P2f"
         ],
         "detail": "",
-        "id": "60b1b9c1ea1d26eb25c8",
+        "id": "d54b2e97ccab511c2774",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL; controlled benchmark lane\"]",
-        "line": 13,
+        "line": 29,
+        "owner": "P10pp",
+        "path": "crates/fireweed-postgres/tests/queue_benchmark.rs",
+        "status": "debt"
+      },
+      {
+        "category": "ignored_test",
+        "dependency_chain": [
+          "P10pp",
+          "P2f"
+        ],
+        "detail": "",
+        "id": "55a68695aef1c7ad9ec1",
+        "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL; benchmark failure/drain control\"]",
+        "line": 139,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/tests/queue_benchmark.rs",
         "status": "debt"
@@ -25539,6 +25553,62 @@
       "expected_ran": 1,
       "harness_id": "matrix_classes::tests::register_suite_claims_rejects_eventual_apply_on_memory_log",
       "id": "Cargo.toml::fireweed-conformance::fireweed_conformance::test::matrix_classes::tests::register_suite_claims_rejects_eventual_apply_on_memory_log",
+      "listed_kind": "test",
+      "package": "fireweed-conformance",
+      "target": "fireweed_conformance",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-conformance",
+        "--lib",
+        "queue_benchmark::tests::bounded_priority_oracle_matches_sort_and_exhausts",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_benchmark::tests::bounded_priority_oracle_matches_sort_and_exhausts",
+      "id": "Cargo.toml::fireweed-conformance::fireweed_conformance::test::queue_benchmark::tests::bounded_priority_oracle_matches_sort_and_exhausts",
+      "listed_kind": "test",
+      "package": "fireweed-conformance",
+      "target": "fireweed_conformance",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-conformance",
+        "--lib",
+        "queue_benchmark::tests::histogram_includes_zero_and_maximum_without_overflow",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_benchmark::tests::histogram_includes_zero_and_maximum_without_overflow",
+      "id": "Cargo.toml::fireweed-conformance::fireweed_conformance::test::queue_benchmark::tests::histogram_includes_zero_and_maximum_without_overflow",
       "listed_kind": "test",
       "package": "fireweed-conformance",
       "target": "fireweed_conformance",
@@ -57711,6 +57781,35 @@
       "listed_kind": "test",
       "package": "fireweed-postgres",
       "target": "multi_instance",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-postgres",
+        "--test",
+        "queue_benchmark",
+        "failed_reference_retains_evidence_and_drains_postgres",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "failed_reference_retains_evidence_and_drains_postgres",
+      "id": "Cargo.toml::fireweed-postgres::queue_benchmark::test::failed_reference_retains_evidence_and_drains_postgres",
+      "listed_kind": "test",
+      "package": "fireweed-postgres",
+      "target": "queue_benchmark",
       "target_kind": [
         "test"
       ],
@@ -94222,7 +94321,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "77025e7e2f1716bd91f8d73b9568e8095c0bccabeef577269273e53e15329e60",
+  "source_inventory_sha256": "4bee2360567b01ad8fd9b4d5c69a695d53578a1af79a0be110450ca34d608a6d",
   "workspaces": [
     {
       "listing_error_sha256": "",
