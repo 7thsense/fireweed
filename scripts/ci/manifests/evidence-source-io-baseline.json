@@ -4076,7 +4076,7 @@
       "calls": [
         "run_owned"
       ],
-      "line": 361,
+      "line": 372,
       "path": "crates/fireweed-bench/src/bin/fireweed-api007-reference.rs",
       "symbol": "execute"
     },
@@ -4829,7 +4829,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "25632fd2caa6c07d8a98a61f82696f8ba69a90fbe9b2b1fa7574c95e14dedf37",
+  "scan_sha256": "550fb39610ba1de9459a8e99181cdf6defbc2dce6f3d6a0b4e81f81a504f4bee",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -4913,12 +4913,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 399,
+      "first_match_line": 410,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 399,
-      "line": 361,
+      "last_match_line": 410,
+      "line": 372,
       "markers": [
         "evidence"
       ],

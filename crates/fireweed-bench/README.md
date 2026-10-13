@@ -16,7 +16,7 @@ cargo run --manifest-path crates/fireweed-bench/Cargo.toml --locked --release \
 
 Arguments are backend (`postgres`, `local`, `s3`), fresh absolute root, fresh
 absolute artifact path, source record count, batch size, seed, body bytes, and
-state bytes. Root and artifact must have existing parents and distinct resolved
+state bytes, with an optional `default` or `zero-linger` profile. Root and artifact must have existing parents and distinct resolved
 destinations. Use fresh paths for each repetition.
 
 PostgreSQL requires `FIREWEED_API007_PG_TEST_URL` for an isolated fixture database.
@@ -44,3 +44,10 @@ memory is unmeasured. Artifacts bind the running executable hash and compare the
 listed benchmark/common sources and manifests/locks with their compiled bytes.
 HEAD and the dirty patch identify the remaining backend source snapshot. Source
 changes invalidate the report. Artifact-write failure preserves stdout evidence.
+
+The optional `zero-linger` diagnostic changes only native `FlushConfig.linger`
+to zero for both local and S3. It retains the budget controller and every other
+setting; PostgreSQL behavior is unchanged. Compare profiles with the same rebuilt
+executable, workload, and capacities on fresh roots, sequentially. The experiment
+isolates configured linger; it does not remove budget, durability, or recovery
+waiting and does not change production defaults.

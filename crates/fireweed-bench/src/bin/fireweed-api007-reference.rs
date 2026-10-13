@@ -33,6 +33,8 @@ struct Config {
     s3: Option<S3>,
     runtime: QueueRuntimeOptions,
     prefix: String,
+    profile: String,
+    flush: fireweed_objectlog::FlushConfig,
 }
 fn limits() -> QueueLimits {
     QueueLimits {
@@ -48,8 +50,15 @@ fn required(name: &str) -> Result<String, String> {
 }
 fn config() -> Result<Config, String> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 8 {
-        return Err("usage: fireweed-api007-reference <postgres|local|s3> <fresh-absolute-root> <fresh-absolute-artifact> <records> <batch> <seed> <body-bytes> <state-bytes>".into());
+    if !(8..=9).contains(&args.len()) {
+        return Err("usage: fireweed-api007-reference <postgres|local|s3> <fresh-absolute-root> <fresh-absolute-artifact> <records> <batch> <seed> <body-bytes> <state-bytes> [default|zero-linger]".into());
+    }
+    let profile = args.get(8).map(String::as_str).unwrap_or("default");
+    let mut flush = fireweed_objectlog::FlushConfig::default();
+    match profile {
+        "default" => {}
+        "zero-linger" => flush.linger = std::time::Duration::ZERO,
+        _ => return Err("profile must be default or zero-linger".into()),
     }
     let root = PathBuf::from(&args[1]);
     let artifact = PathBuf::from(&args[2]);
@@ -152,6 +161,8 @@ fn config() -> Result<Config, String> {
         pg,
         s3,
         runtime,
+        profile: profile.to_owned(),
+        flush,
         prefix: format!(
             "api007-reference-{}-{}",
             std::process::id(),
@@ -261,7 +272,7 @@ async fn construct(c: &Config) -> QueueResult<Box<dyn QueueStore>> {
         NativeQueueStore, QueuePipelineOptions, QueueRecoveryPipeline,
     };
     use fireweed_engine::queue_admission::QueueAdmission;
-    use fireweed_objectlog::{FlushConfig, NativeLogOptions, ObjectLogEngineStore};
+    use fireweed_objectlog::{NativeLogOptions, ObjectLogEngineStore};
     use fireweed_queue_spool::{ScratchDiskQuota, ScratchRoot, ScratchWorkers};
     let workers = ScratchWorkers::new(2, c.runtime.operations)?;
     let result = std::panic::AssertUnwindSafe(async {
@@ -279,14 +290,14 @@ async fn construct(c: &Config) -> QueueResult<Box<dyn QueueStore>> {
                 &s3.secret,
                 format!("{}/data/", c.prefix),
                 format!("{}/meta/", c.prefix),
-                FlushConfig::default(),
+                c.flush,
                 native,
             )
             .await
         } else {
             ObjectLogEngineStore::open_local_with_native_options(
                 c.root.join("log"),
-                FlushConfig::default(),
+                c.flush,
                 native,
             )
             .await
@@ -388,7 +399,7 @@ async fn execute(c: Config, source: Value) -> Result<bool, String> {
     };
     let source_matches = provenance().is_ok_and(|current| current == source);
     passed &= source_matches;
-    let mut report = json!({"qualification":"internal-port reference; histogram only; not TP-005 or public-facade acceptance", "backend":c.backend, "source":source,"compiled_source_scope":"listed benchmark/common sources and manifests/locks; remaining backend source is identified by HEAD and dirty patch", "source_matches_after_drain":source_matches, "command":std::env::args().collect::<Vec<_>>(), "build_profile":if cfg!(debug_assertions) {"debug"} else {"release"}, "clock":"fixed0", "postgres_pool_size":c.pg.as_ref().map(|_|2), "operation_slots":8, "scratch_workers":2, "retained_bytes":512u64<<20, "scratch_bytes":64u64<<20, "queue_limits":limits(),"native_settings":if c.pg.is_none() { Some(json!({"provision_operations":8,"provision_retry_delay_ms":125,"metadata_bytes":65536,"hard_record_bytes":256u64<<20,"flush":format!("{:?}",fireweed_objectlog::FlushConfig::default()),"turso_cache_kib":4096,"turso_cache_scope":"SDK soft cache setting; hard RAM qualification pending"})) } else { None }, "construction_ns":construction_ns,"namespace_prefix":c.prefix,"local_root":c.root,"s3_endpoint":c.s3.as_ref().map(|s3| &s3.endpoint),"s3_bucket":c.s3.as_ref().map(|s3| &s3.bucket),"s3_region":c.s3.as_ref().map(|s3| &s3.region),"postgres_config_source":c.pg.as_ref().map(|_| "FIREWEED_API007_PG_TEST_URL (credentials omitted)"),"host":std::fs::read_to_string("/proc/sys/kernel/hostname").ok().map(|v| v.trim().to_owned()), "client_peak_rss_kib":client_peak_rss_kib(), "service_memory":"unmeasured; client RSS is not backend-total RAM", "remote_storage_and_cost":"unmeasured", "workload":workload, "passed":passed});
+    let mut report = json!({"qualification":"internal-port reference; histogram only; not TP-005 or public-facade acceptance", "backend":c.backend,"native_flush_profile":c.profile,"profile_effect":if c.pg.is_some() {"no PostgreSQL behavior change"} else {"configured native linger only; budget, durability and recovery waits remain"}, "source":source,"compiled_source_scope":"listed benchmark/common sources and manifests/locks; remaining backend source is identified by HEAD and dirty patch", "source_matches_after_drain":source_matches, "command":std::env::args().collect::<Vec<_>>(), "build_profile":if cfg!(debug_assertions) {"debug"} else {"release"}, "clock":"fixed0", "postgres_pool_size":c.pg.as_ref().map(|_|2), "operation_slots":8, "scratch_workers":2, "retained_bytes":512u64<<20, "scratch_bytes":64u64<<20, "queue_limits":limits(),"native_settings":if c.pg.is_none() { Some(json!({"provision_operations":8,"provision_retry_delay_ms":125,"metadata_bytes":65536,"hard_record_bytes":256u64<<20,"flush":format!("{:?}",c.flush),"turso_cache_kib":4096,"turso_cache_scope":"SDK soft cache setting; hard RAM qualification pending"})) } else { None }, "construction_ns":construction_ns,"namespace_prefix":c.prefix,"local_root":c.root,"s3_endpoint":c.s3.as_ref().map(|s3| &s3.endpoint),"s3_bucket":c.s3.as_ref().map(|s3| &s3.bucket),"s3_region":c.s3.as_ref().map(|s3| &s3.region),"postgres_config_source":c.pg.as_ref().map(|_| "FIREWEED_API007_PG_TEST_URL (credentials omitted)"),"host":std::fs::read_to_string("/proc/sys/kernel/hostname").ok().map(|v| v.trim().to_owned()), "client_peak_rss_kib":client_peak_rss_kib(), "service_memory":"unmeasured; client RSS is not backend-total RAM", "remote_storage_and_cost":"unmeasured", "workload":workload, "passed":passed});
     if !source_matches {
         report["workload"]["correctness"] = json!("failed_provenance");
         report["workload"]["settled_per_second"] = Value::Null;
