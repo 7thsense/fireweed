@@ -3222,3 +3222,7 @@ async fn native_batch_original_authority_rejects_corrupt_cache_local() {
 async fn native_batch_original_authority_rejects_corrupt_cache_real_s3() {
     corrupt_batch_originals_do_not_publish_fresh_siblings(true).await;
 }
+
+#[cfg(target_os = "linux")]
+#[path = "tests/original_domains.rs"]
+mod original_domains;

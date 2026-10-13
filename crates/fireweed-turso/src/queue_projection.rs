@@ -2643,6 +2643,7 @@ mod tests {
         projection
             .replay_claim(
                 ClaimReplayInput {
+                    original: None,
                     genesis: encode_checked_genesis(
                         1,
                         &address(),
@@ -3037,6 +3038,7 @@ mod tests {
             reader
                 .replay_claim(
                     ClaimReplayInput {
+                        original: None,
                         genesis,
                         request,
                         now: 11,
@@ -3102,6 +3104,7 @@ mod tests {
         projection
             .select_claim_candidates(
                 ClaimReplayInput {
+                    original: None,
                     genesis: encode_checked_genesis(
                         1,
                         &address(),

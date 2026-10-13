@@ -126,7 +126,12 @@ impl CommitExecution {
     ) -> QueueResult<Option<fireweed_engine::queue_original_authority::AdmittedOriginalPosition>>
     {
         let Some(batch) = &self.batch else {
-            return Ok(None);
+            return recovered
+                .original_authority
+                .as_ref()
+                .ok_or_else(|| unknown("single commit recovery proof missing"))?
+                .position(0, &self.group.request_id)
+                .map(Some);
         };
         let authority = recovered
             .original_authority

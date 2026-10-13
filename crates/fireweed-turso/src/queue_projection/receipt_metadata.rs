@@ -88,8 +88,44 @@ pub(super) async fn read_original_metadata(
     expected: (u8, [u8; 32]),
     authority: Option<fireweed_engine::queue_original_authority::OriginalDescriptor>,
 ) -> QueueResult<ReceiptMetadata> {
-    let cached =
-        read_fixed_receipt_metadata(connection, queue_id, ReceiptDomain::Commit, identity).await?;
+    read_authoritative_receipt_metadata(
+        connection,
+        queue_id,
+        ReceiptDomain::Commit,
+        identity,
+        expected,
+        authority,
+    )
+    .await
+}
+/// A supplied position's absence is checked authority, never a cache fallback.
+pub(super) async fn read_receipt_metadata_with_authority(
+    connection: &Connection,
+    queue_id: i64,
+    domain: ReceiptDomain,
+    identity: &str,
+    expected: (u8, [u8; 32]),
+    authority: Option<Option<fireweed_engine::queue_original_authority::OriginalDescriptor>>,
+) -> QueueResult<ReceiptMetadata> {
+    match authority {
+        Some(authority) => {
+            read_authoritative_receipt_metadata(
+                connection, queue_id, domain, identity, expected, authority,
+            )
+            .await
+        }
+        None => read_receipt_metadata(connection, queue_id, domain, identity, Some(expected)).await,
+    }
+}
+async fn read_authoritative_receipt_metadata(
+    connection: &Connection,
+    queue_id: i64,
+    domain: ReceiptDomain,
+    identity: &str,
+    expected: (u8, [u8; 32]),
+    authority: Option<fireweed_engine::queue_original_authority::OriginalDescriptor>,
+) -> QueueResult<ReceiptMetadata> {
+    let cached = read_fixed_receipt_metadata(connection, queue_id, domain, identity).await?;
     let (cached, authority) = match (cached, authority) {
         (None, None) => return Ok(ReceiptMetadata::Absent),
         (Some(cached), Some(authority)) => (cached, authority),

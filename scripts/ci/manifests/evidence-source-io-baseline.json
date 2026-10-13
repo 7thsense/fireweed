@@ -4829,7 +4829,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "d14fdb03cbd7c69a67d9204d9cca8a0cfd7797f024e9b0e727ba784e1cbaec12",
+  "scan_sha256": "12fecee9909999b9a723b7f25742685b1107d266826aecba3ce7bd7c5150cd38",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -17064,7 +17064,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 94257,
+      "last_match_line": 94505,
       "line": 1,
       "markers": [
         "e3",
@@ -17449,6 +17449,42 @@
       "operations": [
         "constant"
       ],
+      "path": "scripts/formal/check_domains.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 57,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 57,
+      "line": 46,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/check_domains.py",
+      "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 2,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 2,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
       "path": "scripts/formal/check_handoff.py",
       "symbol": "<module>"
     },
@@ -17581,6 +17617,24 @@
       ],
       "path": "scripts/formal/run_replay.py",
       "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 1,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/test_domains.py",
+      "symbol": "<module>"
     },
     {
       "evidence_paths": [],

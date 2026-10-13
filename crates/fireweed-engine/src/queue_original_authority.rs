@@ -35,6 +35,7 @@ struct Entry {
 }
 /// One operation's ordered original-ID subset. No queue-sized map is retained.
 pub struct ColdOriginalTracker {
+    domain: u8,
     address: Vec<u8>,
     entries: Vec<Entry>,
     genesis_sha256: Option<[u8; 32]>,
@@ -47,6 +48,7 @@ pub struct ColdOriginalTracker {
 /// Immutable descriptors for the declared complete checked cut, not permission
 /// to trust a projection or to reuse a prefix across operations.
 pub struct AdmittedOriginalAuthority {
+    domain: u8,
     address: Vec<u8>,
     entries: Vec<Entry>,
     genesis_sha256: [u8; 32],
@@ -55,16 +57,41 @@ pub struct AdmittedOriginalAuthority {
 }
 impl ColdOriginalTracker {
     pub fn new(batch: &CommitBatch, job: &Arc<QueueReservation>) -> QueueResult<Self> {
-        batch.queue.validate()?;
-        let mut capacity = u64::try_from(framed_address_len(&batch.queue)?)
+        Self::new_ids(
+            &batch.queue,
+            2,
+            batch.groups.iter().map(|group| group.request_id.as_str()),
+            job,
+        )
+    }
+    /// One literal original in its immutable insert, claim or commit domain.
+    pub fn new_request(
+        queue: &QueueAddress,
+        domain: u8,
+        id: &str,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Self> {
+        Self::new_ids(queue, domain, std::iter::once(id), job)
+    }
+    fn new_ids<'a>(
+        queue: &QueueAddress,
+        domain: u8,
+        ids: impl ExactSizeIterator<Item = &'a str> + Clone,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Self> {
+        queue.validate()?;
+        if domain > 2 {
+            return Err(QueueError::Invalid("unsupported original domain".into()));
+        }
+        let mut capacity = u64::try_from(framed_address_len(queue)?)
             .map_err(|_| QueueError::TooLarge)?
             .checked_mul(8)
             .and_then(|n| n.checked_add(1024))
             .ok_or(QueueError::TooLarge)?;
-        for group in &batch.groups {
+        for id in ids.clone() {
             capacity = capacity
                 .checked_add(
-                    (group.request_id.len() as u64)
+                    (id.len() as u64)
                         .checked_mul(8)
                         .ok_or(QueueError::TooLarge)?,
                 )
@@ -72,24 +99,21 @@ impl ColdOriginalTracker {
                 .ok_or(QueueError::TooLarge)?;
         }
         let charge = job.owned_buffer(capacity)?;
-        let mut entries = Vec::with_capacity(batch.groups.len());
-        for group in &batch.groups {
-            if group.request_id.is_empty()
-                || entries
-                    .iter()
-                    .any(|entry: &Entry| entry.id == group.request_id)
-            {
+        let mut entries = Vec::with_capacity(ids.len());
+        for id in ids {
+            if id.is_empty() || entries.iter().any(|entry: &Entry| entry.id == id) {
                 return Err(QueueError::Invalid(
-                    "batch original IDs must be nonempty and unique".into(),
+                    "original IDs must be nonempty and unique".into(),
                 ));
             }
             entries.push(Entry {
-                id: group.request_id.clone(),
+                id: id.to_owned(),
                 descriptor: None,
             });
         }
         Ok(Self {
-            address: encode_address(&batch.queue)?,
+            domain,
+            address: encode_address(queue)?,
             entries,
             genesis_sha256: None,
             next_offset: 0,
@@ -133,7 +157,7 @@ impl ColdOriginalTracker {
                 }
                 for receipt in frame.receipts() {
                     let receipt = receipt.map_err(|_| unknown("invalid source receipt"))?;
-                    if receipt.domain != 2 {
+                    if receipt.domain != self.domain {
                         continue;
                     }
                     if let Some(entry) = self
@@ -154,9 +178,25 @@ impl ColdOriginalTracker {
                 }
                 self.insertion_sequence = summary.final_sequence;
             }
-            QueueLogPayload::Claim(_) => {
+            QueueLogPayload::Claim(claim) => {
                 if self.genesis_sha256.is_none() {
                     return Err(unknown("claim before genesis"));
+                }
+                if self.domain == 1
+                    && let Some(entry) = self
+                        .entries
+                        .iter_mut()
+                        .find(|entry| entry.id == claim.request_id())
+                {
+                    if entry.descriptor.is_some() {
+                        return Err(unknown("duplicate source original identity"));
+                    }
+                    entry.descriptor = Some(OriginalDescriptor {
+                        fingerprint_format: claim.fingerprint_format(),
+                        fingerprint: *claim.fingerprint(),
+                        outcome_bytes: claim.receipt_bytes().len() as u64,
+                        outcome_sha256: Sha256::digest(claim.receipt_bytes()).into(),
+                    });
                 }
             }
         }
@@ -199,6 +239,7 @@ impl ColdOriginalTracker {
             return Err(unknown("incomplete or mismatched checked prefix"));
         }
         Ok(AdmittedOriginalAuthority {
+            domain: self.domain,
             address: self.address,
             entries: self.entries,
             genesis_sha256: hash,
@@ -216,6 +257,9 @@ impl AdmittedOriginalAuthority {
         job: &QueueReservation,
     ) -> QueueResult<()> {
         self.validate_cut(&batch.queue, genesis, progress, job)?;
+        if self.domain != 2 {
+            return Err(unknown("batch original domain mismatch"));
+        }
         if self.entries.len() != batch.groups.len()
             || self
                 .entries
@@ -286,6 +330,21 @@ impl AdmittedOriginalPosition {
         progress: (u64, u64, u64),
         job: &QueueReservation,
     ) -> QueueResult<Option<OriginalDescriptor>> {
+        self.validate_domain(2, queue, id, genesis, progress, job)
+    }
+    /// Domain binding is required even when the declared original is absent.
+    pub fn validate_domain(
+        &self,
+        domain: u8,
+        queue: &QueueAddress,
+        id: &str,
+        genesis: &OwnedQueueLogRecord,
+        progress: (u64, u64, u64),
+        job: &QueueReservation,
+    ) -> QueueResult<Option<OriginalDescriptor>> {
+        if self.authority.domain != domain {
+            return Err(unknown("original domain mismatch"));
+        }
         self.authority.validate_cut(queue, genesis, progress, job)?;
         self.authority.descriptor(self.position, id)
     }
@@ -302,7 +361,7 @@ mod tests {
         queue_schema_codec::{AdmittedQueueDefinition, encode_definition},
     };
     use fireweed_core::queue_contract::*;
-    fn batch() -> CommitBatch {
+    pub(super) fn batch() -> CommitBatch {
         let group = |id: &str| CommitGroup {
             request_id: id.into(),
             administration: None,
@@ -326,7 +385,10 @@ mod tests {
             groups: vec![group("known"), group("fresh")],
         }
     }
-    fn records(batch: &CommitBatch, job: &Arc<QueueReservation>) -> Vec<OwnedQueueLogRecord> {
+    pub(super) fn records(
+        batch: &CommitBatch,
+        job: &Arc<QueueReservation>,
+    ) -> Vec<OwnedQueueLogRecord> {
         let schema = QueueSchema {
             work: CollectionDefinition {
                 fields: Default::default(),
@@ -548,5 +610,203 @@ mod tests {
             ColdOriginalTracker::new(&duplicate, &job),
             Err(QueueError::Invalid(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod domain_tests {
+    use super::tests::{batch, records};
+    use super::*;
+    use crate::queue_admission::QueueAdmission;
+    #[test]
+    fn same_literal_has_three_independent_originals_and_scoped_duplicate_poison() {
+        use crate::{
+            queue_claim_publication::{ClaimPublicationInput, encode_claim_publication},
+            queue_claim_receipt::encode_claim_receipt,
+            queue_log_record::{encode_checked_claim_record, encode_checked_publication_record},
+            queue_planner::{RecordSnapshot, combine_deltas},
+            queue_publication::{PublicationReceipt, encode_publication_pinned},
+        };
+        use fireweed_core::queue_contract::*;
+        let batch = batch();
+        let job = Arc::new(QueueAdmission::new(1, 4 << 20).unwrap().reserve(0).unwrap());
+        let source = records(&batch, &job);
+        let mut history = ColdQueueHistory::new(&batch.queue, &job).unwrap();
+        history.observe(0, source[0].bytes()).unwrap();
+        let definition = history.definition().unwrap();
+        let insert = InsertRequest {
+            queue: batch.queue.clone(),
+            request_id: "known".into(),
+            mode: InsertMode::InsertOnly,
+            items: vec![NewWork {
+                key: "absent".into(),
+                priority: 0,
+                available_at: 0,
+                fields: Default::default(),
+                body: Default::default(),
+            }],
+        };
+        let outcomes = [InsertOutcome::Rejected {
+            key: "absent".into(),
+            reason: Rejection::UniqueConflict,
+        }];
+        let frame = encode_publication_pinned(
+            &batch.queue,
+            definition.pin(),
+            &RecordSnapshot::default(),
+            &combine_deltas(&[], 0).unwrap(),
+            &[PublicationReceipt::insert(&insert, &outcomes).unwrap()],
+            1 << 20,
+            &job,
+        )
+        .unwrap();
+        let insert_record =
+            encode_checked_publication_record(1, frame.as_bytes(), 1 << 20, &job).unwrap();
+        let commands = encode_publication_pinned(
+            &batch.queue,
+            definition.pin(),
+            &RecordSnapshot::default(),
+            &combine_deltas(&[], 0).unwrap(),
+            &[],
+            1 << 20,
+            &job,
+        )
+        .unwrap();
+        let claim = ClaimRequest {
+            queue: batch.queue.clone(),
+            request_id: "known".into(),
+            filter: Filter::default(),
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 2,
+            max_bytes: 1024,
+            fields: None,
+            include_body: true,
+        };
+        let receipt = encode_claim_receipt(&[], 1 << 20, &job).unwrap();
+        let wrapper = encode_claim_publication(
+            ClaimPublicationInput {
+                request: &claim,
+                definition,
+                commands: commands.as_bytes(),
+                receipt: &receipt,
+                claimed_at: 0,
+                limits: &QueueLimits::default(),
+            },
+            1 << 20,
+            &job,
+        )
+        .unwrap();
+        let claim_record = encode_checked_claim_record(1, &wrapper, 1 << 20, &job).unwrap();
+        let prefix = [&source[0], &insert_record, &claim_record, &source[1]];
+        for domain in 0..=2 {
+            let mut history = ColdQueueHistory::new(&batch.queue, &job).unwrap();
+            let mut tracker =
+                ColdOriginalTracker::new_request(&batch.queue, domain, "known", &job).unwrap();
+            for (offset, record) in prefix.iter().enumerate() {
+                history.observe(offset as u64, record.bytes()).unwrap();
+                tracker.observe(offset as u64, record).unwrap();
+            }
+            let proof = Arc::new(tracker.finish(&history, &source[0], (4, 0, 1)).unwrap());
+            let position = proof.position(0, "known").unwrap();
+            let descriptor = position
+                .validate_domain(domain, &batch.queue, "known", &source[0], (4, 0, 1), &job)
+                .unwrap()
+                .unwrap();
+            let raw = match prefix[domain as usize + 1].view().unwrap().payload() {
+                QueueLogPayload::Publication(frame) => {
+                    frame.receipts().next().unwrap().unwrap().encoded_outcome()
+                }
+                QueueLogPayload::Claim(claim) => claim.receipt_bytes(),
+                _ => panic!("original source"),
+            };
+            descriptor.verify_outcome(raw).unwrap();
+            // The duplicate is in domain0. Only that requested domain is poisoned.
+            let mut history = ColdQueueHistory::new(&batch.queue, &job).unwrap();
+            let mut tracker =
+                ColdOriginalTracker::new_request(&batch.queue, domain, "known", &job).unwrap();
+            for (offset, record) in prefix.iter().enumerate() {
+                history.observe(offset as u64, record.bytes()).unwrap();
+                tracker.observe(offset as u64, record).unwrap();
+            }
+            history.observe(4, insert_record.bytes()).unwrap();
+            let observed = tracker.observe(4, &insert_record);
+            if domain == 0 {
+                assert!(observed.is_err());
+                assert!(tracker.finish(&history, &source[0], (5, 0, 1)).is_err());
+            } else {
+                observed.unwrap();
+                tracker.finish(&history, &source[0], (5, 0, 1)).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn single_original_domains_bind_presence_absence_and_exact_admission() {
+        let batch = batch();
+        for domain in 0..=2 {
+            let admitted = QueueAdmission::new(1, 4 << 20).unwrap();
+            let job = Arc::new(admitted.reserve(0).unwrap());
+            let tracker =
+                ColdOriginalTracker::new_request(&batch.queue, domain, "known", &job).unwrap();
+            let exact = admitted.usage().unwrap().1;
+            drop(tracker);
+            let fit = QueueAdmission::new(1, exact).unwrap();
+            let fit_job = Arc::new(fit.reserve(0).unwrap());
+            drop(
+                ColdOriginalTracker::new_request(&batch.queue, domain, "known", &fit_job).unwrap(),
+            );
+            let short = QueueAdmission::new(1, exact - 1).unwrap();
+            let short_job = Arc::new(short.reserve(0).unwrap());
+            assert!(matches!(
+                ColdOriginalTracker::new_request(&batch.queue, domain, "known", &short_job),
+                Err(QueueError::OutcomeUnknown(_))
+            ));
+            let source = records(&batch, &job);
+            let mut history = ColdQueueHistory::new(&batch.queue, &job).unwrap();
+            let mut tracker =
+                ColdOriginalTracker::new_request(&batch.queue, domain, "known", &job).unwrap();
+            for (offset, record) in source.iter().enumerate() {
+                history.observe(offset as u64, record.bytes()).unwrap();
+                tracker.observe(offset as u64, record).unwrap();
+            }
+            let proof = Arc::new(tracker.finish(&history, &source[0], (2, 0, 1)).unwrap());
+            let position = proof.position(0, "known").unwrap();
+            assert_eq!(
+                position
+                    .validate_domain(domain, &batch.queue, "known", &source[0], (2, 0, 1), &job)
+                    .unwrap()
+                    .is_some(),
+                domain == 2
+            );
+            assert!(
+                position
+                    .validate_domain(
+                        (domain + 1) % 3,
+                        &batch.queue,
+                        "known",
+                        &source[0],
+                        (2, 0, 1),
+                        &job
+                    )
+                    .is_err()
+            );
+            drop(source);
+            drop(history);
+            drop(proof);
+            let retained = admitted.usage().unwrap().1;
+            assert_eq!(
+                retained, exact,
+                "position must retain the complete admitted proof even for absence"
+            );
+            drop(position);
+            assert_eq!(admitted.usage().unwrap().1, 0);
+            assert!(matches!(
+                ColdOriginalTracker::new_request(&batch.queue, 3, "known", &job),
+                Err(QueueError::Invalid(_))
+            ));
+            assert_eq!(admitted.usage().unwrap().1, 0);
+        }
     }
 }

@@ -81,10 +81,16 @@ cleanup. Shared shutdown drains admission and workers and serializes final
 resource teardown. These internal operations do not activate the public backend.
 
 Native mutation retries require a strictly newer durable fence, complete checked
-log history and covered original-receipt absence. One requested domain/identity
-witness detects missing or phantom originals and duplicate durable identities
-without retaining a history map. It does not validate all cached rows/indexes or
-known batch-classification receipts; complete cached integrity remains required.
+log history and covered original-receipt absence. Operation-owned descriptors
+bind the requested literal identities and domains to that complete source cut.
+Insert, claim and commit preparation and replay compare cached presence,
+fingerprint and outcome bytes with these descriptors before accepting an
+original result. Matching callers cannot trust an unwitnessed cached expiry;
+independently proven caller conflicts retain their existing precedence.
+`check_domains.py` bounds domain/identity proof use, including proved absence;
+`check_originals.py` bounds metadata and opaque-outcome classification. Their
+production mappings remain documentary. Arbitrary receipt lookups, current
+work/state rows and selection indexes still require full cached integrity.
 Fresh catalog-known missing indexes and previously observed malformed authority
 fail closed across reopen, independent handles and later metadata deletion.
 Native S3 conditional writes classify typed conflicts and never retry a lost

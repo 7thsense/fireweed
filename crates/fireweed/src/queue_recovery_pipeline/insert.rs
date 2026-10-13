@@ -61,6 +61,13 @@ impl QueueRecoveryPipeline {
 impl InsertTask {
     fn input(&self, recovered: &RecoveredQueue) -> QueueResult<InsertReplayInput> {
         Ok(InsertReplayInput {
+            original: Some(
+                recovered
+                    .original_authority
+                    .as_ref()
+                    .ok_or_else(|| unknown("request recovery proof missing"))?
+                    .position(0, &self.request.request_id)?,
+            ),
             genesis: self
                 .pipeline
                 .original_genesis(&self.request.queue, recovered, &self.job)?,

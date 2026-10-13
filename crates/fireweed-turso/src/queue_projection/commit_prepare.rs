@@ -429,6 +429,7 @@ mod tests {
             include_body: false,
         };
         let claim_input = |head| ClaimReplayInput {
+            original: None,
             genesis: input(&definition, &seed_job, group("unused"), head, 2).genesis,
             request: request.clone(),
             now: 1000,
@@ -622,6 +623,7 @@ mod tests {
         let claim_input = |head| {
             let definition = AdmittedQueueDefinition::from_raw(definition.raw(), &job).unwrap();
             ClaimReplayInput {
+                original: None,
                 genesis: encode_checked_genesis(
                     1,
                     &address(),

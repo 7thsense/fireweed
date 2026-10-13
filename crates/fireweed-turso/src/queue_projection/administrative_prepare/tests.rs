@@ -626,6 +626,7 @@ async fn prefix_composite_unique_active_delete_and_final_clock_expiry_preserve_a
         .unwrap();
     drop(response);
     let claim_input = |head| ClaimReplayInput {
+        original: None,
         genesis: encode_checked_genesis(1, &address(), &definition, &[31; 32], 16 << 20, &job)
             .unwrap(),
         request: ClaimRequest {

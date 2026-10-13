@@ -239,7 +239,8 @@ impl QueueRecoveryPipeline {
         identity: String,
         job: Arc<QueueReservation>,
     ) -> QueueResult<RecoveredQueue> {
-        self.recover_checked(address, Some((domain, identity)), None, job)
+        let originals = ColdOriginalTracker::new_request(&address, domain, &identity, &job)?;
+        self.recover_checked(address, Some((domain, identity)), Some(originals), job)
             .await
     }
     async fn recover_batch(
@@ -501,6 +502,19 @@ impl RecoveryTask {
                     .map(Arc::new)
             })
             .transpose()?;
+        if let Some((_, id)) = &self.identity {
+            let present = original_authority
+                .as_ref()
+                .ok_or_else(|| unknown("request original proof missing"))?
+                .descriptor(0, id)?
+                .is_some();
+            if original_identity_present != Some(present) {
+                return Err(unknown(
+                    "original presence fold disagrees with sealed source proof",
+                ));
+            }
+            original_identity_present = Some(present);
+        }
         Ok(RecoveredQueue {
             history,
             original_genesis_epoch: genesis_epoch,

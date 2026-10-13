@@ -1,6 +1,8 @@
 //! Selective, provisional insert planning. Only conditional durable publication
 //! and covered immutable replay can acknowledge these results to a consumer.
-use super::receipt_metadata::{ReceiptDomain, ReceiptMetadata, read_receipt_metadata};
+use super::receipt_metadata::{
+    ReceiptDomain, ReceiptMetadata, read_receipt_metadata_with_authority,
+};
 use super::*;
 use fireweed_engine::{
     Clock,
@@ -131,12 +133,13 @@ impl NativeTransactionWork for Worker {
         let request = &self.input.request;
         let schema = native.definition.schema();
         request.validate(schema, &self.input.limits)?;
-        match read_receipt_metadata(
+        match read_receipt_metadata_with_authority(
             connection,
             native.queue_id,
             ReceiptDomain::Insert,
             &request.request_id,
-            Some((3, fingerprint("insert", request)?)),
+            (3, fingerprint("insert", request)?),
+            self.input.original_descriptor(&self.job)?,
         )
         .await?
         {
@@ -282,6 +285,7 @@ mod tests {
     ) -> InsertReplayInput {
         let definition = AdmittedQueueDefinition::from_raw(definition.raw(), job).unwrap();
         InsertReplayInput {
+            original: None,
             genesis: encode_checked_genesis(1, &address(), &definition, &[31; 32], 16 << 20, job)
                 .unwrap(),
             request,
