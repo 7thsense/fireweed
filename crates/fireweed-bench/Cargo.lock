@@ -1253,15 +1253,33 @@ dependencies = [
  "bytes",
  "ctrlc",
  "fireweed",
+ "fireweed-conformance",
  "fireweed-core",
  "fireweed-engine",
  "fireweed-objectlog",
+ "fireweed-postgres",
+ "fireweed-queue-spool",
  "fireweed-release",
+ "fireweed-turso",
  "futures",
  "postgres",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "fireweed-conformance"
+version = "0.31.32"
+dependencies = [
+ "bytes",
+ "fireweed-core",
+ "fireweed-engine",
+ "futures",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

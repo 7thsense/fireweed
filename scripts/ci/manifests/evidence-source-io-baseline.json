@@ -4074,6 +4074,15 @@
     {
       "call_depth": 3,
       "calls": [
+        "run_owned"
+      ],
+      "line": 361,
+      "path": "crates/fireweed-bench/src/bin/fireweed-api007-reference.rs",
+      "symbol": "execute"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
         "verify_file"
       ],
       "line": 397,
@@ -4405,7 +4414,8 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "execute"
       ],
       "line": 2279,
       "path": "crates/fireweed-turso/src/local.rs",
@@ -4549,6 +4559,15 @@
     {
       "call_depth": 4,
       "calls": [
+        "execute"
+      ],
+      "line": 5614,
+      "path": "crates/fireweed-postgres/src/relational.rs",
+      "symbol": "set_emission_cursor"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
         "reduce_union_checked"
       ],
       "line": 335,
@@ -4558,11 +4577,29 @@
     {
       "call_depth": 4,
       "calls": [
+        "execute"
+      ],
+      "line": 2031,
+      "path": "crates/fireweed-turso/src/local.rs",
+      "symbol": "serving_reader_fifo_select_advances_floor_without_apply"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
         "run_committed_reader_probe"
       ],
       "line": 2528,
       "path": "crates/fireweed-turso/src/local.rs",
       "symbol": "committed_reader_pool_candidate_semantics_and_settings"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "execute"
+      ],
+      "line": 957,
+      "path": "crates/fireweed/src/generated_replay_tests.rs",
+      "symbol": "generated_s3_turso_model_traces_match_every_observation"
     },
     {
       "call_depth": 4,
@@ -4792,7 +4829,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "abdd4f3ac8deba961c5e463cc0325e36221ba24db0552d0e95cf3b144f5bbea5",
+  "scan_sha256": "25632fd2caa6c07d8a98a61f82696f8ba69a90fbe9b2b1fa7574c95e14dedf37",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -4873,6 +4910,24 @@
       ],
       "path": "crates/fireweed-bench/Cargo.toml",
       "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 399,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 399,
+      "line": 361,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-bench/src/bin/fireweed-api007-reference.rs",
+      "symbol": "execute"
     },
     {
       "evidence_paths": [],
