@@ -10,6 +10,7 @@ use fireweed_engine::{
 };
 
 pub struct CommitBatchReplayInput {
+    pub originals: Arc<fireweed_engine::queue_original_authority::AdmittedOriginalAuthority>,
     pub genesis: OwnedQueueLogRecord,
     pub request: CommitBatch,
     pub limits: QueueLimits,
@@ -51,6 +52,16 @@ impl QueueProjection {
             return Err(unknown("batch genesis belongs to another operation"));
         }
         input.request.preflight(&input.limits)?;
+        input.originals.validate(
+            &input.request,
+            &input.genesis,
+            (
+                input.required_next_offset,
+                input.required_insertion_sequence,
+                input.required_last_record_epoch,
+            ),
+            job,
+        )?;
         if input.response_max_bytes == 0
             || input.response_max_bytes > input.limits.max_response_bytes
         {
@@ -120,13 +131,16 @@ impl NativeTransactionWork for Worker {
             .request
             .validate(native.definition.schema(), &self.input.limits)?;
         let mut known = Vec::new();
-        for group in &self.input.request.groups {
+        for (position, group) in self.input.request.groups.iter().enumerate() {
             let format = if group.administration.is_some() { 4 } else { 3 };
-            let raw = super::receipt_authority::load_raw(
+            let raw = super::receipt_authority::load_raw_authoritative(
                 connection,
                 native.queue_id,
                 &group.request_id,
-                Some((format, group.fingerprint(&self.input.request.queue)?)),
+                (format, group.fingerprint(&self.input.request.queue)?),
+                self.input
+                    .originals
+                    .descriptor(position, &group.request_id)?,
                 &self.job,
                 &mut self.charges,
             )
@@ -199,12 +213,63 @@ impl NativeTransactionWork for Worker {
 #[cfg(test)]
 mod tests {
     use super::super::tests::{
-        address, apply_group_record, bootstrap, execute_for_test, group, patch, seed,
+        address, bootstrap, execute_for_test, group, group_record, patch, seed_record,
     };
     use super::*;
     use fireweed_engine::{
         queue_admission::QueueAdmission, queue_log_record::encode_checked_genesis,
     };
+    async fn apply_frozen(
+        projection: &Arc<QueueProjection>,
+        records: &mut Vec<OwnedQueueLogRecord>,
+        record: OwnedQueueLogRecord,
+        offset: u64,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) {
+        let charge = job
+            .owned_buffer((record.bytes().len() as u64) * 4 + 4096)
+            .unwrap();
+        let frozen = OwnedQueueLogRecord::from_admitted_bytes(
+            bytes::Bytes::copy_from_slice(record.bytes()),
+            charge,
+            job,
+        )
+        .unwrap();
+        projection
+            .apply(record, offset, job, workers)
+            .await
+            .unwrap();
+        records.push(frozen);
+    }
+    fn authority(
+        request: &CommitBatch,
+        records: &[OwnedQueueLogRecord],
+        job: &Arc<QueueReservation>,
+    ) -> Arc<fireweed_engine::queue_original_authority::AdmittedOriginalAuthority> {
+        use fireweed_engine::{
+            queue_original_authority::ColdOriginalTracker, queue_recovery::ColdQueueHistory,
+        };
+        let mut history = ColdQueueHistory::new(&request.queue, job).unwrap();
+        let mut originals = ColdOriginalTracker::new(request, job).unwrap();
+        for (offset, record) in records.iter().enumerate() {
+            history.observe(offset as u64, record.bytes()).unwrap();
+            originals.observe(offset as u64, record).unwrap();
+        }
+        Arc::new(
+            originals
+                .finish(
+                    &history,
+                    &records[0],
+                    (
+                        history.next_offset(),
+                        history.insertion_sequence(),
+                        history.historical_epoch(),
+                    ),
+                )
+                .unwrap(),
+        )
+    }
     #[tokio::test]
     async fn batch_original_classification_keeps_positional_fates_exact_public_bytes_and_late_errors()
      {
@@ -214,33 +279,19 @@ mod tests {
         let workers = ScratchWorkers::new(1, 1).unwrap();
         let (projection, definition) =
             bootstrap(&directory.path().join("batch.db"), &job, &workers).await;
-        let mut image = seed(&projection, &definition, &job, &workers, false).await;
+        let mut records = vec![
+            encode_checked_genesis(1, &address(), &definition, &[31; 32], 16 << 20, &job).unwrap(),
+        ];
+        let (mut image, record) = seed_record(&definition, &job, false);
+        apply_frozen(&projection, &mut records, record, 1, &job, &workers).await;
         let mut first = group("first");
         first.work_updates.push(patch("a", 1, Some(7), None));
-        apply_group_record(
-            &projection,
-            &definition,
-            &mut image,
-            &first,
-            2,
-            &job,
-            &workers,
-        )
-        .await
-        .unwrap();
+        let record = group_record(&definition, &mut image, &first, &job);
+        apply_frozen(&projection, &mut records, record, 2, &job, &workers).await;
         let mut second = group("expired");
         second.work_updates.push(patch("b", 1, Some(8), None));
-        apply_group_record(
-            &projection,
-            &definition,
-            &mut image,
-            &second,
-            3,
-            &job,
-            &workers,
-        )
-        .await
-        .unwrap();
+        let record = group_record(&definition, &mut image, &second, &job);
+        apply_frozen(&projection, &mut records, record, 3, &job, &workers).await;
         use fireweed_core::queue_administration::{
             AdministrativeAction, AdministrativeEntry, AdministrativeIntent,
             AdministrativeOperation, WorkSelector,
@@ -304,23 +355,32 @@ mod tests {
             .unwrap()
             .unwrap();
         let (record, response, head) = prepared.into_parts();
-        projection
-            .apply(record, head, &job, &workers)
-            .await
-            .unwrap();
+        apply_frozen(&projection, &mut records, record, head, &job, &workers).await;
         drop(response);
-        let input = |groups: Vec<CommitGroup>, max: u64| CommitBatchReplayInput {
-            genesis: encode_checked_genesis(1, &address(), &definition, &[31; 32], 16 << 20, &job)
-                .unwrap(),
-            request: CommitBatch {
+        let input = |groups: Vec<CommitGroup>, max: u64| {
+            let request = CommitBatch {
                 queue: address(),
                 groups,
-            },
-            limits: QueueLimits::default(),
-            response_max_bytes: max,
-            required_next_offset: 5,
-            required_insertion_sequence: 2,
-            required_last_record_epoch: 1,
+            };
+            let originals = authority(&request, &records, &job);
+            CommitBatchReplayInput {
+                originals,
+                genesis: encode_checked_genesis(
+                    1,
+                    &address(),
+                    &definition,
+                    &[31; 32],
+                    16 << 20,
+                    &job,
+                )
+                .unwrap(),
+                request,
+                limits: QueueLimits::default(),
+                response_max_bytes: max,
+                required_next_offset: 5,
+                required_insertion_sequence: 2,
+                required_last_record_epoch: 1,
+            }
         };
         let reply = projection
             .replay_commit_batch(
@@ -378,13 +438,31 @@ mod tests {
         });
         let mut fresh = group("fresh");
         fresh.work_updates.push(patch("a", 2, Some(10), None));
+        // A cache-only expiry is corruption, never a durable expired original.
+        assert!(matches!(
+            projection
+                .replay_commit_batch(
+                    input(vec![fresh.clone(), second.clone()], 1 << 20),
+                    &job,
+                    &workers
+                )
+                .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        // A genuinely changed caller conflicts from authoritative fingerprint
+        // before unsupported expiry or malformed opaque cached outcome decoding.
+        let mut changed_second = second.clone();
+        changed_second.work_updates[0].change = UnclaimedChange::Patch(WorkPatch {
+            priority: Some(99),
+            ..Default::default()
+        });
         let reply = projection
             .replay_commit_batch(
                 input(
                     vec![
                         fresh.clone(),
                         conflict,
-                        second.clone(),
+                        changed_second,
                         administrative.clone(),
                     ],
                     1 << 20,
@@ -401,7 +479,7 @@ mod tests {
         );
         assert_eq!(
             reply.known()[2].as_ref().unwrap().outcome,
-            GroupOutcome::RequestExpired
+            GroupOutcome::RequestConflict
         );
         assert!(matches!(
             reply.known()[3].as_ref().unwrap().outcome,

@@ -1478,13 +1478,11 @@ mod tests {
         .unwrap();
         encode_checked_publication_record(1, frame.as_bytes(), 16 << 20, job).unwrap()
     }
-    pub(super) async fn seed(
-        projection: &Arc<QueueProjection>,
+    pub(super) fn seed_record(
         definition: &AdmittedQueueDefinition,
         job: &Arc<QueueReservation>,
-        workers: &ScratchWorkers,
         opaque: bool,
-    ) -> RecordSnapshot {
+    ) -> (RecordSnapshot, OwnedQueueLogRecord) {
         let schema = schema();
         let mut snapshot = RecordSnapshot::default();
         let request = InsertRequest {
@@ -1501,6 +1499,16 @@ mod tests {
         let delta = combine_deltas(&deltas, before.next_sequence).unwrap();
         let receipt = PublicationReceipt::insert(&request, &outcomes).unwrap();
         let record = publication(&before, &delta, &[receipt], definition, job);
+        (snapshot, record)
+    }
+    pub(super) async fn seed(
+        projection: &Arc<QueueProjection>,
+        definition: &AdmittedQueueDefinition,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+        opaque: bool,
+    ) -> RecordSnapshot {
+        let (snapshot, record) = seed_record(definition, job, opaque);
         assert_eq!(
             projection
                 .apply(record, 1, job, workers)
@@ -1587,6 +1595,19 @@ mod tests {
         workers.close_and_drain().await.unwrap();
         assert_eq!(admission.usage().unwrap(), (0, 0));
     }
+    pub(super) fn group_record(
+        definition: &AdmittedQueueDefinition,
+        snapshot: &mut RecordSnapshot,
+        group: &CommitGroup,
+        job: &Arc<QueueReservation>,
+    ) -> OwnedQueueLogRecord {
+        authorize(snapshot, group, &schema());
+        let before = snapshot.clone();
+        let delta = plan_commit_group(group, snapshot, 20, &schema()).unwrap();
+        let queue = address();
+        let receipt = PublicationReceipt::commit(&queue, group, &delta.receipt).unwrap();
+        publication(&before, &delta, &[receipt], definition, job)
+    }
     pub(super) async fn apply_group_record(
         projection: &Arc<QueueProjection>,
         definition: &AdmittedQueueDefinition,
@@ -1596,14 +1617,9 @@ mod tests {
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
     ) -> QueueResult<AppliedQueueRecord> {
-        authorize(snapshot, group, &schema());
-        let before = snapshot.clone();
-        let delta = plan_commit_group(group, snapshot, 20, &schema()).unwrap();
-        let queue = address();
-        let receipt = PublicationReceipt::commit(&queue, group, &delta.receipt).unwrap();
         projection
             .apply(
-                publication(&before, &delta, &[receipt], definition, job),
+                group_record(definition, snapshot, group, job),
                 offset,
                 job,
                 workers,

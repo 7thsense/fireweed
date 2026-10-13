@@ -55,6 +55,7 @@ pub mod queue_fields;
 pub mod queue_index;
 pub mod queue_log_record;
 pub mod queue_namespace;
+pub mod queue_original_authority;
 pub mod queue_planner;
 pub mod queue_recovery;
 pub mod queue_runtime;

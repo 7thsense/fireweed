@@ -19,6 +19,7 @@ mod store;
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
     queue_log_record::{QueueLogFormat, encode_checked_genesis},
+    queue_original_authority::{AdmittedOriginalAuthority, ColdOriginalTracker},
     queue_recovery::ColdQueueHistory,
 };
 use fireweed_objectlog::ObjectLogEngineStore;
@@ -112,6 +113,7 @@ pub struct RecoveredQueue {
     pub acquired_epoch: u64,
     pub target_next_offset: u64,
     original_identity_present: Option<bool>,
+    original_authority: Option<Arc<AdmittedOriginalAuthority>>,
 }
 /// On return, cancellation or unwind, release the operation permit before the
 /// final task reservation owner can notify shutdown waiters.
@@ -125,6 +127,7 @@ struct RecoveryTask {
     pipeline: Arc<QueueRecoveryPipeline>,
     address: QueueAddress,
     identity: Option<(u8, String)>,
+    originals: Option<ColdOriginalTracker>,
     _headers: OwnedQueueBufferCharge,
     job: Arc<QueueReservation>,
 }
@@ -215,7 +218,7 @@ impl QueueRecoveryPipeline {
         address: QueueAddress,
         job: Arc<QueueReservation>,
     ) -> QueueResult<RecoveredQueue> {
-        self.recover_checked(address, None, job).await
+        self.recover_checked(address, None, None, job).await
     }
     pub(super) async fn recover_request(
         self: &Arc<Self>,
@@ -224,13 +227,23 @@ impl QueueRecoveryPipeline {
         identity: String,
         job: Arc<QueueReservation>,
     ) -> QueueResult<RecoveredQueue> {
-        self.recover_checked(address, Some((domain, identity)), job)
+        self.recover_checked(address, Some((domain, identity)), None, job)
+            .await
+    }
+    async fn recover_batch(
+        self: &Arc<Self>,
+        request: &fireweed_core::queue_contract::CommitBatch,
+        job: Arc<QueueReservation>,
+    ) -> QueueResult<RecoveredQueue> {
+        let originals = ColdOriginalTracker::new(request, &job)?;
+        self.recover_checked(request.queue.clone(), None, Some(originals), job)
             .await
     }
     async fn recover_checked(
         self: &Arc<Self>,
         address: QueueAddress,
         identity: Option<(u8, String)>,
+        originals: Option<ColdOriginalTracker>,
         job: Arc<QueueReservation>,
     ) -> QueueResult<RecoveredQueue> {
         address.validate()?;
@@ -251,6 +264,7 @@ impl QueueRecoveryPipeline {
             pipeline: Arc::clone(self),
             address,
             identity,
+            originals,
             _headers: headers,
             job,
         };
@@ -279,7 +293,7 @@ fn verify_prefix(
     Ok(())
 }
 impl RecoveryTask {
-    async fn execute(self) -> QueueResult<RecoveredQueue> {
+    async fn execute(mut self) -> QueueResult<RecoveredQueue> {
         let pipeline = &self.pipeline;
         let namespace = pipeline
             .store
@@ -348,6 +362,9 @@ impl RecoveryTask {
                 ));
             }
             history.observe(offset, record.bytes())?;
+            if let Some(originals) = &mut self.originals {
+                originals.observe(offset, &record)?;
+            }
             if let Some((domain, id)) = &self.identity {
                 let present = match view.payload() {
                     fireweed_engine::queue_log_record::QueueLogPayload::Genesis(_) => false,
@@ -435,12 +452,37 @@ impl RecoveryTask {
             .await?
             .ok_or_else(|| unknown("projection disappeared after apply"))?;
         verify_prefix(&history, &final_checkpoint)?;
+        let original_authority = self
+            .originals
+            .map(|originals| {
+                let genesis = encode_checked_genesis(
+                    genesis_epoch,
+                    &self.address,
+                    history.definition()?,
+                    history.cursor_secret()?,
+                    pipeline.hard_record_bytes,
+                    &self.job,
+                )?;
+                originals
+                    .finish(
+                        &history,
+                        &genesis,
+                        (
+                            target_next_offset,
+                            history.insertion_sequence(),
+                            history.historical_epoch(),
+                        ),
+                    )
+                    .map(Arc::new)
+            })
+            .transpose()?;
         Ok(RecoveredQueue {
             history,
             original_genesis_epoch: genesis_epoch,
             acquired_epoch: target.epoch,
             target_next_offset,
             original_identity_present,
+            original_authority,
         })
     }
 }

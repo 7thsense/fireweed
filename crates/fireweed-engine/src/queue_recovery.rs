@@ -48,6 +48,9 @@ impl ColdQueueHistory {
             _charge: charge,
         })
     }
+    pub fn belongs_to(&self, job: &QueueReservation) -> bool {
+        std::ptr::eq(self._charge.reservation(), job)
+    }
     pub fn next_offset(&self) -> u64 {
         self.next_offset
     }

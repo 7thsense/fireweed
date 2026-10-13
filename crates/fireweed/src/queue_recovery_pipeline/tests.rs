@@ -2941,3 +2941,236 @@ async fn duplicate_original_witness_rejects_already_checkpointed_history() {
     drop(store);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(target_os = "linux")]
+async fn corrupt_batch_originals_do_not_publish_fresh_siblings(s3: bool) {
+    use fireweed_engine::{queue_contract::QueueStore, queue_storage_layout::discovery_digest};
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    for case in [
+        "missing",
+        "phantom",
+        "fingerprint",
+        "format",
+        "valid-outcome",
+        "same-length-outcome",
+        "oversized",
+        "malformed",
+        "expiry",
+    ] {
+        let root =
+            std::env::temp_dir().join(format!("fireweed-batch-authority-{s3}-{case}-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let prefix = s3.then(|| format!("api007-batch-authority-{case}-{nonce}"));
+        let clock = Arc::new(fireweed_conformance::queue_contract::TestClock::default());
+        let queue =
+            native_port_fixture(&root, "primary.db", prefix.as_deref(), clock.clone()).await;
+        let address = QueueAddress {
+            tenant: "batch-authority".into(),
+            queue: case.into(),
+        };
+        queue
+            .provision(ProvisionRequest {
+                queue: address.clone(),
+                schema: schema(),
+            })
+            .await
+            .unwrap();
+        queue
+            .insert(InsertRequest {
+                queue: address.clone(),
+                request_id: "seed".into(),
+                mode: InsertMode::InsertOnly,
+                items: vec![NewWork {
+                    key: "a".into(),
+                    priority: 0,
+                    available_at: 0,
+                    fields: Default::default(),
+                    body: vec![1].into(),
+                }],
+            })
+            .await
+            .unwrap();
+        let group = |id: &str, version, priority| CommitGroup {
+            request_id: id.into(),
+            administration: None,
+            claimed_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![],
+            work_updates: vec![UnclaimedUpdate {
+                key: "a".into(),
+                expect: StateExpect::Version(version),
+                change: UnclaimedChange::Patch(WorkPatch {
+                    priority: Some(priority),
+                    ..Default::default()
+                }),
+            }],
+        };
+        let mut original = group("known", 1, 7);
+        let rejected_source = case == "same-length-outcome";
+        if rejected_source {
+            original.work_updates[0].key = "missing".into();
+        }
+        let expected_version = if rejected_source { 1 } else { 2 };
+        let expected_priority = if rejected_source { 0 } else { 7 };
+        let request = CommitBatch {
+            queue: address.clone(),
+            groups: vec![original.clone()],
+        };
+        let receipt = queue.commit(request.clone()).await.unwrap();
+        queue.shutdown().await.unwrap();
+        drop(queue);
+        // Fault only an explicitly closed projection; published log bytes stay intact.
+        let path = root.join("primary.db");
+        let db = turso::Builder::new_local(path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let connection = db.connect().unwrap();
+        let mut caller = original.clone();
+        match case {
+            "missing" => {
+                connection
+                    .execute(
+                        "DELETE FROM q7_requests WHERE domain=2 AND identity=?1",
+                        vec![turso::Value::Blob(b"known".to_vec())],
+                    )
+                    .await
+                    .unwrap();
+            }
+            "phantom" => {
+                let id = b"fresh";
+                connection.execute("INSERT INTO q7_requests(queue_id,domain,identity_hash,identity,fingerprint_format,fingerprint,expired,outcome) SELECT queue_id,domain,?1,?2,fingerprint_format,fingerprint,expired,outcome FROM q7_requests WHERE domain=2 AND identity=?3",vec![turso::Value::Blob(discovery_digest(id).to_vec()),turso::Value::Blob(id.to_vec()),turso::Value::Blob(b"known".to_vec())]).await.unwrap();
+            }
+            "fingerprint" => {
+                caller = group("known", 1, 9);
+                let fingerprint = caller.fingerprint(&address).unwrap();
+                connection
+                    .execute(
+                        "UPDATE q7_requests SET fingerprint=?1 WHERE domain=2 AND identity=?2",
+                        vec![
+                            turso::Value::Blob(fingerprint.to_vec()),
+                            turso::Value::Blob(b"known".to_vec()),
+                        ],
+                    )
+                    .await
+                    .unwrap();
+            }
+            "format" => {
+                connection.execute("UPDATE q7_requests SET fingerprint_format=4 WHERE domain=2 AND identity=?1",vec![turso::Value::Blob(b"known".to_vec())]).await.unwrap();
+            }
+            "valid-outcome" => {
+                connection
+                    .execute(
+                        "UPDATE q7_requests SET outcome=x'0103' WHERE domain=2 AND identity=?1",
+                        vec![turso::Value::Blob(b"known".to_vec())],
+                    )
+                    .await
+                    .unwrap();
+            }
+            "same-length-outcome" => {
+                connection
+                    .execute(
+                        "UPDATE q7_requests SET outcome=x'0101' WHERE domain=2 AND identity=?1",
+                        vec![turso::Value::Blob(b"known".to_vec())],
+                    )
+                    .await
+                    .unwrap();
+            }
+            "oversized" => {
+                connection.execute("UPDATE q7_requests SET outcome=zeroblob(8388608) WHERE domain=2 AND identity=?1",vec![turso::Value::Blob(b"known".to_vec())]).await.unwrap();
+            }
+            "malformed" => {
+                connection
+                    .execute(
+                        "UPDATE q7_requests SET outcome=x'ff' WHERE domain=2 AND identity=?1",
+                        vec![turso::Value::Blob(b"known".to_vec())],
+                    )
+                    .await
+                    .unwrap();
+            }
+            "expiry" => {
+                connection
+                    .execute(
+                        "UPDATE q7_requests SET expired=1 WHERE domain=2 AND identity=?1",
+                        vec![turso::Value::Blob(b"known".to_vec())],
+                    )
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        drop(connection);
+        drop(db);
+        let reopened =
+            native_port_fixture(&root, "primary.db", prefix.as_deref(), clock.clone()).await;
+        let outcome = reopened
+            .commit(CommitBatch {
+                queue: address.clone(),
+                groups: vec![group("fresh", expected_version, 11), caller],
+            })
+            .await;
+        assert!(
+            matches!(outcome, Err(QueueError::OutcomeUnknown(_))),
+            "case={case}, s3={s3}, outcome={outcome:?}"
+        );
+        reopened.shutdown().await.unwrap();
+        drop(reopened);
+        let db = turso::Builder::new_local(path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let connection = db.connect().unwrap();
+        let mut rows=connection.query("SELECT applied_next_offset,(SELECT version FROM q7_records WHERE collection=0 AND key=x'61'),(SELECT priority FROM q7_records WHERE collection=0 AND key=x'61') FROM q7_queues",()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(
+            row.get_value(0).unwrap(),
+            turso::Value::Integer(3),
+            "no fresh publication: {case}"
+        );
+        assert_eq!(
+            row.get_value(1).unwrap(),
+            turso::Value::Blob(expected_version.to_be_bytes().to_vec())
+        );
+        assert_eq!(
+            row.get_value(2).unwrap(),
+            turso::Value::Integer(expected_priority)
+        );
+        drop(rows);
+        drop(connection);
+        drop(db);
+        let rebuilt = native_port_fixture(&root, "rebuilt.db", prefix.as_deref(), clock).await;
+        assert_eq!(
+            rebuilt.commit(request).await.unwrap(),
+            receipt,
+            "cold rebuild must recover exact original: {case}"
+        );
+        let stats = rebuilt
+            .stats(StatsRequest {
+                queue: address,
+                filter: Filter::default(),
+                group_by: vec![],
+                eligible_at: 0,
+                buckets: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(stats.totals.pending, 1);
+        assert_eq!(stats.totals.leased, 0);
+        rebuilt.shutdown().await.unwrap();
+        drop(rebuilt);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn native_batch_original_authority_rejects_corrupt_cache_local() {
+    corrupt_batch_originals_do_not_publish_fresh_siblings(false).await;
+}
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn native_batch_original_authority_rejects_corrupt_cache_real_s3() {
+    corrupt_batch_originals_do_not_publish_fresh_siblings(true).await;
+}

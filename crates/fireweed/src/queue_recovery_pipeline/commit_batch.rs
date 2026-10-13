@@ -60,6 +60,13 @@ impl CoveredRead for BatchRead {
         self.request.preflight(limits)?;
         administrative_envelope_preflight(&self.request, limits)
     }
+    fn recover<'a>(
+        &'a self,
+        pipeline: &'a Arc<QueueRecoveryPipeline>,
+        job: Arc<QueueReservation>,
+    ) -> QueueFuture<'a, RecoveredQueue> {
+        Box::pin(async move { pipeline.recover_batch(&self.request, job).await })
+    }
     fn read<'a>(
         &'a self,
         pipeline: &'a Arc<QueueRecoveryPipeline>,
@@ -72,6 +79,10 @@ impl CoveredRead for BatchRead {
                 .projection
                 .replay_commit_batch(
                     CommitBatchReplayInput {
+                        originals: recovered
+                            .original_authority
+                            .clone()
+                            .ok_or_else(|| unknown("batch original authority missing"))?,
                         genesis: pipeline.original_genesis(&self.request.queue, recovered, job)?,
                         request: self.request.clone(),
                         limits,

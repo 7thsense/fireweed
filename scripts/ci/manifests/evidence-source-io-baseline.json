@@ -4829,7 +4829,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "550fb39610ba1de9459a8e99181cdf6defbc2dce6f3d6a0b4e81f81a504f4bee",
+  "scan_sha256": "8c82186ad9a409f6d1e8ab243b4959adc9eb57d484acd093289fd17c398ab8b8",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -17431,6 +17431,42 @@
       "operations": [
         "constant"
       ],
+      "path": "scripts/formal/check_originals.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 57,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 57,
+      "line": 46,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/check_originals.py",
+      "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 2,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 2,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
       "path": "scripts/formal/conformance.py",
       "symbol": "<module>"
     },
@@ -17491,6 +17527,24 @@
       ],
       "path": "scripts/formal/run_replay.py",
       "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 1,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/test_originals.py",
+      "symbol": "<module>"
     },
     {
       "evidence_paths": [],

@@ -16984,6 +16984,46 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_local",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_local",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_local"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_real_s3",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_real_s3",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_real_s3"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::native_store_condition_checks_replay_and_rebuild_local",
           "--",
           "--exact"
@@ -40853,6 +40893,90 @@
       "expected_ran": 1,
       "harness_id": "queue_namespace::tests::literal_fixture_and_complete_validation",
       "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_namespace::tests::literal_fixture_and_complete_validation",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--lib",
+        "queue_original_authority::tests::exact_source_descriptors_bind_position_scope_genesis_job_and_cut",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_original_authority::tests::exact_source_descriptors_bind_position_scope_genesis_job_and_cut",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_original_authority::tests::exact_source_descriptors_bind_position_scope_genesis_job_and_cut",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--lib",
+        "queue_original_authority::tests::late_duplicate_source_poison_and_incomplete_prefix_cannot_finish",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_original_authority::tests::late_duplicate_source_poison_and_incomplete_prefix_cannot_finish",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_original_authority::tests::late_duplicate_source_poison_and_incomplete_prefix_cannot_finish",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--lib",
+        "queue_original_authority::tests::original_header_admission_and_unique_positions_precede_allocation",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_original_authority::tests::original_header_admission_and_unique_positions_precede_allocation",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_original_authority::tests::original_header_admission_and_unique_positions_precede_allocation",
       "listed_kind": "test",
       "package": "fireweed-engine",
       "target": "fireweed_engine",
@@ -83837,6 +83961,62 @@
         "-p",
         "fireweed",
         "--lib",
+        "queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_local",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_local",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_local",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
+        "queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_real_s3",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_real_s3",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_real_s3",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
         "queue_recovery_pipeline::tests::native_store_condition_checks_replay_and_rebuild_local",
         "--",
         "--exact"
@@ -94321,7 +94501,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "f589e131787c9fa1c6e9321d95cbd7297f42e3044ac1462219de65c2e5c979ac",
+  "source_inventory_sha256": "b979458431ca358660ca071677bca4dfde332c462c14cf59e89c7929ec9ac667",
   "workspaces": [
     {
       "listing_error_sha256": "",

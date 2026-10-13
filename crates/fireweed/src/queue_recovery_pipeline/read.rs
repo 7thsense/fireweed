@@ -11,6 +11,13 @@ pub(super) trait CoveredRead: IncomingHeaders + Send + Sync + 'static {
     fn address(&self) -> &QueueAddress;
     fn encoded_size(&self) -> QueueResult<u64>;
     fn preflight(&self, limits: &QueueLimits) -> QueueResult<()>;
+    fn recover<'a>(
+        &'a self,
+        pipeline: &'a Arc<QueueRecoveryPipeline>,
+        job: Arc<QueueReservation>,
+    ) -> QueueFuture<'a, RecoveredQueue> {
+        Box::pin(async move { pipeline.recover(self.address().clone(), job).await })
+    }
     fn read<'a>(
         &'a self,
         pipeline: &'a Arc<QueueRecoveryPipeline>,
@@ -102,11 +109,7 @@ impl<R: CoveredRead> ReadExecution<R> {
     }
     pub(super) async fn execute(self) -> QueueResult<R::Output> {
         for _ in 0..3 {
-            let recovered = match self
-                .pipeline
-                .recover(self.request.address().clone(), self.job.clone())
-                .await
-            {
+            let recovered = match self.request.recover(&self.pipeline, self.job.clone()).await {
                 Ok(recovered) => recovered,
                 Err(QueueError::QueueNotFound) => return Err(QueueError::QueueNotFound),
                 Err(_) => continue,
