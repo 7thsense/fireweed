@@ -26,6 +26,10 @@ pub(super) struct CommitExecution {
     _input: OwnedQueueBufferCharge,
     job: Arc<QueueReservation>,
 }
+pub(super) enum BatchCommitResult {
+    Found(AdmittedCommitReceipts, RecoveredQueue),
+    Classified(QueueError, RecoveredQueue),
+}
 impl QueueRecoveryPipeline {
     /// Internal complete commit operation, not a public QueueStore activation.
     /// Once dispatched, cancellation cannot abandon publication or resolution.
@@ -248,8 +252,17 @@ impl CommitExecution {
     }
     pub(super) async fn execute_covered(
         self,
-        mut covered: Option<RecoveredQueue>,
+        covered: Option<RecoveredQueue>,
     ) -> QueueResult<(AdmittedCommitReceipts, RecoveredQueue)> {
+        match self.execute_batch_covered(covered).await? {
+            BatchCommitResult::Found(receipts, coverage) => Ok((receipts, coverage)),
+            BatchCommitResult::Classified(error, _) => Err(error),
+        }
+    }
+    pub(super) async fn execute_batch_covered(
+        self,
+        mut covered: Option<RecoveredQueue>,
+    ) -> QueueResult<BatchCommitResult> {
         for _ in 0..32 {
             let mut recovered = match covered.take() {
                 Some(value) => {
@@ -319,13 +332,24 @@ impl CommitExecution {
                     )
                     .await
             };
-            let prepared = super::mutation::check_preparation(&recovered, prepared)?;
+            let prepared = match super::mutation::check_preparation(&recovered, prepared) {
+                Ok(prepared) => prepared,
+                Err(error @ (QueueError::RequestConflict | QueueError::RequestExpired)) => {
+                    // This immutable classification was verified against source authority.
+                    // Carry its cut so the next sibling cannot restart from a cold prefix.
+                    return Ok(BatchCommitResult::Classified(error, recovered));
+                }
+                Err(error) => return Err(error),
+            };
             let Some(prepared) = prepared else {
                 return match super::mutation::resolve_submission(&self, None, Some(recovered))
                     .await?
                 {
                     super::mutation::Submission::Resolved(response, coverage) => {
-                        Ok((response, coverage))
+                        Ok(BatchCommitResult::Found(response, coverage))
+                    }
+                    super::mutation::Submission::Classified(error, coverage) => {
+                        Ok(BatchCommitResult::Classified(error, coverage))
                     }
                     super::mutation::Submission::Reprepare(_) => {
                         Err(unknown("known original cannot be reprepared"))
@@ -356,7 +380,10 @@ impl CommitExecution {
                 .await?
             {
                 super::mutation::Submission::Resolved(response, coverage) => {
-                    return Ok((response, coverage));
+                    return Ok(BatchCommitResult::Found(response, coverage));
+                }
+                super::mutation::Submission::Classified(error, coverage) => {
+                    return Ok(BatchCommitResult::Classified(error, coverage));
                 }
                 super::mutation::Submission::Reprepare(next) => covered = Some(next),
             }

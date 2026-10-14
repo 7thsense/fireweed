@@ -44,6 +44,7 @@ pub(super) async fn recover_original<M: OriginalMutation>(
 pub(super) enum Submission<T> {
     Resolved(T, RecoveredQueue),
     Reprepare(RecoveredQueue),
+    Classified(QueueError, RecoveredQueue),
 }
 pub(super) fn check_preparation<T>(
     recovered: &RecoveredQueue,
@@ -124,7 +125,7 @@ pub(super) async fn resolve_submission_after<M: OriginalMutation>(
                 if recovered.original_identity_present != Some(true) {
                     return Err(unknown("phantom cached original classification"));
                 }
-                return Err(error);
+                return Ok(Submission::Classified(error, recovered));
             }
             Err(QueueError::TooLarge) if recovered.original_identity_present == Some(true) => {
                 return Err(QueueError::TooLarge);

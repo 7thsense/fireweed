@@ -17058,6 +17058,86 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_local",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_local",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_local"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_real_s3",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_real_s3",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_real_s3"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_local",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_local",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_local"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::commit_batch::submission_resolution_does_not_retry_failed_continuation_into_fenced_absence",
           "--",
           "--exact"
@@ -85371,6 +85451,118 @@
         "-p",
         "fireweed",
         "--lib",
+        "queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_local",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_local",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_local",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
+        "queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_real_s3",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_real_s3",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_real_s3",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
+        "queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_local",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_local",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_local",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
+        "queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
         "queue_recovery_pipeline::tests::commit_batch::submission_resolution_does_not_retry_failed_continuation_into_fenced_absence",
         "--",
         "--exact"
@@ -96527,7 +96719,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "f8f1ad1fffe58fdce896f09650dd14391271b4d739d6e23ffc3932e30959e9a2",
+  "source_inventory_sha256": "f81a1d066c9efd2db297cbe7af7082560847513a57ccb74b0c988eb503d42537",
   "workspaces": [
     {
       "listing_error_sha256": "",

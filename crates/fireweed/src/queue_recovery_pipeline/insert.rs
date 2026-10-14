@@ -136,6 +136,7 @@ impl InsertTask {
                     .await?
                 {
                     super::mutation::Submission::Resolved(response, _) => Ok(response),
+                    super::mutation::Submission::Classified(error, _) => Err(error),
                     super::mutation::Submission::Reprepare(_) => {
                         Err(unknown("known original cannot be reprepared"))
                     }
@@ -163,6 +164,7 @@ impl InsertTask {
                 .await?;
             match super::mutation::resolve_submission(&self, Some(epoch), None).await? {
                 super::mutation::Submission::Resolved(response, _) => return Ok(response),
+                super::mutation::Submission::Classified(error, _) => return Err(error),
                 super::mutation::Submission::Reprepare(next) => covered = Some(next),
             }
         }

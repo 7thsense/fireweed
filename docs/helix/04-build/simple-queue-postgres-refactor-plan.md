@@ -96,8 +96,15 @@ caller order. Unique probes retain loaded absence and speculative ownership.
 Accepted deltas, receipts and clock decisions survive splitting at the first
 physical size overflow; physical receipts sort canonically without reordering logical
 outputs. Reservation or authority errors cannot masquerade as a size split.
-`check_pack_preparation.py` bounds these preparer-only invariants. Publication,
-fresh all-original resolution and public activation remain separate gates.
+Root publishes the actual accepted contiguous prefix once, then resolves the
+complete declared batch at a freshly acquired, head-confirmed cut. Every retry
+retains its checked authority floor; absent submitted originals require a newer
+fence and fresh planning. Finalized caller positions retain their admitted owners,
+including single/administrative conflict or expiry classifications with their cut.
+`check_pack_preparation.py` bounds preparation; `check_pack_publication.py` bounds
+physical publication, contiguous remainder retries and source-confirmed receipts.
+Neither finite family establishes provider durability or performance readiness;
+public activation and the matched release workloads remain separate gates.
 
 The concrete PostgreSQL facade and mandatory suite are implemented. The hidden
 Linux native port assembles all ten operations from shared planners, native

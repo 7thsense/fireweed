@@ -25,14 +25,14 @@ fn batch(groups: Vec<CommitGroup>) -> CommitBatch {
         groups,
     }
 }
-struct FailSecondClock {
+struct FailThirdClock {
     inner: TestClock,
     calls: std::sync::atomic::AtomicUsize,
 }
-impl Clock for FailSecondClock {
+impl Clock for FailThirdClock {
     fn now(&self) -> fireweed_core::UtcTimestamp {
-        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
-            panic!("injected second-group clock failure");
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 2 {
+            panic!("injected suffix clock failure after physical prefix");
         }
         self.inner.now()
     }
@@ -67,7 +67,7 @@ async fn one_permit_batch_validates_all_siblings_replays_before_fresh_and_finish
         metadata_bytes: 65536,
         hard_record_bytes: 1 << 20,
     };
-    let pipeline =
+    let mut pipeline =
         test_pipeline_options(store.clone(), projection, workers.clone(), options, &root)
             .await
             .unwrap();
@@ -109,7 +109,7 @@ async fn one_permit_batch_validates_all_siblings_replays_before_fresh_and_finish
             measured.succeeded,
             measured.admitted_raw_records
         ),
-        (4, 4, 5)
+        (2, 2, 3)
     );
     let replay_before = pipeline.diagnostics.snapshot();
     let expected = output.receipts().to_vec();
@@ -137,7 +137,7 @@ async fn one_permit_batch_validates_all_siblings_replays_before_fresh_and_finish
         .snapshot()
         .checked_delta(replay_before)
         .unwrap();
-    assert_eq!((replay.attempts, replay.admitted_raw_records), (1, 5));
+    assert_eq!((replay.attempts, replay.admitted_raw_records), (1, 3));
     let before = pipeline
         .recover(address(), job.clone())
         .await
@@ -320,14 +320,16 @@ async fn one_permit_batch_validates_all_siblings_replays_before_fresh_and_finish
     let expected_cancellation = originals.receipts().to_vec();
     drop(originals);
 
-    let failing = Arc::new(FailSecondClock {
+    let failing = Arc::new(FailThirdClock {
         inner: TestClock::default(),
         calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let prefix = batch(vec![
-        patch_group("durable-prefix", 8, 57),
-        patch_group("failed-suffix", 9, 59),
+        split_group("durable-prefix", 8, 57),
+        split_group("failed-suffix", 9, 59),
     ]);
+    let cap = first_group_record_bytes(&pipeline, &prefix, clock.clone(), job.clone()).await;
+    Arc::get_mut(&mut pipeline).unwrap().hard_record_bytes = cap;
     assert!(matches!(
         pipeline
             .commit_batch(prefix, QueueLimits::default(), failing, job.clone())
@@ -399,7 +401,7 @@ async fn confirmed_handoff_recovers_after_head_and_fence_changes(s3: bool) {
         let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
             .await
             .unwrap();
-        let pipeline = test_pipeline(
+        let mut pipeline = test_pipeline(
             store.clone(),
             projection,
             workers.clone(),
@@ -410,6 +412,15 @@ async fn confirmed_handoff_recovers_after_head_and_fence_changes(s3: bool) {
         .await
         .unwrap();
         let clock = Arc::new(TestClock::default());
+        let split_request = batch(vec![
+            split_group("first", 1, 7),
+            split_group("next", 2, 8),
+            split_group("tail", 3, 9),
+        ]);
+        let cap =
+            first_group_record_bytes(&pipeline, &split_request, clock.clone(), job.clone()).await;
+        Arc::get_mut(&mut pipeline).unwrap().hard_record_bytes = cap;
+        let recovery_before = pipeline.diagnostics.snapshot();
         let initial_entered = Arc::new(tokio::sync::Notify::new());
         let initial_release = Arc::new(tokio::sync::Notify::new());
         let second_entered = Arc::new(tokio::sync::Notify::new());
@@ -428,9 +439,9 @@ async fn confirmed_handoff_recovers_after_head_and_fence_changes(s3: bool) {
                 pipeline
                     .commit_batch(
                         batch(vec![
-                            patch_group("first", 1, 7),
-                            patch_group("next", 2, 8),
-                            patch_group("tail", 3, 9),
+                            split_group("first", 1, 7),
+                            split_group("next", 2, 8),
+                            split_group("tail", 3, 9),
                         ]),
                         QueueLimits::default(),
                         clock,
@@ -454,7 +465,12 @@ async fn confirmed_handoff_recovers_after_head_and_fence_changes(s3: bool) {
         .await
         .unwrap();
         assert_eq!(
-            pipeline.diagnostics.snapshot().succeeded,
+            pipeline
+                .diagnostics
+                .snapshot()
+                .checked_delta(recovery_before)
+                .unwrap()
+                .succeeded,
             2,
             "initial cut and first post-publication cut completed"
         );
@@ -505,7 +521,15 @@ async fn confirmed_handoff_recovers_after_head_and_fence_changes(s3: bool) {
             })
             .await
             .unwrap();
-            assert_eq!(pipeline.diagnostics.snapshot().succeeded, 4);
+            assert_eq!(
+                pipeline
+                    .diagnostics
+                    .snapshot()
+                    .checked_delta(recovery_before)
+                    .unwrap()
+                    .succeeded,
+                4
+            );
         } else {
             second_release.notify_one();
             let result = tokio::time::timeout(std::time::Duration::from_secs(60), caller)
@@ -530,7 +554,11 @@ async fn confirmed_handoff_recovers_after_head_and_fence_changes(s3: bool) {
                 GroupOutcome::Committed { .. }
             ));
         }
-        let measured = pipeline.diagnostics.snapshot();
+        let measured = pipeline
+            .diagnostics
+            .snapshot()
+            .checked_delta(recovery_before)
+            .unwrap();
         if kind == "fence" {
             assert_eq!(
                 (
@@ -938,4 +966,350 @@ async fn batch_continuation_rejects_real_valid_rewound_and_vanished_authority() 
         drop(job);
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+// Derive a real physical boundary from the admitted wire encoder, not a test-only
+// group-count limit. The helper publishes nothing and uses a normal clock.
+async fn first_group_record_bytes(
+    pipeline: &Arc<QueueRecoveryPipeline>,
+    request: &CommitBatch,
+    clock: Arc<dyn Clock>,
+    job: Arc<QueueReservation>,
+) -> u64 {
+    let prepared = sized_pack(pipeline, request, clock, job, vec![0]).await;
+    let (record, provisional, _) = prepared.into_parts();
+    let cap = record.bytes().len() as u64;
+    drop(provisional);
+    drop(record);
+    cap
+}
+
+async fn sized_pack(
+    pipeline: &Arc<QueueRecoveryPipeline>,
+    request: &CommitBatch,
+    clock: Arc<dyn Clock>,
+    job: Arc<QueueReservation>,
+    positions: Vec<usize>,
+) -> fireweed_turso::queue_projection::PreparedOrdinaryPack {
+    let request = Arc::new(request.clone());
+    let covered = pipeline.recover_batch(&request, job.clone()).await.unwrap();
+    let prepared = pipeline
+        .projection
+        .prepare_ordinary_pack(
+            fireweed_turso::queue_projection::CommitPackPreparationInput {
+                request: request.clone(),
+                positions,
+                originals: covered.original_authority.clone().unwrap(),
+                states: covered.group_state_authority.clone().unwrap(),
+                genesis: pipeline
+                    .original_genesis(&request.queue, &covered, &job)
+                    .unwrap(),
+                limits: QueueLimits::default(),
+                required_progress: (
+                    covered.target_next_offset,
+                    covered.history.insertion_sequence(),
+                    covered.history.historical_epoch(),
+                ),
+            },
+            covered.acquired_epoch,
+            pipeline.hard_record_bytes,
+            clock,
+            &job,
+            &pipeline.workers,
+        )
+        .await
+        .unwrap();
+    let fireweed_turso::queue_projection::OrdinaryPackPreparation::Prepared(prepared) = prepared
+    else {
+        panic!("first group must fit");
+    };
+    prepared
+}
+
+fn split_group(id: &str, version: u64, priority: i64) -> CommitGroup {
+    let mut group = patch_group(id, version, priority);
+    group.work_inserts.push(NewWork {
+        key: format!("split-{id}"),
+        priority: 0,
+        available_at: 0,
+        fields: Default::default(),
+        body: vec![23; 16 << 10].into(),
+    });
+    group
+}
+
+async fn packed_original_races(s3: bool, cases: &[&str]) {
+    use fireweed_core::queue_administration::*;
+    for &kind in cases {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-pack-race-{kind}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let prefix = s3.then(|| {
+            format!(
+                "api007-packed-race-{kind}-{}",
+                root.file_name().unwrap().to_string_lossy()
+            )
+        });
+        let store = Arc::new(native_log_fixture(&root, prefix.as_deref()).await);
+        let admission = QueueAdmission::new(2, 256 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(2, 2).unwrap();
+        provision(&store, &job, &workers).await;
+        append_insert(&store, &job, &workers).await;
+        let projection = QueueProjection::open(&root.join("main.db"), &job, &workers)
+            .await
+            .unwrap();
+        let mut pipeline = test_pipeline(
+            store.clone(),
+            projection,
+            workers.clone(),
+            65536,
+            1 << 20,
+            &root,
+        )
+        .await
+        .unwrap();
+        let projection = QueueProjection::open(&root.join("other.db"), &job, &workers)
+            .await
+            .unwrap();
+        let other = test_pipeline(
+            store.clone(),
+            projection,
+            workers.clone(),
+            65536,
+            1 << 20,
+            &root,
+        )
+        .await
+        .unwrap();
+        let clock = Arc::new(TestClock::default());
+        let insert = |id: &str, priority| CommitGroup {
+            request_id: id.into(),
+            administration: None,
+            claimed_updates: vec![],
+            work_updates: vec![],
+            state_updates: vec![],
+            work_inserts: vec![NewWork {
+                key: format!("work-{id}"),
+                priority,
+                available_at: 0,
+                fields: Default::default(),
+                body: bytes::Bytes::from_static(b"opaque"),
+            }],
+        };
+        let mut a = insert("z-first", 1);
+        let mut middle = insert("a-middle", 2);
+        let mut c = insert("β-tail", 3);
+        if kind == "outside-match" {
+            for group in [&mut a, &mut middle, &mut c] {
+                group.work_inserts[0].body = vec![23; 16 << 10].into();
+            }
+            let mut cap = 0;
+            for group in [&a, &middle, &c] {
+                cap = cap.max(
+                    first_group_record_bytes(
+                        &pipeline,
+                        &batch(vec![group.clone()]),
+                        clock.clone(),
+                        job.clone(),
+                    )
+                    .await,
+                );
+            }
+            Arc::get_mut(&mut pipeline).unwrap().hard_record_bytes = cap;
+            let prepared = sized_pack(
+                &pipeline,
+                &batch(vec![a.clone(), middle.clone(), c.clone()]),
+                clock.clone(),
+                job.clone(),
+                vec![0, 1, 2],
+            )
+            .await;
+            assert_eq!(
+                prepared.response().positions(),
+                &[0],
+                "winner C must lie outside the actual submitted prefix"
+            );
+            drop(prepared);
+        }
+        let groups = if kind == "fp4-conflict" {
+            let mut admin = middle.clone();
+            admin.work_inserts.clear();
+            admin.administration = Some(AdministrativeCommit {
+                max_result_bytes: 65536,
+                intent: AdministrativeIntent {
+                    evaluated_at: 0,
+                    before_fields: None,
+                    operation: AdministrativeOperation::Addressed(vec![AdministrativeEntry {
+                        key: "missing".into(),
+                        expected_version: None,
+                        precondition: WorkSelector::all(vec![]),
+                        action: AdministrativeAction::Delete {
+                            lease_guard: AdministrativeLeaseGuard::RejectActive,
+                        },
+                    }]),
+                },
+            });
+            vec![admin, a.clone(), c.clone()]
+        } else {
+            vec![a.clone(), middle.clone(), c.clone()]
+        };
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let recovery_before = pipeline.diagnostics.snapshot();
+        let hook = if kind == "post-replay-head" {
+            &pipeline.after_commit_replay
+        } else {
+            &pipeline.before_commit_append
+        };
+        *hook.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let request = batch(groups);
+        let caller = tokio::spawn({
+            let pipeline = pipeline.clone();
+            let request = request.clone();
+            let job = job.clone();
+            let clock = clock.clone();
+            async move {
+                pipeline
+                    .commit_batch(request, QueueLimits::default(), clock, job)
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), entered.notified())
+            .await
+            .unwrap();
+        let winner = if kind == "post-replay-head" {
+            insert("external-unrelated", 99)
+        } else if kind == "outside-match" {
+            c.clone()
+        } else if kind == "matching-middle" {
+            middle.clone()
+        } else {
+            insert("a-middle", 99)
+        };
+        drop(
+            other
+                .commit(
+                    address(),
+                    winner,
+                    QueueLimits::default(),
+                    clock.clone(),
+                    job.clone(),
+                )
+                .await
+                .unwrap(),
+        );
+        release.notify_one();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(30), caller)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            output
+                .receipts()
+                .iter()
+                .map(|r| &r.request_id)
+                .collect::<Vec<_>>(),
+            request
+                .groups
+                .iter()
+                .map(|g| &g.request_id)
+                .collect::<Vec<_>>()
+        );
+        let middle_position = if kind == "fp4-conflict" {
+            0
+        } else if kind == "outside-match" {
+            2
+        } else {
+            1
+        };
+        for (p, receipt) in output.receipts().iter().enumerate() {
+            if p == middle_position && matches!(kind, "conflicting-middle" | "fp4-conflict") {
+                assert_eq!(receipt.outcome, GroupOutcome::RequestConflict);
+            } else {
+                assert!(matches!(receipt.outcome, GroupOutcome::Committed { .. }));
+            }
+        }
+        if kind == "post-replay-head" {
+            assert_eq!(
+                pipeline
+                    .diagnostics
+                    .snapshot()
+                    .checked_delta(recovery_before)
+                    .unwrap()
+                    .succeeded,
+                3,
+                "stale replay must continue from its checked cut before ACK"
+            );
+        }
+        let expected = output.receipts().to_vec();
+        drop(output);
+        let replay = pipeline
+            .commit_batch(request, QueueLimits::default(), clock, job.clone())
+            .await
+            .unwrap();
+        assert_eq!(replay.receipts(), expected);
+        drop(replay);
+        let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
+        assert_eq!(
+            recovered.target_next_offset,
+            if matches!(kind, "fp4-conflict" | "post-replay-head") {
+                4
+            } else {
+                5
+            },
+            "failed speculative pack must publish no absent sibling effect"
+        );
+        drop(recovered);
+        drop(other);
+        drop(pipeline);
+        workers.close_and_drain().await.unwrap();
+        drop(workers);
+        drop(job);
+        drop(store);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn packed_submission_refreshes_middle_outside_and_fp4_originals_local() {
+    packed_original_races(
+        false,
+        &[
+            "matching-middle",
+            "conflicting-middle",
+            "outside-match",
+            "fp4-conflict",
+        ],
+    )
+    .await;
+}
+#[tokio::test]
+async fn packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3() {
+    packed_original_races(
+        true,
+        &[
+            "matching-middle",
+            "conflicting-middle",
+            "outside-match",
+            "fp4-conflict",
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn packed_replay_head_advancement_retains_checked_floor_local() {
+    packed_original_races(false, &["post-replay-head"]).await;
+}
+#[tokio::test]
+async fn packed_replay_head_advancement_retains_checked_floor_real_s3() {
+    packed_original_races(true, &["post-replay-head"]).await;
 }

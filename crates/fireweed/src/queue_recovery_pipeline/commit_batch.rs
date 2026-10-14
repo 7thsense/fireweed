@@ -15,6 +15,7 @@ use fireweed_engine::{
 };
 use fireweed_turso::queue_projection::{
     AdmittedCommitBatchReplay, AdmittedCommitReceipts, CommitBatchReplayInput,
+    CommitPackPreparationInput, OrdinaryPackPreparation,
 };
 
 /// DTOs drop before every retained classification/fresh-output owner and guard.
@@ -23,7 +24,7 @@ pub struct AdmittedQueueCommitBatch {
     // Its full-batch input/header charge covers every position, including
     // initially absent identities copied into racing conflict/expiry statuses.
     classification: AdmittedCommitBatchReplay,
-    fresh: Vec<AdmittedCommitReceipts>,
+    fresh: Vec<FreshOwner>,
     _containers: OwnedQueueBufferCharge,
 }
 impl AdmittedQueueCommitBatch {
@@ -39,6 +40,24 @@ impl AdmittedQueueCommitBatch {
     pub fn receipts(&self) -> &[CommitReceipt] {
         &self.receipts
     }
+}
+// Every moved DTO retains its producing admitted owner until output destruction.
+enum FreshOwner {
+    Single(AdmittedCommitReceipts),
+    Batch(AdmittedCommitBatchReplay),
+}
+// This status describes the actual submitted prefix, never one arbitrary original.
+enum PackResolution {
+    AllKnown,
+    FencedAbsent,
+}
+enum PackResult {
+    Single(RecoveredQueue),
+    Classified {
+        replay: AdmittedCommitBatchReplay,
+        coverage: RecoveredQueue,
+        resolution: Option<PackResolution>,
+    },
 }
 struct BatchRead {
     request: Arc<CommitBatch>,
@@ -188,7 +207,8 @@ impl BatchTask {
             (count as u64)
                 .checked_mul(
                     (std::mem::size_of::<CommitReceipt>()
-                        + std::mem::size_of::<AdmittedCommitReceipts>()) as u64,
+                        + std::mem::size_of::<FreshOwner>()
+                        + std::mem::size_of::<Option<CommitReceipt>>()) as u64,
                 )
                 .and_then(|n| n.checked_mul(3))
                 .ok_or(QueueError::TooLarge)?,
@@ -199,59 +219,119 @@ impl BatchTask {
             fresh: Vec::with_capacity(count),
             _containers: containers,
         };
+        // Finalized positions are distinct from replay slots consumed by take_known.
+        let mut finalized: Vec<Option<CommitReceipt>> = (0..count)
+            .map(|position| output.classification.take_known(position))
+            .collect::<QueueResult<_>>()?;
         let mut unresolved_started = false;
-        for (position, group) in self.request.groups.iter().enumerate() {
-            let receipt = if let Some(known) = output.classification.take_known(position)? {
-                known
-            } else {
-                // An attempt may submit and then resolve as expired. Do not infer
-                // absence of a durable prefix from the final positional status.
-                unresolved_started = true;
-                let result = match CommitExecution::new(
+        let mut contention = 0usize;
+        while let Some(position) = finalized.iter().position(Option::is_none) {
+            let group = &self.request.groups[position];
+            unresolved_started = true;
+            let result = async {
+                if group.administration.is_none() {
+                    let end = (position..count)
+                        .find(|&p| {
+                            finalized[p].is_some()
+                                || self.request.groups[p].administration.is_some()
+                        })
+                        .unwrap_or(count);
+                    // The preadmitted container charge includes this bounded usize vector.
+                    let positions = (position..end).collect();
+                    match self
+                        .pack(
+                            positions,
+                            coverage
+                                .take()
+                                .ok_or_else(|| unknown("batch coverage missing"))?,
+                        )
+                        .await?
+                    {
+                        PackResult::Single(next) => coverage = Some(next),
+                        PackResult::Classified {
+                            replay,
+                            coverage: next,
+                            resolution,
+                        } => {
+                            let before = finalized.iter().filter(|r| r.is_some()).count();
+                            // Retain the owner before transferring any newly finalized DTO.
+                            output.fresh.push(FreshOwner::Batch(replay));
+                            let FreshOwner::Batch(owner) = output.fresh.last_mut().unwrap() else {
+                                unreachable!()
+                            };
+                            for (p, receipt) in finalized.iter_mut().enumerate() {
+                                if receipt.is_none() {
+                                    *receipt = owner.take_known(p)?;
+                                }
+                            }
+                            let after = finalized.iter().filter(|r| r.is_some()).count();
+                            if after == before {
+                                output.fresh.pop();
+                            }
+                            if matches!(resolution, Some(PackResolution::AllKnown))
+                                && after == before
+                            {
+                                return Err(unknown("resolved pack finalized no positions"));
+                            }
+                            coverage = Some(next);
+                            contention = if after > before { 0 } else { contention + 1 };
+                            if contention >= 32 {
+                                return Err(unknown("batch pack contention exhausted"));
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+                let result = CommitExecution::new(
                     self.pipeline.clone(),
                     self.request.queue.clone(),
                     group.clone(),
                     self.limits,
                     self.clock.clone(),
                     self.job.clone(),
-                ) {
-                    Ok(execution) => {
-                        execution
-                            .with_batch(self.request.clone())
-                            .execute_covered(coverage.take())
-                            .await
-                    }
-                    Err(error) => Err(error),
-                };
+                )?
+                .with_batch(self.request.clone())
+                .execute_batch_covered(coverage.take())
+                .await?;
                 match result {
-                    Ok((fresh, next_coverage)) => {
-                        coverage = Some(next_coverage);
-                        // Keep the whole owner before moving any receipt DTO.
-                        output.fresh.push(fresh);
-                        output
-                            .fresh
-                            .last_mut()
-                            .ok_or_else(|| unknown("fresh batch owner disappeared"))?
-                            .take_original()?
+                    super::commit::BatchCommitResult::Found(fresh, next) => {
+                        output.fresh.push(FreshOwner::Single(fresh));
+                        let FreshOwner::Single(owner) = output.fresh.last_mut().unwrap() else {
+                            unreachable!()
+                        };
+                        finalized[position] = Some(owner.take_original()?);
+                        coverage = Some(next);
                     }
-                    Err(QueueError::RequestConflict) => CommitReceipt {
-                        request_id: group.request_id.clone(),
-                        outcome: GroupOutcome::RequestConflict,
-                    },
-                    Err(QueueError::RequestExpired) => CommitReceipt {
-                        request_id: group.request_id.clone(),
-                        outcome: GroupOutcome::RequestExpired,
-                    },
-                    Err(_) if unresolved_started => {
-                        return Err(unknown(
-                            "batch failed after possible durable prefix; resolve original identities",
-                        ));
+                    super::commit::BatchCommitResult::Classified(error, next) => {
+                        let outcome = match error {
+                            QueueError::RequestConflict => GroupOutcome::RequestConflict,
+                            QueueError::RequestExpired => GroupOutcome::RequestExpired,
+                            _ => return Err(unknown("invalid single batch classification")),
+                        };
+                        finalized[position] = Some(CommitReceipt {
+                            request_id: group.request_id.clone(),
+                            outcome,
+                        });
+                        coverage = Some(next);
                     }
-                    Err(error) => return Err(error),
                 }
-            };
-            output.receipts.push(receipt);
+                contention = 0;
+                Ok(())
+            }
+            .await;
+            match result {
+                Ok(()) => {}
+                Err(_) => {
+                    return Err(unknown(
+                        "batch failed after possible durable prefix; resolve original identities",
+                    ));
+                }
+            }
         }
+        output.receipts = finalized
+            .into_iter()
+            .map(|r| r.ok_or_else(|| unknown("unresolved batch output")))
+            .collect::<QueueResult<_>>()?;
         if encoded_len(&output.receipts)? > self.limits.max_response_bytes {
             return Err(if unresolved_started {
                 unknown(
@@ -262,5 +342,190 @@ impl BatchTask {
             });
         }
         Ok(output)
+    }
+}
+
+impl BatchTask {
+    async fn classify_after(
+        &self,
+        mut previous: RecoveredQueue,
+        submitted: Option<(&[usize], u64)>,
+    ) -> QueueResult<(AdmittedCommitBatchReplay, RecoveredQueue)> {
+        let read = BatchRead {
+            request: self.request.clone(),
+        };
+        for _ in 0..3 {
+            let recovered = self
+                .pipeline
+                .recover_batch_after(self.request.clone(), previous, self.job.clone())
+                .await?;
+            let result = read
+                .read(&self.pipeline, &recovered, self.limits, &self.job)
+                .await;
+            #[cfg(test)]
+            {
+                let pause = self.pipeline.after_commit_replay.lock().unwrap().take();
+                if let Some((entered, release)) = pause {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+            }
+            if self
+                .pipeline
+                .head_matches(&self.request.queue, &recovered, &self.job)
+                .await?
+                && let Ok(replay) = result
+                && submitted.is_none_or(|(positions, epoch)| {
+                    positions
+                        .iter()
+                        .all(|&p| replay.known().get(p).is_some_and(Option::is_some))
+                        || recovered.acquired_epoch > epoch
+                })
+            {
+                return Ok((replay, recovered));
+            }
+            previous = recovered;
+        }
+        Err(unknown("pack classification has no current complete cut"))
+    }
+    async fn pack(
+        &self,
+        positions: Vec<usize>,
+        coverage: RecoveredQueue,
+    ) -> QueueResult<PackResult> {
+        #[cfg(test)]
+        {
+            let pause = self.pipeline.before_handoff_check.lock().unwrap().take();
+            if let Some((entered, release)) = pause {
+                entered.notify_one();
+                release.notified().await;
+            }
+        }
+        if !self
+            .pipeline
+            .head_matches(&self.request.queue, &coverage, &self.job)
+            .await?
+        {
+            let (replay, coverage) = self.classify_after(coverage, None).await?;
+            return Ok(PackResult::Classified {
+                replay,
+                coverage,
+                resolution: None,
+            });
+        }
+        #[cfg(test)]
+        {
+            let pause = self.pipeline.after_handoff_check.lock().unwrap().take();
+            if let Some((entered, release)) = pause {
+                entered.notify_one();
+                release.notified().await;
+            }
+        }
+        let requested_start = positions[0];
+        let requested_end = positions
+            .len()
+            .checked_add(requested_start)
+            .ok_or(QueueError::TooLarge)?;
+        let input = CommitPackPreparationInput {
+            request: self.request.clone(),
+            positions,
+            originals: coverage
+                .original_authority
+                .clone()
+                .ok_or_else(|| unknown("pack original authority missing"))?,
+            states: coverage
+                .group_state_authority
+                .clone()
+                .ok_or_else(|| unknown("pack state authority missing"))?,
+            genesis: self
+                .pipeline
+                .original_genesis(&self.request.queue, &coverage, &self.job)?,
+            limits: self.limits,
+            required_progress: (
+                coverage.target_next_offset,
+                coverage.history.insertion_sequence(),
+                coverage.history.historical_epoch(),
+            ),
+        };
+        let prepared = match self
+            .pipeline
+            .projection
+            .prepare_ordinary_pack(
+                input,
+                coverage.acquired_epoch,
+                self.pipeline.hard_record_bytes,
+                self.clock.clone(),
+                &self.job,
+                &self.pipeline.workers,
+            )
+            .await?
+        {
+            OrdinaryPackPreparation::SingleGroup => return Ok(PackResult::Single(coverage)),
+            OrdinaryPackPreparation::Reclassify => {
+                let (replay, coverage) = self.classify_after(coverage, None).await?;
+                return Ok(PackResult::Classified {
+                    replay,
+                    coverage,
+                    resolution: None,
+                });
+            }
+            OrdinaryPackPreparation::Prepared(prepared) => prepared,
+        };
+        // The physical byte limit may accept only a strict prefix of the input.
+        let submitted = prepared.response().positions();
+        if submitted.is_empty()
+            || submitted[0] != requested_start
+            || submitted.last().is_none_or(|&p| p >= requested_end)
+            || submitted
+                .windows(2)
+                .any(|p| p[0].checked_add(1) != Some(p[1]))
+        {
+            return Err(unknown("invalid prepared pack prefix"));
+        }
+        let _submitted_charge = self.job.owned_buffer(
+            (submitted.len() as u64)
+                .checked_mul(std::mem::size_of::<usize>() as u64)
+                .ok_or(QueueError::TooLarge)?,
+        )?;
+        let submitted = submitted.to_vec();
+        let epoch = prepared.writer_epoch();
+        let (record, provisional, expected_head) = prepared.into_parts();
+        drop(provisional);
+        let namespace = self
+            .pipeline
+            .store
+            .bind_api007_namespace(&self.request.queue, &self.job)
+            .await?;
+        #[cfg(test)]
+        {
+            let pause = self.pipeline.before_commit_append.lock().unwrap().take();
+            if let Some((entered, release)) = pause {
+                entered.notify_one();
+                release.notified().await;
+            }
+        }
+        self.pipeline
+            .publish_prepared(namespace, record, expected_head, epoch, &self.job)
+            .await?;
+        let (replay, next) = self
+            .classify_after(coverage, Some((&submitted, epoch)))
+            .await?;
+        let all_known = submitted
+            .iter()
+            .all(|&p| replay.known().get(p).is_some_and(Option::is_some));
+        let resolution = if all_known {
+            PackResolution::AllKnown
+        } else if next.acquired_epoch > epoch {
+            PackResolution::FencedAbsent
+        } else {
+            return Err(unknown(
+                "pack has no resolved or fenced-absent submitted prefix",
+            ));
+        };
+        Ok(PackResult::Classified {
+            replay,
+            coverage: next,
+            resolution: Some(resolution),
+        })
     }
 }
