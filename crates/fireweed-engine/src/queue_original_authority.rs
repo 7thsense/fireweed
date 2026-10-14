@@ -146,17 +146,39 @@ impl ColdOriginalTracker {
         if self.poisoned {
             return Err(unknown("poisoned prefix"));
         }
-        let result = self.observe_checked(offset, record);
+        let checked = match record.checked() {
+            Ok(checked) => checked,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(error);
+            }
+        };
+        self.observe_record(offset, &checked)
+    }
+    pub fn observe_record(
+        &mut self,
+        offset: u64,
+        checked: &crate::queue_log_record::CheckedQueueLogRecord<'_>,
+    ) -> QueueResult<()> {
+        if self.poisoned {
+            return Err(unknown("poisoned prefix"));
+        }
+        let result = self.observe_checked(offset, checked);
         if result.is_err() {
             self.poisoned = true;
         }
         result
     }
-    fn observe_checked(&mut self, offset: u64, record: &OwnedQueueLogRecord) -> QueueResult<()> {
+    fn observe_checked(
+        &mut self,
+        offset: u64,
+        checked: &crate::queue_log_record::CheckedQueueLogRecord<'_>,
+    ) -> QueueResult<()> {
+        let record = checked.owner();
         if !record.belongs_to(self._charge.reservation()) || offset != self.next_offset {
             return Err(unknown("record operation or contiguous offset mismatch"));
         }
-        let view = record.view()?;
+        let view = checked.view();
         if view.address() != view_address(&self.address)? || view.epoch() < self.historical_epoch {
             return Err(unknown("record address or epoch mismatch"));
         }

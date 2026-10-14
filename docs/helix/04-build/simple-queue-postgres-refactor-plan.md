@@ -73,6 +73,14 @@ contracts, designs and this execution plan concise and maintained in place.
 
 ## Continuation Evidence
 
+Recovery observers share one structurally checked view of the exact admitted
+record while retaining independent scope, continuity and poison checks. Fixed
+phase totals partition elapsed recovery time into fresh authority, planned
+read/worker/transfer, checked history/proof folding and native checkpoint/apply.
+Quiescent deltas reject saturation and inconsistent totals. Worker-side parsing
+is included in read time; elapsed buckets are not CPU or provider-request counts.
+
+
 The concrete PostgreSQL facade and mandatory suite are implemented. The hidden
 Linux native port assembles all ten operations from shared planners, native
 filtered selection, stock-Turso atomic projection and conditional log publication.

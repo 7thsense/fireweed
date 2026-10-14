@@ -184,25 +184,24 @@ impl ColdStateTracker {
         if self.poisoned {
             return Err(unknown("poisoned state history"));
         }
-        let view = match record.view() {
-            Ok(view) => view,
+        let checked = match record.checked() {
+            Ok(checked) => checked,
             Err(error) => {
                 self.poisoned = true;
                 return Err(error);
             }
         };
-        self.observe_view(offset, record, &view)
+        self.observe_record(offset, &checked)
     }
-    pub(super) fn observe_view(
+    pub fn observe_record(
         &mut self,
         offset: u64,
-        record: &OwnedQueueLogRecord,
-        view: &crate::queue_log_record::QueueLogRecordView<'_>,
+        checked: &crate::queue_log_record::CheckedQueueLogRecord<'_>,
     ) -> QueueResult<()> {
         if self.poisoned {
             return Err(unknown("poisoned state history"));
         }
-        let result = self.observe_checked(offset, record, view);
+        let result = self.observe_checked(offset, checked.owner(), checked.view());
         if result.is_err() {
             self.poisoned = true;
         }
@@ -1022,5 +1021,130 @@ mod tests {
         assert!(weak.upgrade().is_some());
         drop(handles);
         assert!(weak.upgrade().is_none());
+    }
+    #[test]
+    fn sealed_record_observers_match_raw_folds_and_reject_foreign_owners_and_addresses() {
+        use crate::{
+            queue_group_state_authority::ColdGroupStateTracker,
+            queue_original_authority::ColdOriginalTracker,
+        };
+        let job = Arc::new(
+            QueueAdmission::new(1, 32 << 20)
+                .unwrap()
+                .reserve(0)
+                .unwrap(),
+        );
+        let (definition, first) = genesis(&job);
+        let mut snapshot = RecordSnapshot::default();
+        let records = vec![
+            first,
+            mutation(
+                &job,
+                &definition,
+                &mut snapshot,
+                "put",
+                "a",
+                StateExpect::Absent,
+                put(Fields::new(), b"exact"),
+            ),
+        ];
+        let request = request(&["a", "missing", "a"]);
+        let expected = fold(&request, &records, &job);
+        let lookup = ReceiptReadRequest {
+            queue: request.queue.clone(),
+            request_ids: vec!["put".into(), "absent".into(), "put".into()],
+            max_bytes: 65536,
+        };
+        let declared = CommitGroup {
+            request_id: "next".into(),
+            administration: None,
+            claimed_updates: vec![],
+            work_updates: vec![],
+            work_inserts: vec![],
+            state_updates: vec![StateUpdate {
+                collection: request.collection.clone(),
+                key: "a".into(),
+                expect: StateExpect::Version(1),
+                change: StateChange::Check,
+            }],
+        };
+        let mut history = ColdQueueHistory::new(&request.queue, &job).unwrap();
+        let mut states = ColdStateTracker::new(&request, &job).unwrap();
+        let mut originals = ColdOriginalTracker::new_lookup(&lookup, &job).unwrap();
+        let mut legacy_originals = ColdOriginalTracker::new_lookup(&lookup, &job).unwrap();
+        let mut groups =
+            ColdGroupStateTracker::new(&request.queue, std::slice::from_ref(&declared), &job)
+                .unwrap();
+        for (offset, owner) in records.iter().enumerate() {
+            let checked = owner.checked().unwrap();
+            assert!(std::ptr::eq(checked.owner(), owner));
+            assert_eq!(checked.view().address(), owner.view().unwrap().address());
+            history.observe_record(offset as u64, &checked).unwrap();
+            states.observe_record(offset as u64, &checked).unwrap();
+            originals.observe_record(offset as u64, &checked).unwrap();
+            legacy_originals.observe(offset as u64, owner).unwrap();
+            groups.observe_record(offset as u64, &checked).unwrap();
+        }
+        let cut = (2, 0, 1);
+        let states = states.finish(&history, &records[0], cut).unwrap();
+        for (position, key) in request.keys.iter().enumerate() {
+            assert_eq!(
+                states.descriptor(position, key).unwrap(),
+                expected.descriptor(position, key).unwrap()
+            );
+        }
+        let originals = Arc::new(originals.finish(&history, &records[0], cut).unwrap());
+        let legacy_originals =
+            Arc::new(legacy_originals.finish(&history, &records[0], cut).unwrap());
+        for (position, id) in lookup.request_ids.iter().enumerate() {
+            assert_eq!(
+                originals
+                    .position(position, id)
+                    .unwrap()
+                    .validate(&lookup.queue, id, &records[0], cut, &job)
+                    .unwrap(),
+                legacy_originals
+                    .position(position, id)
+                    .unwrap()
+                    .validate(&lookup.queue, id, &records[0], cut, &job)
+                    .unwrap()
+            );
+        }
+        let proof = Arc::new(groups.finish(&history, &records[0], cut).unwrap());
+        assert_eq!(
+            proof.group(0).unwrap().descriptor(0, "a").unwrap(),
+            states.descriptor(0, "a").unwrap()
+        );
+        let foreign = Arc::new(
+            QueueAdmission::new(1, 32 << 20)
+                .unwrap()
+                .reserve(0)
+                .unwrap(),
+        );
+        let (_, foreign_owner) = genesis(&foreign);
+        let wrong_queue = QueueAddress {
+            tenant: "foreign".into(),
+            queue: "queue".into(),
+        };
+        let wrong_address_owner =
+            encode_checked_genesis(1, &wrong_queue, &definition, &[31; 32], 4 << 20, &job).unwrap();
+        for bad_owner in [&foreign_owner, &wrong_address_owner] {
+            let checked = bad_owner.checked().unwrap();
+            let valid = records[0].checked().unwrap();
+            let mut history = ColdQueueHistory::new(&request.queue, &job).unwrap();
+            let mut states = ColdStateTracker::new(&request, &job).unwrap();
+            let mut originals = ColdOriginalTracker::new_lookup(&lookup, &job).unwrap();
+            let mut groups =
+                ColdGroupStateTracker::new(&request.queue, std::slice::from_ref(&declared), &job)
+                    .unwrap();
+            assert!(history.observe_record(0, &checked).is_err());
+            assert!(history.observe_record(0, &valid).is_err());
+            assert!(states.observe_record(0, &checked).is_err());
+            assert!(states.observe_record(0, &valid).is_err());
+            assert!(originals.observe_record(0, &checked).is_err());
+            assert!(originals.observe_record(0, &valid).is_err());
+            assert!(groups.observe_record(0, &checked).is_err());
+            assert!(groups.observe_record(0, &valid).is_err());
+        }
     }
 }

@@ -119,11 +119,11 @@ impl RecoveryStateTracker {
     fn observe(
         &mut self,
         offset: u64,
-        record: &fireweed_engine::queue_log_record::OwnedQueueLogRecord,
+        record: &fireweed_engine::queue_log_record::CheckedQueueLogRecord<'_>,
     ) -> QueueResult<()> {
         match self {
-            Self::Read(s) => s.observe(offset, record),
-            Self::Groups(s) => s.observe(offset, record),
+            Self::Read(s) => s.observe_record(offset, record),
+            Self::Groups(s) => s.observe_record(offset, record),
         }
     }
 }
@@ -404,6 +404,7 @@ impl RecoveryTask {
         let mut genesis_epoch = 0;
         let mut original_identity_present = self.identity.as_ref().map(|_| false);
         while history.next_offset() < target_next_offset {
+            span.phase(diagnostics::RecoveryPhase::PlannedRead);
             let offset = history.next_offset();
             let plan = pipeline.store.plan_api007_read(
                 acquired.namespace(),
@@ -417,7 +418,9 @@ impl RecoveryTask {
                 .ok_or_else(|| unknown("early EOF before acquired target"))?;
             let (actual, record) = read.into_record(&self.job)?;
             span.record(record.bytes().len());
-            let view = record.view()?;
+            span.phase(diagnostics::RecoveryPhase::CheckedFold);
+            let checked = record.checked()?;
+            let view = checked.view();
             if actual != offset
                 || view.format() != QueueLogFormat::ChecksummedV2
                 || view.epoch() > target.epoch
@@ -426,12 +429,12 @@ impl RecoveryTask {
                     "record offset, checksum policy or acquired epoch mismatch",
                 ));
             }
-            history.observe(offset, record.bytes())?;
+            history.observe_record(offset, &checked)?;
             if let Some(originals) = &mut self.originals {
-                originals.observe(offset, &record)?;
+                originals.observe_record(offset, &checked)?;
             }
             if let Some(states) = &mut self.states {
-                states.observe(offset, &record)?;
+                states.observe(offset, &checked)?;
             }
             if let Some((domain, id)) = &self.identity {
                 let present = match view.payload() {
@@ -475,6 +478,7 @@ impl RecoveryTask {
                     pipeline.hard_record_bytes,
                     &self.job,
                 )?;
+                span.phase(diagnostics::RecoveryPhase::NativeApply);
                 checkpoint = pipeline
                     .projection
                     .checkpoint(authority, &self.job, &pipeline.workers)
@@ -495,11 +499,13 @@ impl RecoveryTask {
                 .as_ref()
                 .is_none_or(|point| offset >= point.next_offset)
             {
+                span.phase(diagnostics::RecoveryPhase::NativeApply);
                 pipeline
                     .projection
                     .apply(record, offset, &self.job, &pipeline.workers)
                     .await?;
             }
+            span.phase(diagnostics::RecoveryPhase::CheckedFold);
             if let Some(point) = &checkpoint
                 && history.next_offset() == point.next_offset
             {
@@ -514,11 +520,13 @@ impl RecoveryTask {
             pipeline.hard_record_bytes,
             &self.job,
         )?;
+        span.phase(diagnostics::RecoveryPhase::NativeApply);
         let final_checkpoint = pipeline
             .projection
             .checkpoint(genesis, &self.job, &pipeline.workers)
             .await?
             .ok_or_else(|| unknown("projection disappeared after apply"))?;
+        span.phase(diagnostics::RecoveryPhase::CheckedFold);
         verify_prefix(&history, &final_checkpoint)?;
         let original_authority = self
             .originals

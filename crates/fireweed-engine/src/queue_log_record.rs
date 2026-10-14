@@ -236,6 +236,21 @@ pub fn view_queue_log_record(raw: &[u8]) -> QueueResult<QueueLogRecordView<'_>> 
     })
 }
 
+/// One version-specific structurally checked view of the exact immutable owner.
+/// This token is not storage, fence, or progress authority. Borrowing prevents
+/// its owner/charge from disappearing while observers share the parsed bytes.
+pub struct CheckedQueueLogRecord<'a> {
+    owner: &'a OwnedQueueLogRecord,
+    view: QueueLogRecordView<'a>,
+}
+impl<'a> CheckedQueueLogRecord<'a> {
+    pub fn owner(&self) -> &'a OwnedQueueLogRecord {
+        self.owner
+    }
+    pub fn view(&self) -> &QueueLogRecordView<'a> {
+        &self.view
+    }
+}
 /// Bytes and every copied header are owned before the admission guard drops.
 pub struct OwnedQueueLogRecord {
     bytes: Bytes,
@@ -273,6 +288,12 @@ impl OwnedQueueLogRecord {
     }
     pub fn view(&self) -> QueueResult<QueueLogRecordView<'_>> {
         view_queue_log_record(&self.bytes)
+    }
+    pub fn checked(&self) -> QueueResult<CheckedQueueLogRecord<'_>> {
+        Ok(CheckedQueueLogRecord {
+            owner: self,
+            view: self.view()?,
+        })
     }
     pub fn belongs_to(&self, job: &QueueReservation) -> bool {
         std::ptr::eq(self._charge.reservation(), job)

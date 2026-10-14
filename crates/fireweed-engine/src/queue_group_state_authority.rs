@@ -104,11 +104,27 @@ impl ColdGroupStateTracker {
         if self.poisoned {
             return Err(unknown("poisoned group state history"));
         }
+        let checked = match record.checked() {
+            Ok(checked) => checked,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(error);
+            }
+        };
+        self.observe_record(offset, &checked)
+    }
+    pub fn observe_record(
+        &mut self,
+        offset: u64,
+        checked: &crate::queue_log_record::CheckedQueueLogRecord<'_>,
+    ) -> QueueResult<()> {
+        if self.poisoned {
+            return Err(unknown("poisoned group state history"));
+        }
         let result = (|| {
-            let view = record.view()?;
-            self.anchor.observe_view(offset, record, &view)?;
+            self.anchor.observe_record(offset, checked)?;
             for state in &mut self.states {
-                state.observe_view(offset, record, &view)?;
+                state.observe_record(offset, checked)?;
             }
             Ok(())
         })();

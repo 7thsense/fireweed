@@ -83,20 +83,51 @@ impl ColdQueueHistory {
         if self.poisoned {
             return Err(invalid("poisoned recovery"));
         }
-        let result = self.observe_checked(offset, raw);
+        let record = match view_queue_log_record(raw) {
+            Ok(record) => record,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(error);
+            }
+        };
+        self.observe_view(offset, &record)
+    }
+    pub fn observe_record(
+        &mut self,
+        offset: u64,
+        checked: &crate::queue_log_record::CheckedQueueLogRecord<'_>,
+    ) -> QueueResult<()> {
+        if !checked.owner().belongs_to(&self.job) {
+            self.poisoned = true;
+            return Err(invalid("record belongs to another operation"));
+        }
+        self.observe_view(offset, checked.view())
+    }
+    fn observe_view(
+        &mut self,
+        offset: u64,
+        record: &crate::queue_log_record::QueueLogRecordView<'_>,
+    ) -> QueueResult<()> {
+        if self.poisoned {
+            return Err(invalid("poisoned recovery"));
+        }
+        let result = self.observe_checked(offset, record);
         if result.is_err() {
             self.poisoned = true;
         }
         result
     }
-    fn observe_checked(&mut self, offset: u64, raw: &[u8]) -> QueueResult<()> {
+    fn observe_checked(
+        &mut self,
+        offset: u64,
+        record: &crate::queue_log_record::QueueLogRecordView<'_>,
+    ) -> QueueResult<()> {
         if offset != self.next_offset {
             return Err(invalid("noncontiguous log offset"));
         }
         let next = offset
             .checked_add(1)
             .ok_or_else(|| invalid("offset overflow"))?;
-        let record = view_queue_log_record(raw)?;
         if record.address() != self.address()? {
             return Err(invalid("full address mismatch"));
         }

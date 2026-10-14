@@ -4829,7 +4829,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "655be63fc631d229354324dac1d230781630214ea86cf8d941094584cc650771",
+  "scan_sha256": "3be238203308ac3bc55a779874222a223768ca30dbe4aa991f0c90c2a65a653a",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -14576,11 +14576,11 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 30,
+      "first_match_line": 35,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 30,
+      "last_match_line": 35,
       "line": 1,
       "markers": [
         "evidence"
@@ -17064,7 +17064,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 95473,
+      "last_match_line": 95597,
       "line": 1,
       "markers": [
         "e3",

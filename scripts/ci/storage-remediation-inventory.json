@@ -16784,6 +16784,46 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::diagnostics::tests::phase_ledger_partitions_transitions_with_one_clock_sample",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::diagnostics::tests::phase_ledger_partitions_transitions_with_one_clock_sample",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::diagnostics::tests::phase_ledger_partitions_transitions_with_one_clock_sample"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::diagnostics::tests::phase_totals_survive_failed_and_panicking_operations_and_reject_bad_snapshots",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::diagnostics::tests::phase_totals_survive_failed_and_panicking_operations_and_reject_bad_snapshots",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::diagnostics::tests::phase_totals_survive_failed_and_panicking_operations_and_reject_bad_snapshots"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::diagnostics::tests::saturation_and_backward_snapshots_cannot_fabricate_deltas",
           "--",
           "--exact"
@@ -44093,6 +44133,34 @@
       "expected_ran": 1,
       "harness_id": "queue_state_authority::tests::group_state_bindings_cover_siblings_collections_empty_groups_and_owner",
       "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_state_authority::tests::group_state_bindings_cover_siblings_collections_empty_groups_and_owner",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--lib",
+        "queue_state_authority::tests::sealed_record_observers_match_raw_folds_and_reject_foreign_owners_and_addresses",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_state_authority::tests::sealed_record_observers_match_raw_folds_and_reject_foreign_owners_and_addresses",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_state_authority::tests::sealed_record_observers_match_raw_folds_and_reject_foreign_owners_and_addresses",
       "listed_kind": "test",
       "package": "fireweed-engine",
       "target": "fireweed_engine",
@@ -84557,6 +84625,62 @@
         "-p",
         "fireweed",
         "--lib",
+        "queue_recovery_pipeline::diagnostics::tests::phase_ledger_partitions_transitions_with_one_clock_sample",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::diagnostics::tests::phase_ledger_partitions_transitions_with_one_clock_sample",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::diagnostics::tests::phase_ledger_partitions_transitions_with_one_clock_sample",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
+        "queue_recovery_pipeline::diagnostics::tests::phase_totals_survive_failed_and_panicking_operations_and_reject_bad_snapshots",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::diagnostics::tests::phase_totals_survive_failed_and_panicking_operations_and_reject_bad_snapshots",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::diagnostics::tests::phase_totals_survive_failed_and_panicking_operations_and_reject_bad_snapshots",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
         "queue_recovery_pipeline::diagnostics::tests::saturation_and_backward_snapshots_cannot_fabricate_deltas",
         "--",
         "--exact"
@@ -95937,7 +96061,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "0eb57f1554d6b78ef7db22539b850bc6f53aff58934265ca3cb2622e1d352a0e",
+  "source_inventory_sha256": "8097b7624fb72d3a455d0933f44eab68b516bc3f6ca2d91603446a5396d8b341",
   "workspaces": [
     {
       "listing_error_sha256": "",

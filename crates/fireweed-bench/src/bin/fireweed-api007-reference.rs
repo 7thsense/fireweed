@@ -409,7 +409,7 @@ async fn execute(c: Config, source: Value) -> Result<bool, String> {
                        "scope":"admitted framed records, not physical provider reads; elapsed is sum of recovery-task durations including waits and may exceed wall time",
                        "snapshot_after_successful_drain":outcome.report["shutdown"] == "completed",
                        "overflow":after.overflow,
-                       "delta":delta.map(|d| json!({"attempts":d.attempts,"succeeded":d.succeeded,"failed":d.failed,"abandoned":d.abandoned,"admitted_raw_records":d.admitted_raw_records,"admitted_raw_bytes":d.admitted_raw_bytes,"summed_recovery_task_elapsed_ns":d.summed_recovery_task_elapsed_ns}))})
+                       "delta":delta.map(|d| json!({"attempts":d.attempts,"succeeded":d.succeeded,"failed":d.failed,"abandoned":d.abandoned,"admitted_raw_records":d.admitted_raw_records,"admitted_raw_bytes":d.admitted_raw_bytes,"summed_recovery_task_elapsed_ns":d.summed_recovery_task_elapsed_ns,"phase_elapsed_ns":{"fresh_authority":d.fresh_authority_ns,"planned_read_worker_transfer":d.planned_read_ns,"checked_record_history_proofs":d.checked_fold_ns,"native_checkpoint_apply":d.native_apply_ns}}))})
             });
             (outcome.report, outcome.passed, recovery)
         }
