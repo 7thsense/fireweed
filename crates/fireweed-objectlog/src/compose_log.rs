@@ -325,4 +325,27 @@ mod tests {
         drop(b);
         let _ = std::fs::remove_dir_all(&root);
     }
+    #[tokio::test]
+    async fn generic_bridge_remains_safe_inside_owned_runtime_future() {
+        let workers = fireweed_queue_spool::ScratchWorkers::new(1, 1).unwrap();
+        let target = objectlog_shared_runtime().handle().clone();
+        let expected = target.id();
+        let result = workers
+            .run_on_runtime(target, move || async move {
+                tokio::task::yield_now().await;
+                let physical = std::thread::current().id();
+                let output = block_on_objectlog_future(async move {
+                    assert_ne!(std::thread::current().id(), physical);
+                    assert_eq!(tokio::runtime::Handle::current().id(), expected);
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    17
+                });
+                assert_eq!(std::thread::current().id(), physical);
+                Ok(output)
+            })
+            .await
+            .unwrap();
+        assert_eq!(result, 17);
+        workers.close_and_drain().await.unwrap();
+    }
 }

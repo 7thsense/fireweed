@@ -47,6 +47,12 @@ and database sessions MUST NOT become consumer workflow state or operation DTOs.
 | Infrastructure deadlines | Host/runtime; finite documented backend deadlines | Independent of injected logical clock; an expired publication reply may remain OutcomeUnknown |
 | Diagnostics | Caller-owned; disabled exporter permitted | No collector is mandatory; redaction and loss behavior follow diagnostics Contract |
 
+Native async read stages enter the existing shared multi-thread runtime only at
+newly dispatched owned physical execution. Their future factory runs in that
+runtime, with the same admission, cancellation, panic and completion policy as
+synchronous stages. A current-thread target or recursive entry into the same
+worker pool rejects before registration; caller runtime flavor is unrestricted.
+
 Default interface limits are 4096 addressed records, 64 independent groups,
 128 MiB per group, 256 MiB per request, 128 MiB per response, 1 MiB work body and
 64 MiB state value. SelectFirst administration has no record-match cap: its full

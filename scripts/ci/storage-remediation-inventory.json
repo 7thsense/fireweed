@@ -50006,6 +50006,34 @@
         "-p",
         "fireweed-objectlog",
         "--lib",
+        "compose_log::tests::generic_bridge_remains_safe_inside_owned_runtime_future",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "compose_log::tests::generic_bridge_remains_safe_inside_owned_runtime_future",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::compose_log::tests::generic_bridge_remains_safe_inside_owned_runtime_future",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
         "compose_log::tests::open_local_memory_product_empty_root",
         "--",
         "--exact"
@@ -63426,6 +63454,202 @@
       "expected_ran": 1,
       "harness_id": "tests::shared_disk_quota_competes_atomically_across_owners",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::tests::shared_disk_quota_competes_atomically_across_owners",
+      "listed_kind": "test",
+      "package": "fireweed-queue-spool",
+      "target": "fireweed_queue_spool",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-queue-spool",
+        "--lib",
+        "worker::runtime_tests::owned_runtime_caller_abort_retains_future_resources_until_physical_drain",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "worker::runtime_tests::owned_runtime_caller_abort_retains_future_resources_until_physical_drain",
+      "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::runtime_tests::owned_runtime_caller_abort_retains_future_resources_until_physical_drain",
+      "listed_kind": "test",
+      "package": "fireweed-queue-spool",
+      "target": "fireweed_queue_spool",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-queue-spool",
+        "--lib",
+        "worker::runtime_tests::owned_runtime_cancelled_permit_waiter_never_constructs_future_and_releases_inputs",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "worker::runtime_tests::owned_runtime_cancelled_permit_waiter_never_constructs_future_and_releases_inputs",
+      "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::runtime_tests::owned_runtime_cancelled_permit_waiter_never_constructs_future_and_releases_inputs",
+      "listed_kind": "test",
+      "package": "fireweed-queue-spool",
+      "target": "fireweed_queue_spool",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-queue-spool",
+        "--lib",
+        "worker::runtime_tests::owned_runtime_entry_accepts_current_thread_caller",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "worker::runtime_tests::owned_runtime_entry_accepts_current_thread_caller",
+      "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::runtime_tests::owned_runtime_entry_accepts_current_thread_caller",
+      "listed_kind": "test",
+      "package": "fireweed-queue-spool",
+      "target": "fireweed_queue_spool",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-queue-spool",
+        "--lib",
+        "worker::runtime_tests::owned_runtime_entry_accepts_multi_thread_caller",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "worker::runtime_tests::owned_runtime_entry_accepts_multi_thread_caller",
+      "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::runtime_tests::owned_runtime_entry_accepts_multi_thread_caller",
+      "listed_kind": "test",
+      "package": "fireweed-queue-spool",
+      "target": "fireweed_queue_spool",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-queue-spool",
+        "--lib",
+        "worker::runtime_tests::owned_runtime_entry_rejects_current_thread_target_before_registration_and_factory",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "worker::runtime_tests::owned_runtime_entry_rejects_current_thread_target_before_registration_and_factory",
+      "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::runtime_tests::owned_runtime_entry_rejects_current_thread_target_before_registration_and_factory",
+      "listed_kind": "test",
+      "package": "fireweed-queue-spool",
+      "target": "fireweed_queue_spool",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-queue-spool",
+        "--lib",
+        "worker::runtime_tests::owned_runtime_entry_rejects_same_pool_recursion_before_factory",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "worker::runtime_tests::owned_runtime_entry_rejects_same_pool_recursion_before_factory",
+      "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::runtime_tests::owned_runtime_entry_rejects_same_pool_recursion_before_factory",
+      "listed_kind": "test",
+      "package": "fireweed-queue-spool",
+      "target": "fireweed_queue_spool",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-queue-spool",
+        "--lib",
+        "worker::runtime_tests::owned_runtime_factory_and_poll_panics_release_resources_and_preserve_error_policy",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "worker::runtime_tests::owned_runtime_factory_and_poll_panics_release_resources_and_preserve_error_policy",
+      "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::runtime_tests::owned_runtime_factory_and_poll_panics_release_resources_and_preserve_error_policy",
       "listed_kind": "test",
       "package": "fireweed-queue-spool",
       "target": "fireweed_queue_spool",
@@ -97123,7 +97347,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "52cc00c1a8a12117982b213dfc70dc6a4a7cb51cf71cfbcc145cbd2799e7986b",
+  "source_inventory_sha256": "b97c94c7b7644ab7932e12120c764246fde891d1d2e277d564721052b7b40be6",
   "workspaces": [
     {
       "listing_error_sha256": "",

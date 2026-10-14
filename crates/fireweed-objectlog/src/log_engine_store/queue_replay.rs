@@ -251,7 +251,14 @@ impl<S: BoundedSequencer<Meta = ()> + 'static> Api007ReadPlan<S> {
             plan: self,
             payload_charge: Some(charge),
         };
-        workers.run(move || worker.execute()).await
+        workers
+            .run_on_runtime(
+                crate::compose_log::objectlog_shared_runtime()
+                    .handle()
+                    .clone(),
+                move || worker.execute(),
+            )
+            .await
     }
 }
 // Capture this container as a whole. Its consuming method retains the metadata
@@ -261,8 +268,8 @@ struct ReadWorker<S: Sequencer> {
     payload_charge: Option<OwnedQueueBufferCharge>,
 }
 impl<S: BoundedSequencer<Meta = ()> + 'static> ReadWorker<S> {
-    fn execute(mut self) -> QueueResult<Option<AdmittedApi007Read>> {
-        crate::block_on_objectlog_future(self.execute_inner())
+    async fn execute(mut self) -> QueueResult<Option<AdmittedApi007Read>> {
+        self.execute_inner().await
     }
     async fn execute_inner(&mut self) -> QueueResult<Option<AdmittedApi007Read>> {
         let batch = self

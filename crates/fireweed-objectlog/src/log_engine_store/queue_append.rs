@@ -714,7 +714,8 @@ mod tests {
                         ));
                     } else {
                         assert!(
-                            matches!(result.outcome(), Err(PackedAppendError::PostPositionAmbiguous { reason, .. }) if reason.contains(if phase == 2 || phase == 4 { "produce timed out" } else { "high-water metadata timed out" }))
+                            matches!(result.outcome(), Err(PackedAppendError::PostPositionAmbiguous { reason, .. }) if reason.contains(if phase == 2 || phase == 4 { "produce timed out" } else { "high-water metadata timed out" })),
+                            "phase={phase} cancel={cancel} actual={:?}", result.outcome()
                         );
                     }
                     drop(result);

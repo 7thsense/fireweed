@@ -199,6 +199,33 @@ impl ScratchWorkers {
             }
         }
     }
+    /// Drive a native async stage only at a newly dispatched physical entry.
+    /// The supplied multi-thread runtime owns its reactor; the factory is first
+    /// invoked inside that runtime. Existing run admission, panic, cancellation
+    /// and completion ownership remain the only execution policy.
+    pub async fn run_on_runtime<T, F, Fut>(
+        &self,
+        target: tokio::runtime::Handle,
+        factory: F,
+    ) -> QueueResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = QueueResult<T>> + Send + 'static,
+    {
+        if target.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err(unknown(
+                "native stage requires a multi-thread runtime target",
+            ));
+        }
+        if PhysicalScope::owns(&self.inner) {
+            return Err(unknown(
+                "scratch worker cannot recursively drive its own pool",
+            ));
+        }
+        self.run(move || target.block_on(async move { factory().await }))
+            .await
+    }
     /// Known synchronous scratch stages may reuse this exact pool's current
     /// physical owner. There is no new task, registration, permit or await gap.
     /// Never use this for a native stage that enters another async runtime.
@@ -920,3 +947,6 @@ mod tests {
         workers.close_and_drain().await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod runtime_tests;
