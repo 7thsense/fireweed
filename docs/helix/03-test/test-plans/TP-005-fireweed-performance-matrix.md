@@ -24,6 +24,13 @@ Compare PostgreSQL and S3/object-log with stock Turso 0.8.2 through the identica
 
 The Architecture, PRD and TP-002 own correctness, numeric progress, 10M resident scale, 1,000-cold-plus-hot density and bounded-resource requirements. This benchmark supplies matched measurements; it cannot silently waive those gates or turn a historical throughput observation into a universal pass bar.
 
+The [first-principles performance model](../../00-discover/first-principles-performance-model.md)
+owns the applicable numeric capacity targets and host/commit envelopes. Qualify
+its local headline and backend-specific matrix rows separately from the Snorri
+10,000-recipient/second campaign gate (12,500 stretch). Report each applicable
+row's measured result against its declared target; neither a passing consumer
+campaign nor correctness progress watchdog replaces primitive qualification.
+
 ## Matched run design
 
 Use controlled operator-selected hardware, release builds, identical useful-work counts, seeds, payload/body/state distributions, selectors, queue definitions, batching, concurrency, lease durations and semantics. Declare host, storage/provider, latency/topology, toolchain, dependency revisions and all effective limits. Randomize/interleave backend order and repeat independent runs; retain raw samples and controls. Conventional CI may compile and verify evidence or run explicitly non-authoritative smoke checks; authoritative timing requires the declared host envelope.

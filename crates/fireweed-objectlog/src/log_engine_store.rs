@@ -480,6 +480,8 @@ pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     post_position_timeout_ms: AtomicU64,
     fail_high_water_puts: AtomicU32,
     pre_position_stall_ms: AtomicU64,
+    #[cfg(test)]
+    timeout_phase_observer: Mutex<Option<tokio::sync::mpsc::UnboundedSender<u8>>>,
     /// Physical store join id for opt-in traces and post-position timeout errors.
     store_tag: String,
 }
@@ -592,6 +594,8 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             ),
             fail_high_water_puts: AtomicU32::new(0),
             pre_position_stall_ms: AtomicU64::new(0),
+            #[cfg(test)]
+            timeout_phase_observer: Mutex::new(None),
             store_tag,
         };
         store.load_meta().await?;
@@ -891,6 +895,8 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             ),
             fail_high_water_puts: AtomicU32::new(0),
             pre_position_stall_ms: AtomicU64::new(0),
+            #[cfg(test)]
+            timeout_phase_observer: Mutex::new(None),
             store_tag,
         };
         store.load_meta().await?;
@@ -1562,6 +1568,10 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         let pre = async {
             let stall_ms = self.pre_position_stall_ms.load(Ordering::Relaxed);
             if stall_ms > 0 {
+                #[cfg(test)]
+                if let Some(observer) = self.timeout_phase_observer.lock().unwrap().as_ref() {
+                    let _ = observer.send(0); // Actual preparation future has been polled.
+                }
                 tokio::time::sleep(Duration::from_millis(stall_ms)).await;
             }
             // Legacy epoch validation is serialized under the queue permit.
@@ -1601,6 +1611,10 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             }
             Ok(Err(error)) => return Err(error),
             Err(_) => {
+                #[cfg(test)]
+                if let Some(observer) = self.timeout_phase_observer.lock().unwrap().as_ref() {
+                    let _ = observer.send(1);
+                }
                 if retain_completion {
                     // Finish any already-started preparation I/O, but never
                     // submit a produce after the pre-position deadline.
@@ -1720,6 +1734,10 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 } else {
                     "produce"
                 };
+                #[cfg(test)]
+                if let Some(observer) = self.timeout_phase_observer.lock().unwrap().as_ref() {
+                    let _ = observer.send(if post_phase == "produce" { 2 } else { 3 });
+                }
 
                 if retain_completion {
                     // Classification remains ambiguous even if completion later
@@ -3386,18 +3404,31 @@ mod tests {
                 .unwrap(),
         );
         let mut queues = Vec::new();
-        let mut tasks = Vec::new();
+        let mut tasks = tokio::task::JoinSet::new();
+        let start = Arc::new(tokio::sync::Barrier::new(17));
+        let (progress, mut completed) = tokio::sync::mpsc::unbounded_channel();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         for queue in 0..4 {
             let definition = qdef_named(&format!("parallel-{queue}"));
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             log.create_or_read_definition(definition).await.unwrap();
             let epoch = log.acquire_epoch(shard.clone()).await.unwrap();
-            queues.push((shard.clone(), epoch));
+            queues.push((shard, epoch));
+        }
+        for (queue, (shard, epoch)) in queues.iter().enumerate() {
+            let epoch = *epoch;
             for worker in 0..4 {
                 let log = log.clone();
                 let shard = shard.clone();
-                tasks.push(tokio::spawn(async move {
+                let start = start.clone();
+                let progress = progress.clone();
+                let stop = stop.clone();
+                tasks.spawn(async move {
+                    start.wait().await;
                     for generation in 0..16 {
+                        if stop.load(Ordering::SeqCst) {
+                            break;
+                        }
                         let commands = (0..3)
                             .map(|entry| {
                                 pause_env(&format!("q{queue}-w{worker}-g{generation}-e{entry}"))
@@ -3419,17 +3450,63 @@ mod tests {
                                 .windows(2)
                                 .all(|pair| pair[0].sequence + 1 == pair[1].sequence)
                         );
+                        progress
+                            .send(((queue, worker, generation), tokio::time::Instant::now()))
+                            .unwrap();
                     }
-                }));
+                });
             }
         }
-        tokio::time::timeout(Duration::from_secs(30), async {
-            for task in tasks {
-                task.await.unwrap();
+        drop(progress);
+        start.wait().await;
+        // Correctness watchdog: reset only after a checked durable append.
+        // The former whole-workload stopwatch was an undeclared host throughput gate.
+        let mut deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let mut last = None;
+        let mut progress_open = true;
+        let mut failure = None;
+        while !tasks.is_empty() {
+            tokio::select! {
+                result = tasks.join_next() => {
+                    if let Some(Err(error)) = result {
+                        failure = Some(format!("concurrent append task failed: {error}"));
+                        break;
+                    }
+                }
+                progress = completed.recv(), if progress_open => {
+                    if let Some((position, finished_at)) = progress {
+                        last = Some(position);
+                        deadline = deadline.max(finished_at + Duration::from_secs(30));
+                    } else { progress_open = false; }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    // A completion and expiry can become ready in the same poll.
+                    while let Ok((position, finished_at)) = completed.try_recv() {
+                        last = Some(position);
+                        deadline = deadline.max(finished_at + Duration::from_secs(30));
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        failure = Some(format!("no durable append progress for 30s; last={last:?}"));
+                        break;
+                    }
+                }
             }
-        })
-        .await
-        .expect("concurrent append paths must make progress");
+        }
+        // Stop new generations and join started calls. This is not an SDK
+        // physical-drain proof or bounded termination of permanently stuck IO.
+        stop.store(true, Ordering::SeqCst);
+        if let Some(failure) = &failure {
+            eprintln!("{failure}; joining started calls before engine teardown");
+        }
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result {
+                failure.get_or_insert_with(|| format!("concurrent append task failed: {error}"));
+            }
+        }
+        if let Some(failure) = failure {
+            drop(log); // Finish engine teardown before reporting the test failure.
+            panic!("{failure}");
+        }
         for (shard, epoch) in &queues {
             let page = log.read_from(shard.clone(), None, 1000).await.unwrap();
             assert_eq!(page.entries.len(), 192);

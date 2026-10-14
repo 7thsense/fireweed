@@ -529,6 +529,42 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    struct ReleasePausedIo(tokio::sync::watch::Sender<bool>);
+    impl Drop for ReleasePausedIo {
+        fn drop(&mut self) {
+            self.0.send_replace(true);
+        }
+    }
+    async fn with_wall_watchdog<T>(future: impl std::future::Future<Output = T>) -> T {
+        struct Watchdog {
+            cancel: Option<std::sync::mpsc::Sender<()>>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for Watchdog {
+            fn drop(&mut self) {
+                drop(self.cancel.take());
+                self.thread.take().unwrap().join().unwrap();
+            }
+        }
+        let (cancel, cancelled) = std::sync::mpsc::channel();
+        let (expired, expiry) = tokio::sync::oneshot::channel();
+        let _guard = Watchdog {
+            cancel: Some(cancel),
+            thread: Some(std::thread::spawn(move || {
+                if matches!(
+                    cancelled.recv_timeout(Duration::from_secs(30)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    let _ = expired.send(());
+                }
+            })),
+        };
+        tokio::select! {
+            result = future => result,
+            _ = expiry => panic!("fixture made no terminal progress within 30 wall seconds"),
+        }
+    }
+
     struct PausedIo {
         inner: LocalBlobStore,
         phase: std::sync::atomic::AtomicU8,
@@ -597,150 +633,289 @@ mod tests {
             self.inner.compare_and_swap(key, expected, value).await
         }
     }
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn owned_deadlines_drain_started_io_and_survive_caller_drop() {
+    async fn paused_local_store() -> (
+        std::path::PathBuf,
+        Arc<PausedIo>,
+        Arc<ObjectLogEngineStore<ManifestSequencer>>,
+        ReleasePausedIo,
+    ) {
+        let root = super::super::tests::temp_root("owned-deadline");
+        std::fs::create_dir_all(&root).unwrap();
+        let blob = Arc::new(PausedIo {
+            inner: LocalBlobStore::new(&root),
+            phase: std::sync::atomic::AtomicU8::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::watch::channel(false).0,
+        });
+        let mut store = ObjectLogEngineStore::open_with_blob_and_authority(
+            blob.clone(),
+            "fwlog/",
+            "fwmeta/",
+            FlushConfig {
+                linger: Duration::ZERO,
+                ..Default::default()
+            },
+            DefinitionAuthority::Local { root: root.clone() },
+        )
+        .await
+        .unwrap();
+        // Qualify only this known local delegate with observation-only pauses.
+        store.raw_io_qualified = true;
+        let release = ReleasePausedIo(blob.release.clone());
+        (root, blob, Arc::new(store), release)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn controlled_deadlines_classify_actual_timeout_before_owned_drain() {
         // Phase 4 drains a late head rejection after the caller deadline.
         for phase in [1, 2, 3, 4] {
-            for cancel in [false, true] {
-                let root = super::super::tests::temp_root("owned-deadline");
-                std::fs::create_dir_all(&root).unwrap();
-                let blob = Arc::new(PausedIo {
-                    inner: LocalBlobStore::new(&root),
-                    phase: std::sync::atomic::AtomicU8::new(0),
-                    entered: tokio::sync::Notify::new(),
-                    release: tokio::sync::watch::channel(false).0,
-                });
-                let mut store = ObjectLogEngineStore::open_with_blob_and_authority(
-                    blob.clone(),
-                    "fwlog/",
-                    "fwmeta/",
-                    FlushConfig {
-                        linger: Duration::ZERO,
-                        ..Default::default()
-                    },
-                    DefinitionAuthority::Local { root: root.clone() },
-                )
-                .await
-                .unwrap();
-                // Test-only qualification of a known local delegate with pauses.
-                store.raw_io_qualified = true;
-                let store = Arc::new(store);
-                let admission = QueueAdmission::new(1, 16 << 20).unwrap();
-                let terminal = Arc::new(tokio::sync::Notify::new());
-                let notify = terminal.clone();
-                let job = Arc::new(
-                    admission
-                        .reserve(0)
-                        .unwrap()
-                        .with_terminal_callback(move || notify.notify_one())
-                        .unwrap(),
-                );
-                let namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
-                let shard = store.checked_api007_shard(&namespace).unwrap().clone();
-                let epoch = store.acquire_epoch(shard.clone()).await.unwrap();
-                let raw = encode_definition(&schema()).unwrap();
-                let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
-                let record =
-                    encode_genesis(epoch, &address(), &definition, &[11; 32], 4096, &job).unwrap();
-                drop(definition);
-                if phase == 4 {
-                    let seed_namespace =
-                        store.bind_api007_namespace(&address(), &job).await.unwrap();
-                    let seed_definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
-                    let seed =
-                        encode_genesis(epoch, &address(), &seed_definition, &[12; 32], 4096, &job)
-                            .unwrap();
-                    let seed_workers = ScratchWorkers::new(1, 1).unwrap();
-                    let seeded = store
-                        .append_api007_record(seed_namespace, seed, 0, &job, &seed_workers)
-                        .await
+            with_wall_watchdog(async {
+            // A live blocking task prevents Tokio's automatic clock advance.
+            // Dropping the sender also releases it during assertion unwinding.
+            let (clock_guard, clock_release) = std::sync::mpsc::channel::<()>();
+            let (clock_ready, clock_started) = tokio::sync::oneshot::channel();
+            let clock_task = tokio::task::spawn_blocking(move || {
+                let _ = clock_ready.send(());
+                let _ = clock_release.recv();
+            });
+            clock_started.await.unwrap();
+            let (root, blob, store, _release_on_failure) = paused_local_store().await;
+            let admission = QueueAdmission::new(1, 16 << 20).unwrap();
+            let terminal = Arc::new(tokio::sync::Notify::new());
+            let notify = terminal.clone();
+            let job = Arc::new(
+                admission
+                    .reserve(0)
+                    .unwrap()
+                    .with_terminal_callback(move || notify.notify_one())
+                    .unwrap(),
+            );
+            let namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
+            let shard = store.checked_api007_shard(&namespace).unwrap().clone();
+            let epoch = store.acquire_epoch(shard.clone()).await.unwrap();
+            let raw = encode_definition(&schema()).unwrap();
+            let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+            let record =
+                encode_genesis(epoch, &address(), &definition, &[11; 32], 4096, &job).unwrap();
+            drop(definition);
+            if phase == 4 {
+                let seed_namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
+                let seed_definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+                let seed =
+                    encode_genesis(epoch, &address(), &seed_definition, &[12; 32], 4096, &job)
                         .unwrap();
-                    assert!(seeded.outcome().is_ok());
-                    drop(seeded);
-                    drop(seed_definition);
-                    seed_workers.close_and_drain().await.unwrap();
-                }
-                if phase == 1 {
-                    store.epochs.lock().unwrap().clear();
-                }
-                store
-                    .pre_position_timeout_ms
-                    .store(if phase == 1 { 1 } else { 5000 }, Ordering::SeqCst);
-                store.post_position_timeout_ms.store(
-                    if phase == 2 || phase == 4 { 1 } else { 1000 },
-                    Ordering::SeqCst,
-                );
-                if phase == 1 {
-                    store.pre_position_stall_ms.store(100, Ordering::SeqCst);
-                }
-                blob.phase
-                    .store(if phase == 4 { 2 } else { phase }, Ordering::SeqCst);
-                let workers = ScratchWorkers::new(1, 1).unwrap();
-                let owned_workers = workers.clone();
-                let writer = store.clone();
-                let caller = tokio::spawn(async move {
-                    writer
-                        .append_api007_record(namespace, record, 0, &job, &owned_workers)
-                        .await
-                });
-                if phase != 1 {
-                    tokio::time::timeout(Duration::from_secs(5), blob.entered.notified())
-                        .await
-                        .unwrap();
-                }
-                tokio::time::sleep(Duration::from_millis(if phase == 3 { 1100 } else { 25 })).await;
-                assert!(!caller.is_finished());
-                let charged = admission.usage().unwrap();
-                assert_eq!(charged.0, 1);
-                assert!(charged.1 > 65536);
-                if cancel {
-                    caller.abort();
-                }
-                assert_eq!(admission.usage().unwrap(), charged);
-                blob.release.send_replace(true);
-                if cancel {
-                    match caller.await {
-                        Err(error) => assert!(error.is_cancelled()),
-                        Ok(_) => panic!("caller was not cancelled"),
-                    }
-                } else {
-                    let result = caller.await.unwrap().unwrap();
-                    if phase == 1 {
-                        assert!(matches!(
-                            result.outcome(),
-                            Err(PackedAppendError::BeforePosition(
-                                EngineError::Backpressure { .. }
-                            ))
-                        ));
-                    } else {
-                        assert!(
-                            matches!(result.outcome(), Err(PackedAppendError::PostPositionAmbiguous { reason, .. }) if reason.contains(if phase == 2 || phase == 4 { "produce timed out" } else { "high-water metadata timed out" })),
-                            "phase={phase} cancel={cancel} actual={:?}", result.outcome()
-                        );
-                    }
-                    drop(result);
-                }
-                workers.close_and_drain().await.unwrap();
-                tokio::time::timeout(Duration::from_secs(5), terminal.notified())
+                let seed_workers = ScratchWorkers::new(1, 1).unwrap();
+                let seeded = store
+                    .append_api007_record(seed_namespace, seed, 0, &job, &seed_workers)
                     .await
                     .unwrap();
-                assert_eq!(admission.usage().unwrap(), (0, 0));
-                let plan = store
-                    .engine
-                    .plan_fetch(&partition_key(&shard), 0, 1, 65536, 1)
-                    .unwrap();
-                assert_eq!(plan.entries().len(), usize::from(phase != 1));
-                if phase == 4 {
-                    let eof = store
-                        .engine
-                        .plan_fetch(&partition_key(&shard), 1, 1, 65536, 1)
-                        .unwrap();
-                    assert!(eof.entries().is_empty());
-                }
-                *super::super::namespace::METADATA_READ_HOOK.lock().unwrap() = None;
-                drop(store);
-                std::fs::remove_dir_all(root).unwrap();
+                assert!(seeded.outcome().is_ok());
+                drop(seeded);
+                drop(seed_definition);
+                seed_workers.close_and_drain().await.unwrap();
             }
+            if phase == 1 {
+                store.epochs.lock().unwrap().clear();
+            }
+            store
+                .pre_position_timeout_ms
+                .store(if phase == 1 { 1 } else { 5000 }, Ordering::SeqCst);
+            store.post_position_timeout_ms.store(
+                if phase == 2 || phase == 4 { 1 } else { 1000 },
+                Ordering::SeqCst,
+            );
+            if phase == 1 {
+                store.pre_position_stall_ms.store(100, Ordering::SeqCst);
+            }
+            blob.phase
+                .store(if phase == 4 { 2 } else { phase }, Ordering::SeqCst);
+            let (observer, mut observed) = tokio::sync::mpsc::unbounded_channel();
+            *store.timeout_phase_observer.lock().unwrap() = Some(observer);
+            let mut worker = AppendWorker {
+                store: store.clone(),
+                namespace,
+                payload: record.into_admitted_bytes(),
+                epoch,
+                expected_head: 0,
+                lifetime: Arc::new(AppendLifetime {
+                    _charge: job.owned_buffer(100_000).unwrap(),
+                }),
+                job: job.clone(),
+                output_charge: Some(job.owned_buffer(4096).unwrap()),
+            };
+            drop(job);
+            let caller = tokio::spawn(async move { worker.execute_inner().await });
+            if phase == 1 {
+                assert_eq!(observed.recv().await.unwrap(), 0);
+            } else {
+                tokio::time::timeout(Duration::from_secs(5), blob.entered.notified())
+                    .await
+                    .unwrap();
+            }
+            tokio::time::advance(Duration::from_millis(if phase == 1 { 2 } else { 1100 })).await;
+            assert_eq!(
+                observed.recv().await.unwrap(),
+                if phase == 4 { 2 } else { phase }
+            );
+            assert!(!caller.is_finished());
+            let charged = admission.usage().unwrap();
+            assert_eq!(charged.0, 1);
+            assert!(charged.1 > 65536);
+            assert_eq!(admission.usage().unwrap(), charged);
+            blob.release.send_replace(true);
+            if phase == 1 {
+                tokio::time::advance(Duration::from_millis(100)).await;
+            }
+            let result = caller.await.unwrap().unwrap();
+            if phase == 1 {
+                assert!(matches!(
+                    result.outcome(),
+                    Err(PackedAppendError::BeforePosition(
+                        EngineError::Backpressure { .. }
+                    ))
+                ));
+            } else {
+                assert!(
+                    matches!(result.outcome(), Err(PackedAppendError::PostPositionAmbiguous { reason, .. }) if reason.contains(if phase == 2 || phase == 4 { "produce timed out" } else { "high-water metadata timed out" })),
+                    "phase={phase} actual={:?}",
+                    result.outcome()
+                );
+            }
+            drop(result);
+            tokio::time::timeout(Duration::from_secs(5), terminal.notified())
+                .await
+                .unwrap();
+            assert_eq!(admission.usage().unwrap(), (0, 0));
+            let plan = store
+                .engine
+                .plan_fetch(&partition_key(&shard), 0, 1, 65536, 1)
+                .unwrap();
+            assert_eq!(plan.entries().len(), usize::from(phase != 1));
+            if phase == 4 {
+                let eof = store
+                    .engine
+                    .plan_fetch(&partition_key(&shard), 1, 1, 65536, 1)
+                    .unwrap();
+                assert!(eof.entries().is_empty());
+            }
+            *super::super::namespace::METADATA_READ_HOOK.lock().unwrap() = None;
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+            drop(clock_guard);
+            clock_task.await.unwrap();
+            }).await;
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owned_append_survives_caller_drop_and_drains_physical_io() {
+        // Phase 4 drains a late head rejection after caller cancellation.
+        for phase in [1, 2, 3, 4] {
+            let (root, blob, store, _release_on_failure) = paused_local_store().await;
+            let admission = QueueAdmission::new(1, 16 << 20).unwrap();
+            let terminal = Arc::new(tokio::sync::Notify::new());
+            let notify = terminal.clone();
+            let job = Arc::new(
+                admission
+                    .reserve(0)
+                    .unwrap()
+                    .with_terminal_callback(move || notify.notify_one())
+                    .unwrap(),
+            );
+            let namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
+            let shard = store.checked_api007_shard(&namespace).unwrap().clone();
+            let epoch = store.acquire_epoch(shard.clone()).await.unwrap();
+            let raw = encode_definition(&schema()).unwrap();
+            let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+            let record =
+                encode_genesis(epoch, &address(), &definition, &[11; 32], 4096, &job).unwrap();
+            drop(definition);
+            if phase == 4 {
+                let seed_namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
+                let seed_definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+                let seed =
+                    encode_genesis(epoch, &address(), &seed_definition, &[12; 32], 4096, &job)
+                        .unwrap();
+                let seed_workers = ScratchWorkers::new(1, 1).unwrap();
+                let seeded = store
+                    .append_api007_record(seed_namespace, seed, 0, &job, &seed_workers)
+                    .await
+                    .unwrap();
+                assert!(seeded.outcome().is_ok());
+                drop(seeded);
+                drop(seed_definition);
+                seed_workers.close_and_drain().await.unwrap();
+            }
+            if phase == 1 {
+                store.epochs.lock().unwrap().clear();
+            }
+            store
+                .pre_position_timeout_ms
+                .store(if phase == 1 { 1 } else { 5000 }, Ordering::SeqCst);
+            store.post_position_timeout_ms.store(
+                if phase == 2 || phase == 4 { 1 } else { 1000 },
+                Ordering::SeqCst,
+            );
+            let permit = store.metadata_permit(&shard);
+            let held = if phase == 1 {
+                Some(permit.lock().await)
+            } else {
+                None
+            };
+            let (observer, mut observed) = tokio::sync::mpsc::unbounded_channel();
+            *store.timeout_phase_observer.lock().unwrap() = Some(observer);
+            blob.phase
+                .store(if phase == 4 { 2 } else { phase }, Ordering::SeqCst);
+            let workers = ScratchWorkers::new(1, 1).unwrap();
+            let owned_workers = workers.clone();
+            let writer = store.clone();
+            let caller = tokio::spawn(async move {
+                writer
+                    .append_api007_record(namespace, record, 0, &job, &owned_workers)
+                    .await
+            });
+            if phase == 1 {
+                tokio::time::timeout(Duration::from_secs(5), observed.recv())
+                    .await
+                    .unwrap()
+                    .map(|phase| assert_eq!(phase, 1))
+                    .unwrap();
+            } else {
+                tokio::time::timeout(Duration::from_secs(5), blob.entered.notified())
+                    .await
+                    .unwrap();
+            }
+            assert!(!caller.is_finished());
+            let charged = admission.usage().unwrap();
+            assert_eq!(charged.0, 1);
+            assert!(charged.1 > 65536);
+            caller.abort();
+            assert_eq!(admission.usage().unwrap(), charged);
+            drop(held);
+            blob.release.send_replace(true);
+            match caller.await {
+                Err(error) => assert!(error.is_cancelled()),
+                Ok(_) => panic!("caller was not cancelled"),
+            }
+            workers.close_and_drain().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), terminal.notified())
+                .await
+                .unwrap();
+            assert_eq!(admission.usage().unwrap(), (0, 0));
+            let plan = store
+                .engine
+                .plan_fetch(&partition_key(&shard), 0, 1, 65536, 1)
+                .unwrap();
+            assert_eq!(plan.entries().len(), usize::from(phase != 1));
+            if phase == 4 {
+                let eof = store
+                    .engine
+                    .plan_fetch(&partition_key(&shard), 1, 1, 65536, 1)
+                    .unwrap();
+                assert!(eof.entries().is_empty());
+            }
+            *super::super::namespace::METADATA_READ_HOOK.lock().unwrap() = None;
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
         }
     }
 }

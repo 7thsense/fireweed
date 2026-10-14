@@ -165,6 +165,15 @@ can materialize overflow records before later per-key admission; opcode and
 corruption controls establish correctness, not a hard allocation bound. Settled
 release density, scale and cost workloads must qualify performance.
 
+The SDK provides required bounded metadata reads/conditional writes with exact
+provider/key/version tokens and source-buffer lifetime ownership. Its fixed-head
+reader/fencer is qualification-internal. Production reuse requires lazy immutable
+paged log indexes and a source-committed semantic summary covering originals,
+tombstones, payload descriptors, complete selection indexes and aggregates.
+Fresh operations mint their own proofs against that head; existing tracker
+objects remain operation-scoped. The current full-vector manifest and cold
+prefix recovery remain in use until those gates pass.
+
 The single Snorri adapter, diagnostics receiver integration, revised formal
 correspondence and matched settled release benchmarks remain required. Snorri
 binds stats as_of to signed Unix nanoseconds, including negative-epoch hourly
@@ -190,11 +199,22 @@ reads and writes in both numeric modes. State_version advances on transitions
 and await consumption, not dispatch/timeout/timer bookkeeping. Host maintenance
 must preserve ownership and resource drain semantics.
 
-Release performance acceptance retains the napkin baseline's fixed 10,000
-complete recipients/second and 12,500/second stretch target, with the declared
-campaign and primitive workload shapes. Both backends must be measured against
-that baseline with matched durability and resources; small reference diagnostics
-and historical source results do not qualify the current release.
+Release performance acceptance includes the
+[first-principles matrix](../00-discover/first-principles-performance-model.md):
+its declared H-server local headline is 100,000 completed items/second
+(approximately 350,000 durable item mutations/second), batch p99 at most 10 ms,
+with 10M resident items. Apply the matrix's backend-specific topology and commit
+bounds to S3 and remote PostgreSQL; do not impose a local-NVMe latency assumption
+on remote storage. The Snorri campaign's 10,000 complete recipients/second and
+12,500/second stretch target are additional consumer gates, not substitutes for
+primitive targets. Both backends require matched durability/resources and settled
+runs; small diagnostics and historical results do not qualify this release.
+
+Deadline correctness tests observe the actual timeout branch before owned drain,
+using controlled Tokio time and real local storage. Separate real worker tests
+cover caller cancellation. Concurrent append correctness retains the full
+workload and checks durable completion progress, offsets, fencing and reopen;
+its 30-second no-progress watchdog is not an aggregate throughput qualification.
 
 Benchmark useful completed work after full settle/drain. Measure p50/p95/p99,
 RSS/retained memory, projection debt, storage volume and S3 requests/cost, with

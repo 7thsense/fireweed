@@ -1,5 +1,5 @@
 {
-  "authority_manifest_sha256": "40457873dd14d06ff90f0ada8cfa9b9c606a63c5888965d396131ffcdbb83201",
+  "authority_manifest_sha256": "8afd1954e579ad1dae3efb70b53a4c331f0807d034ba57fb145435e95faa7bfb",
   "debt_registries": {
     "cargo_machete_exceptions": [],
     "harness_skips": [
@@ -50314,6 +50314,34 @@
         "-p",
         "fireweed-objectlog",
         "--lib",
+        "log_engine_store::queue_append::tests::controlled_deadlines_classify_actual_timeout_before_owned_drain",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "log_engine_store::queue_append::tests::controlled_deadlines_classify_actual_timeout_before_owned_drain",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::log_engine_store::queue_append::tests::controlled_deadlines_classify_actual_timeout_before_owned_drain",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--lib",
         "log_engine_store::queue_append::tests::custom_io_rejects_and_native_append_ignores_legacy_epoch_hint",
         "--",
         "--exact"
@@ -50342,13 +50370,13 @@
         "-p",
         "fireweed-objectlog",
         "--lib",
-        "log_engine_store::queue_append::tests::owned_deadlines_drain_started_io_and_survive_caller_drop",
+        "log_engine_store::queue_append::tests::owned_append_survives_caller_drop_and_drains_physical_io",
         "--",
         "--exact"
       ],
       "expected_ran": 1,
-      "harness_id": "log_engine_store::queue_append::tests::owned_deadlines_drain_started_io_and_survive_caller_drop",
-      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::log_engine_store::queue_append::tests::owned_deadlines_drain_started_io_and_survive_caller_drop",
+      "harness_id": "log_engine_store::queue_append::tests::owned_append_survives_caller_drop_and_drains_physical_io",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::log_engine_store::queue_append::tests::owned_append_survives_caller_drop_and_drains_physical_io",
       "listed_kind": "test",
       "package": "fireweed-objectlog",
       "target": "fireweed_objectlog",
@@ -97347,7 +97375,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "b97c94c7b7644ab7932e12120c764246fde891d1d2e277d564721052b7b40be6",
+  "source_inventory_sha256": "c4aed19fde12471804351f56287466f7710119975d3936915a48014f059bff0e",
   "workspaces": [
     {
       "listing_error_sha256": "",
