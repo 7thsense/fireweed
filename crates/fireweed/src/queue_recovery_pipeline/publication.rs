@@ -18,6 +18,21 @@ impl QueueRecoveryPipeline {
             .store
             .append_api007_record(namespace, record, expected_head, job, &self.workers)
             .await;
+        #[cfg(test)]
+        let appended = if self
+            .lose_append_reply
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            assert!(
+                appended
+                    .as_ref()
+                    .is_ok_and(|result| result.outcome().is_ok())
+            );
+            // The real append completed; suppress only its returned classification.
+            Err(unknown("injected lost durable append reply"))
+        } else {
+            appended
+        };
         if let Ok(result) = &appended
             && let Ok(position) = result.outcome()
             && (position.backend_epoch != epoch || position.sequence != expected_head)

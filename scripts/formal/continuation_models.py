@@ -112,3 +112,58 @@ class Continuation(Model):
             if after.case=='empty' and after.historical_epoch!=2: return 'C-EPOCH'
             if after.highwater!=before.expected_hwm or after.originals!=before.expected_originals: return 'C-DESCRIPTORS'
         return None
+
+# Separate binding model: the existing continuation graph remains unchanged.
+SINGLE_FAULTS = {'wrong_domain':'S-DECLARATION', 'wrong_id':'S-DECLARATION',
+                 'wrong_count':'S-DECLARATION', 'wrong_owner':'S-DECLARATION',
+                 'wrong_presence':'S-PRESENCE', 'forget_present':'S-PRESENCE'}
+
+@dataclass(frozen=True)
+class SingleState:
+    phase: str = 'choose'
+    case: str = ''
+    domain: int = 0
+    expected_domain: int = 0
+    id_matches: bool = True
+    count: int = 1
+    owner_matches: bool = True
+    descriptor_present: bool = False
+    old_present: bool = False
+    resumed_present: bool = False
+    touched_authority: bool = False
+    terminal: str = ''
+
+class SingleOriginalBinding(Model):
+    name = 'api007-single-original-continuation-binding'
+    initial = SingleState()
+    bounds = {'domains':2, 'requested_originals':1, 'declaration_count_cases':[0,1,2],
+              'frontier':'complete accepted or Unknown binding'}
+    properties = ['S-DECLARATION','S-PRESENCE']
+    assumptions = ['sealed digest/cut checked by the shared continuation model',
+                   'finite exact-declaration binding only; no wire/provider correspondence']
+    def __init__(self, fault=None):
+        if fault is not None and fault not in SINGLE_FAULTS: raise ValueError('unknown single fault')
+        self.fault=fault
+    def frontier(self,s): return s.phase=='done'
+    def transitions(self,s):
+        if self.frontier(s): return
+        if s.phase=='choose':
+            for domain in (0,1):
+                for case in ('present','absent','domain','id','empty','multiple','owner','presence'):
+                    yield f'Choose:{domain}:{case}', replace(s,phase='bind',case=case,
+                        domain=1-domain if case=='domain' else domain,expected_domain=domain,
+                        id_matches=case!='id',count=0 if case=='empty' else 2 if case=='multiple' else 1,
+                        owner_matches=case!='owner',descriptor_present=case in ('present','presence'),
+                        old_present=case=='present')
+        elif s.phase=='bind':
+            rejected=(s.domain!=s.expected_domain and self.fault!='wrong_domain') or (not s.id_matches and self.fault!='wrong_id') or (s.count!=1 and self.fault!='wrong_count') or (not s.owner_matches and self.fault!='wrong_owner') or (s.old_present!=s.descriptor_present and self.fault!='wrong_presence')
+            if rejected:
+                yield 'RejectBeforeAuthority',replace(s,phase='done',terminal='Unknown')
+            else:
+                yield 'ResumeChecked',replace(s,phase='done',terminal='Covered',touched_authority=True,
+                    resumed_present=False if self.fault=='forget_present' else s.old_present)
+    def violation(self,before,action,after):
+        if after.touched_authority or after.terminal=='Covered':
+            if before.domain!=before.expected_domain or not before.id_matches or before.count!=1 or not before.owner_matches: return 'S-DECLARATION'
+            if before.old_present!=before.descriptor_present or after.resumed_present!=before.descriptor_present: return 'S-PRESENCE'
+        return None

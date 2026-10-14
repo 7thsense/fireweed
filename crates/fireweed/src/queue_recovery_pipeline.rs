@@ -2,6 +2,8 @@
 //! Coverage is operation-scoped; this is not a consumer transaction or readiness cache.
 use fireweed_core::queue_contract::{QueueAddress, QueueError, QueueResult};
 mod claim;
+mod continuation;
+use continuation::ContinuationDeclaration;
 mod diagnostics;
 pub use diagnostics::{RecoveryCounters, RecoverySnapshot};
 mod commit;
@@ -70,6 +72,8 @@ pub struct QueueRecoveryPipeline {
     metadata_bytes: usize,
     hard_record_bytes: u64,
     diagnostics: Arc<RecoveryCounters>,
+    #[cfg(test)]
+    lose_append_reply: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     before_drop: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -148,12 +152,12 @@ struct OperationCompletion {
     _slot: OwnedSemaphorePermit,
     _job: Arc<QueueReservation>,
 }
-struct BatchContinuation {
+struct RecoveryContinuation {
     previous: RecoveredQueue,
-    request: Arc<fireweed_core::queue_contract::CommitBatch>,
+    declaration: ContinuationDeclaration,
 }
 struct RecoveryTask {
-    continuation: Option<BatchContinuation>,
+    continuation: Option<RecoveryContinuation>,
     // Release the bounded task slot before releasing the operation reservation.
     _slot: OwnedSemaphorePermit,
     pipeline: Arc<QueueRecoveryPipeline>,
@@ -185,6 +189,8 @@ impl QueueRecoveryPipeline {
             metadata_bytes: options.metadata_bytes,
             hard_record_bytes: options.hard_record_bytes,
             diagnostics: Arc::new(RecoveryCounters::default()),
+            #[cfg(test)]
+            lose_append_reply: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             before_drop: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -309,7 +315,31 @@ impl QueueRecoveryPipeline {
             None,
             None,
             None,
-            Some(BatchContinuation { previous, request }),
+            Some(RecoveryContinuation {
+                previous,
+                declaration: ContinuationDeclaration::Batch(request),
+            }),
+            job,
+        )
+        .await
+    }
+    async fn recover_request_after(
+        self: &Arc<Self>,
+        address: QueueAddress,
+        domain: u8,
+        id: String,
+        previous: RecoveredQueue,
+        job: Arc<QueueReservation>,
+    ) -> QueueResult<RecoveredQueue> {
+        self.recover_scoped(
+            address,
+            Some((domain, id)),
+            None,
+            None,
+            Some(RecoveryContinuation {
+                previous,
+                declaration: ContinuationDeclaration::Request,
+            }),
             job,
         )
         .await
@@ -331,7 +361,7 @@ impl QueueRecoveryPipeline {
         identity: Option<(u8, String)>,
         originals: Option<ColdOriginalTracker>,
         states: Option<RecoveryStateTracker>,
-        continuation: Option<BatchContinuation>,
+        continuation: Option<RecoveryContinuation>,
         job: Arc<QueueReservation>,
     ) -> QueueResult<RecoveredQueue> {
         address.validate()?;
@@ -403,7 +433,7 @@ impl RecoveryTask {
                 .source
                 .upgrade()
                 .is_some_and(|store| Arc::ptr_eq(&store, &pipeline.store))
-                || seed.request.queue != self.address
+                || !seed.declaration.matches_address(&self.address)
                 || old.target_next_offset != old.history.next_offset()
                 || old.acquired_epoch < old.history.historical_epoch()
             {
@@ -430,14 +460,14 @@ impl RecoveryTask {
                 old.history.insertion_sequence(),
                 old.history.historical_epoch(),
             );
-            old.original_authority
-                .as_ref()
-                .ok_or_else(|| unknown("missing continuation originals"))?
-                .validate(&seed.request, &genesis, progress, &self.job)?;
-            old.group_state_authority
-                .as_ref()
-                .ok_or_else(|| unknown("missing continuation states"))?
-                .validate_batch(&seed.request, &genesis, progress, &self.job)?;
+            seed.declaration.validate(
+                old,
+                &self.address,
+                self.identity.as_ref(),
+                &genesis,
+                progress,
+                &self.job,
+            )?;
         }
         let namespace = pipeline
             .store
@@ -539,36 +569,28 @@ impl RecoveryTask {
                     old.history.insertion_sequence(),
                     old.history.historical_epoch(),
                 );
-                self.originals = Some(ColdOriginalTracker::resume(
-                    old.original_authority.as_ref().unwrap(),
-                    &seed.request,
+                let (originals, states) = seed.declaration.resume(
+                    &old,
+                    &self.address,
+                    self.identity.as_ref(),
                     &genesis,
                     progress,
                     &self.job,
-                )?);
-                self.states = Some(RecoveryStateTracker::Groups(
-                    fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::resume(
-                        old.group_state_authority.as_ref().unwrap(),
-                        &seed.request,
-                        &genesis,
-                        progress,
-                        &self.job,
-                    )?,
-                ));
+                )?;
+                self.originals = Some(originals);
+                self.states = states;
+                if self.identity.is_some() {
+                    original_identity_present = old.original_identity_present;
+                }
                 genesis_epoch = old.original_genesis_epoch;
                 history = old.history;
                 checkpoint = Some(point);
             } else {
-                self.originals = Some(ColdOriginalTracker::new(&seed.request, &self.job)?);
-                self.states = Some(RecoveryStateTracker::Groups(
-                    fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::with_work(
-                        &seed.request.queue,
-                        fireweed_engine::queue_group_state_authority::GroupDeclarations::Batch(
-                            seed.request.clone(),
-                        ),
-                        &self.job,
-                    )?,
-                ));
+                let (originals, states) =
+                    seed.declaration
+                        .cold(&self.address, self.identity.as_ref(), &self.job)?;
+                self.originals = Some(originals);
+                self.states = states;
             }
         }
         while history.next_offset() < target_next_offset {

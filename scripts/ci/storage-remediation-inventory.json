@@ -17138,6 +17138,26 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::commit_batch::single_continuation_rejects_real_valid_rewound_and_vanished_authority",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::single_continuation_rejects_real_valid_rewound_and_vanished_authority",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::commit_batch::single_continuation_rejects_real_valid_rewound_and_vanished_authority"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::commit_batch::submission_resolution_does_not_retry_failed_continuation_into_fenced_absence",
           "--",
           "--exact"
@@ -17665,6 +17685,26 @@
         "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::replay_discards_stale_expiry_after_concurrent_durable_renewal",
         "target": "fireweed",
         "test_id": "queue_recovery_pipeline::tests::replay_discards_stale_expiry_after_concurrent_durable_renewal"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::single_continuation::single_original_continuation_preserves_presence_and_reads_only_suffix",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::single_continuation::single_original_continuation_preserves_presence_and_reads_only_suffix",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::single_continuation::single_original_continuation_preserves_presence_and_reads_only_suffix"
       },
       {
         "exact_invocation": [
@@ -41851,6 +41891,34 @@
       "expected_ran": 1,
       "harness_id": "queue_original_authority::tests::sealed_original_header_exact_capacity_and_one_byte_short",
       "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_original_authority::tests::sealed_original_header_exact_capacity_and_one_byte_short",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--lib",
+        "queue_original_authority::tests::single_original_resume_binds_exact_declaration_cut_and_preserves_duplicate_poison",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_original_authority::tests::single_original_resume_binds_exact_declaration_cut_and_preserves_duplicate_poison",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_original_authority::tests::single_original_resume_binds_exact_declaration_cut_and_preserves_duplicate_poison",
       "listed_kind": "test",
       "package": "fireweed-engine",
       "target": "fireweed_engine",
@@ -85843,6 +85911,34 @@
         "-p",
         "fireweed",
         "--lib",
+        "queue_recovery_pipeline::tests::commit_batch::single_continuation_rejects_real_valid_rewound_and_vanished_authority",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::commit_batch::single_continuation_rejects_real_valid_rewound_and_vanished_authority",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::single_continuation_rejects_real_valid_rewound_and_vanished_authority",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
         "queue_recovery_pipeline::tests::commit_batch::submission_resolution_does_not_retry_failed_continuation_into_fenced_absence",
         "--",
         "--exact"
@@ -86578,6 +86674,34 @@
       "expected_ran": 1,
       "harness_id": "queue_recovery_pipeline::tests::replay_discards_stale_expiry_after_concurrent_durable_renewal",
       "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::replay_discards_stale_expiry_after_concurrent_durable_renewal",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
+        "queue_recovery_pipeline::tests::single_continuation::single_original_continuation_preserves_presence_and_reads_only_suffix",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::single_continuation::single_original_continuation_preserves_presence_and_reads_only_suffix",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::single_continuation::single_original_continuation_preserves_presence_and_reads_only_suffix",
       "listed_kind": "test",
       "package": "fireweed",
       "target": "fireweed",
@@ -96999,7 +97123,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "fff173c2d06d92af31796144db13ae9a37c54fbbc1f88ea52192da42c803264d",
+  "source_inventory_sha256": "52cc00c1a8a12117982b213dfc70dc6a4a7cb51cf71cfbcc145cbd2799e7986b",
   "workspaces": [
     {
       "listing_error_sha256": "",

@@ -231,6 +231,14 @@ are paged; no whole-queue hydration is required. Validation, DTOs, fingerprintin
 Snorri mapping and test scenarios are shared. SQL row locking/transactions and
 object-log publication/apply/recovery remain implementation-specific.
 
+Native insert, claim and commit-batch resolution may continue a sealed checked
+prefix only within the same owned operation. The declaration, source, genesis,
+full progress and prior presence bind before I/O; every continuation acquires a
+strictly newer fence and checks the suffix. Missing or behind projections rebuild
+under that same acquired target. Known-source regression and continuation failure
+remain Unknown; neither may reset the known floor. This permission does not grant
+cross-operation cache authority or qualify independent-operation scan costs.
+
 Throughput is settled useful work, not acknowledgments accumulating apply debt.
 Compare PostgreSQL and S3/Turso on the same source, host, workload, sizes and
 concurrency, reporting latency, throughput, memory, storage and object-request

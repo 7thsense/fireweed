@@ -86,6 +86,25 @@ impl ColdOriginalTracker {
         tracker.historical_epoch = progress.2;
         Ok(tracker)
     }
+    /// Resume one exact declared original within its owning operation.
+    pub fn resume_request(
+        proof: &AdmittedOriginalAuthority,
+        queue: &QueueAddress,
+        domain: u8,
+        id: &str,
+        genesis: &OwnedQueueLogRecord,
+        progress: (u64, u64, u64),
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Self> {
+        proof.validate_request(queue, domain, id, genesis, progress, job)?;
+        let mut tracker = Self::new_request(queue, domain, id, job)?;
+        tracker.entries[0].descriptor = proof.entries[0].descriptor;
+        tracker.genesis_sha256 = Some(proof.genesis_sha256);
+        tracker.next_offset = progress.0;
+        tracker.insertion_sequence = progress.1;
+        tracker.historical_epoch = progress.2;
+        Ok(tracker)
+    }
     /// One literal original in its immutable insert, claim or commit domain.
     pub fn new_request(
         queue: &QueueAddress,
@@ -333,6 +352,24 @@ impl AdmittedOriginalAuthority {
         {
             return Err(unknown(
                 "snapshot operation/address/genesis/progress/position mismatch",
+            ));
+        }
+        Ok(())
+    }
+    /// Bind a complete single-original declaration, including absent originals.
+    pub fn validate_request(
+        &self,
+        queue: &QueueAddress,
+        domain: u8,
+        id: &str,
+        genesis: &OwnedQueueLogRecord,
+        progress: (u64, u64, u64),
+        job: &QueueReservation,
+    ) -> QueueResult<()> {
+        self.validate_cut(queue, genesis, progress, job)?;
+        if self.domain != domain || self.entries.len() != 1 || self.entries[0].id != id {
+            return Err(unknown(
+                "single original domain or exact declaration mismatch",
             ));
         }
         Ok(())
@@ -675,6 +712,145 @@ mod tests {
         );
     }
     #[test]
+    fn single_original_resume_binds_exact_declaration_cut_and_preserves_duplicate_poison() {
+        let admission = QueueAdmission::new(2, 4 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let request = batch();
+        let source = records(&request, &job);
+        let mut history = ColdQueueHistory::new(&request.queue, &job).unwrap();
+        let mut tracker =
+            ColdOriginalTracker::new_request(&request.queue, 2, "known", &job).unwrap();
+        for (offset, record) in source.iter().enumerate() {
+            history.observe(offset as u64, record.bytes()).unwrap();
+            tracker.observe(offset as u64, record).unwrap();
+        }
+        let progress = (2, 0, 1);
+        let proof = tracker.finish(&history, &source[0], progress).unwrap();
+        let mut resumed = ColdOriginalTracker::resume_request(
+            &proof,
+            &request.queue,
+            2,
+            "known",
+            &source[0],
+            progress,
+            &job,
+        )
+        .unwrap();
+        assert!(resumed.observe(2, &source[1]).is_err());
+        assert!(resumed.observe(2, &source[1]).is_err());
+        drop(resumed);
+        for (domain, id, cut) in [
+            (1, "known", progress),
+            (2, "fresh", progress),
+            (2, "known", (1, 0, 1)),
+            (2, "known", (2, 1, 1)),
+            (2, "known", (2, 0, 2)),
+        ] {
+            assert!(
+                ColdOriginalTracker::resume_request(
+                    &proof,
+                    &request.queue,
+                    domain,
+                    id,
+                    &source[0],
+                    cut,
+                    &job
+                )
+                .is_err()
+            );
+        }
+        let baseline = admission.usage().unwrap().1;
+        let measured = ColdOriginalTracker::new_request(&request.queue, 2, "known", &job).unwrap();
+        let needed = admission.usage().unwrap().1 - baseline;
+        drop(measured);
+        let filler = job.owned_buffer((4 << 20) - baseline - needed).unwrap();
+        let exact = ColdOriginalTracker::resume_request(
+            &proof,
+            &request.queue,
+            2,
+            "known",
+            &source[0],
+            progress,
+            &job,
+        )
+        .unwrap();
+        drop(exact);
+        let one_byte = job.owned_buffer(1).unwrap();
+        let before = admission.usage().unwrap();
+        assert!(matches!(
+            ColdOriginalTracker::resume_request(
+                &proof,
+                &request.queue,
+                2,
+                "known",
+                &source[0],
+                progress,
+                &job
+            ),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        assert_eq!(admission.usage().unwrap(), before);
+        drop(one_byte);
+        drop(filler);
+        let other = Arc::new(admission.reserve(0).unwrap());
+        assert!(
+            ColdOriginalTracker::resume_request(
+                &proof,
+                &request.queue,
+                2,
+                "known",
+                &source[0],
+                progress,
+                &other
+            )
+            .is_err()
+        );
+        drop(other);
+        let (tracker, _) = fold(&request, &source, &job);
+        let multiple = tracker.finish(&history, &source[0], progress).unwrap();
+        assert!(
+            ColdOriginalTracker::resume_request(
+                &multiple,
+                &request.queue,
+                2,
+                "known",
+                &source[0],
+                progress,
+                &job
+            )
+            .is_err()
+        );
+        let empty = ReceiptReadRequest {
+            queue: request.queue.clone(),
+            request_ids: vec![],
+            max_bytes: 1 << 20,
+        };
+        let mut tracker = ColdOriginalTracker::new_lookup(&empty, &job).unwrap();
+        for (offset, record) in source.iter().enumerate() {
+            tracker.observe(offset as u64, record).unwrap();
+        }
+        let empty = tracker.finish(&history, &source[0], progress).unwrap();
+        assert!(
+            ColdOriginalTracker::resume_request(
+                &empty,
+                &request.queue,
+                2,
+                "known",
+                &source[0],
+                progress,
+                &job
+            )
+            .is_err()
+        );
+        drop(empty);
+        drop(multiple);
+        drop(proof);
+        drop(source);
+        drop(history);
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+    }
+    #[test]
     fn late_duplicate_source_poison_and_incomplete_prefix_cannot_finish() {
         let job = Arc::new(QueueAdmission::new(1, 4 << 20).unwrap().reserve(0).unwrap());
         let batch = batch();
@@ -970,6 +1146,33 @@ mod domain_tests {
                 _ => panic!("original source"),
             };
             descriptor.verify_outcome(raw).unwrap();
+            let resumed = ColdOriginalTracker::resume_request(
+                &proof,
+                &batch.queue,
+                domain,
+                "known",
+                &source[0],
+                (4, 0, 1),
+                &job,
+            )
+            .unwrap();
+            let equivalent = resumed.finish(&history, &source[0], (4, 0, 1)).unwrap();
+            assert_eq!(equivalent.descriptor(0, "known").unwrap(), Some(descriptor));
+            drop(equivalent);
+            let mut resumed = ColdOriginalTracker::resume_request(
+                &proof,
+                &batch.queue,
+                domain,
+                "known",
+                &source[0],
+                (4, 0, 1),
+                &job,
+            )
+            .unwrap();
+            let duplicate = prefix[domain as usize + 1];
+            assert!(resumed.observe(4, duplicate).is_err());
+            assert!(resumed.observe(4, duplicate).is_err());
+            drop(resumed);
             // The duplicate is in domain0. Only that requested domain is poisoned.
             let mut history = ColdQueueHistory::new(&batch.queue, &job).unwrap();
             let mut tracker =

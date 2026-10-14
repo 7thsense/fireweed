@@ -18,9 +18,20 @@ class ContinuationGateTests(unittest.TestCase):
         self.assertTrue(baseline['complete'])
         self.assertGreater(baseline['states'], 1)
         self.assertEqual(len(baseline['completed_witnesses']), 13)
-        self.assertEqual(len(self.report['negative_controls']), 11)
+        self.assertEqual(len(self.report['negative_controls']), 17)
+        self.assertEqual(len(self.report['baseline'][1]['completed_witnesses']), 16)
         for control in self.report['negative_controls']:
-            gate.helper.replay(gate.model.Continuation(control['fault']),control['trace'],control['property'])
+            gate.helper.replay((gate.model.SingleOriginalBinding(control['fault']) if control.get('model') else gate.model.Continuation(control['fault'])),control['trace'],control['property'])
+
+    def test_forged_covered_output_cannot_hide_behind_false_touch(self):
+        from dataclasses import replace
+        model = gate.model.SingleOriginalBinding()
+        before = replace(model.initial,phase='bind',domain=1,expected_domain=0)
+        after = replace(before,phase='done',terminal='Covered',touched_authority=False)
+        self.assertEqual(model.violation(before,'ForgedCovered',after),'S-DECLARATION')
+        before = replace(model.initial,phase='bind',descriptor_present=True,old_present=True)
+        after = replace(before,phase='done',terminal='Covered',touched_authority=False,resumed_present=False)
+        self.assertEqual(model.violation(before,'ForgedCovered',after),'S-PRESENCE')
 
     def test_empty_suffix_keeps_historical_epoch(self):
         model=gate.model.Continuation(); state=model.initial
@@ -44,7 +55,7 @@ class ContinuationGateTests(unittest.TestCase):
         control=self.report['negative_controls'][0]
         trace=json.loads(json.dumps(control['trace']));trace[-1]['state']['head']+=99
         with self.assertRaises(ValueError):
-            gate.helper.replay(gate.model.Continuation(control['fault']),trace,control['property'])
+            gate.helper.replay((gate.model.SingleOriginalBinding(control['fault']) if control.get('model') else gate.model.Continuation(control['fault'])),trace,control['property'])
 
     def test_missing_physical_publication_cannot_complete_named_witness(self):
         model=gate.model.Continuation();report,graph=gate.helper.explore(model,100000)

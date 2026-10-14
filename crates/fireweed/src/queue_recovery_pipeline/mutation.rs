@@ -84,7 +84,7 @@ pub(super) async fn resolve_submission_after<M: OriginalMutation>(
     mut covered: Option<RecoveredQueue>,
     mut previous: Option<RecoveredQueue>,
 ) -> QueueResult<Submission<M::Output>> {
-    let continuing_batch = mutation.continuation_enabled();
+    let continuation_enabled = mutation.continuation_enabled();
     for _ in 0..3 {
         let recovered = match covered.take() {
             Some(value) => value,
@@ -132,7 +132,7 @@ pub(super) async fn resolve_submission_after<M: OriginalMutation>(
             }
             Err(_) => {}
         }
-        if continuing_batch {
+        if continuation_enabled {
             previous = Some(recovered);
         }
     }

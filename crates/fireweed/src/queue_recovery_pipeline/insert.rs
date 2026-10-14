@@ -145,7 +145,6 @@ impl InsertTask {
             let epoch = prepared.writer_epoch();
             let (record, provisional, expected_head) = prepared.into_parts();
             drop(provisional);
-            drop(recovered);
             let namespace = self
                 .pipeline
                 .store
@@ -162,7 +161,14 @@ impl InsertTask {
             self.pipeline
                 .publish_prepared(namespace, record, expected_head, epoch, &self.job)
                 .await?;
-            match super::mutation::resolve_submission(&self, Some(epoch), None).await? {
+            match super::mutation::resolve_submission_after(
+                &self,
+                Some(epoch),
+                None,
+                Some(recovered),
+            )
+            .await?
+            {
                 super::mutation::Submission::Resolved(response, _) => return Ok(response),
                 super::mutation::Submission::Classified(error, _) => return Err(error),
                 super::mutation::Submission::Reprepare(next) => covered = Some(next),
@@ -185,6 +191,30 @@ impl super::mutation::OriginalMutation for InsertTask {
     }
     fn job(&self) -> &Arc<QueueReservation> {
         &self.job
+    }
+    fn continuation_enabled(&self) -> bool {
+        true
+    }
+    fn recover_from<'a>(
+        &'a self,
+        previous: Option<RecoveredQueue>,
+    ) -> fireweed_engine::queue_contract::QueueFuture<'a, RecoveredQueue> {
+        Box::pin(async move {
+            if let Some(previous) = previous {
+                let (domain, id) = self.identity();
+                self.pipeline
+                    .recover_request_after(
+                        self.request.queue.clone(),
+                        domain,
+                        id.to_owned(),
+                        previous,
+                        self.job.clone(),
+                    )
+                    .await
+            } else {
+                self.recover().await
+            }
+        })
     }
     fn replay<'a>(
         &'a self,

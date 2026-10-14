@@ -853,6 +853,15 @@ async fn submission_resolution_does_not_retry_failed_continuation_into_fenced_ab
 
 #[tokio::test]
 async fn batch_continuation_rejects_real_valid_rewound_and_vanished_authority() {
+    continuation_rejects_real_regressed_authority(None).await;
+}
+#[tokio::test]
+async fn single_continuation_rejects_real_valid_rewound_and_vanished_authority() {
+    for domain in [0, 1] {
+        continuation_rejects_real_regressed_authority(Some(domain)).await;
+    }
+}
+async fn continuation_rejects_real_regressed_authority(domain: Option<u8>) {
     for vanished in [false, true] {
         let root = std::env::temp_dir().join(format!(
             "fireweed-continuation-rewind-{vanished}-{}-{}",
@@ -914,10 +923,17 @@ async fn batch_continuation_rejects_real_valid_rewound_and_vanished_authority() 
         .await
         .unwrap();
         let request = Arc::new(batch(vec![patch_group("one", 1, 7)]));
-        let previous = pipeline
-            .recover_batch(request.clone(), job.clone())
-            .await
-            .unwrap();
+        let previous = if let Some(domain) = domain {
+            pipeline
+                .recover_request(address(), domain, "insert".into(), job.clone())
+                .await
+                .unwrap()
+        } else {
+            pipeline
+                .recover_batch(request.clone(), job.clone())
+                .await
+                .unwrap()
+        };
         assert_eq!(previous.target_next_offset, 2);
         saved["epoch"] = (previous.acquired_epoch + 10).into();
         if vanished {
@@ -951,12 +967,16 @@ async fn batch_continuation_rejects_real_valid_rewound_and_vanished_authority() 
         )
         .await
         .unwrap();
-        assert!(matches!(
+        let result = if let Some(domain) = domain {
+            fresh
+                .recover_request_after(address(), domain, "insert".into(), previous, job.clone())
+                .await
+        } else {
             fresh
                 .recover_batch_after(request, previous, job.clone())
-                .await,
-            Err(QueueError::OutcomeUnknown(_))
-        ));
+                .await
+        };
+        assert!(matches!(result, Err(QueueError::OutcomeUnknown(_))));
         assert_eq!(fresh.diagnostics.snapshot().admitted_raw_records, 0);
         let namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
         let unchanged = store
