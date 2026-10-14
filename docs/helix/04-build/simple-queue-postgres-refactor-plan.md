@@ -89,6 +89,16 @@ same acquired target and recovery slot. Independent operations remain cold.
 `check_continuation.py` bounds scope, fence, suffix poison, original duplicates,
 state high-water and historical-epoch preservation; mappings are documentary.
 
+Native ordinary-pack preparation uses one exact per-key read union and an
+evolving shared-planner snapshot. Whole-batch original classification precedes
+current-state hydration; known predecessors and administration barriers preserve
+caller order. Unique probes retain loaded absence and speculative ownership.
+Accepted deltas, receipts and clock decisions survive splitting at the first
+physical size overflow; physical receipts sort canonically without reordering logical
+outputs. Reservation or authority errors cannot masquerade as a size split.
+`check_pack_preparation.py` bounds these preparer-only invariants. Publication,
+fresh all-original resolution and public activation remain separate gates.
+
 The concrete PostgreSQL facade and mandatory suite are implemented. The hidden
 Linux native port assembles all ten operations from shared planners, native
 filtered selection, stock-Turso atomic projection and conditional log publication.

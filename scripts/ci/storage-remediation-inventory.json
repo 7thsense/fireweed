@@ -3458,6 +3458,20 @@
           "P2f"
         ],
         "detail": "early_success=false",
+        "id": "d6414a27cfbab1994843",
+        "identity": "async fn pack_rejects_skipped_fresh_prefix_noncontiguous_positions_and_foreign_cut() {",
+        "line": 519,
+        "owner": "P3-P9/P15",
+        "path": "crates/fireweed-turso/src/queue_projection/commit_pack_prepare/tests.rs",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "early_success=false",
         "id": "c20b86814abfe766d946",
         "identity": "let skipped = (1..4)",
         "line": 840,
@@ -79284,6 +79298,286 @@
         "-p",
         "fireweed-turso",
         "--lib",
+        "queue_projection::commit_pack_prepare::tests::administration_is_a_barrier_and_late_fallback_fit_precedes_any_pack",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::commit_pack_prepare::tests::administration_is_a_barrier_and_late_fallback_fit_precedes_any_pack",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::commit_pack_prepare::tests::administration_is_a_barrier_and_late_fallback_fit_precedes_any_pack",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
+        "queue_projection::commit_pack_prepare::tests::caller_order_unicode_rejections_state_aba_and_body_preservation_pack_atomically",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::commit_pack_prepare::tests::caller_order_unicode_rejections_state_aba_and_body_preservation_pack_atomically",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::commit_pack_prepare::tests::caller_order_unicode_rejections_state_aba_and_body_preservation_pack_atomically",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
+        "queue_projection::commit_pack_prepare::tests::check_sibling_cannot_suppress_mutation_field_hydration",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::commit_pack_prepare::tests::check_sibling_cannot_suppress_mutation_field_hydration",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::commit_pack_prepare::tests::check_sibling_cannot_suppress_mutation_field_hydration",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
+        "queue_projection::commit_pack_prepare::tests::each_group_samples_its_own_clock_across_real_lease_expiry",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::commit_pack_prepare::tests::each_group_samples_its_own_clock_across_real_lease_expiry",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::commit_pack_prepare::tests::each_group_samples_its_own_clock_across_real_lease_expiry",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
+        "queue_projection::commit_pack_prepare::tests::known_conflicting_prefix_classifies_before_unused_current_state_fields",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::commit_pack_prepare::tests::known_conflicting_prefix_classifies_before_unused_current_state_fields",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::commit_pack_prepare::tests::known_conflicting_prefix_classifies_before_unused_current_state_fields",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
+        "queue_projection::commit_pack_prepare::tests::later_state_check_cannot_hide_corrupt_old_fields_but_unused_body_is_ignored",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::commit_pack_prepare::tests::later_state_check_cannot_hide_corrupt_old_fields_but_unused_body_is_ignored",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::commit_pack_prepare::tests::later_state_check_cannot_hide_corrupt_old_fields_but_unused_body_is_ignored",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
+        "queue_projection::commit_pack_prepare::tests::pack_proof_owners_survive_cancel_and_panic_until_owned_transaction_cleanup",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::commit_pack_prepare::tests::pack_proof_owners_survive_cancel_and_panic_until_owned_transaction_cleanup",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::commit_pack_prepare::tests::pack_proof_owners_survive_cancel_and_panic_until_owned_transaction_cleanup",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
+        "queue_projection::commit_pack_prepare::tests::pack_rejects_skipped_fresh_prefix_noncontiguous_positions_and_foreign_cut",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::commit_pack_prepare::tests::pack_rejects_skipped_fresh_prefix_noncontiguous_positions_and_foreign_cut",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::commit_pack_prepare::tests::pack_rejects_skipped_fresh_prefix_noncontiguous_positions_and_foreign_cut",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
+        "queue_projection::commit_pack_prepare::tests::packed_unique_release_claim_reject_delete_and_reclaim_preserve_overlay",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::commit_pack_prepare::tests::packed_unique_release_claim_reject_delete_and_reclaim_preserve_overlay",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::commit_pack_prepare::tests::packed_unique_release_claim_reject_delete_and_reclaim_preserve_overlay",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
+        "queue_projection::commit_pack_prepare::tests::whole_group_wrapper_split_preserves_accepted_clock_and_exact_fit",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::commit_pack_prepare::tests::whole_group_wrapper_split_preserves_accepted_clock_and_exact_fit",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::commit_pack_prepare::tests::whole_group_wrapper_split_preserves_accepted_clock_and_exact_fit",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
         "queue_projection::commit_prepare::preview_tests::ordinary_preview_and_publication_retain_reservations_through_precommit_panic_and_cancellation",
         "--",
         "--exact"
@@ -96233,7 +96527,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "16ce2dcec83a8c72af1618924fffbc2d361e5327a95b0111eac25b3849d3b363",
+  "source_inventory_sha256": "f8f1ad1fffe58fdce896f09650dd14391271b4d739d6e23ffc3932e30959e9a2",
   "workspaces": [
     {
       "listing_error_sha256": "",

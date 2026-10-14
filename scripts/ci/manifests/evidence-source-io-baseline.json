@@ -3768,15 +3768,15 @@
         3336,
         3350,
         3364,
-        3518,
         3532,
-        3770,
-        3952,
-        4064,
-        6493,
-        6549,
-        6591,
-        6731
+        3546,
+        3784,
+        3966,
+        4078,
+        6507,
+        6563,
+        6605,
+        6745
       ],
       "path": "scripts/ci/storage-remediation-inventory.json",
       "symbol": "<module>"
@@ -4829,7 +4829,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "05d89dddfc1c9a9ccdd23e742eca5cbddb59de2153232533efe815b437a5fc68",
+  "scan_sha256": "33e6059bad1874ada0c17e66c35ed902d965e62f7309c62d7bf6032fe32d80db",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -17064,7 +17064,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 95769,
+      "last_match_line": 96063,
       "line": 1,
       "markers": [
         "e3",
@@ -17629,6 +17629,42 @@
       "operations": [
         "constant"
       ],
+      "path": "scripts/formal/check_pack_preparation.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 57,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 57,
+      "line": 46,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/check_pack_preparation.py",
+      "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 2,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 2,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
       "path": "scripts/formal/check_state_authority.py",
       "symbol": "<module>"
     },
@@ -17850,6 +17886,24 @@
         "constant"
       ],
       "path": "scripts/formal/test_originals.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 1,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/test_pack_preparation.py",
       "symbol": "<module>"
     },
     {

@@ -4,9 +4,13 @@ mod administrative_prepare;
 #[cfg(target_os = "linux")]
 mod administrative_selection;
 mod commit_batch_replay;
+mod commit_pack_prepare;
 mod commit_prepare;
 pub use administrative_prepare::AdministrativePreparationInput;
 pub use commit_batch_replay::{AdmittedCommitBatchReplay, CommitBatchReplayInput};
+pub use commit_pack_prepare::{
+    AdmittedPackReceipts, CommitPackPreparationInput, OrdinaryPackPreparation, PreparedOrdinaryPack,
+};
 pub use preview::AdmittedQueuePreview;
 mod filter_sql;
 mod group_authority;

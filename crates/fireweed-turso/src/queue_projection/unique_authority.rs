@@ -11,6 +11,33 @@ pub(super) async fn load_unique_authority(
     job: &Arc<QueueReservation>,
     charges: &mut Vec<OwnedQueueBufferCharge>,
 ) -> QueueResult<()> {
+    if probes.is_empty() {
+        return Ok(());
+    }
+    if probes.iter().any(|probe| {
+        snapshot.unique_probes_loaded.contains(probe) || snapshot.unique_owners.contains_key(probe)
+    }) {
+        return Err(unknown(
+            "unique authority load requires fresh distinct owner-free tuples",
+        ));
+    }
+    let capacity = probes.iter().try_fold(1024u64, |total, probe| {
+        (probe.full_sort_key.len() as u64)
+            .checked_add(probe.index.len() as u64)
+            .and_then(|n| {
+                n.checked_add(
+                    probe
+                        .collection
+                        .as_ref()
+                        .map_or(0, |name| name.len() as u64),
+                )
+            })
+            .and_then(|n| n.checked_mul(16))
+            .and_then(|n| n.checked_add(1024))
+            .and_then(|n| total.checked_add(n))
+            .ok_or(QueueError::TooLarge)
+    })?;
+    charges.push(job.owned_buffer(capacity)?);
     for probe in probes {
         let collection = collection_number(schema, probe.collection.as_deref())?;
         let definition = collection_definition(schema, collection)?;
@@ -56,5 +83,7 @@ pub(super) async fn load_unique_authority(
             );
         }
     }
+    // Include native absence, and never reload over an evolved owner overlay.
+    snapshot.unique_probes_loaded.extend(probes.iter().cloned());
     Ok(())
 }

@@ -126,88 +126,107 @@ impl NativeTransactionWork for Worker {
                 self.input.required_last_record_epoch,
             ),
         )?;
-        // This includes every later sibling's schema/type/credential/target checks.
-        self.input
-            .request
-            .validate(native.definition.schema(), &self.input.limits)?;
-        let mut known = Vec::new();
-        for (position, group) in self.input.request.groups.iter().enumerate() {
-            let format = if group.administration.is_some() { 4 } else { 3 };
-            let raw = super::receipt_authority::load_raw_authoritative(
-                connection,
-                native.queue_id,
-                &group.request_id,
-                Some((format, group.fingerprint(&self.input.request.queue)?)),
-                self.input
-                    .originals
-                    .descriptor(position, &group.request_id)?,
-                &self.job,
-                &mut self.charges,
-            )
-            .await;
-            let receipt = match raw {
-                Ok(None) => None,
-                Ok(Some((_, None))) | Err(QueueError::RequestExpired) => Some(CommitReceipt {
-                    request_id: group.request_id.clone(),
-                    outcome: GroupOutcome::RequestExpired,
-                }),
-                Err(QueueError::RequestConflict) => Some(CommitReceipt {
-                    request_id: group.request_id.clone(),
-                    outcome: GroupOutcome::RequestConflict,
-                }),
-                Err(error) => return Err(error),
-                Ok(Some((format, Some(raw)))) => {
-                    let outcome =
-                        view_receipt_outcome(2, format, &raw).map_err(publication_error)?;
-                    let ReceiptOutcomeRef::Commit(commit) = outcome else {
-                        return Err(unknown("batch receipt has wrong domain"));
-                    };
-                    self.charges.push(
-                        self.job.owned_buffer(
-                            receipt_outcome_heap_bound(outcome, raw.len() as u64)
-                                .map_err(publication_error)?,
-                        )?,
-                    );
-                    let projection = CommitReceiptProjection {
-                        request_id: &group.request_id,
-                        outcome: commit,
-                    };
-                    let bytes = encoded_len(&projection)?;
-                    self.charges.push(
-                        self.job.owned_buffer(
-                            bytes
-                                .checked_mul(4)
-                                .and_then(|n| n.checked_add(4096))
-                                .ok_or(QueueError::TooLarge)?,
-                        )?,
-                    );
-                    let encoded = encode(&projection)?;
-                    let receipt: CommitReceipt = decode(&encoded)?;
-                    validate_original_commit_receipt(
-                        &self.input.request.queue,
-                        group,
-                        &receipt,
-                        &self.job,
-                    )
-                    .map_err(publication_error)?;
-                    Some(receipt)
-                }
-            };
-            known.push(receipt);
-        }
-        // The public sequence is Vec<CommitReceipt>. Internal Option/Lookup tags
-        // must not turn an exact-boundary valid public response into TooLarge.
-        let mut bytes = encoded_len(&(known.len() as u64))?;
-        for receipt in known.iter().flatten() {
-            bytes = bytes
-                .checked_add(encoded_len(receipt)?)
-                .ok_or(QueueError::TooLarge)?;
-        }
-        if bytes > self.input.response_max_bytes {
-            return Err(QueueError::TooLarge);
-        }
-        Ok(known)
+        classify_originals(
+            connection,
+            &native,
+            BatchRead {
+                request: &self.input.request,
+                originals: &self.input.originals,
+                limits: &self.input.limits,
+                response_max_bytes: self.input.response_max_bytes,
+            },
+            &self.job,
+            &mut self.charges,
+        )
+        .await
     }
+}
+pub(super) struct BatchRead<'a> {
+    pub request: &'a CommitBatch,
+    pub originals: &'a fireweed_engine::queue_original_authority::AdmittedOriginalAuthority,
+    pub limits: &'a QueueLimits,
+    pub response_max_bytes: u64,
+}
+pub(super) async fn classify_originals(
+    connection: &Connection,
+    native: &super::snapshot::NativeQueueSnapshot,
+    input: BatchRead<'_>,
+    job: &Arc<QueueReservation>,
+    charges: &mut Vec<OwnedQueueBufferCharge>,
+) -> QueueResult<Vec<Option<CommitReceipt>>> {
+    // This includes every later sibling's schema/type/credential/target checks.
+    input
+        .request
+        .validate(native.definition.schema(), input.limits)?;
+    let mut known = Vec::new();
+    for (position, group) in input.request.groups.iter().enumerate() {
+        let format = if group.administration.is_some() { 4 } else { 3 };
+        let raw = super::receipt_authority::load_raw_authoritative(
+            connection,
+            native.queue_id,
+            &group.request_id,
+            Some((format, group.fingerprint(&input.request.queue)?)),
+            input.originals.descriptor(position, &group.request_id)?,
+            job,
+            charges,
+        )
+        .await;
+        let receipt = match raw {
+            Ok(None) => None,
+            Ok(Some((_, None))) | Err(QueueError::RequestExpired) => Some(CommitReceipt {
+                request_id: group.request_id.clone(),
+                outcome: GroupOutcome::RequestExpired,
+            }),
+            Err(QueueError::RequestConflict) => Some(CommitReceipt {
+                request_id: group.request_id.clone(),
+                outcome: GroupOutcome::RequestConflict,
+            }),
+            Err(error) => return Err(error),
+            Ok(Some((format, Some(raw)))) => {
+                let outcome = view_receipt_outcome(2, format, &raw).map_err(publication_error)?;
+                let ReceiptOutcomeRef::Commit(commit) = outcome else {
+                    return Err(unknown("batch receipt has wrong domain"));
+                };
+                charges.push(
+                    job.owned_buffer(
+                        receipt_outcome_heap_bound(outcome, raw.len() as u64)
+                            .map_err(publication_error)?,
+                    )?,
+                );
+                let projection = CommitReceiptProjection {
+                    request_id: &group.request_id,
+                    outcome: commit,
+                };
+                let bytes = encoded_len(&projection)?;
+                charges.push(
+                    job.owned_buffer(
+                        bytes
+                            .checked_mul(4)
+                            .and_then(|n| n.checked_add(4096))
+                            .ok_or(QueueError::TooLarge)?,
+                    )?,
+                );
+                let encoded = encode(&projection)?;
+                let receipt: CommitReceipt = decode(&encoded)?;
+                validate_original_commit_receipt(&input.request.queue, group, &receipt, job)
+                    .map_err(publication_error)?;
+                Some(receipt)
+            }
+        };
+        known.push(receipt);
+    }
+    // The public sequence is Vec<CommitReceipt>. Internal Option/Lookup tags
+    // must not turn an exact-boundary valid public response into TooLarge.
+    let mut bytes = encoded_len(&(known.len() as u64))?;
+    for receipt in known.iter().flatten() {
+        bytes = bytes
+            .checked_add(encoded_len(receipt)?)
+            .ok_or(QueueError::TooLarge)?;
+    }
+    if bytes > input.response_max_bytes {
+        return Err(QueueError::TooLarge);
+    }
+    Ok(known)
 }
 
 #[cfg(test)]

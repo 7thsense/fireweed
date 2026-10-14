@@ -467,6 +467,15 @@ pub fn encode_publication_record(
 ) -> QueueResult<OwnedQueueLogRecord> {
     encode_publication_with_format(epoch, publication, max_bytes, job, QueueLogFormat::LegacyV1)
 }
+/// Complete checksummed publication wrapper size, separate from its inner frame.
+pub fn checked_publication_record_len(publication_bytes: u64) -> QueueResult<u64> {
+    publication_len_with_format(publication_bytes, QueueLogFormat::ChecksummedV2)
+}
+fn publication_len_with_format(publication_bytes: u64, format: QueueLogFormat) -> QueueResult<u64> {
+    publication_bytes
+        .checked_add(22 + format.trailer_len() as u64)
+        .ok_or(QueueError::TooLarge)
+}
 pub fn encode_checked_publication_record(
     epoch: u64,
     publication: &[u8],
@@ -495,10 +504,11 @@ fn encode_publication_with_format(
         queue: validated.summary().queue.1,
     }
     .validate()?;
-    let size = publication
-        .len()
-        .checked_add(22 + format.trailer_len())
-        .ok_or(QueueError::TooLarge)?;
+    let size = usize::try_from(publication_len_with_format(
+        publication.len() as u64,
+        format,
+    )?)
+    .map_err(|_| QueueError::TooLarge)?;
     let mut out = admitted_output(size, max_bytes, job)?;
     header(
         &mut out.bytes,

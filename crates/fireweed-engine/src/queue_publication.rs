@@ -114,7 +114,8 @@ impl<'a> PublicationReceipt<'a> {
             result: ReceiptResult::Insert(outcomes),
         })
     }
-    fn identity(&self) -> (u8, &str) {
+    /// Canonical physical receipt ordering; logical caller order is independent.
+    pub fn identity(&self) -> (u8, &str) {
         (
             match self.result {
                 ReceiptResult::Insert(_) => 0,
