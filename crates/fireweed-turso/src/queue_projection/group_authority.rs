@@ -5,7 +5,8 @@ use fireweed_engine::queue_planner::{RecordIdentity, RecordSnapshot, required_wo
 use fireweed_engine::queue_state_authority::StateDescriptor;
 use std::collections::{BTreeMap, BTreeSet};
 #[derive(Default)]
-struct WorkRead {
+struct WorkRead<'a> {
+    source: Option<&'a fireweed_engine::queue_group_state_authority::WorkDescriptor>,
     fields: bool,
     body: bool,
     names: BTreeSet<String>,
@@ -17,7 +18,7 @@ struct StateRead {
 }
 #[derive(Default)]
 struct ReadSet<'a> {
-    work: BTreeMap<&'a str, WorkRead>,
+    work: BTreeMap<&'a str, WorkRead<'a>>,
     state: BTreeMap<(&'a str, &'a str), StateRead>,
 }
 pub(super) struct GroupRead<'a> {
@@ -56,11 +57,11 @@ pub(super) async fn load_group_with_fields(
     )
     .await
 }
-pub(super) async fn load_groups(
+pub(super) async fn load_groups<'a>(
     connection: &Connection,
     queue_id: i64,
     schema: &QueueSchema,
-    inputs: &[GroupRead<'_>],
+    inputs: &[GroupRead<'a>],
     job: &Arc<QueueReservation>,
     charges: &mut Vec<OwnedQueueBufferCharge>,
     complete_work_fields: bool,
@@ -138,6 +139,30 @@ pub(super) async fn load_groups(
             need.fields = true;
             need.names.extend(names.iter().cloned());
         }
+        if let Some(states) = input.states {
+            if !states.has_work_authority() {
+                return Err(unknown("ordinary work source scope missing"));
+            }
+            for key in group
+                .claimed_updates
+                .iter()
+                .map(|u| u.key.as_str())
+                .chain(group.work_updates.iter().map(|u| u.key.as_str()))
+                .chain(group.work_inserts.iter().map(|u| u.key.as_str()))
+            {
+                let source = states.work_descriptor(key)?;
+                let need = readset
+                    .work
+                    .get_mut(key)
+                    .ok_or_else(|| unknown("work readset declaration missing"))?;
+                if let Some(old) = need.source
+                    && old != source
+                {
+                    return Err(unknown("group materialization work source disagrees"));
+                }
+                need.source = Some(source);
+            }
+        }
         for (position, update) in group.state_updates.iter().enumerate() {
             let need = readset
                 .state
@@ -165,7 +190,12 @@ pub(super) async fn load_groups(
             collection: None,
             key: key.into(),
         };
-        match super::work::load_work_authority(connection, queue_id, key, sequence).await? {
+        let authority =
+            super::work::load_work_authority(connection, queue_id, key, sequence).await?;
+        if let Some(source) = need.source {
+            super::work_source::validate_presence(source, &authority)?;
+        }
+        match authority {
             super::work::WorkAuthority::Absent => {}
             super::work::WorkAuthority::Deleted { version } => {
                 snapshot.versions.insert(identity, version);
@@ -174,6 +204,22 @@ pub(super) async fn load_groups(
                 let mut total = 0;
                 let mut exceeded = false;
                 if need.fields {
+                    if let Some(source) = need.source {
+                        if complete_work_fields {
+                            return Err(unknown(
+                                "selected work proof cannot authorize complete hydration",
+                            ));
+                        }
+                        super::work_source::validate_payload_metadata(
+                            connection,
+                            id,
+                            &schema.work,
+                            source,
+                            &need.names,
+                            need.body,
+                        )
+                        .await?;
+                    }
                     payload::load_payload(
                         connection,
                         id,
@@ -197,6 +243,12 @@ pub(super) async fn load_groups(
                         &mut work.record.work.body,
                     )
                     .await?;
+                    if let Some(source) = need.source {
+                        source.verify_fields(&work.record.work.fields, &need.names)?;
+                        if need.body {
+                            source.verify_body(&work.record.work.body)?;
+                        }
+                    }
                 }
                 work.field_coverage = if !need.fields {
                     FieldCoverage::Selected {

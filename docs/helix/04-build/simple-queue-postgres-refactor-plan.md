@@ -138,8 +138,15 @@ batch sibling, before fresh planning. Metadata-only checks verify presence and
 retained high-water; replacement/deletion verify complete old fields without
 reading old values. Immutable original replay precedes current-state validation.
 `check_state_preparation.py` bounds this ordering and payload knowledge; its
-production map remains documentary. State query paths, current work, unique
-owners and selection indexes still require full cached integrity.
+production map remains documentary. Ordinary commit, preview and pack preparation now compose addressed work
+metadata and selected-field/body descriptors with the existing group proof.
+Checked genesis establishes the exact field closure; lease/presence metadata,
+source lengths and canonical value digests precede planner use. Failed proof
+initialization is terminal, and continuation retains admitted knowledge.
+`check_state_preparation.py` also bounds this selected-work knowledge ordering;
+its production map remains documentary. Complete administrative hydration,
+state query paths, unique owners and selection indexes still require full cached
+integrity.
 Fresh catalog-known missing indexes and previously observed malformed authority
 fail closed across reopen, independent handles and later metadata deletion.
 Native S3 conditional writes classify typed conflicts and never retry a lost

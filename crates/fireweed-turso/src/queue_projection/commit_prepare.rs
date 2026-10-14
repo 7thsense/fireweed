@@ -1253,15 +1253,24 @@ mod tests {
         let publication = group_record(definition, &mut snapshot, &source, job);
         let records = vec![seed, publication];
         let mut history = ColdQueueHistory::new(&input.queue, job).unwrap();
-        let mut tracker =
-            ColdGroupStateTracker::new(&input.queue, std::slice::from_ref(&input.group), job)
-                .unwrap();
+        let mut tracker = ColdGroupStateTracker::with_work(
+            &input.queue,
+            fireweed_engine::queue_group_state_authority::GroupDeclarations::Group(Arc::new(
+                input.group.clone(),
+            )),
+            job,
+        )
+        .unwrap();
         for (offset, record) in std::iter::once(&input.genesis)
             .chain(records.iter())
             .enumerate()
         {
-            history.observe(offset as u64, record.bytes()).unwrap();
-            tracker.observe(offset as u64, record).unwrap();
+            let checked = record.checked().unwrap();
+            history.observe_record(offset as u64, &checked).unwrap();
+            if offset == 0 {
+                tracker.initialize_work(&history, &checked, job).unwrap();
+            }
+            tracker.observe_record(offset as u64, &checked).unwrap();
         }
         let proof = Arc::new(tracker.finish(&history, &input.genesis, (3, 2, 1)).unwrap());
         let weak = Arc::downgrade(&proof);

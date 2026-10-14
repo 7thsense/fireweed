@@ -19,7 +19,7 @@ struct CommitTask {
 pub(super) struct CommitExecution {
     pipeline: Arc<QueueRecoveryPipeline>,
     queue: QueueAddress,
-    group: CommitGroup,
+    group: Arc<CommitGroup>,
     limits: QueueLimits,
     batch: Option<Arc<fireweed_core::queue_contract::CommitBatch>>,
     clock: Arc<dyn Clock>,
@@ -109,7 +109,7 @@ impl CommitExecution {
         Ok(Self {
             pipeline,
             queue,
-            group,
+            group: Arc::new(group),
             limits,
             batch: None,
             clock,
@@ -208,7 +208,7 @@ impl CommitExecution {
                 .pipeline
                 .original_genesis(&self.queue, recovered, &self.job)?,
             queue: self.queue.clone(),
-            group: self.group.clone(),
+            group: self.group.as_ref().clone(),
             limits: self.limits,
             required_next_offset: recovered.target_next_offset,
             required_insertion_sequence: recovered.history.insertion_sequence(),
@@ -409,7 +409,9 @@ impl super::mutation::OriginalMutation for CommitExecution {
     fn recover<'a>(&'a self) -> fireweed_engine::queue_contract::QueueFuture<'a, RecoveredQueue> {
         Box::pin(async move {
             let mut recovered = if let Some(batch) = &self.batch {
-                self.pipeline.recover_batch(batch, self.job.clone()).await?
+                self.pipeline
+                    .recover_batch(batch.clone(), self.job.clone())
+                    .await?
             } else {
                 let originals = ColdOriginalTracker::new_request(
                     &self.queue,
@@ -418,9 +420,11 @@ impl super::mutation::OriginalMutation for CommitExecution {
                     &self.job,
                 )?;
                 let states =
-                    fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::new(
+                    fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::with_work(
                         &self.queue,
-                        std::slice::from_ref(&self.group),
+                        fireweed_engine::queue_group_state_authority::GroupDeclarations::Group(
+                            self.group.clone(),
+                        ),
                         &self.job,
                     )?;
                 self.pipeline

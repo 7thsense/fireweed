@@ -84,7 +84,7 @@ impl CoveredRead for BatchRead {
         pipeline: &'a Arc<QueueRecoveryPipeline>,
         job: Arc<QueueReservation>,
     ) -> QueueFuture<'a, RecoveredQueue> {
-        Box::pin(async move { pipeline.recover_batch(&self.request, job).await })
+        Box::pin(async move { pipeline.recover_batch(self.request.clone(), job).await })
     }
     fn read<'a>(
         &'a self,

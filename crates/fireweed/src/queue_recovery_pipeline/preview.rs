@@ -15,7 +15,7 @@ use fireweed_turso::queue_projection::{
     AdministrativePreparationInput, AdmittedQueuePreview, CommitPreparationInput,
 };
 struct PreviewRead {
-    request: PreviewRequest,
+    request: Arc<PreviewRequest>,
     clock: Arc<dyn Clock>,
     root: Arc<ScratchRoot>,
     quota: Arc<ScratchDiskQuota>,
@@ -43,7 +43,7 @@ impl QueueRecoveryPipeline {
     ) -> QueueResult<AdmittedQueuePreview> {
         self.covered_read(
             PreviewRead {
-                request,
+                request: Arc::new(request),
                 clock,
                 root: Arc::clone(&self.scratch_root),
                 quota: Arc::clone(&self.scratch_quota),
@@ -60,7 +60,7 @@ impl CoveredRead for PreviewRead {
         &self.request.queue
     }
     fn encoded_size(&self) -> QueueResult<u64> {
-        encoded_len(&self.request)
+        encoded_len(self.request.as_ref())
     }
     fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
         self.request.preflight(limits)?;
@@ -90,11 +90,14 @@ impl CoveredRead for PreviewRead {
         job: Arc<QueueReservation>,
     ) -> QueueFuture<'a, RecoveredQueue> {
         Box::pin(async move {
-            let states = fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::new(
-                &self.request.queue,
-                std::slice::from_ref(&self.request.group),
-                &job,
-            )?;
+            let states =
+                fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::with_work(
+                    &self.request.queue,
+                    fireweed_engine::queue_group_state_authority::GroupDeclarations::Preview(
+                        self.request.clone(),
+                    ),
+                    &job,
+                )?;
             pipeline
                 .recover_checked(
                     self.request.queue.clone(),

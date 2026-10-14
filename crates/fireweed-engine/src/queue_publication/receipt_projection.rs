@@ -131,6 +131,13 @@ fn fields_fingerprint<T: Serialize>(fields: &T) -> PublicationResult<FieldsFinge
         sha256: writer.hash.finalize().into(),
     })
 }
+/// Canonical public FieldValue fingerprint without owning borrowed payloads.
+pub fn borrowed_value_fingerprint(value: ValueRef<'_>) -> PublicationResult<FieldsFingerprint> {
+    fields_fingerprint(&value)
+}
+pub fn owned_value_fingerprint(value: &FieldValue) -> PublicationResult<FieldsFingerprint> {
+    fields_fingerprint(value)
+}
 pub fn borrowed_fields_fingerprint(fields: FieldsRef<'_>) -> PublicationResult<FieldsFingerprint> {
     fields_fingerprint(&PublicFields(fields))
 }
@@ -571,6 +578,39 @@ mod tests {
         assert_eq!(
             postcard::to_allocvec(&lookup).unwrap(),
             postcard::to_allocvec(&owned_lookup).unwrap()
+        );
+    }
+    #[test]
+    fn borrowed_value_fingerprints_match_independent_public_serialization() {
+        let values = [
+            FieldValue::Integer(i64::MIN),
+            FieldValue::Integer(i64::MAX),
+            FieldValue::Float(-0.0),
+            FieldValue::Float(0.0),
+            FieldValue::Float(f64::MIN_POSITIVE),
+            FieldValue::Boolean(false),
+            FieldValue::Text("\0β\n".into()),
+            FieldValue::Bytes(vec![0, 128, 255]),
+        ];
+        for owned in &values {
+            let borrowed = match owned {
+                FieldValue::Integer(v) => ValueRef::Integer(*v),
+                FieldValue::Float(v) => ValueRef::Float(*v),
+                FieldValue::Boolean(v) => ValueRef::Boolean(*v),
+                FieldValue::Text(v) => ValueRef::Text(v),
+                FieldValue::Bytes(v) => ValueRef::Bytes(v),
+            };
+            let encoded = postcard::to_allocvec(owned).unwrap();
+            let expected = FieldsFingerprint {
+                encoded_bytes: encoded.len() as u64,
+                sha256: Sha256::digest(&encoded).into(),
+            };
+            assert_eq!(borrowed_value_fingerprint(borrowed).unwrap(), expected);
+            assert_eq!(owned_value_fingerprint(owned).unwrap(), expected);
+        }
+        assert_ne!(
+            borrowed_value_fingerprint(ValueRef::Float(-0.0)).unwrap(),
+            borrowed_value_fingerprint(ValueRef::Float(0.0)).unwrap()
         );
     }
 }

@@ -35,6 +35,7 @@ mod stats_group;
 mod stats_read;
 mod unique_authority;
 mod work;
+mod work_source;
 pub use commit_prepare::{AdmittedCommitReceipt, CommitPreparationInput, PreparedOrdinaryCommit};
 use fireweed_core::queue_contract::*;
 use fireweed_engine::{

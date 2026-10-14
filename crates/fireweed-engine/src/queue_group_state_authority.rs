@@ -1,5 +1,7 @@
-//! Bounded state authority for the exact declared commit groups, including every
-//! sibling in an operation-local batch handoff. No state payload is retained.
+//! Bounded state and ordinary selected-work authority for declared commit groups.
+//! The existing state anchor binds every sibling, owner and checked cut; no opaque
+//! work or state payload is retained. Complete administrative hydration is separate.
+mod work;
 use crate::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
     queue_log_record::OwnedQueueLogRecord,
@@ -8,13 +10,31 @@ use crate::{
 };
 use fireweed_core::queue_contract::*;
 use std::sync::Arc;
+pub use work::{BodyDescriptor, ValueDescriptor, WorkDescriptor, WorkMetadata};
 const ANCHOR_COLLECTION: &str = "\0group-state-cut";
 struct Binding {
     fingerprint: [u8; 32],
     positions: Vec<(usize, usize)>,
 }
+pub enum GroupDeclarations {
+    Batch(Arc<CommitBatch>),
+    Group(Arc<CommitGroup>),
+    Preview(Arc<PreviewRequest>),
+}
+impl GroupDeclarations {
+    fn groups(&self) -> &[CommitGroup] {
+        match self {
+            Self::Batch(batch) => &batch.groups,
+            Self::Group(group) => std::slice::from_ref(group.as_ref()),
+            Self::Preview(request) => std::slice::from_ref(&request.group),
+        }
+    }
+}
 pub struct ColdGroupStateTracker {
     anchor: ColdStateTracker,
+    declarations: Option<GroupDeclarations>,
+    work_genesis_sha256: Option<[u8; 32]>,
+    work: Option<work::WorkSet>,
     bindings: Vec<Binding>,
     states: Vec<ColdStateTracker>,
     charge: OwnedQueueBufferCharge,
@@ -22,6 +42,7 @@ pub struct ColdGroupStateTracker {
 }
 pub struct AdmittedGroupStateSet {
     anchor: AdmittedStateAuthority,
+    work: Option<work::WorkSet>,
     bindings: Vec<Binding>,
     states: Vec<AdmittedStateAuthority>,
     _charge: OwnedQueueBufferCharge,
@@ -35,6 +56,65 @@ fn unknown(reason: &str) -> QueueError {
     QueueError::OutcomeUnknown(format!("group state authority: {reason}"))
 }
 impl ColdGroupStateTracker {
+    /// Retain the already admitted request owner until checked genesis supplies
+    /// the exact schema. No request payload is cloned by this proof.
+    pub fn with_work(
+        queue: &QueueAddress,
+        declarations: GroupDeclarations,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Self> {
+        if match &declarations {
+            GroupDeclarations::Batch(batch) => &batch.queue != queue,
+            GroupDeclarations::Preview(request) => &request.queue != queue,
+            GroupDeclarations::Group(_) => false,
+        } {
+            return Err(unknown("work declarations address differs"));
+        }
+        let mut tracker = Self::new(queue, declarations.groups(), job)?;
+        tracker.declarations = Some(declarations);
+        Ok(tracker)
+    }
+    /// Called after the enclosing history validates the same checked genesis.
+    pub fn initialize_work(
+        &mut self,
+        history: &ColdQueueHistory,
+        checked: &crate::queue_log_record::CheckedQueueLogRecord<'_>,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<()> {
+        if self.poisoned {
+            return Err(unknown("poisoned group history initialization"));
+        }
+        let result = self.initialize_work_checked(history, checked, job);
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+    fn initialize_work_checked(
+        &mut self,
+        history: &ColdQueueHistory,
+        checked: &crate::queue_log_record::CheckedQueueLogRecord<'_>,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<()> {
+        let Some(declarations) = self.declarations.as_ref() else {
+            return Ok(());
+        };
+        if self.poisoned
+            || self.work.is_some()
+            || !std::ptr::eq(self.charge.reservation(), job.as_ref())
+        {
+            return Err(unknown("work scope initialization is not fresh"));
+        }
+        let genesis_sha256 = self.anchor.initialization_genesis(history, checked, job)?;
+        self.work = Some(work::WorkSet::new(
+            declarations.groups(),
+            history.definition()?.schema(),
+            job,
+        )?);
+        self.work_genesis_sha256 = Some(genesis_sha256);
+        Ok(())
+    }
+
     pub fn new(
         queue: &QueueAddress,
         groups: &[CommitGroup],
@@ -94,6 +174,9 @@ impl ColdGroupStateTracker {
             .collect::<QueueResult<Vec<_>>>()?;
         Ok(Self {
             anchor,
+            declarations: None,
+            work_genesis_sha256: None,
+            work: None,
             bindings,
             states,
             charge,
@@ -114,6 +197,9 @@ impl ColdGroupStateTracker {
             .seed(&proof.anchor, &batch.queue, genesis, progress, job)?;
         if tracker.states.len() != proof.states.len() {
             return Err(unknown("continuation state vector mismatch"));
+        }
+        if let Some(work) = &proof.work {
+            tracker.work = Some(work.copy_admitted(job)?);
         }
         for (state, previous) in tracker.states.iter_mut().zip(&proof.states) {
             state.seed(previous, &batch.queue, genesis, progress, job)?;
@@ -142,7 +228,33 @@ impl ColdGroupStateTracker {
             return Err(unknown("poisoned group state history"));
         }
         let result = (|| {
+            if self.declarations.is_some() && self.work.is_none() {
+                return Err(unknown("work scope not initialized at checked genesis"));
+            }
+            if offset == 0
+                && let Some(expected) = self.work_genesis_sha256
+            {
+                use sha2::Digest;
+                if expected != <[u8; 32]>::from(sha2::Sha256::digest(checked.owner().bytes())) {
+                    return Err(unknown(
+                        "work scope initialized from a different genesis token",
+                    ));
+                }
+            }
             self.anchor.observe_record(offset, checked)?;
+            if let Some(work) = &mut self.work {
+                use crate::queue_log_record::QueueLogPayload;
+                let commands = match checked.view().payload() {
+                    QueueLogPayload::Genesis(_) => None,
+                    QueueLogPayload::Publication(frame) => Some(frame.commands()),
+                    QueueLogPayload::Claim(claim) => Some(claim.commands().commands()),
+                };
+                if let Some(commands) = commands {
+                    for command in commands {
+                        work.observe(command.map_err(|_| unknown("invalid source work command"))?)?;
+                    }
+                }
+            }
             for state in &mut self.states {
                 state.observe_record(offset, checked)?;
             }
@@ -159,8 +271,8 @@ impl ColdGroupStateTracker {
         genesis: &OwnedQueueLogRecord,
         progress: (u64, u64, u64),
     ) -> QueueResult<AdmittedGroupStateSet> {
-        if self.poisoned {
-            return Err(unknown("poisoned group state history"));
+        if self.poisoned || (self.declarations.is_some() && self.work.is_none()) {
+            return Err(unknown("poisoned or uninitialized group history"));
         }
         let anchor = self.anchor.finish(history, genesis, progress)?;
         let states = self
@@ -170,6 +282,7 @@ impl ColdGroupStateTracker {
             .collect::<QueueResult<Vec<_>>>()?;
         Ok(AdmittedGroupStateSet {
             anchor,
+            work: self.work,
             bindings: self.bindings,
             states,
             _charge: self.charge,
@@ -212,6 +325,18 @@ impl AdmittedGroupStateSet {
     }
 }
 impl AdmittedGroupStateAuthority {
+    /// Exact group membership is checked even when sibling field closures unite.
+    pub fn work_descriptor(&self, key: &str) -> QueueResult<&WorkDescriptor> {
+        self.set
+            .work
+            .as_ref()
+            .ok_or_else(|| unknown("ordinary work scope missing"))?
+            .descriptor(self.position, key)
+    }
+    pub fn has_work_authority(&self) -> bool {
+        self.set.work.is_some()
+    }
+
     pub fn validate(
         &self,
         queue: &QueueAddress,
@@ -256,3 +381,6 @@ impl AdmittedGroupStateAuthority {
         self.set.states[collection].descriptor(position, key)
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -665,7 +665,10 @@ async fn batch_continuation_empty_suffix_preserves_historical_epoch_and_rebuilds
         patch_group("one", 1, 7),
         patch_group("two", 2, 8),
     ]));
-    let old = pipeline.recover_batch(&request, job.clone()).await.unwrap();
+    let old = pipeline
+        .recover_batch(request.clone(), job.clone())
+        .await
+        .unwrap();
     let historical_epoch = old.history.historical_epoch();
     let previous_fence = old.acquired_epoch;
     let before = pipeline.diagnostics.snapshot();
@@ -818,7 +821,7 @@ async fn submission_resolution_does_not_retry_failed_continuation_into_fenced_ab
         .unwrap();
     for replay_retry in [false, true] {
         let previous = pipeline
-            .recover_batch(&batch(vec![patch_group("one", 1, 7)]), job.clone())
+            .recover_batch(Arc::new(batch(vec![patch_group("one", 1, 7)])), job.clone())
             .await
             .unwrap();
         let mutation = RewoundMutation {
@@ -911,7 +914,10 @@ async fn batch_continuation_rejects_real_valid_rewound_and_vanished_authority() 
         .await
         .unwrap();
         let request = Arc::new(batch(vec![patch_group("one", 1, 7)]));
-        let previous = pipeline.recover_batch(&request, job.clone()).await.unwrap();
+        let previous = pipeline
+            .recover_batch(request.clone(), job.clone())
+            .await
+            .unwrap();
         assert_eq!(previous.target_next_offset, 2);
         saved["epoch"] = (previous.acquired_epoch + 10).into();
         if vanished {
@@ -992,7 +998,10 @@ async fn sized_pack(
     positions: Vec<usize>,
 ) -> fireweed_turso::queue_projection::PreparedOrdinaryPack {
     let request = Arc::new(request.clone());
-    let covered = pipeline.recover_batch(&request, job.clone()).await.unwrap();
+    let covered = pipeline
+        .recover_batch(request.clone(), job.clone())
+        .await
+        .unwrap();
     let prepared = pipeline
         .projection
         .prepare_ordinary_pack(

@@ -14,10 +14,18 @@ fn input(
 ) -> CommitPackPreparationInput {
     let mut history = ColdQueueHistory::new(&request.queue, job).unwrap();
     let mut originals = ColdOriginalTracker::new(&request, job).unwrap();
-    let mut states = ColdGroupStateTracker::new(&request.queue, &request.groups, job).unwrap();
+    let mut states = ColdGroupStateTracker::with_work(
+        &request.queue,
+        fireweed_engine::queue_group_state_authority::GroupDeclarations::Batch(request.clone()),
+        job,
+    )
+    .unwrap();
     for (offset, record) in records.iter().enumerate() {
         let checked = record.checked().unwrap();
         history.observe_record(offset as u64, &checked).unwrap();
+        if offset == 0 {
+            states.initialize_work(&history, &checked, job).unwrap();
+        }
         originals.observe_record(offset as u64, &checked).unwrap();
         states.observe_record(offset as u64, &checked).unwrap();
     }
@@ -1114,4 +1122,154 @@ async fn administration_is_a_barrier_and_late_fallback_fit_precedes_any_pack() {
     assert_eq!(integer(&row[0]).unwrap(), 2);
     assert_eq!(integer(&row[1]).unwrap(), 1);
     fixture.finish().await;
+}
+
+#[tokio::test]
+async fn source_work_metadata_and_selected_field_corruption_fail_before_pack_planning() {
+    use super::super::tests::execute_for_test;
+    for case in [
+        "priority",
+        "version",
+        "active",
+        "missing",
+        "schedule",
+        "attempts",
+        "selected-value",
+        "unindexed-value",
+        "selected-type",
+        "selected-length",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let (projection, definition) =
+            bootstrap(&directory.path().join("projection.db"), &job, &workers).await;
+        let genesis =
+            encode_checked_genesis(1, &address(), &definition, &[31; 32], 16 << 20, &job).unwrap();
+        let (mut source_snapshot, seed) = seed_record(&definition, &job, false);
+        let mut records = vec![genesis, seed];
+        projection
+            .apply(
+                OwnedQueueLogRecord::from_admitted_bytes(
+                    bytes::Bytes::copy_from_slice(records[1].bytes()),
+                    job.owned_buffer((records[1].bytes().len() as u64) * 4 + 4096)
+                        .unwrap(),
+                    &job,
+                )
+                .unwrap(),
+                1,
+                &job,
+                &workers,
+            )
+            .await
+            .unwrap();
+        if case == "unindexed-value" {
+            let mut source_group = patch("seed-unindexed", 1, 0);
+            source_group.work_updates[0].change = UnclaimedChange::Patch(WorkPatch {
+                fields: [("meta/note".into(), Some(FieldValue::Text("old".into())))].into(),
+                ..Default::default()
+            });
+            let source = super::super::tests::group_record(
+                &definition,
+                &mut source_snapshot,
+                &source_group,
+                &job,
+            );
+            let copy = OwnedQueueLogRecord::from_admitted_bytes(
+                bytes::Bytes::copy_from_slice(source.bytes()),
+                job.owned_buffer((source.bytes().len() as u64) * 4 + 4096)
+                    .unwrap(),
+                &job,
+            )
+            .unwrap();
+            projection.apply(copy, 2, &job, &workers).await.unwrap();
+            records.push(source);
+        }
+        let mut group = patch("source-work", 1, 7);
+        group.work_updates[0].change = UnclaimedChange::Patch(WorkPatch {
+            fields: [("u".into(), Some(FieldValue::Integer(3)))].into(),
+            ..Default::default()
+        });
+        if case == "unindexed-value" {
+            group.work_updates[0].expect = StateExpect::Version(2);
+            group.work_updates[0].change = UnclaimedChange::Patch(WorkPatch {
+                fields: [("meta/note".into(), Some(FieldValue::Text("new".into())))].into(),
+                ..Default::default()
+            });
+        }
+        let request = Arc::new(CommitBatch {
+            queue: address(),
+            groups: vec![group],
+        });
+        let prepared_input = input(request, &definition, &records, &job);
+        let (sql, params) = match case {
+            "priority" => (
+                "UPDATE q7_records SET priority=12 WHERE key=?1",
+                vec![blob(b"a")],
+            ),
+            "version" => (
+                "UPDATE q7_records SET version=?2 WHERE key=?1",
+                vec![blob(b"a"), number(2)],
+            ),
+            "active" => (
+                "UPDATE q7_records SET active=0 WHERE key=?1",
+                vec![blob(b"a")],
+            ),
+            "missing" => ("DELETE FROM q7_records WHERE key=?1", vec![blob(b"a")]),
+            "schedule" => (
+                "UPDATE q7_records SET available_at=17 WHERE key=?1",
+                vec![blob(b"a")],
+            ),
+            "attempts" => (
+                "UPDATE q7_records SET attempts=2 WHERE key=?1",
+                vec![blob(b"a")],
+            ),
+            "selected-value" => (
+                "UPDATE q7_fields SET value=?2 WHERE field=1 AND record_id=(SELECT id FROM q7_records WHERE key=?1)",
+                vec![blob(b"a"), blob(&encode(&FieldValue::Integer(4)).unwrap())],
+            ),
+            "unindexed-value" => (
+                "UPDATE q7_additional SET value=?2 WHERE name=?3 AND record_id=(SELECT id FROM q7_records WHERE key=?1)",
+                vec![
+                    blob(b"a"),
+                    blob(&encode(&FieldValue::Text("bad".into())).unwrap()),
+                    blob(b"meta/note"),
+                ],
+            ),
+            "selected-type" => (
+                "UPDATE q7_fields SET value=?2 WHERE field=1 AND record_id=(SELECT id FROM q7_records WHERE key=?1)",
+                vec![
+                    blob(b"a"),
+                    blob(&encode(&FieldValue::Boolean(true)).unwrap()),
+                ],
+            ),
+            "selected-length" => (
+                "UPDATE q7_fields SET value=zeroblob(4194304) WHERE field=1 AND record_id=(SELECT id FROM q7_records WHERE key=?1)",
+                vec![blob(b"a")],
+            ),
+            _ => unreachable!(),
+        };
+        execute_for_test(&projection, sql, params).await;
+        let result = projection
+            .prepare_ordinary_pack(
+                prepared_input,
+                2,
+                16 << 20,
+                Arc::new(TestClock::default()),
+                &job,
+                &workers,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(QueueError::OutcomeUnknown(_))),
+            "{case}"
+        );
+        drop(source_snapshot);
+        drop(records);
+        drop(definition);
+        drop(projection);
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (0, 0), "{case} drains");
+    }
 }

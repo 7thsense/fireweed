@@ -277,18 +277,20 @@ impl QueueRecoveryPipeline {
     }
     async fn recover_batch(
         self: &Arc<Self>,
-        request: &fireweed_core::queue_contract::CommitBatch,
+        request: Arc<fireweed_core::queue_contract::CommitBatch>,
         job: Arc<QueueReservation>,
     ) -> QueueResult<RecoveredQueue> {
-        let originals = ColdOriginalTracker::new(request, &job)?;
+        let originals = ColdOriginalTracker::new(&request, &job)?;
         self.recover_checked(
             request.queue.clone(),
             None,
             Some(originals),
             Some(RecoveryStateTracker::Groups(
-                fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::new(
+                fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::with_work(
                     &request.queue,
-                    &request.groups,
+                    fireweed_engine::queue_group_state_authority::GroupDeclarations::Batch(
+                        request.clone(),
+                    ),
                     &job,
                 )?,
             )),
@@ -559,9 +561,11 @@ impl RecoveryTask {
             } else {
                 self.originals = Some(ColdOriginalTracker::new(&seed.request, &self.job)?);
                 self.states = Some(RecoveryStateTracker::Groups(
-                    fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::new(
+                    fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::with_work(
                         &seed.request.queue,
-                        &seed.request.groups,
+                        fireweed_engine::queue_group_state_authority::GroupDeclarations::Batch(
+                            seed.request.clone(),
+                        ),
                         &self.job,
                     )?,
                 ));
@@ -594,6 +598,11 @@ impl RecoveryTask {
                 ));
             }
             history.observe_record(offset, &checked)?;
+            if offset == 0
+                && let Some(RecoveryStateTracker::Groups(groups)) = &mut self.states
+            {
+                groups.initialize_work(&history, &checked, &self.job)?;
+            }
             if let Some(originals) = &mut self.originals {
                 originals.observe_record(offset, &checked)?;
             }

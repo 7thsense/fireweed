@@ -19,6 +19,38 @@ class StatePreparationGateTests(unittest.TestCase):
         self.assertEqual(len(self.report['negative_controls']),10)
         for control in self.report['negative_controls']:
             gate.helper.replay(gate.model.StatePreparation(control['fault']),control['trace'],control['property'])
+    def test_work_knowledge_and_replayable_admission_controls(self):
+        report = self.report['baseline'][1]
+        self.assertTrue(report['complete'])
+        self.assertGreater(report['states'],1)
+        self.assertEqual(len(report['completed_witnesses']),11)
+        self.assertEqual(len(self.report['work_negative_controls']),12)
+        for control in self.report['work_negative_controls']:
+            gate.helper.replay(gate.model.WorkPreparation(control['fault']),control['trace'],control['property'])
+    def test_correct_unknown_cannot_mask_unsafe_work_reads(self):
+        model = gate.model.WorkPreparation()
+        for case, flag, expected in [
+            ((0,0,1,1,0,0,0), 'touched', 'W-SCOPE'),
+            ((0,0,1,0,1,0,0), 'fields_loaded', 'W-METADATA'),
+        ]:
+            for phase in ['fields', 'done']:
+                state = gate.model.WorkState(case=case,phase=phase,result='unknown' if phase == 'done' else '',**{flag:True})
+                self.assertEqual(model.violation(model.initial,'UnsafeReadThenUnknown',state),expected)
+        for fault in ['read_foreign_work_then_unknown','read_bad_metadata_fields_then_unknown']:
+            mutant = gate.model.WorkPreparation(fault)
+            case = (0,0,1,1,0,0,0) if 'foreign' in fault else (0,0,1,0,1,0,0)
+            state = gate.model.WorkState(case=case,phase='scope' if 'foreign' in fault else 'metadata',touched='foreign' not in fault)
+            action, bad_read = next(mutant.transitions(state))
+            self.assertEqual(mutant.violation(state,action,bad_read),gate.model.WORK_FAULTS[fault])
+            action, terminal = next(mutant.transitions(bad_read))
+            self.assertEqual(terminal.result,'unknown')
+            self.assertEqual(mutant.violation(bad_read,action,terminal),gate.model.WORK_FAULTS[fault])
+    def test_work_classification_uses_source_needs_and_not_cache_size(self):
+        expected = gate.model.WorkPreparation.expected
+        self.assertEqual(expected((0,1,2,1,1,2,2)), 'original')
+        self.assertEqual(expected((1,0,0,0,0,2,2)), 'prepared')
+        self.assertEqual(expected((1,0,1,0,0,0,2)), 'prepared')
+        self.assertEqual(expected((1,0,2,0,0,0,2)), 'unknown')
     def test_original_precedes_every_current_state_touch(self):
         control=next(c for c in self.report['negative_controls'] if c['fault']=='read_before_original')
         terminal=control['trace'][-1]

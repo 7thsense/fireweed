@@ -126,6 +126,35 @@ pub struct AdmittedStateAuthority {
     charge: OwnedQueueBufferCharge,
 }
 impl ColdStateTracker {
+    /// Share the anchor's address and operation ownership for lazy proof scopes.
+    pub(super) fn initialization_genesis(
+        &self,
+        history: &ColdQueueHistory,
+        checked: &crate::queue_log_record::CheckedQueueLogRecord<'_>,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<[u8; 32]> {
+        let QueueLogPayload::Genesis(genesis) = checked.view().payload() else {
+            return Err(unknown("initialization requires checked genesis"));
+        };
+        if self.poisoned
+            || self.next_offset != 0
+            || !std::ptr::eq(self.charge.reservation(), job.as_ref())
+            || !checked.owner().belongs_to(job)
+            || !history.belongs_to(job)
+            || history.next_offset() != 1
+            || history.address()? != view_address(&self.address)?
+            || checked.view().address() != view_address(&self.address)?
+            || history.definition()?.raw() != genesis.definition_bytes()
+            || history.cursor_secret()? != genesis.cursor_secret()
+            || history.historical_epoch() != checked.view().epoch()
+        {
+            return Err(unknown(
+                "initialization genesis/history/address/owner mismatch",
+            ));
+        }
+        Ok(Sha256::digest(checked.owner().bytes()).into())
+    }
+
     pub fn new(request: &StateReadRequest, job: &Arc<QueueReservation>) -> QueueResult<Self> {
         Self::new_keys(
             &request.queue,
