@@ -4829,7 +4829,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "9e9b61b9c04214585cfbe04711628bda7a7ea8426433dcc2be414d881c49cf7d",
+  "scan_sha256": "655be63fc631d229354324dac1d230781630214ea86cf8d941094584cc650771",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -17064,7 +17064,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 95197,
+      "last_match_line": 95473,
       "line": 1,
       "markers": [
         "e3",
@@ -17629,6 +17629,42 @@
       "operations": [
         "constant"
       ],
+      "path": "scripts/formal/check_state_preparation.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 57,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 57,
+      "line": 46,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/check_state_preparation.py",
+      "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 2,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 2,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
       "path": "scripts/formal/conformance.py",
       "symbol": "<module>"
     },
@@ -17778,6 +17814,24 @@
         "constant"
       ],
       "path": "scripts/formal/test_state_authority.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 1,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/test_state_preparation.py",
       "symbol": "<module>"
     },
     {

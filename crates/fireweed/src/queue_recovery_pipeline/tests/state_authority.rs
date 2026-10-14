@@ -488,3 +488,354 @@ async fn prove_unchecked_phantom_readable(path: &std::path::Path, address: &Queu
     drop(job);
     workers.close_and_drain().await.unwrap();
 }
+
+async fn state_preparation_cache_contract(s3: bool) {
+    for (case, change, succeeds) in [
+        ("check-unused", StateChange::Check, true),
+        (
+            "put-unused-body",
+            StateChange::Put {
+                fields: fields(),
+                value: bytes::Bytes::from_static(b"next"),
+            },
+            true,
+        ),
+        ("delete-unused-body", StateChange::Delete, true),
+        ("check-missing", StateChange::Check, false),
+        ("check-hwm", StateChange::Check, false),
+        (
+            "put-field",
+            StateChange::Put {
+                fields: fields(),
+                value: bytes::Bytes::new(),
+            },
+            false,
+        ),
+        ("delete-field", StateChange::Delete, false),
+    ] {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("fireweed-state-preparation-{s3}-{case}-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let prefix = s3.then(|| format!("api007-state-preparation-{case}-{nonce}"));
+        let address = QueueAddress {
+            tenant: "state-preparation".into(),
+            queue: case.into(),
+        };
+        let clock = Arc::new(fireweed_conformance::queue_contract::TestClock::default());
+        let queue =
+            native_port_fixture(&root, "primary.db", prefix.as_deref(), clock.clone()).await;
+        seed_states(&queue, &address).await;
+        queue.shutdown().await.unwrap();
+        drop(queue);
+        let db = turso::Builder::new_local(root.join("primary.db").to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let connection = db.connect().unwrap();
+        let key = turso::Value::Blob(b"a".to_vec());
+        let sql = match case {
+            "check-unused" | "put-unused-body" | "delete-unused-body" => {
+                "DELETE FROM q7_bodies WHERE record_id IN (SELECT id FROM q7_records WHERE collection=1 AND key=?1)"
+            }
+            "check-missing" => "DELETE FROM q7_records WHERE collection=1 AND key=?1",
+            "check-hwm" => "UPDATE q7_records SET version=?2 WHERE collection=1 AND key=?1",
+            "put-field" => {
+                "UPDATE q7_fields SET value=?2 WHERE field=0 AND record_id IN (SELECT id FROM q7_records WHERE collection=1 AND key=?1)"
+            }
+            "delete-field" => {
+                "UPDATE q7_fields SET value=zeroblob(8388608) WHERE field=0 AND record_id IN (SELECT id FROM q7_records WHERE collection=1 AND key=?1)"
+            }
+            _ => unreachable!(),
+        };
+        let mut params = vec![key.clone()];
+        if case == "check-hwm" {
+            params.push(turso::Value::Blob(2u64.to_be_bytes().to_vec()));
+        }
+        if case == "put-field" {
+            params.push(turso::Value::Blob(
+                encode(&FieldValue::Text("waiting".into())).unwrap(),
+            ));
+        }
+        connection.execute(sql, params).await.unwrap();
+        if case == "check-unused" {
+            connection.execute("UPDATE q7_fields SET value=zeroblob(8388608) WHERE record_id IN (SELECT id FROM q7_records WHERE collection=1 AND key=?1)", vec![key]).await.unwrap();
+        }
+        drop(connection);
+        drop(db);
+        let queue =
+            native_port_fixture(&root, "primary.db", prefix.as_deref(), clock.clone()).await;
+        // Immutable originals remain replayable even when current state is corrupt.
+        let original = state_group(
+            "create",
+            vec![
+                update(
+                    "a",
+                    StateExpect::Absent,
+                    StateChange::Put {
+                        fields: fields(),
+                        value: bytes::Bytes::from_static(b"exact"),
+                    },
+                ),
+                update(
+                    "empty",
+                    StateExpect::Absent,
+                    StateChange::Put {
+                        fields: Fields::new(),
+                        value: bytes::Bytes::new(),
+                    },
+                ),
+            ],
+        );
+        let replay = queue
+            .commit(CommitBatch {
+                queue: address.clone(),
+                groups: vec![original],
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(replay[0].outcome, GroupOutcome::Committed { .. }),
+            "{s3} {case}: immutable original replay"
+        );
+        let group = state_group("fresh", vec![update("a", StateExpect::Version(1), change)]);
+        let preview = queue
+            .preview(PreviewRequest {
+                queue: address.clone(),
+                group: group.clone(),
+            })
+            .await;
+        let committed = queue
+            .commit(CommitBatch {
+                queue: address.clone(),
+                groups: vec![group],
+            })
+            .await;
+        if succeeds {
+            assert!(
+                matches!(
+                    preview,
+                    Ok(PreviewResult {
+                        outcome: PreviewOutcome::Committed { .. }
+                    })
+                ),
+                "{s3} {case}: {preview:?}"
+            );
+            assert!(
+                matches!(&committed, Ok(receipts) if matches!(receipts[0].outcome, GroupOutcome::Committed { .. })),
+                "{s3} {case}: {committed:?}"
+            );
+        } else {
+            assert!(
+                matches!(preview, Err(QueueError::OutcomeUnknown(_))),
+                "{s3} {case}: {preview:?}"
+            );
+            assert!(
+                matches!(committed, Err(QueueError::OutcomeUnknown(_))),
+                "{s3} {case}: {committed:?}"
+            );
+        }
+        queue.shutdown().await.unwrap();
+        drop(queue);
+        let rebuilt = native_port_fixture(&root, "rebuilt.db", prefix.as_deref(), clock).await;
+        let restored = rebuilt
+            .read_state(read(&address, &["a"], 65536))
+            .await
+            .unwrap();
+        assert_eq!(
+            restored[0].as_ref().map(|record| record.version),
+            if case == "delete-unused-body" {
+                None
+            } else if case == "put-unused-body" {
+                Some(2)
+            } else {
+                Some(1)
+            }
+        );
+        rebuilt.shutdown().await.unwrap();
+        drop(rebuilt);
+        let db = turso::Builder::new_local(root.join("rebuilt.db").to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let connection = db.connect().unwrap();
+        let mut rows = connection
+            .query("SELECT applied_next_offset FROM q7_queues", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get_value(0).unwrap(),
+            turso::Value::Integer(if succeeds { 4 } else { 3 }),
+            "preview and rejected preparation cannot append"
+        );
+        drop(rows);
+        drop(connection);
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+#[tokio::test]
+async fn native_state_preparation_source_cache_local() {
+    state_preparation_cache_contract(false).await;
+}
+#[tokio::test]
+async fn native_state_preparation_source_cache_real_s3() {
+    state_preparation_cache_contract(true).await;
+}
+
+async fn state_preparation_administration_contract(s3: bool) {
+    use fireweed_core::queue_administration::{
+        AdministrativeAction, AdministrativeEntry, AdministrativeIntent, AdministrativeOperation,
+        WorkSelector,
+    };
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("fireweed-state-admin-proof-{s3}-{nonce}"));
+    std::fs::create_dir_all(&root).unwrap();
+    let prefix = s3.then(|| format!("api007-state-admin-proof-{nonce}"));
+    let clock = Arc::new(fireweed_conformance::queue_contract::TestClock::default());
+    let address = QueueAddress {
+        tenant: "state-admin-proof".into(),
+        queue: "queue".into(),
+    };
+    let queue = native_port_fixture(&root, "primary.db", prefix.as_deref(), clock.clone()).await;
+    queue
+        .provision(ProvisionRequest {
+            queue: address.clone(),
+            schema: state_schema(),
+        })
+        .await
+        .unwrap();
+    let administrative = |id: &str, expect| {
+        let mut group = state_group(
+            id,
+            vec![update(
+                "a",
+                expect,
+                StateChange::Put {
+                    fields: fields(),
+                    value: bytes::Bytes::from_static(b"exact"),
+                },
+            )],
+        );
+        group.administration = Some(AdministrativeCommit {
+            max_result_bytes: 65536,
+            intent: AdministrativeIntent {
+                evaluated_at: 0,
+                before_fields: None,
+                operation: AdministrativeOperation::Addressed(vec![AdministrativeEntry {
+                    key: "missing".into(),
+                    expected_version: None,
+                    precondition: WorkSelector::all(vec![]),
+                    action: AdministrativeAction::Delete {
+                        lease_guard: AdministrativeLeaseGuard::RejectActive,
+                    },
+                }]),
+            },
+        });
+        group
+    };
+    let original = administrative("original-fp4", StateExpect::Absent);
+    let recorded = queue
+        .commit(CommitBatch {
+            queue: address.clone(),
+            groups: vec![original.clone()],
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(&recorded[0].outcome, GroupOutcome::AdministrativeCommitted { versions, .. } if versions == &vec![RecordVersion { collection: Some("workflow".into()), key: "a".into(), version: 1 }])
+    );
+    queue.shutdown().await.unwrap();
+    drop(queue);
+    let db = turso::Builder::new_local(root.join("primary.db").to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let connection = db.connect().unwrap();
+    connection.execute("UPDATE q7_fields SET value=?1 WHERE field=0 AND record_id IN (SELECT id FROM q7_records WHERE collection=1)", vec![turso::Value::Blob(encode(&FieldValue::Text("waiting".into())).unwrap())]).await.unwrap();
+    drop(connection);
+    drop(db);
+    let queue = native_port_fixture(&root, "primary.db", prefix.as_deref(), clock.clone()).await;
+    assert_eq!(
+        queue
+            .commit(CommitBatch {
+                queue: address.clone(),
+                groups: vec![original]
+            })
+            .await
+            .unwrap(),
+        recorded,
+        "FP4 original replay precedes current-state cache checks"
+    );
+    let fresh = administrative("fresh-fp4", StateExpect::Version(1));
+    assert!(
+        matches!(
+            queue
+                .preview(PreviewRequest {
+                    queue: address.clone(),
+                    group: fresh.clone()
+                })
+                .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ),
+        "FP4 preview must consume proved old fields"
+    );
+    assert!(
+        matches!(
+            queue
+                .commit(CommitBatch {
+                    queue: address.clone(),
+                    groups: vec![fresh]
+                })
+                .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ),
+        "FP4 publication must consume proved old fields"
+    );
+    queue.shutdown().await.unwrap();
+    drop(queue);
+    let rebuilt = native_port_fixture(&root, "rebuilt.db", prefix.as_deref(), clock).await;
+    assert_eq!(
+        rebuilt
+            .read_state(read(&address, &["a"], 65536))
+            .await
+            .unwrap()[0]
+            .as_ref()
+            .unwrap()
+            .version,
+        1
+    );
+    rebuilt.shutdown().await.unwrap();
+    drop(rebuilt);
+    let db = turso::Builder::new_local(root.join("rebuilt.db").to_str().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let connection = db.connect().unwrap();
+    let mut rows = connection
+        .query("SELECT applied_next_offset FROM q7_queues", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get_value(0).unwrap(),
+        turso::Value::Integer(2)
+    );
+    drop(rows);
+    drop(connection);
+    drop(db);
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[tokio::test]
+async fn native_state_preparation_administration_local() {
+    state_preparation_administration_contract(false).await;
+}
+#[tokio::test]
+async fn native_state_preparation_administration_real_s3() {
+    state_preparation_administration_contract(true).await;
+}

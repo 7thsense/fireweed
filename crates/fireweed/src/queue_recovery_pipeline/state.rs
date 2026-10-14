@@ -34,7 +34,13 @@ impl CoveredRead for StateReadRequest {
         Box::pin(async move {
             let states = fireweed_engine::queue_state_authority::ColdStateTracker::new(self, &job)?;
             pipeline
-                .recover_checked(self.queue.clone(), None, None, Some(states), job)
+                .recover_checked(
+                    self.queue.clone(),
+                    None,
+                    None,
+                    Some(RecoveryStateTracker::Read(states)),
+                    job,
+                )
                 .await
         })
     }

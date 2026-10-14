@@ -52,6 +52,7 @@ pub mod queue_claim_receipt;
 pub mod queue_contract;
 pub mod queue_cursor;
 pub mod queue_fields;
+pub mod queue_group_state_authority;
 pub mod queue_index;
 pub mod queue_log_record;
 pub mod queue_namespace;

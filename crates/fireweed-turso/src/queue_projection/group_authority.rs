@@ -3,31 +3,36 @@
 use super::*;
 use fireweed_engine::queue_planner::{RecordIdentity, RecordSnapshot, required_work_fields};
 use std::collections::BTreeSet;
+pub(super) struct GroupRead<'a> {
+    pub group: &'a CommitGroup,
+    pub states:
+        Option<&'a fireweed_engine::queue_group_state_authority::AdmittedGroupStateAuthority>,
+    pub sequence: u64,
+}
 pub(super) async fn load_group(
     connection: &Connection,
     queue_id: i64,
     schema: &QueueSchema,
-    group: &CommitGroup,
-    sequence: u64,
+    input: GroupRead<'_>,
     job: &Arc<QueueReservation>,
     charges: &mut Vec<OwnedQueueBufferCharge>,
 ) -> QueueResult<RecordSnapshot> {
-    load_group_with_fields(
-        connection, queue_id, schema, group, sequence, job, charges, false,
-    )
-    .await
+    load_group_with_fields(connection, queue_id, schema, input, job, charges, false).await
 }
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn load_group_with_fields(
     connection: &Connection,
     queue_id: i64,
     schema: &QueueSchema,
-    group: &CommitGroup,
-    sequence: u64,
+    input: GroupRead<'_>,
     job: &Arc<QueueReservation>,
     charges: &mut Vec<OwnedQueueBufferCharge>,
     complete_work_fields: bool,
 ) -> QueueResult<RecordSnapshot> {
+    let GroupRead {
+        group,
+        states,
+        sequence,
+    } = input;
     let names = required_work_fields(group, schema)?;
     let work_keys: BTreeSet<_> = group
         .claimed_updates
@@ -118,7 +123,7 @@ pub(super) async fn load_group_with_fields(
             }
         }
     }
-    for update in &group.state_updates {
+    for (position, update) in group.state_updates.iter().enumerate() {
         let collection = collection_number(schema, Some(&update.collection))?;
         let definition = collection_definition(schema, collection)?;
         let authority = super::state_authority::load_state_authority(
@@ -128,6 +133,12 @@ pub(super) async fn load_group_with_fields(
             &update.key,
         )
         .await?;
+        let source = states
+            .map(|states| states.descriptor(position, &update.key))
+            .transpose()?;
+        if let Some(source) = source {
+            super::state_source::validate_presence(source, &authority)?;
+        }
         let (version, id) = match authority {
             super::state_authority::StateAuthority::Absent => continue,
             super::state_authority::StateAuthority::Deleted { version } => (version, None),
@@ -146,6 +157,9 @@ pub(super) async fn load_group_with_fields(
         let mut total = 0;
         let mut exceeded = false;
         if update.change != StateChange::Check {
+            if let Some(source) = source {
+                super::state_source::validate_fields_metadata(connection, id, source).await?;
+            }
             payload::load_payload(
                 connection,
                 id,
@@ -153,7 +167,15 @@ pub(super) async fn load_group_with_fields(
                 payload::PayloadSelection {
                     fields: None,
                     include_body: false,
-                    max_bytes: u64::MAX,
+                    max_bytes: match source {
+                        Some(
+                            fireweed_engine::queue_state_authority::StateDescriptor::Present {
+                                fields,
+                                ..
+                            },
+                        ) => fields.encoded_bytes,
+                        _ => u64::MAX,
+                    },
                 },
                 &mut payload::NativePayloadBudget {
                     job,
@@ -164,7 +186,17 @@ pub(super) async fn load_group_with_fields(
                 &mut fields,
                 &mut body,
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                if source.is_some() && matches!(error, QueueError::TooLarge) {
+                    unknown("cached state fields exceeded source bounds")
+                } else {
+                    error
+                }
+            })?;
+            if let Some(source) = source {
+                source.verify_fields(version, &fields)?;
+            }
         }
         snapshot.state.insert(
             (update.collection.clone(), update.key.clone()),

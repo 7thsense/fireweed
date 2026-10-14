@@ -269,8 +269,11 @@ async fn hydrate(
         connection,
         queue_id,
         schema,
-        &group,
-        sequence,
+        super::group_authority::GroupRead {
+            group: &group,
+            states: None,
+            sequence,
+        },
         job,
         &mut charges,
         true,
@@ -410,12 +413,28 @@ impl NativeTransactionWork for Worker {
             measure_administrative_success_floor(&input.queue, native.definition.pin(), group)
                 .map_err(publication_error)?;
         let mut initial_charges = Vec::new();
+        if let Some(states) = &input.states {
+            states.validate(
+                &input.queue,
+                group,
+                &input.genesis,
+                (
+                    input.required_next_offset,
+                    input.required_insertion_sequence,
+                    input.required_last_record_epoch,
+                ),
+                &self.job,
+            )?;
+        }
         let mut initial = super::group_authority::load_group(
             connection,
             native.queue_id,
             schema,
-            group,
-            native.insertion_sequence,
+            super::group_authority::GroupRead {
+                group,
+                states: input.states.as_ref(),
+                sequence: native.insertion_sequence,
+            },
             &self.job,
             &mut initial_charges,
         )

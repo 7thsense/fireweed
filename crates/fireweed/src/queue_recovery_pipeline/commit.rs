@@ -185,6 +185,21 @@ impl CommitExecution {
     fn input(&self, recovered: &RecoveredQueue) -> QueueResult<CommitPreparationInput> {
         Ok(CommitPreparationInput {
             original: self.batch_position(recovered)?,
+            states: Some(
+                recovered
+                    .group_state_authority
+                    .as_ref()
+                    .ok_or_else(|| unknown("commit state proof missing"))?
+                    .group(if let Some(batch) = &self.batch {
+                        batch
+                            .groups
+                            .iter()
+                            .position(|g| g.request_id == self.group.request_id)
+                            .ok_or_else(|| unknown("commit group missing from declared batch"))?
+                    } else {
+                        0
+                    })?,
+            ),
             genesis: self
                 .pipeline
                 .original_genesis(&self.queue, recovered, &self.job)?,
@@ -362,11 +377,24 @@ impl super::mutation::OriginalMutation for CommitExecution {
             let mut recovered = if let Some(batch) = &self.batch {
                 self.pipeline.recover_batch(batch, self.job.clone()).await?
             } else {
+                let originals = ColdOriginalTracker::new_request(
+                    &self.queue,
+                    2,
+                    &self.group.request_id,
+                    &self.job,
+                )?;
+                let states =
+                    fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::new(
+                        &self.queue,
+                        std::slice::from_ref(&self.group),
+                        &self.job,
+                    )?;
                 self.pipeline
-                    .recover_request(
+                    .recover_checked(
                         self.queue.clone(),
-                        2,
-                        self.group.request_id.clone(),
+                        Some((2, self.group.request_id.clone())),
+                        Some(originals),
+                        Some(RecoveryStateTracker::Groups(states)),
                         self.job.clone(),
                     )
                     .await?

@@ -909,6 +909,7 @@ mod tests {
         let prepared = projection
             .prepare_ordinary_commit(
                 CommitPreparationInput {
+                    states: None,
                     original: None,
                     genesis: encode_checked_genesis(
                         1,

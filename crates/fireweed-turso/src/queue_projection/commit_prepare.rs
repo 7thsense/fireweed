@@ -10,6 +10,7 @@ use fireweed_engine::{
     queue_publication::{PublicationReceipt, encode_publication_pinned},
 };
 pub struct CommitPreparationInput {
+    pub states: Option<fireweed_engine::queue_group_state_authority::AdmittedGroupStateAuthority>,
     pub original: Option<fireweed_engine::queue_original_authority::AdmittedOriginalPosition>,
     pub genesis: OwnedQueueLogRecord,
     pub queue: QueueAddress,
@@ -268,12 +269,28 @@ impl NativeTransactionWork for Worker {
                     .ok_or(QueueError::TooLarge)?,
             )?,
         );
+        if let Some(states) = &self.input.states {
+            states.validate(
+                &self.input.queue,
+                group,
+                &self.input.genesis,
+                (
+                    self.input.required_next_offset,
+                    self.input.required_insertion_sequence,
+                    self.input.required_last_record_epoch,
+                ),
+                &self.job,
+            )?;
+        }
         let mut snapshot = super::group_authority::load_group(
             connection,
             native.queue_id,
             schema,
-            group,
-            native.insertion_sequence,
+            super::group_authority::GroupRead {
+                group,
+                states: self.input.states.as_ref(),
+                sequence: native.insertion_sequence,
+            },
             &self.job,
             &mut self.charges,
         )
@@ -368,6 +385,7 @@ mod tests {
     ) -> CommitPreparationInput {
         let definition = AdmittedQueueDefinition::from_raw(definition.raw(), job).unwrap();
         CommitPreparationInput {
+            states: None,
             original: None,
             genesis: encode_checked_genesis(1, &address(), &definition, &[31; 32], 16 << 20, job)
                 .unwrap(),
@@ -1199,6 +1217,275 @@ mod tests {
         assert_eq!(unsigned(&point[1]).unwrap(), 2);
         assert_eq!(unsigned(&point[2]).unwrap(), 4);
         assert_eq!(integer(&point[3]).unwrap(), 2);
+        workers.close_and_drain().await.unwrap();
+    }
+    fn source_state_input(
+        definition: &AdmittedQueueDefinition,
+        job: &Arc<QueueReservation>,
+        declared: CommitGroup,
+        old_body: &[u8],
+    ) -> (CommitPreparationInput, Vec<OwnedQueueLogRecord>) {
+        let (input, records, _) = source_state_input_retained(definition, job, declared, old_body);
+        (input, records)
+    }
+    fn source_state_input_retained(
+        definition: &AdmittedQueueDefinition,
+        job: &Arc<QueueReservation>,
+        declared: CommitGroup,
+        old_body: &[u8],
+    ) -> (
+        CommitPreparationInput,
+        Vec<OwnedQueueLogRecord>,
+        std::sync::Weak<fireweed_engine::queue_group_state_authority::AdmittedGroupStateSet>,
+    ) {
+        use super::super::tests::{group_record, seed_record};
+        use fireweed_engine::{
+            queue_group_state_authority::ColdGroupStateTracker, queue_recovery::ColdQueueHistory,
+        };
+        let mut input = input(definition, job, declared, 3, 2);
+        let (mut snapshot, seed) = seed_record(definition, job, false);
+        let source = state_group("source-state", "run", StateExpect::Absent, "running");
+        let mut source = source;
+        let StateChange::Put { value, .. } = &mut source.state_updates[0].change else {
+            panic!()
+        };
+        *value = bytes::Bytes::copy_from_slice(old_body);
+        let publication = group_record(definition, &mut snapshot, &source, job);
+        let records = vec![seed, publication];
+        let mut history = ColdQueueHistory::new(&input.queue, job).unwrap();
+        let mut tracker =
+            ColdGroupStateTracker::new(&input.queue, std::slice::from_ref(&input.group), job)
+                .unwrap();
+        for (offset, record) in std::iter::once(&input.genesis)
+            .chain(records.iter())
+            .enumerate()
+        {
+            history.observe(offset as u64, record.bytes()).unwrap();
+            tracker.observe(offset as u64, record).unwrap();
+        }
+        let proof = Arc::new(tracker.finish(&history, &input.genesis, (3, 2, 1)).unwrap());
+        let weak = Arc::downgrade(&proof);
+        input.states = Some(proof.group(0).unwrap());
+        (input, records, weak)
+    }
+    #[tokio::test]
+    async fn source_state_preparation_respects_metadata_and_fields_only_knowledge() {
+        let old_body = vec![7; 1 << 20];
+        for (case, change, expected_ok) in [
+            ("check-unused-payload", StateChange::Check, true),
+            (
+                "put-huge-old-body",
+                StateChange::Put {
+                    fields: Fields::new(),
+                    value: bytes::Bytes::new(),
+                },
+                true,
+            ),
+            ("delete-missing-old-body", StateChange::Delete, true),
+            (
+                "put-wrong-fields",
+                StateChange::Put {
+                    fields: Fields::new(),
+                    value: bytes::Bytes::new(),
+                },
+                false,
+            ),
+            ("delete-inflated-fields", StateChange::Delete, false),
+            ("check-missing-live", StateChange::Check, false),
+            ("check-wrong-highwater", StateChange::Check, false),
+            ("wrong-group-binding", StateChange::Check, false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let job = Arc::new(
+                QueueAdmission::new(1, 64 << 20)
+                    .unwrap()
+                    .reserve(0)
+                    .unwrap(),
+            );
+            let workers = ScratchWorkers::new(1, 2).unwrap();
+            let (projection, definition) = bootstrap(
+                &directory.path().join("state-preparation.db"),
+                &job,
+                &workers,
+            )
+            .await;
+            let mut declared = group(case);
+            declared.state_updates.push(StateUpdate {
+                collection: "workflow".into(),
+                key: "run".into(),
+                expect: StateExpect::Version(1),
+                change,
+            });
+            let (_, records) = source_state_input(&definition, &job, declared.clone(), &old_body);
+            for (offset, record) in records.into_iter().enumerate() {
+                projection
+                    .apply(record, offset as u64 + 1, &job, &workers)
+                    .await
+                    .unwrap();
+            }
+            match case {
+                "check-unused-payload" => {
+                    execute_for_test(&projection, "DELETE FROM q7_bodies WHERE record_id IN (SELECT id FROM q7_records WHERE collection=1)", vec![]).await;
+                    execute_for_test(&projection, "UPDATE q7_fields SET value=zeroblob(8388608) WHERE record_id IN (SELECT id FROM q7_records WHERE collection=1)", vec![]).await;
+                }
+                "put-huge-old-body" => execute_for_test(&projection, "UPDATE q7_bodies SET value=zeroblob(8388608) WHERE record_id IN (SELECT id FROM q7_records WHERE collection=1)", vec![]).await,
+                "delete-missing-old-body" => execute_for_test(&projection, "DELETE FROM q7_bodies WHERE record_id IN (SELECT id FROM q7_records WHERE collection=1)", vec![]).await,
+                "put-wrong-fields" => execute_for_test(&projection, "UPDATE q7_fields SET value=?1 WHERE record_id IN (SELECT id FROM q7_records WHERE collection=1)", vec![blob(&fireweed_engine::queue_storage_layout::encode(&FieldValue::Text("waiting".into())).unwrap())]).await,
+                "delete-inflated-fields" => execute_for_test(&projection, "UPDATE q7_fields SET value=zeroblob(8388608) WHERE record_id IN (SELECT id FROM q7_records WHERE collection=1)", vec![]).await,
+                "check-missing-live" => execute_for_test(&projection, "DELETE FROM q7_records WHERE collection=1", vec![]).await,
+                "check-wrong-highwater" => execute_for_test(&projection, "UPDATE q7_records SET version=?1 WHERE collection=1", vec![blob(&2u64.to_be_bytes())]).await,
+                _ => {}
+            }
+            for preview in [true, false] {
+                let (mut input, records) =
+                    source_state_input(&definition, &job, declared.clone(), &old_body);
+                drop(records);
+                input.limits.max_response_bytes = 1024;
+                if case == "wrong-group-binding" {
+                    input.group.request_id.push_str("-changed");
+                }
+                let clock = Arc::new(TestClock::default());
+                let result = if preview {
+                    projection
+                        .preview_ordinary_commit(input, clock, &job, &workers)
+                        .await
+                        .map(|result| result.result().outcome.clone())
+                } else {
+                    projection
+                        .prepare_ordinary_commit(input, 1, 16 << 20, clock, &job, &workers)
+                        .await
+                        .map(|prepared| {
+                            PreviewResult::try_from(prepared.unwrap().receipt().outcome.clone())
+                                .unwrap()
+                                .outcome
+                        })
+                };
+                if expected_ok {
+                    let versions = if case == "check-unused-payload" {
+                        vec![]
+                    } else {
+                        vec![RecordVersion {
+                            collection: Some("workflow".into()),
+                            key: "run".into(),
+                            version: 2,
+                        }]
+                    };
+                    assert_eq!(
+                        result.unwrap(),
+                        PreviewOutcome::Committed { versions },
+                        "{case} preview={preview}"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(QueueError::OutcomeUnknown(_))),
+                        "{case} preview={preview}: {result:?}"
+                    );
+                }
+            }
+            workers.close_and_drain().await.unwrap();
+        }
+    }
+
+    fn owner_work_group() -> CommitGroup {
+        let mut declared = group("owner-work-only");
+        declared.work_inserts.push(work("owner-new", 99, false));
+        declared
+    }
+    #[tokio::test]
+    async fn group_state_proof_owner_survives_native_panic_and_cancel_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = QueueAdmission::new(2, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 2).unwrap();
+        let (projection, definition) =
+            bootstrap(&directory.path().join("owner.db"), &job, &workers).await;
+        let (initial, records) =
+            source_state_input(&definition, &job, owner_work_group(), b"exact");
+        for (index, record) in records.into_iter().enumerate() {
+            projection
+                .apply(record, index as u64 + 1, &job, &workers)
+                .await
+                .unwrap();
+        }
+        drop(initial);
+        let baseline = admission.usage().unwrap();
+        for panic in [true, false] {
+            let terminal = Arc::new(tokio::sync::Notify::new());
+            let signal = terminal.clone();
+            let owned_job = Arc::new(
+                admission
+                    .reserve(0)
+                    .unwrap()
+                    .with_terminal_callback(move || signal.notify_one())
+                    .unwrap(),
+            );
+            let owned_definition =
+                AdmittedQueueDefinition::from_raw(definition.raw(), &owned_job).unwrap();
+            let (input, records, weak) = source_state_input_retained(
+                &owned_definition,
+                &owned_job,
+                owner_work_group(),
+                b"exact",
+            );
+            drop(records);
+            drop(owned_definition);
+            let pause = Arc::new(ApplyPause {
+                after_commit: false,
+                fail_reply: false,
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::watch::channel(false).0,
+            });
+            *projection.pause.lock().await = Some(pause.clone());
+            projection
+                .panic_after_command
+                .store(panic, std::sync::atomic::Ordering::Release);
+            let caller = tokio::spawn({
+                let projection = projection.clone();
+                let workers = workers.clone();
+                async move {
+                    projection
+                        .preview_ordinary_commit(
+                            input,
+                            Arc::new(TestClock::default()),
+                            &owned_job,
+                            &workers,
+                        )
+                        .await
+                }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(30), pause.entered.notified())
+                .await
+                .unwrap();
+            assert!(weak.upgrade().is_some());
+            assert!(admission.usage().unwrap().1 > baseline.1);
+            if panic {
+                pause.release.send(true).unwrap();
+                assert!(matches!(
+                    caller.await.unwrap(),
+                    Err(QueueError::OutcomeUnknown(_))
+                ));
+            } else {
+                caller.abort();
+                assert!(matches!(caller.await,Err(error) if error.is_cancelled()));
+                assert!(
+                    weak.upgrade().is_some(),
+                    "physical state preparation still owns proof after caller cancellation"
+                );
+                pause.release.send(true).unwrap();
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(30), terminal.notified())
+                .await
+                .unwrap();
+            assert!(weak.upgrade().is_none());
+            assert_eq!(admission.usage().unwrap(), baseline);
+            let writer = projection.writer.lock().await;
+            assert!(
+                writer
+                    .as_ref()
+                    .is_none_or(|connection| matches!(connection.is_autocommit(), Ok(true)))
+            );
+            drop(writer);
+        }
         workers.close_and_drain().await.unwrap();
     }
 }

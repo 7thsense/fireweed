@@ -57,6 +57,26 @@ impl StateDescriptor {
             _ => Ok(0),
         }
     }
+    pub fn verify_fields(self, version: u64, actual: &Fields) -> QueueResult<()> {
+        let Self::Present {
+            highwater,
+            field_count,
+            fields,
+            ..
+        } = self
+        else {
+            return Err(unknown("cached fields lack live source authority"));
+        };
+        if version != highwater
+            || actual.len() as u64 != field_count
+            || owned_fields_fingerprint(actual)
+                .map_err(|_| unknown("cached fields encoding invalid"))?
+                != fields
+        {
+            return Err(unknown("cached state fields differ from source"));
+        }
+        Ok(())
+    }
     pub fn verify_record(self, record: &StateRecord) -> QueueResult<()> {
         let Self::Present {
             highwater,
@@ -107,16 +127,29 @@ pub struct AdmittedStateAuthority {
 }
 impl ColdStateTracker {
     pub fn new(request: &StateReadRequest, job: &Arc<QueueReservation>) -> QueueResult<Self> {
-        request.queue.validate()?;
-        if request.collection.is_empty() {
+        Self::new_keys(
+            &request.queue,
+            &request.collection,
+            request.keys.iter().map(String::as_str),
+            job,
+        )
+    }
+    pub(super) fn new_keys<'a>(
+        queue: &QueueAddress,
+        collection: &str,
+        keys: impl Iterator<Item = &'a str> + Clone,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Self> {
+        queue.validate()?;
+        if collection.is_empty() {
             return Err(QueueError::Invalid("empty state collection".into()));
         }
-        let mut capacity = (framed_address_len(&request.queue)? as u64)
+        let mut capacity = (framed_address_len(queue)? as u64)
             .checked_mul(8)
-            .and_then(|n| n.checked_add((request.collection.len() as u64).checked_mul(8)?))
+            .and_then(|n| n.checked_add((collection.len() as u64).checked_mul(8)?))
             .and_then(|n| n.checked_add(1024))
             .ok_or(QueueError::TooLarge)?;
-        for key in &request.keys {
+        for key in keys.clone() {
             if key.is_empty() {
                 return Err(QueueError::Invalid("empty state key".into()));
             }
@@ -131,13 +164,11 @@ impl ColdStateTracker {
         }
         let charge = job.owned_buffer(capacity)?;
         Ok(Self {
-            address: encode_address(&request.queue)?,
-            collection: request.collection.clone(),
-            entries: request
-                .keys
-                .iter()
+            address: encode_address(queue)?,
+            collection: collection.to_owned(),
+            entries: keys
                 .map(|key| Entry {
-                    key: key.clone(),
+                    key: key.to_owned(),
                     descriptor: StateDescriptor::NeverSeen,
                 })
                 .collect(),
@@ -153,17 +184,39 @@ impl ColdStateTracker {
         if self.poisoned {
             return Err(unknown("poisoned state history"));
         }
-        let result = self.observe_checked(offset, record);
+        let view = match record.view() {
+            Ok(view) => view,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(error);
+            }
+        };
+        self.observe_view(offset, record, &view)
+    }
+    pub(super) fn observe_view(
+        &mut self,
+        offset: u64,
+        record: &OwnedQueueLogRecord,
+        view: &crate::queue_log_record::QueueLogRecordView<'_>,
+    ) -> QueueResult<()> {
+        if self.poisoned {
+            return Err(unknown("poisoned state history"));
+        }
+        let result = self.observe_checked(offset, record, view);
         if result.is_err() {
             self.poisoned = true;
         }
         result
     }
-    fn observe_checked(&mut self, offset: u64, record: &OwnedQueueLogRecord) -> QueueResult<()> {
+    fn observe_checked(
+        &mut self,
+        offset: u64,
+        record: &OwnedQueueLogRecord,
+        view: &crate::queue_log_record::QueueLogRecordView<'_>,
+    ) -> QueueResult<()> {
         if !record.belongs_to(self.charge.reservation()) || offset != self.next_offset {
             return Err(unknown("record owner or contiguous offset mismatch"));
         }
-        let view = record.view()?;
         if view.address() != view_address(&self.address)? || view.epoch() < self.historical_epoch {
             return Err(unknown("record address or epoch mismatch"));
         }
@@ -290,26 +343,55 @@ impl AdmittedStateAuthority {
         progress: (u64, u64, u64),
         job: &QueueReservation,
     ) -> QueueResult<()> {
+        self.validate_keys(
+            &request.queue,
+            &request.collection,
+            request.keys.iter().map(String::as_str),
+            genesis,
+            progress,
+            job,
+        )
+    }
+    pub(super) fn validate_keys<'a>(
+        &self,
+        queue: &QueueAddress,
+        collection: &str,
+        keys: impl Iterator<Item = &'a str> + Clone,
+        genesis: &OwnedQueueLogRecord,
+        progress: (u64, u64, u64),
+        job: &QueueReservation,
+    ) -> QueueResult<()> {
         let address = view_address(&self.address)?;
         if !std::ptr::eq(self.charge.reservation(), job)
             || !genesis.belongs_to(job)
-            || address.tenant != request.queue.tenant
-            || address.queue != request.queue.queue
-            || self.collection != request.collection
+            || address.tenant != queue.tenant
+            || address.queue != queue.queue
+            || self.collection != collection
             || self.progress != progress
             || self.genesis_sha256 != <[u8; 32]>::from(Sha256::digest(genesis.bytes()))
-            || self.entries.len() != request.keys.len()
+            || self.entries.len() != keys.clone().count()
             || self
                 .entries
                 .iter()
-                .zip(&request.keys)
-                .any(|(entry, key)| &entry.key != key)
+                .zip(keys)
+                .any(|(entry, key)| entry.key != key)
         {
             return Err(unknown(
                 "state operation/address/collection/genesis/cut/vector mismatch",
             ));
         }
         Ok(())
+    }
+    pub(super) fn descriptor_identity(
+        &self,
+        position: usize,
+        collection: &str,
+        key: &str,
+    ) -> QueueResult<StateDescriptor> {
+        if self.collection != collection {
+            return Err(unknown("state collection mismatch"));
+        }
+        self.descriptor(position, key)
     }
     pub fn descriptor(&self, position: usize, key: &str) -> QueueResult<StateDescriptor> {
         self.entries
@@ -811,5 +893,134 @@ mod tests {
             drop(proof);
             assert_eq!(admission.usage().unwrap(), (1, 0));
         }
+    }
+    #[test]
+    fn group_state_bindings_cover_siblings_collections_empty_groups_and_owner() {
+        use crate::queue_group_state_authority::ColdGroupStateTracker;
+        let job = Arc::new(
+            QueueAdmission::new(1, 32 << 20)
+                .unwrap()
+                .reserve(0)
+                .unwrap(),
+        );
+        let (definition, genesis) = genesis(&job);
+        let mut snapshot = RecordSnapshot::default();
+        let mut records = vec![genesis];
+        for (id, expect, change) in [
+            (
+                "put",
+                StateExpect::Absent,
+                put(Fields::new(), b"large-old-body"),
+            ),
+            ("delete", StateExpect::Version(1), StateChange::Delete),
+            ("recreate", StateExpect::Absent, put(Fields::new(), b"new")),
+        ] {
+            records.push(mutation(
+                &job,
+                &definition,
+                &mut snapshot,
+                id,
+                "same",
+                expect,
+                change,
+            ));
+        }
+        let queue = request(&[]).queue;
+        let make_group = |id: &str, collection: Option<&str>| CommitGroup {
+            request_id: id.into(),
+            administration: None,
+            claimed_updates: vec![],
+            work_updates: vec![],
+            work_inserts: vec![],
+            state_updates: collection
+                .into_iter()
+                .map(|collection| StateUpdate {
+                    collection: collection.into(),
+                    key: "same".into(),
+                    expect: StateExpect::Absent,
+                    change: StateChange::Check,
+                })
+                .collect(),
+        };
+        let mut multi = make_group("multi", Some("instances"));
+        let mut other_key = multi.state_updates[0].clone();
+        other_key.key = "second".into();
+        multi.state_updates.push(other_key);
+        let groups = [
+            make_group("one", Some("instances")),
+            make_group("two", Some("other")),
+            make_group("empty", None),
+            multi,
+            make_group("shared", Some("instances")),
+        ];
+        let mut tracker = ColdGroupStateTracker::new(&queue, &groups, &job).unwrap();
+        let mut history = ColdQueueHistory::new(&queue, &job).unwrap();
+        for (offset, record) in records.iter().enumerate() {
+            history.observe(offset as u64, record.bytes()).unwrap();
+            tracker.observe(offset as u64, record).unwrap();
+        }
+        let cut = (4, 0, 1);
+        let proof = Arc::new(tracker.finish(&history, &records[0], cut).unwrap());
+        let handles: Vec<_> = (0..5).map(|n| proof.group(n).unwrap()).collect();
+        for (handle, group) in handles.iter().zip(&groups) {
+            handle
+                .validate(&queue, group, &records[0], cut, &job)
+                .unwrap();
+        }
+        assert!(matches!(
+            handles[0].descriptor(0, "same").unwrap(),
+            StateDescriptor::Present { highwater: 3, .. }
+        ));
+        assert_eq!(
+            handles[1].descriptor(0, "same").unwrap(),
+            StateDescriptor::NeverSeen
+        );
+        assert!(
+            handles[0]
+                .validate(&queue, &groups[1], &records[0], cut, &job)
+                .is_err()
+        );
+        assert!(
+            handles[2]
+                .validate(&queue, &groups[2], &records[0], (3, 0, 1), &job)
+                .is_err()
+        );
+        let foreign = Arc::new(
+            QueueAdmission::new(1, 32 << 20)
+                .unwrap()
+                .reserve(0)
+                .unwrap(),
+        );
+        assert!(
+            handles[2]
+                .validate(&queue, &groups[2], &records[0], cut, &foreign)
+                .is_err()
+        );
+        assert_eq!(
+            handles[3].descriptor(0, "same").unwrap(),
+            handles[4].descriptor(0, "same").unwrap()
+        );
+        assert_eq!(
+            handles[3].descriptor(1, "second").unwrap(),
+            StateDescriptor::NeverSeen
+        );
+        let mut reordered = groups[3].clone();
+        reordered.state_updates.reverse();
+        assert!(
+            handles[3]
+                .validate(&queue, &reordered, &records[0], cut, &job)
+                .is_err()
+        );
+        assert!(handles[3].descriptor(1, "same").is_err());
+        assert!(proof.group(5).is_err());
+        let mut poisoned = ColdGroupStateTracker::new(&queue, &groups, &job).unwrap();
+        assert!(poisoned.observe(1, &records[0]).is_err());
+        assert!(poisoned.observe(0, &records[0]).is_err());
+        assert!(poisoned.finish(&history, &records[0], cut).is_err());
+        let weak = Arc::downgrade(&proof);
+        drop(proof);
+        assert!(weak.upgrade().is_some());
+        drop(handles);
+        assert!(weak.upgrade().is_none());
     }
 }

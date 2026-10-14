@@ -97,8 +97,13 @@ Addressed state reads bind ordered keys and their current presence/high-water
 history to the checked cut. Source-derived exact response sizes precede payload
 admission; cached metadata, complete fields and values require source agreement.
 `check_state_authority.py` bounds predecessor, scope, cache and size ordering.
-State mutation/query paths, current work and selection indexes still require
-full cached integrity.
+Commit and preview bind the complete declared state component, including every
+batch sibling, before fresh planning. Metadata-only checks verify presence and
+retained high-water; replacement/deletion verify complete old fields without
+reading old values. Immutable original replay precedes current-state validation.
+`check_state_preparation.py` bounds this ordering and payload knowledge; its
+production map remains documentary. State query paths, current work, unique
+owners and selection indexes still require full cached integrity.
 Fresh catalog-known missing indexes and previously observed malformed authority
 fail closed across reopen, independent handles and later metadata deletion.
 Native S3 conditional writes classify typed conflicts and never retry a lost
@@ -141,6 +146,12 @@ state and the complete JsonEqualityEncoding namespace/schema pin before indexed
 reads and writes in both numeric modes. State_version advances on transitions
 and await consumption, not dispatch/timeout/timer bookkeeping. Host maintenance
 must preserve ownership and resource drain semantics.
+
+Release performance acceptance retains the napkin baseline's fixed 10,000
+complete recipients/second and 12,500/second stretch target, with the declared
+campaign and primitive workload shapes. Both backends must be measured against
+that baseline with matched durability and resources; small reference diagnostics
+and historical source results do not qualify the current release.
 
 Benchmark useful completed work after full settle/drain. Measure p50/p95/p99,
 RSS/retained memory, projection debt, storage volume and S3 requests/cost, with

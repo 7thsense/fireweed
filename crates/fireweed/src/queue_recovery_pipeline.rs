@@ -111,6 +111,22 @@ impl Drop for QueueRecoveryPipeline {
         }
     }
 }
+enum RecoveryStateTracker {
+    Read(fireweed_engine::queue_state_authority::ColdStateTracker),
+    Groups(fireweed_engine::queue_group_state_authority::ColdGroupStateTracker),
+}
+impl RecoveryStateTracker {
+    fn observe(
+        &mut self,
+        offset: u64,
+        record: &fireweed_engine::queue_log_record::OwnedQueueLogRecord,
+    ) -> QueueResult<()> {
+        match self {
+            Self::Read(s) => s.observe(offset, record),
+            Self::Groups(s) => s.observe(offset, record),
+        }
+    }
+}
 /// Point-in-time coverage only; later consumer reads/writes must establish
 /// current projection and fence authority again.
 pub struct RecoveredQueue {
@@ -122,6 +138,8 @@ pub struct RecoveredQueue {
     original_identity_present: Option<bool>,
     original_authority: Option<Arc<AdmittedOriginalAuthority>>,
     state_authority: Option<Arc<fireweed_engine::queue_state_authority::AdmittedStateAuthority>>,
+    group_state_authority:
+        Option<Arc<fireweed_engine::queue_group_state_authority::AdmittedGroupStateSet>>,
 }
 /// On return, cancellation or unwind, release the operation permit before the
 /// final task reservation owner can notify shutdown waiters.
@@ -136,7 +154,7 @@ struct RecoveryTask {
     address: QueueAddress,
     identity: Option<(u8, String)>,
     originals: Option<ColdOriginalTracker>,
-    states: Option<fireweed_engine::queue_state_authority::ColdStateTracker>,
+    states: Option<RecoveryStateTracker>,
     _headers: OwnedQueueBufferCharge,
     job: Arc<QueueReservation>,
 }
@@ -257,15 +275,27 @@ impl QueueRecoveryPipeline {
         job: Arc<QueueReservation>,
     ) -> QueueResult<RecoveredQueue> {
         let originals = ColdOriginalTracker::new(request, &job)?;
-        self.recover_checked(request.queue.clone(), None, Some(originals), None, job)
-            .await
+        self.recover_checked(
+            request.queue.clone(),
+            None,
+            Some(originals),
+            Some(RecoveryStateTracker::Groups(
+                fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::new(
+                    &request.queue,
+                    &request.groups,
+                    &job,
+                )?,
+            )),
+            job,
+        )
+        .await
     }
     async fn recover_checked(
         self: &Arc<Self>,
         address: QueueAddress,
         identity: Option<(u8, String)>,
         originals: Option<ColdOriginalTracker>,
-        states: Option<fireweed_engine::queue_state_authority::ColdStateTracker>,
+        states: Option<RecoveryStateTracker>,
         job: Arc<QueueReservation>,
     ) -> QueueResult<RecoveredQueue> {
         address.validate()?;
@@ -515,31 +545,33 @@ impl RecoveryTask {
                     .map(Arc::new)
             })
             .transpose()?;
-        let state_authority = self
-            .states
-            .take()
-            .map(|states| {
-                let genesis = encode_checked_genesis(
-                    genesis_epoch,
-                    &self.address,
-                    history.definition()?,
-                    history.cursor_secret()?,
-                    pipeline.hard_record_bytes,
-                    &self.job,
-                )?;
-                states
-                    .finish(
-                        &history,
-                        &genesis,
-                        (
-                            target_next_offset,
-                            history.insertion_sequence(),
-                            history.historical_epoch(),
-                        ),
-                    )
-                    .map(Arc::new)
-            })
-            .transpose()?;
+        let (state_authority, group_state_authority) = if let Some(states) = self.states.take() {
+            let genesis = encode_checked_genesis(
+                genesis_epoch,
+                &self.address,
+                history.definition()?,
+                history.cursor_secret()?,
+                pipeline.hard_record_bytes,
+                &self.job,
+            )?;
+            let progress = (
+                target_next_offset,
+                history.insertion_sequence(),
+                history.historical_epoch(),
+            );
+            match states {
+                RecoveryStateTracker::Read(states) => (
+                    Some(Arc::new(states.finish(&history, &genesis, progress)?)),
+                    None,
+                ),
+                RecoveryStateTracker::Groups(states) => (
+                    None,
+                    Some(Arc::new(states.finish(&history, &genesis, progress)?)),
+                ),
+            }
+        } else {
+            (None, None)
+        };
         if let Some((_, id)) = &self.identity {
             let present = original_authority
                 .as_ref()
@@ -561,6 +593,7 @@ impl RecoveryTask {
             original_identity_present,
             original_authority,
             state_authority,
+            group_state_authority,
         })
     }
 }

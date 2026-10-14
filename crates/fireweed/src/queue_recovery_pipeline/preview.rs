@@ -84,6 +84,28 @@ impl CoveredRead for PreviewRead {
         }
         Ok(())
     }
+    fn recover<'a>(
+        &'a self,
+        pipeline: &'a Arc<QueueRecoveryPipeline>,
+        job: Arc<QueueReservation>,
+    ) -> QueueFuture<'a, RecoveredQueue> {
+        Box::pin(async move {
+            let states = fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::new(
+                &self.request.queue,
+                std::slice::from_ref(&self.request.group),
+                &job,
+            )?;
+            pipeline
+                .recover_checked(
+                    self.request.queue.clone(),
+                    None,
+                    None,
+                    Some(RecoveryStateTracker::Groups(states)),
+                    job,
+                )
+                .await
+        })
+    }
     fn read<'a>(
         &'a self,
         pipeline: &'a Arc<QueueRecoveryPipeline>,
@@ -94,6 +116,13 @@ impl CoveredRead for PreviewRead {
         Box::pin(async move {
             let input = CommitPreparationInput {
                 original: None,
+                states: Some(
+                    recovered
+                        .group_state_authority
+                        .as_ref()
+                        .ok_or_else(|| unknown("preview state proof missing"))?
+                        .group(0)?,
+                ),
                 genesis: pipeline.original_genesis(&self.request.queue, recovered, job)?,
                 queue: self.request.queue.clone(),
                 group: self.request.group.clone(),

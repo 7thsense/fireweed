@@ -326,6 +326,7 @@ mod tests {
             .prepare_administration(
                 AdministrativePreparationInput {
                     commit: CommitPreparationInput {
+                        states: None,
                         original: None,
                         genesis: encode_checked_genesis(
                             1,
@@ -431,6 +432,7 @@ mod tests {
         let original_input = |group: CommitGroup| {
             let proved = input(vec![group.clone()], 1 << 20);
             CommitPreparationInput {
+                states: None,
                 original: Some(proved.originals.position(0, &group.request_id).unwrap()),
                 genesis: proved.genesis,
                 queue: proved.request.queue,

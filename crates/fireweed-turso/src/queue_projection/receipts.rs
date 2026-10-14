@@ -999,6 +999,7 @@ mod tests {
         let original_input = |request: CommitGroup| {
             let read = input(&definition, &job, vec![], 1 << 20, 4);
             super::super::commit_prepare::CommitPreparationInput {
+                states: None,
                 original: None,
                 genesis: read.genesis,
                 queue: address(),
