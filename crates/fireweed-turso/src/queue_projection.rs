@@ -215,6 +215,11 @@ fn unsigned(value: &Value) -> QueueResult<u64> {
             .map_err(|_| unknown("invalid unsigned authority"))?,
     ))
 }
+// The right-hand seek must include the digest and record-ID range. Stock
+// Turso otherwise chooses q7_index_order and scans an entire index domain for
+// each left row. Full-key and uniqueness predicates remain mandatory residuals.
+const FINAL_UNIQUE_OWNERSHIP_SQL: &str = "SELECT a.record_id FROM q7_indexes a JOIN q7_indexes b INDEXED BY q7_index_equal ON a.queue_id=b.queue_id AND a.collection=b.collection AND a.index_no=b.index_no AND a.hash=b.hash AND a.full_key=b.full_key AND a.record_id<b.record_id WHERE a.queue_id=?1 AND a.is_unique=1 AND b.is_unique=1 LIMIT 1";
+
 async fn one(
     connection: &Connection,
     sql: &str,
@@ -560,7 +565,17 @@ async fn apply_transaction(
             }
             // Native indexes are not individually constrained: atomic swaps are
             // validated against the completed transaction's exact full values.
-            if one(connection, "SELECT a.record_id FROM q7_indexes a JOIN q7_indexes b ON a.queue_id=b.queue_id AND a.collection=b.collection AND a.index_no=b.index_no AND a.hash=b.hash AND a.full_key=b.full_key AND a.record_id<b.record_id WHERE a.queue_id=?1 AND a.is_unique=1 AND b.is_unique=1 LIMIT 1", vec![Value::Integer(queue_id)], 1).await?.is_some() { return Err(unknown("final projection unique ownership conflict")); }
+            if one(
+                connection,
+                FINAL_UNIQUE_OWNERSHIP_SQL,
+                vec![Value::Integer(queue_id)],
+                1,
+            )
+            .await?
+            .is_some()
+            {
+                return Err(unknown("final projection unique ownership conflict"));
+            }
             for receipt in frame.receipts() {
                 let receipt = receipt.map_err(publication_error)?;
                 let domain = match receipt.domain {
@@ -1320,6 +1335,7 @@ async fn validate_receipt_versions(
 
 #[cfg(test)]
 mod tests {
+    mod unique_check;
     use super::*;
     use bytes::Bytes;
     use fireweed_engine::{

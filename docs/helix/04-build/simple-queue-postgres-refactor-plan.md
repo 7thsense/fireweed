@@ -103,6 +103,9 @@ fence and fresh planning. Finalized caller positions retain their admitted owner
 including single/administrative conflict or expiry classifications with their cut.
 `check_pack_preparation.py` bounds preparation; `check_pack_publication.py` bounds
 physical publication, contiguous remainder retries and source-confirmed receipts.
+Native final-transaction uniqueness checks seek the existing digest/range equality
+index and still compare full values across exact queue/collection/index domains.
+Pinned-runtime query-plan and bounded predicate-oracle controls guard that path.
 Neither finite family establishes provider durability or performance readiness;
 public activation and the matched release workloads remain separate gates.
 

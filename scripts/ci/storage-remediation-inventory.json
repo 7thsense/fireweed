@@ -81170,6 +81170,90 @@
         "-p",
         "fireweed-turso",
         "--lib",
+        "queue_projection::tests::unique_check::final_unique_check_matches_independent_pair_oracle_and_predicate_mutants",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::tests::unique_check::final_unique_check_matches_independent_pair_oracle_and_predicate_mutants",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::tests::unique_check::final_unique_check_matches_independent_pair_oracle_and_predicate_mutants",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
+        "queue_projection::tests::unique_check::final_unique_check_seeks_digest_and_record_range_instead_of_domain_scan",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::tests::unique_check::final_unique_check_seeks_digest_and_record_range_instead_of_domain_scan",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::tests::unique_check::final_unique_check_seeks_digest_and_record_range_instead_of_domain_scan",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
+        "queue_projection::tests::unique_check::missing_equality_index_rolls_back_effects_and_reopen_restores_the_checked_path",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_projection::tests::unique_check::missing_equality_index_rolls_back_effects_and_reopen_restores_the_checked_path",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::tests::unique_check::missing_equality_index_rolls_back_effects_and_reopen_restores_the_checked_path",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--lib",
         "queue_projection::tests::unique_swap_and_sparse_removal_preserve_query_keys",
         "--",
         "--exact"
@@ -96719,7 +96803,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "f81a1d066c9efd2db297cbe7af7082560847513a57ccb74b0c988eb503d42537",
+  "source_inventory_sha256": "2d079d57a13eb6da1664c346a588c5c66da7d628a8efd3e9d770c54635fff5e6",
   "workspaces": [
     {
       "listing_error_sha256": "",
