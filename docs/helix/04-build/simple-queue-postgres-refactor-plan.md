@@ -80,6 +80,14 @@ read/worker/transfer, checked history/proof folding and native checkpoint/apply.
 Quiescent deltas reject saturation and inconsistent totals. Worker-side parsing
 is included in read time; elapsed buckets are not CPU or provider-request counts.
 
+Within one exact admitted commit batch, a sealed prior cut can seed suffix
+folding after a fresh durable acquire. Store, job, genesis, complete declarations,
+progress and every state/original descriptor remain bound. A lost/regressed
+source or failed continuation is terminal unknown; replay retries retain their
+last checked authority floor. Missing/behind projections rebuild cold under the
+same acquired target and recovery slot. Independent operations remain cold.
+`check_continuation.py` bounds scope, fence, suffix poison, original duplicates,
+state high-water and historical-epoch preservation; mappings are documentary.
 
 The concrete PostgreSQL facade and mandatory suite are implemented. The hidden
 Linux native port assembles all ten operations from shared planners, native

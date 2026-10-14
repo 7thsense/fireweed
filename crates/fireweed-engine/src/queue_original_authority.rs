@@ -67,6 +67,25 @@ impl ColdOriginalTracker {
             job,
         )
     }
+    /// Resume only the complete, sealed declaration within its owning operation.
+    pub fn resume(
+        proof: &AdmittedOriginalAuthority,
+        batch: &CommitBatch,
+        genesis: &OwnedQueueLogRecord,
+        progress: (u64, u64, u64),
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Self> {
+        proof.validate(batch, genesis, progress, job)?;
+        let mut tracker = Self::new(batch, job)?;
+        for (entry, previous) in tracker.entries.iter_mut().zip(&proof.entries) {
+            entry.descriptor = previous.descriptor;
+        }
+        tracker.genesis_sha256 = Some(proof.genesis_sha256);
+        tracker.next_offset = progress.0;
+        tracker.insertion_sequence = progress.1;
+        tracker.historical_epoch = progress.2;
+        Ok(tracker)
+    }
     /// One literal original in its immutable insert, claim or commit domain.
     pub fn new_request(
         queue: &QueueAddress,
@@ -627,6 +646,33 @@ mod tests {
         assert_eq!(admission.usage().unwrap(), (1, 0));
         drop(job);
         assert_eq!(admission.usage().unwrap(), (0, 0));
+    }
+    #[test]
+    fn resumed_originals_preserve_cut_and_duplicate_poison() {
+        let job = Arc::new(QueueAdmission::new(1, 4 << 20).unwrap().reserve(0).unwrap());
+        let batch = batch();
+        let records = records(&batch, &job);
+        let (tracker, history) = fold(&batch, &records, &job);
+        let proof = tracker.finish(&history, &records[0], (2, 0, 1)).unwrap();
+        let resumed =
+            ColdOriginalTracker::resume(&proof, &batch, &records[0], (2, 0, 1), &job).unwrap();
+        let equivalent = resumed.finish(&history, &records[0], (2, 0, 1)).unwrap();
+        for (position, group) in batch.groups.iter().enumerate() {
+            assert_eq!(
+                proof.descriptor(position, &group.request_id).unwrap(),
+                equivalent.descriptor(position, &group.request_id).unwrap()
+            );
+        }
+        let mut resumed =
+            ColdOriginalTracker::resume(&proof, &batch, &records[0], (2, 0, 1), &job).unwrap();
+        assert!(resumed.observe(2, &records[1]).is_err());
+        assert!(resumed.observe(2, &records[1]).is_err());
+        assert!(ColdOriginalTracker::resume(&proof, &batch, &records[0], (2, 0, 2), &job).is_err());
+        let mut changed = batch.clone();
+        changed.groups.reverse();
+        assert!(
+            ColdOriginalTracker::resume(&proof, &changed, &records[0], (2, 0, 1), &job).is_err()
+        );
     }
     #[test]
     fn late_duplicate_source_poison_and_incomplete_prefix_cannot_finish() {

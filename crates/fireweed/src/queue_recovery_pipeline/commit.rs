@@ -277,8 +277,13 @@ impl CommitExecution {
                         }
                         value
                     } else {
-                        drop(value);
-                        super::mutation::recover_original(&self).await?
+                        if self.batch.is_some() {
+                            super::mutation::OriginalMutation::recover_from(&self, Some(value))
+                                .await?
+                        } else {
+                            drop(value);
+                            super::mutation::recover_original(&self).await?
+                        }
                     }
                 }
                 None => super::mutation::recover_original(&self).await?,
@@ -330,7 +335,7 @@ impl CommitExecution {
             let epoch = prepared.writer_epoch();
             let (record, provisional, expected_head) = prepared.into_parts();
             drop(provisional);
-            drop(recovered);
+            let previous = self.batch.as_ref().map(|_| recovered);
             let namespace = self
                 .pipeline
                 .store
@@ -347,7 +352,9 @@ impl CommitExecution {
             self.pipeline
                 .publish_prepared(namespace, record, expected_head, epoch, &self.job)
                 .await?;
-            match super::mutation::resolve_submission(&self, Some(epoch), None).await? {
+            match super::mutation::resolve_submission_after(&self, Some(epoch), None, previous)
+                .await?
+            {
                 super::mutation::Submission::Resolved(response, coverage) => {
                     return Ok((response, coverage));
                 }
@@ -401,6 +408,26 @@ impl super::mutation::OriginalMutation for CommitExecution {
             };
             self.bind_batch_original(&mut recovered)?;
             Ok(recovered)
+        })
+    }
+    fn continuation_enabled(&self) -> bool {
+        self.batch.is_some()
+    }
+    fn recover_from<'a>(
+        &'a self,
+        previous: Option<RecoveredQueue>,
+    ) -> fireweed_engine::queue_contract::QueueFuture<'a, RecoveredQueue> {
+        Box::pin(async move {
+            if let (Some(batch), Some(previous)) = (&self.batch, previous) {
+                let mut recovered = self
+                    .pipeline
+                    .recover_batch_after(batch.clone(), previous, self.job.clone())
+                    .await?;
+                self.bind_batch_original(&mut recovered)?;
+                Ok(recovered)
+            } else {
+                self.recover().await
+            }
         })
     }
     fn replay<'a>(

@@ -109,7 +109,7 @@ async fn one_permit_batch_validates_all_siblings_replays_before_fresh_and_finish
             measured.succeeded,
             measured.admitted_raw_records
         ),
-        (4, 4, 14)
+        (4, 4, 5)
     );
     let replay_before = pipeline.diagnostics.snapshot();
     let expected = output.receipts().to_vec();
@@ -538,7 +538,7 @@ async fn confirmed_handoff_recovers_after_head_and_fence_changes(s3: bool) {
                     measured.succeeded,
                     measured.admitted_raw_records
                 ),
-                (5, 5, 17)
+                (5, 5, 5)
             );
         }
         let recovered = pipeline.recover(address(), job.clone()).await.unwrap();
@@ -583,4 +583,359 @@ async fn confirmed_batch_handoff_recovers_head_and_fence_races_local() {
 #[tokio::test]
 async fn confirmed_batch_handoff_recovers_head_and_fence_races_real_s3() {
     confirmed_handoff_recovers_after_head_and_fence_changes(true).await;
+}
+
+#[tokio::test]
+async fn batch_continuation_empty_suffix_preserves_historical_epoch_and_rebuilds_missing_projection()
+ {
+    let root = std::env::temp_dir().join(format!(
+        "fireweed-continuation-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(
+        ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
+            .await
+            .unwrap(),
+    );
+    let admission = QueueAdmission::new(2, 256 << 20).unwrap();
+    let job = Arc::new(admission.reserve(0).unwrap());
+    let workers = ScratchWorkers::new(1, 1).unwrap();
+    provision(&store, &job, &workers).await;
+    let behind_projection = QueueProjection::open(&root.join("behind.db"), &job, &workers)
+        .await
+        .unwrap();
+    let behind = test_pipeline(
+        store.clone(),
+        behind_projection,
+        workers.clone(),
+        65536,
+        1 << 20,
+        &root,
+    )
+    .await
+    .unwrap();
+    drop(behind.recover(address(), job.clone()).await.unwrap());
+    append_insert(&store, &job, &workers).await;
+    let options = QueuePipelineOptions {
+        operations: 1,
+        metadata_bytes: 65536,
+        hard_record_bytes: 1 << 20,
+    };
+    let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
+        .await
+        .unwrap();
+    let pipeline =
+        test_pipeline_options(store.clone(), projection, workers.clone(), options, &root)
+            .await
+            .unwrap();
+    let request = Arc::new(batch(vec![
+        patch_group("one", 1, 7),
+        patch_group("two", 2, 8),
+    ]));
+    let old = pipeline.recover_batch(&request, job.clone()).await.unwrap();
+    let historical_epoch = old.history.historical_epoch();
+    let previous_fence = old.acquired_epoch;
+    let before = pipeline.diagnostics.snapshot();
+    let continued = pipeline
+        .recover_batch_after(request.clone(), old, job.clone())
+        .await
+        .unwrap();
+    assert_eq!(continued.history.historical_epoch(), historical_epoch);
+    assert!(continued.acquired_epoch > previous_fence);
+    assert_eq!(
+        pipeline
+            .diagnostics
+            .snapshot()
+            .checked_delta(before)
+            .unwrap()
+            .admitted_raw_records,
+        0
+    );
+    // The source affinity is the store, so an empty replacement projection can
+    // rebuild under the same fresh acquire even with a one-slot pipeline.
+    let fresh_projection = QueueProjection::open(&root.join("fresh.db"), &job, &workers)
+        .await
+        .unwrap();
+    let fresh = test_pipeline_options(
+        store.clone(),
+        fresh_projection,
+        workers.clone(),
+        options,
+        &root,
+    )
+    .await
+    .unwrap();
+    let rebuilt = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        fresh.recover_batch_after(request.clone(), continued, job.clone()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(rebuilt.history.next_offset(), 2);
+    assert_eq!(rebuilt.history.historical_epoch(), historical_epoch);
+    assert_eq!(fresh.diagnostics.snapshot().admitted_raw_records, 2);
+    let rebuilt = behind
+        .recover_batch_after(request.clone(), rebuilt, job.clone())
+        .await
+        .unwrap();
+    assert_eq!(rebuilt.history.next_offset(), 2);
+    assert_eq!(rebuilt.history.historical_epoch(), historical_epoch);
+    // One initial genesis read plus the two-record fallback rebuild.
+    assert_eq!(behind.diagnostics.snapshot().admitted_raw_records, 3);
+    let mut changed = (*request).clone();
+    changed.groups[1].work_updates[0].key = "changed".into();
+    assert!(matches!(
+        fresh
+            .recover_batch_after(Arc::new(changed), rebuilt, job.clone())
+            .await,
+        Err(QueueError::OutcomeUnknown(_))
+    ));
+    drop(behind);
+    drop(fresh);
+    drop(pipeline);
+    drop(store);
+    drop(job);
+    assert_eq!(admission.usage().unwrap(), (0, 0));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn submission_resolution_does_not_retry_failed_continuation_into_fenced_absence() {
+    struct RewoundMutation {
+        pipeline: Arc<QueueRecoveryPipeline>,
+        job: Arc<QueueReservation>,
+        queue: QueueAddress,
+        calls: std::sync::atomic::AtomicUsize,
+        replay_retry: bool,
+    }
+    impl super::super::mutation::OriginalMutation for RewoundMutation {
+        type Output = ();
+        fn pipeline(&self) -> &Arc<QueueRecoveryPipeline> {
+            &self.pipeline
+        }
+        fn address(&self) -> &QueueAddress {
+            &self.queue
+        }
+        fn identity(&self) -> (u8, &str) {
+            (2, "one")
+        }
+        fn job(&self) -> &Arc<QueueReservation> {
+            &self.job
+        }
+        fn continuation_enabled(&self) -> bool {
+            true
+        }
+        fn recover_from<'a>(
+            &'a self,
+            previous: Option<RecoveredQueue>,
+        ) -> fireweed_engine::queue_contract::QueueFuture<'a, RecoveredQueue> {
+            Box::pin(async move {
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert!(
+                    previous.is_some(),
+                    "must not forget the known authority floor"
+                );
+                if self.replay_retry && call == 0 {
+                    return Ok(previous.unwrap());
+                }
+                Err(unknown(
+                    "known continuation authority disappeared or regressed",
+                ))
+            })
+        }
+        fn replay<'a>(
+            &'a self,
+            _: &'a RecoveredQueue,
+        ) -> fireweed_engine::queue_contract::QueueFuture<'a, Option<()>> {
+            Box::pin(async move {
+                assert!(self.replay_retry);
+                assert_eq!(self.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+                Err(unknown("injected replay head advance"))
+            })
+        }
+    }
+    let root = std::env::temp_dir().join(format!(
+        "fireweed-continuation-resolution-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(
+        ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
+            .await
+            .unwrap(),
+    );
+    let job = Arc::new(
+        QueueAdmission::new(1, 256 << 20)
+            .unwrap()
+            .reserve(0)
+            .unwrap(),
+    );
+    let workers = ScratchWorkers::new(1, 1).unwrap();
+    provision(&store, &job, &workers).await;
+    let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
+        .await
+        .unwrap();
+    let pipeline = test_pipeline(store.clone(), projection, workers, 65536, 1 << 20, &root)
+        .await
+        .unwrap();
+    for replay_retry in [false, true] {
+        let previous = pipeline
+            .recover_batch(&batch(vec![patch_group("one", 1, 7)]), job.clone())
+            .await
+            .unwrap();
+        let mutation = RewoundMutation {
+            pipeline: pipeline.clone(),
+            job: job.clone(),
+            queue: address(),
+            calls: Default::default(),
+            replay_retry,
+        };
+        let result = super::super::mutation::resolve_submission_after(
+            &mutation,
+            Some(previous.acquired_epoch),
+            None,
+            Some(previous),
+        )
+        .await;
+        assert!(matches!(result, Err(QueueError::OutcomeUnknown(_))));
+        assert_eq!(
+            mutation.calls.load(std::sync::atomic::Ordering::SeqCst),
+            if replay_retry { 2 } else { 1 }
+        );
+        drop(mutation);
+    }
+    drop(pipeline);
+    drop(store);
+    drop(job);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn batch_continuation_rejects_real_valid_rewound_and_vanished_authority() {
+    for vanished in [false, true] {
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-continuation-rewind-{vanished}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Arc::new(
+            ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
+                .await
+                .unwrap(),
+        );
+        let job = Arc::new(
+            QueueAdmission::new(1, 256 << 20)
+                .unwrap()
+                .reserve(0)
+                .unwrap(),
+        );
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        provision(&store, &job, &workers).await;
+        let index_dir = root.join("log/fwmeta/manifest/index");
+        let paths = std::fs::read_dir(index_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_none())
+            .collect::<Vec<_>>();
+        let saved_indexes = paths
+            .iter()
+            .map(|path| {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                (path.clone(), value)
+            })
+            .collect::<Vec<_>>();
+        append_insert(&store, &job, &workers).await;
+        let (path, mut saved) = saved_indexes
+            .into_iter()
+            .find(|(path, _)| {
+                let now: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                now["next_offset"] == 2
+            })
+            .unwrap();
+        assert_eq!(saved["next_offset"], 1);
+        let projection = QueueProjection::open(&root.join("projection.db"), &job, &workers)
+            .await
+            .unwrap();
+        let pipeline = test_pipeline(
+            store.clone(),
+            projection,
+            workers.clone(),
+            65536,
+            1 << 20,
+            &root,
+        )
+        .await
+        .unwrap();
+        let request = Arc::new(batch(vec![patch_group("one", 1, 7)]));
+        let previous = pipeline.recover_batch(&request, job.clone()).await.unwrap();
+        assert_eq!(previous.target_next_offset, 2);
+        saved["epoch"] = (previous.acquired_epoch + 10).into();
+        if vanished {
+            saved["next_offset"] = 0.into();
+            saved["entries"] = serde_json::json!([]);
+        }
+        // Atomic replacement of an idle test-only index presents a genuinely
+        // valid older prefix with a HIGHER fence to the SAME live store Arc.
+        let temporary = path.with_extension("rewind");
+        std::fs::write(&temporary, serde_json::to_vec(&saved).unwrap()).unwrap();
+        std::fs::rename(temporary, &path).unwrap();
+        let namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
+        let actual = store
+            .read_api007_state(namespace, &job, &workers)
+            .await
+            .unwrap();
+        assert_eq!(actual.state().next_offset, if vanished { 0 } else { 1 });
+        assert!(actual.state().epoch > previous.acquired_epoch);
+        drop(actual);
+        // An empty cache cannot mask the known-source guard by being ahead.
+        let fresh_projection = QueueProjection::open(&root.join("fresh.db"), &job, &workers)
+            .await
+            .unwrap();
+        let fresh = test_pipeline(
+            store.clone(),
+            fresh_projection,
+            workers.clone(),
+            65536,
+            1 << 20,
+            &root,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            fresh
+                .recover_batch_after(request, previous, job.clone())
+                .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        assert_eq!(fresh.diagnostics.snapshot().admitted_raw_records, 0);
+        let namespace = store.bind_api007_namespace(&address(), &job).await.unwrap();
+        let unchanged = store
+            .read_api007_state(namespace, &job, &workers)
+            .await
+            .unwrap();
+        assert_eq!(unchanged.state().next_offset, if vanished { 0 } else { 1 });
+        assert_eq!(unchanged.state().epoch, saved["epoch"].as_u64().unwrap());
+        drop(unchanged);
+        drop(fresh);
+        drop(pipeline);
+        drop(store);
+        drop(job);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

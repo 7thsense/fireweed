@@ -100,6 +100,26 @@ impl ColdGroupStateTracker {
             poisoned: false,
         })
     }
+    pub fn resume(
+        proof: &Arc<AdmittedGroupStateSet>,
+        batch: &CommitBatch,
+        genesis: &OwnedQueueLogRecord,
+        progress: (u64, u64, u64),
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Self> {
+        proof.validate_batch(batch, genesis, progress, job)?;
+        let mut tracker = Self::new(&batch.queue, &batch.groups, job)?;
+        tracker
+            .anchor
+            .seed(&proof.anchor, &batch.queue, genesis, progress, job)?;
+        if tracker.states.len() != proof.states.len() {
+            return Err(unknown("continuation state vector mismatch"));
+        }
+        for (state, previous) in tracker.states.iter_mut().zip(&proof.states) {
+            state.seed(previous, &batch.queue, genesis, progress, job)?;
+        }
+        Ok(tracker)
+    }
     pub fn observe(&mut self, offset: u64, record: &OwnedQueueLogRecord) -> QueueResult<()> {
         if self.poisoned {
             return Err(unknown("poisoned group state history"));
@@ -157,6 +177,30 @@ impl ColdGroupStateTracker {
     }
 }
 impl AdmittedGroupStateSet {
+    pub fn validate_batch(
+        self: &Arc<Self>,
+        batch: &CommitBatch,
+        genesis: &OwnedQueueLogRecord,
+        progress: (u64, u64, u64),
+        job: &QueueReservation,
+    ) -> QueueResult<()> {
+        self.anchor.validate_keys(
+            &batch.queue,
+            ANCHOR_COLLECTION,
+            std::iter::empty(),
+            genesis,
+            progress,
+            job,
+        )?;
+        if self.bindings.len() != batch.groups.len() {
+            return Err(unknown("complete batch declaration mismatch"));
+        }
+        for (position, group) in batch.groups.iter().enumerate() {
+            self.group(position)?
+                .validate(&batch.queue, group, genesis, progress, job)?;
+        }
+        Ok(())
+    }
     pub fn group(self: &Arc<Self>, position: usize) -> QueueResult<AdmittedGroupStateAuthority> {
         if position >= self.bindings.len() {
             return Err(unknown("group position outside declared batch"));

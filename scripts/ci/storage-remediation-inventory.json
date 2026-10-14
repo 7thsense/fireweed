@@ -16944,6 +16944,46 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::commit_batch::batch_continuation_empty_suffix_preserves_historical_epoch_and_rebuilds_missing_projection",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::batch_continuation_empty_suffix_preserves_historical_epoch_and_rebuilds_missing_projection",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::commit_batch::batch_continuation_empty_suffix_preserves_historical_epoch_and_rebuilds_missing_projection"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::commit_batch::batch_continuation_rejects_real_valid_rewound_and_vanished_authority",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::batch_continuation_rejects_real_valid_rewound_and_vanished_authority",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::commit_batch::batch_continuation_rejects_real_valid_rewound_and_vanished_authority"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_local",
           "--",
           "--exact"
@@ -16991,6 +17031,26 @@
         "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop",
         "target": "fireweed",
         "test_id": "queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::commit_batch::submission_resolution_does_not_retry_failed_continuation_into_fenced_absence",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::submission_resolution_does_not_retry_failed_continuation_into_fenced_absence",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::commit_batch::submission_resolution_does_not_retry_failed_continuation_into_fenced_absence"
       },
       {
         "exact_invocation": [
@@ -41529,6 +41589,34 @@
       "expected_ran": 1,
       "harness_id": "queue_original_authority::tests::original_header_admission_and_unique_positions_precede_allocation",
       "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_original_authority::tests::original_header_admission_and_unique_positions_precede_allocation",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--lib",
+        "queue_original_authority::tests::resumed_originals_preserve_cut_and_duplicate_poison",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_original_authority::tests::resumed_originals_preserve_cut_and_duplicate_poison",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_original_authority::tests::resumed_originals_preserve_cut_and_duplicate_poison",
       "listed_kind": "test",
       "package": "fireweed-engine",
       "target": "fireweed_engine",
@@ -84849,6 +84937,62 @@
         "-p",
         "fireweed",
         "--lib",
+        "queue_recovery_pipeline::tests::commit_batch::batch_continuation_empty_suffix_preserves_historical_epoch_and_rebuilds_missing_projection",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::commit_batch::batch_continuation_empty_suffix_preserves_historical_epoch_and_rebuilds_missing_projection",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::batch_continuation_empty_suffix_preserves_historical_epoch_and_rebuilds_missing_projection",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
+        "queue_recovery_pipeline::tests::commit_batch::batch_continuation_rejects_real_valid_rewound_and_vanished_authority",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::commit_batch::batch_continuation_rejects_real_valid_rewound_and_vanished_authority",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::batch_continuation_rejects_real_valid_rewound_and_vanished_authority",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
         "queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_local",
         "--",
         "--exact"
@@ -84912,6 +85056,34 @@
       "expected_ran": 1,
       "harness_id": "queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop",
       "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--lib",
+        "queue_recovery_pipeline::tests::commit_batch::submission_resolution_does_not_retry_failed_continuation_into_fenced_absence",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "harness_id": "queue_recovery_pipeline::tests::commit_batch::submission_resolution_does_not_retry_failed_continuation_into_fenced_absence",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::submission_resolution_does_not_retry_failed_continuation_into_fenced_absence",
       "listed_kind": "test",
       "package": "fireweed",
       "target": "fireweed",
@@ -96061,7 +96233,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "8097b7624fb72d3a455d0933f44eab68b516bc3f6ca2d91603446a5396d8b341",
+  "source_inventory_sha256": "16ce2dcec83a8c72af1618924fffbc2d361e5327a95b0111eac25b3849d3b363",
   "workspaces": [
     {
       "listing_error_sha256": "",

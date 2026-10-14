@@ -134,6 +134,39 @@ impl ColdStateTracker {
             job,
         )
     }
+    pub(super) fn seed(
+        &mut self,
+        proof: &AdmittedStateAuthority,
+        queue: &QueueAddress,
+        genesis: &OwnedQueueLogRecord,
+        progress: (u64, u64, u64),
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<()> {
+        if self.poisoned
+            || self.next_offset != 0
+            || !std::ptr::eq(self.charge.reservation(), job.as_ref())
+        {
+            return Err(unknown(
+                "state continuation requires fresh admitted tracker",
+            ));
+        }
+        proof.validate_keys(
+            queue,
+            &self.collection,
+            self.entries.iter().map(|entry| entry.key.as_str()),
+            genesis,
+            progress,
+            job,
+        )?;
+        for (entry, previous) in self.entries.iter_mut().zip(&proof.entries) {
+            entry.descriptor = previous.descriptor;
+        }
+        self.genesis_sha256 = Some(proof.genesis_sha256);
+        self.next_offset = progress.0;
+        self.insertion_sequence = progress.1;
+        self.historical_epoch = progress.2;
+        Ok(())
+    }
     pub(super) fn new_keys<'a>(
         queue: &QueueAddress,
         collection: &str,

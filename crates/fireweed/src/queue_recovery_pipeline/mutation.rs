@@ -20,6 +20,16 @@ pub(super) trait OriginalMutation: Sync {
                 .await
         })
     }
+    fn continuation_enabled(&self) -> bool {
+        false
+    }
+    fn recover_from<'a>(
+        &'a self,
+        previous: Option<RecoveredQueue>,
+    ) -> QueueFuture<'a, RecoveredQueue> {
+        drop(previous);
+        self.recover()
+    }
     fn replay<'a>(&'a self, recovered: &'a RecoveredQueue)
     -> QueueFuture<'a, Option<Self::Output>>;
 }
@@ -63,15 +73,30 @@ pub(super) fn check_preparation<T>(
 pub(super) async fn resolve_submission<M: OriginalMutation>(
     mutation: &M,
     prepared_epoch: Option<u64>,
-    mut covered: Option<RecoveredQueue>,
+    covered: Option<RecoveredQueue>,
 ) -> QueueResult<Submission<M::Output>> {
+    resolve_submission_after(mutation, prepared_epoch, covered, None).await
+}
+pub(super) async fn resolve_submission_after<M: OriginalMutation>(
+    mutation: &M,
+    prepared_epoch: Option<u64>,
+    mut covered: Option<RecoveredQueue>,
+    mut previous: Option<RecoveredQueue>,
+) -> QueueResult<Submission<M::Output>> {
+    let continuing_batch = mutation.continuation_enabled();
     for _ in 0..3 {
         let recovered = match covered.take() {
             Some(value) => value,
-            None => match recover_original(mutation).await {
-                Ok(value) => value,
-                Err(_) => continue,
-            },
+            None => {
+                let continuing = previous.is_some();
+                match mutation.recover_from(previous.take()).await {
+                    Ok(value) => value,
+                    // A failed continuation must not forget previously known
+                    // authority and retry a shorter cold prefix as fenced absent.
+                    Err(error) if continuing => return Err(error),
+                    Err(_) => continue,
+                }
+            }
         };
         match mutation.replay(&recovered).await {
             Ok(Some(response)) => {
@@ -105,6 +130,9 @@ pub(super) async fn resolve_submission<M: OriginalMutation>(
                 return Err(QueueError::TooLarge);
             }
             Err(_) => {}
+        }
+        if continuing_batch {
+            previous = Some(recovered);
         }
     }
     Err(unknown(

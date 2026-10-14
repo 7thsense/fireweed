@@ -27,7 +27,7 @@ use fireweed_engine::{
 use fireweed_objectlog::ObjectLogEngineStore;
 use fireweed_queue_spool::ScratchWorkers;
 use fireweed_turso::queue_projection::{QueueProjection, QueueProjectionCheckpoint};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 #[cfg(target_os = "linux")]
 pub use store::NativeQueueStore;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -130,6 +130,7 @@ impl RecoveryStateTracker {
 /// Point-in-time coverage only; later consumer reads/writes must establish
 /// current projection and fence authority again.
 pub struct RecoveredQueue {
+    source: Weak<ObjectLogEngineStore>,
     pub history: ColdQueueHistory,
     /// Original genesis header epoch, distinct from the acquired fence and last record.
     pub original_genesis_epoch: u64,
@@ -147,7 +148,12 @@ struct OperationCompletion {
     _slot: OwnedSemaphorePermit,
     _job: Arc<QueueReservation>,
 }
+struct BatchContinuation {
+    previous: RecoveredQueue,
+    request: Arc<fireweed_core::queue_contract::CommitBatch>,
+}
 struct RecoveryTask {
+    continuation: Option<BatchContinuation>,
     // Release the bounded task slot before releasing the operation reservation.
     _slot: OwnedSemaphorePermit,
     pipeline: Arc<QueueRecoveryPipeline>,
@@ -290,12 +296,40 @@ impl QueueRecoveryPipeline {
         )
         .await
     }
+    async fn recover_batch_after(
+        self: &Arc<Self>,
+        request: Arc<fireweed_core::queue_contract::CommitBatch>,
+        previous: RecoveredQueue,
+        job: Arc<QueueReservation>,
+    ) -> QueueResult<RecoveredQueue> {
+        self.recover_scoped(
+            request.queue.clone(),
+            None,
+            None,
+            None,
+            Some(BatchContinuation { previous, request }),
+            job,
+        )
+        .await
+    }
     async fn recover_checked(
         self: &Arc<Self>,
         address: QueueAddress,
         identity: Option<(u8, String)>,
         originals: Option<ColdOriginalTracker>,
         states: Option<RecoveryStateTracker>,
+        job: Arc<QueueReservation>,
+    ) -> QueueResult<RecoveredQueue> {
+        self.recover_scoped(address, identity, originals, states, None, job)
+            .await
+    }
+    async fn recover_scoped(
+        self: &Arc<Self>,
+        address: QueueAddress,
+        identity: Option<(u8, String)>,
+        originals: Option<ColdOriginalTracker>,
+        states: Option<RecoveryStateTracker>,
+        continuation: Option<BatchContinuation>,
         job: Arc<QueueReservation>,
     ) -> QueueResult<RecoveredQueue> {
         address.validate()?;
@@ -312,6 +346,7 @@ impl QueueRecoveryPipeline {
             .try_acquire_owned()
             .map_err(|_| QueueError::Busy)?;
         let task = RecoveryTask {
+            continuation,
             _slot: slot,
             pipeline: Arc::clone(self),
             address,
@@ -359,6 +394,49 @@ impl RecoveryTask {
         span: &mut diagnostics::RecoverySpan,
     ) -> QueueResult<RecoveredQueue> {
         let pipeline = &self.pipeline;
+        // Reject the complete old bundle before consulting projection state.
+        if let Some(seed) = &self.continuation {
+            let old = &seed.previous;
+            if !old
+                .source
+                .upgrade()
+                .is_some_and(|store| Arc::ptr_eq(&store, &pipeline.store))
+                || seed.request.queue != self.address
+                || old.target_next_offset != old.history.next_offset()
+                || old.acquired_epoch < old.history.historical_epoch()
+            {
+                return Err(unknown("continuation source/declaration/cut mismatch"));
+            }
+            old.history.definition()?;
+            let address = old.history.address()?;
+            if !old.history.belongs_to(&self.job)
+                || address.tenant != self.address.tenant
+                || address.queue != self.address.queue
+            {
+                return Err(unknown("continuation history operation/address mismatch"));
+            }
+            let genesis = encode_checked_genesis(
+                old.original_genesis_epoch,
+                &self.address,
+                old.history.definition()?,
+                old.history.cursor_secret()?,
+                pipeline.hard_record_bytes,
+                &self.job,
+            )?;
+            let progress = (
+                old.history.next_offset(),
+                old.history.insertion_sequence(),
+                old.history.historical_epoch(),
+            );
+            old.original_authority
+                .as_ref()
+                .ok_or_else(|| unknown("missing continuation originals"))?
+                .validate(&seed.request, &genesis, progress, &self.job)?;
+            old.group_state_authority
+                .as_ref()
+                .ok_or_else(|| unknown("missing continuation states"))?
+                .validate_batch(&seed.request, &genesis, progress, &self.job)?;
+        }
         let namespace = pipeline
             .store
             .bind_api007_namespace(&self.address, &self.job)
@@ -372,6 +450,17 @@ impl RecoveryTask {
             .read_api007_state(namespace, &self.job, &pipeline.workers)
             .await?;
         let before = observed.state();
+        if let Some(seed) = &self.continuation
+            && (before.log_start != 0
+                || u64::try_from(before.next_offset)
+                    .ok()
+                    .is_none_or(|head| head < seed.previous.target_next_offset)
+                || before.epoch < seed.previous.acquired_epoch)
+        {
+            return Err(unknown(
+                "known continuation authority disappeared or regressed",
+            ));
+        }
         if before.log_start == 0 && before.next_offset == 0 {
             if pipeline
                 .projection
@@ -403,6 +492,81 @@ impl RecoveryTask {
         let mut checkpoint: Option<QueueProjectionCheckpoint> = None;
         let mut genesis_epoch = 0;
         let mut original_identity_present = self.identity.as_ref().map(|_| false);
+        if let Some(seed) = self.continuation.take() {
+            let old = seed.previous;
+            if target_next_offset < old.target_next_offset || target.epoch <= old.acquired_epoch {
+                return Err(unknown(
+                    "continuation requires nonregressing head and fresh fence",
+                ));
+            }
+            let genesis = encode_checked_genesis(
+                old.original_genesis_epoch,
+                &self.address,
+                old.history.definition()?,
+                old.history.cursor_secret()?,
+                pipeline.hard_record_bytes,
+                &self.job,
+            )?;
+            span.phase(diagnostics::RecoveryPhase::NativeApply);
+            let point = pipeline
+                .projection
+                .checkpoint(genesis, &self.job, &pipeline.workers)
+                .await?;
+            if point
+                .as_ref()
+                .is_some_and(|point| point.next_offset > target_next_offset)
+            {
+                return Err(unknown("projection ahead of continuation target"));
+            }
+            // Missing/behind projections rebuild cold under this same acquired
+            // target and task slot, without adding a resolution attempt.
+            if let Some(point) = point.filter(|point| point.next_offset >= old.target_next_offset) {
+                if point.next_offset == old.target_next_offset {
+                    verify_prefix(&old.history, &point)?;
+                }
+                let genesis = encode_checked_genesis(
+                    old.original_genesis_epoch,
+                    &self.address,
+                    old.history.definition()?,
+                    old.history.cursor_secret()?,
+                    pipeline.hard_record_bytes,
+                    &self.job,
+                )?;
+                let progress = (
+                    old.history.next_offset(),
+                    old.history.insertion_sequence(),
+                    old.history.historical_epoch(),
+                );
+                self.originals = Some(ColdOriginalTracker::resume(
+                    old.original_authority.as_ref().unwrap(),
+                    &seed.request,
+                    &genesis,
+                    progress,
+                    &self.job,
+                )?);
+                self.states = Some(RecoveryStateTracker::Groups(
+                    fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::resume(
+                        old.group_state_authority.as_ref().unwrap(),
+                        &seed.request,
+                        &genesis,
+                        progress,
+                        &self.job,
+                    )?,
+                ));
+                genesis_epoch = old.original_genesis_epoch;
+                history = old.history;
+                checkpoint = Some(point);
+            } else {
+                self.originals = Some(ColdOriginalTracker::new(&seed.request, &self.job)?);
+                self.states = Some(RecoveryStateTracker::Groups(
+                    fireweed_engine::queue_group_state_authority::ColdGroupStateTracker::new(
+                        &seed.request.queue,
+                        &seed.request.groups,
+                        &self.job,
+                    )?,
+                ));
+            }
+        }
         while history.next_offset() < target_next_offset {
             span.phase(diagnostics::RecoveryPhase::PlannedRead);
             let offset = history.next_offset();
@@ -594,6 +758,7 @@ impl RecoveryTask {
             original_identity_present = Some(present);
         }
         Ok(RecoveredQueue {
+            source: Arc::downgrade(&pipeline.store),
             history,
             original_genesis_epoch: genesis_epoch,
             acquired_epoch: target.epoch,

@@ -4829,7 +4829,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "3be238203308ac3bc55a779874222a223768ca30dbe4aa991f0c90c2a65a653a",
+  "scan_sha256": "05d89dddfc1c9a9ccdd23e742eca5cbddb59de2153232533efe815b437a5fc68",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -17064,7 +17064,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 95597,
+      "last_match_line": 95769,
       "line": 1,
       "markers": [
         "e3",
@@ -17449,6 +17449,42 @@
       "operations": [
         "constant"
       ],
+      "path": "scripts/formal/check_continuation.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 57,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 57,
+      "line": 46,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/check_continuation.py",
+      "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 2,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 2,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
       "path": "scripts/formal/check_domains.py",
       "symbol": "<module>"
     },
@@ -17725,6 +17761,24 @@
       ],
       "path": "scripts/formal/run_replay.py",
       "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 1,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/test_continuation.py",
+      "symbol": "<module>"
     },
     {
       "evidence_paths": [],
