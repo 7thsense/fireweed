@@ -12,6 +12,8 @@ import subprocess
 import sys
 import tomllib
 
+from stock_turso_policy import StockTursoError, read_and_validate as validate_stock_turso, self_test as stock_turso_self_test
+
 from fireweed_test_placement import PlacementError
 from fireweed_test_placement import self_test as fireweed_placement_self_test
 from fireweed_test_placement import validate as validate_fireweed_test_placement
@@ -36,64 +38,8 @@ def require(condition: bool, message: str) -> None:
         raise PolicyError(message)
 
 
-# These two ignores compensate for macro expansion / Cargo feature unification,
-# not unused dependencies. Keep the allowlist independent of vendor debt scope.
-VENDOR_MACHETE_PAIRS = {
-    ("vendor/turso_core/Cargo.toml", "antithesis_sdk"),
-    ("vendor/turso_sdk_kit/Cargo.toml", "parking_lot"),
-}
-
-
-def validate_vendor_dependency_invariants(
-    manifests: dict[str, dict[str, object]], core_source: str, sdk_source: str
-) -> None:
-    pairs = []
-    for path, manifest in manifests.items():
-        ignored = manifest.get("package", {}).get("metadata", {}).get("cargo-machete", {}).get("ignored", [])
-        require(isinstance(ignored, list), f"vendor cargo-machete ignored list: {path}")
-        pairs.extend((path, dependency) for dependency in ignored)
-    require(
-        len(pairs) == len(VENDOR_MACHETE_PAIRS) and set(pairs) == VENDOR_MACHETE_PAIRS,
-        "vendor cargo-machete ignores must be exactly the reviewed macro/feature pairs",
-    )
-    core = manifests["vendor/turso_core/Cargo.toml"]
-    antithesis = core.get("target", {}).get("cfg(antithesis)", {}).get("dependencies", {}).get("antithesis_sdk", {})
-    require(
-        antithesis.get("version") and antithesis.get("features") == ["full"]
-        and antithesis.get("default-features") is False,
-        "antithesis_sdk ignore requires the cfg(antithesis) full-feature dependency",
-    )
-    require(core.get("dependencies", {}).get("turso_macros", {}).get("version"), "assertion macro dependency missing")
-    exports = re.search(r"pub use turso_macros::\{([^}]+)\};", core_source, re.DOTALL)
-    require(
-        exports is not None and {"turso_assert", "turso_assert_sometimes"}.issubset(
-            {name.strip() for name in exports.group(1).split(",")}
-        ),
-        "antithesis_sdk ignore requires Turso assertion macro exports",
-    )
-    sdk = manifests["vendor/turso_sdk_kit/Cargo.toml"]
-    dependencies = sdk.get("dependencies", {})
-    parking_lot = dependencies.get("parking_lot", {})
-    require(
-        parking_lot.get("version") and parking_lot.get("features") == ["send_guard"]
-        and dependencies.get("turso_core", {}).get("path") == "../turso_core",
-        "parking_lot ignore requires send_guard feature unification with vendored core",
-    )
-    require(
-        "assert_send!(TursoDatabase, TursoConnection, TursoStatement);" in sdk_source,
-        "parking_lot ignore requires the SDK's Send assertions",
-    )
-
-
-def vendor_dependency_sources() -> tuple[dict[str, dict[str, object]], str, str]:
-    paths = subprocess.check_output(
-        ["git", "ls-files", "-z", "--", "vendor/"], cwd=ROOT, text=True
-    ).split("\0")
-    manifests = {
-        path: tomllib.loads((ROOT / path).read_text())
-        for path in sorted(paths) if Path(path).name == "Cargo.toml"
-    }
-    return manifests, (ROOT / "vendor/turso_core/lib.rs").read_text(), (ROOT / "vendor/turso_sdk_kit/src/rsapi.rs").read_text()
+# The retired fork has no surviving dependency-ignore exceptions.
+VENDOR_MACHETE_PAIRS: set[tuple[str, str]] = set()
 
 
 def validate_external_dependencies(
@@ -133,10 +79,10 @@ def validate_external_dependencies(
             machete_pairs.append((path, row["identity"]))
     require(
         len(machete_pairs) == len(VENDOR_MACHETE_PAIRS) and set(machete_pairs) == VENDOR_MACHETE_PAIRS,
-        "external observations must retain exactly the reviewed vendor macro/feature ignores",
+        "external observations cannot restore retired vendor dependency ignores",
     )
     if check_repository:
-        validate_vendor_dependency_invariants(*vendor_dependency_sources())
+        validate_stock_turso(ROOT)
 
 
 def parse_mode(path: Path) -> str:
@@ -371,10 +317,6 @@ def validate_cargo_scope(text: str) -> None:
         "root Cargo comment omits independent benchmark workspace",
     )
     require(
-        "vendor/turso_core/Cargo.toml" in text,
-        "root Cargo comment omits vendored Turso tests",
-    )
-    require(
         "members below" in text,
         "root Cargo comment does not bound cargo test --workspace",
     )
@@ -406,14 +348,19 @@ def validate_shape() -> None:
 def self_test(document: dict[str, object]) -> None:
     validate_shape()
     fireweed_placement_self_test(document["fireweed_test_placement"])
-    try:
-        validate_cargo_scope(
-            "# No crate is excluded, so cargo test covers everything\n[workspace]\nmembers=[]\n"
-        )
-    except PolicyError:
-        pass
-    else:
-        raise PolicyError("false-complete Cargo scope fixture passed")
+    cargo = CARGO_MANIFEST.read_text()
+    validate_cargo_scope(cargo)
+    for label, text in (
+        ("false completeness", cargo + "\n# No crate is excluded\n"),
+        ("missing benchmark", cargo.replace("crates/fireweed-bench/Cargo.toml", "benchmark workspace")),
+        ("missing member bound", cargo.replace("members below", "all crates")),
+    ):
+        try:
+            validate_cargo_scope(text)
+        except PolicyError:
+            pass
+        else:
+            raise PolicyError(f"Cargo scope fixture passed: {label}")
     try:
         parse_mode(Path("scripts/ci/fixtures/closure/all-closed.json"))
     except PolicyError:
@@ -496,27 +443,25 @@ def self_test(document: dict[str, object]) -> None:
     else:
         raise PolicyError("arbitrary vendor dependency ignore passed")
 
-    manifests, core_source, sdk_source = vendor_dependency_sources()
-    validate_vendor_dependency_invariants(manifests, core_source, sdk_source)
-    for label in ("extra_ignore", "missing_send_guard", "missing_antithesis_cfg", "missing_assertion_macros", "missing_send_assertions"):
-        changed = copy.deepcopy(manifests)
-        changed_core, changed_sdk = core_source, sdk_source
-        if label == "extra_ignore":
-            changed["vendor/turso_sdk_kit/Cargo.toml"]["package"]["metadata"]["cargo-machete"]["ignored"].append("unused")
-        elif label == "missing_send_guard":
-            changed["vendor/turso_sdk_kit/Cargo.toml"]["dependencies"]["parking_lot"]["features"] = []
-        elif label == "missing_antithesis_cfg":
-            changed["vendor/turso_core/Cargo.toml"]["target"].pop("cfg(antithesis)")
-        elif label == "missing_assertion_macros":
-            changed_core = ""
-        else:
-            changed_sdk = ""
+    retired = (
+        ("vendor/turso_core/Cargo.toml", "antithesis_sdk"),
+        ("vendor/turso_sdk_kit/Cargo.toml", "parking_lot"),
+    )
+    for pairs in ((retired[0],), (retired[1],), retired):
+        fixture = copy.deepcopy(document)
+        for path, dependency in pairs:
+            fixture["external_dependency_observations"]["findings"].append({
+                "registry": "cargo_machete_exceptions",
+                "finding": {**upstream, "path": path, "category": "cargo_machete_exception", "identity": dependency},
+            })
         try:
-            validate_vendor_dependency_invariants(changed, changed_core, changed_sdk)
+            validate_inventory(fixture, "remediation", check_repository=False)
         except PolicyError:
             pass
         else:
-            raise PolicyError(f"vendor ignore invariant fixture passed: {label}")
+            raise PolicyError(f"retired vendor dependency ignores passed: {pairs}")
+    stock_turso_self_test()
+    validate_stock_turso(ROOT)
 
 
 def main() -> int:
@@ -542,7 +487,7 @@ def main() -> int:
         count = len(document["external_dependency_observations"]["findings"])
         print(f"external dependency observations: {count}; not qualified by product closure")
         return 0
-    except (PolicyError, PlacementError, json.JSONDecodeError, KeyError, TypeError) as error:
+    except (PolicyError, StockTursoError, PlacementError, json.JSONDecodeError, KeyError, TypeError, OSError, tomllib.TOMLDecodeError) as error:
         print(f"storage remediation policy failed: {error}", file=sys.stderr)
         return 1
 
