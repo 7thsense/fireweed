@@ -185,6 +185,17 @@ impl<'a, 'r> UniqueTupleReducer<'a, 'r> {
     /// Call only after the source successfully completes this full tuple group.
     /// The driver must also complete every remaining group before publication.
     pub fn finish(self) -> QueueResult<UniqueTupleDecision> {
+        self.finish_with(|_| Ok(()))
+    }
+    /// Observe the final owner synchronously while retained claimant guards are
+    /// alive. Collisions return their existing decision without invoking the
+    /// callback; None means genuine final nonownership, never a collision.
+    /// The caller retains initial-owner/tuple admission, and all output remains
+    /// provisional until every tuple and the complete source finish successfully.
+    pub fn finish_with(
+        self,
+        callback: impl FnOnce(Option<&RecordIdentity>) -> QueueResult<()>,
+    ) -> QueueResult<UniqueTupleDecision> {
         if self.poisoned {
             return Err(unknown("poisoned unique tuple cannot finish"));
         }
@@ -192,10 +203,23 @@ impl<'a, 'r> UniqueTupleReducer<'a, 'r> {
             self.initial_owner
                 .is_some_and(|owner| *owner != claimant.identity && !self.released)
         });
-        Ok(UniqueTupleDecision {
+        let decision = UniqueTupleDecision {
             administrative_collision: self.administrative_collision,
             final_collision: self.final_collision || blocked_by_initial,
-        })
+        };
+        if !decision.administrative_collision && !decision.final_collision {
+            let owner = self
+                .claimant
+                .as_ref()
+                .map(|claimant| &claimant.identity)
+                .or(if self.released {
+                    None
+                } else {
+                    self.initial_owner
+                });
+            callback(owner)?;
+        }
+        Ok(decision)
     }
 }
 
@@ -417,6 +441,179 @@ mod tests {
         assert_eq!(admission.usage().unwrap().1, baseline);
         drop(tuple_charge);
         assert_eq!(admission.usage().unwrap().1, 0);
+    }
+    #[test]
+    fn final_owner_callback_preserves_observation_release_reclaim_and_order() {
+        let tuple = tuple();
+        let a = owner("a");
+        let b = owner("b");
+        let admission = QueueAdmission::new(1, 65536).unwrap();
+        let job = admission.reserve(0).unwrap();
+        for (initial, release, claimant, expected) in [
+            (None, false, None, None),
+            (Some(&a), false, None, Some(&a)),
+            (Some(&a), true, None, None),
+            (Some(&a), false, Some(&a), Some(&a)),
+            (Some(&a), true, Some(&a), Some(&a)),
+            (Some(&a), true, Some(&b), Some(&b)),
+            (None, false, Some(&b), Some(&b)),
+        ] {
+            for release_first in [false, true] {
+                let mut reducer = UniqueTupleReducer::new(&tuple, true, initial, &job).unwrap();
+                reducer
+                    .observe(UniqueEvidence {
+                        tuple: &tuple,
+                        initial_loaded: true,
+                        initial_owner: initial,
+                        effect: UniqueEvidenceEffect::Observe,
+                    })
+                    .unwrap();
+                for is_release in [release_first, !release_first] {
+                    let effect = if is_release {
+                        if !release {
+                            continue;
+                        }
+                        UniqueEvidenceEffect::Release(initial.unwrap())
+                    } else {
+                        let Some(owner) = claimant else {
+                            continue;
+                        };
+                        UniqueEvidenceEffect::Claim {
+                            owner,
+                            origin: UniqueClaimOrigin::Ordinary,
+                        }
+                    };
+                    reducer
+                        .observe(UniqueEvidence {
+                            tuple: &tuple,
+                            initial_loaded: true,
+                            initial_owner: initial,
+                            effect,
+                        })
+                        .unwrap();
+                }
+                let mut seen = Vec::new();
+                let result = reducer
+                    .finish_with(|owner| {
+                        seen.push(owner.cloned());
+                        Ok(())
+                    })
+                    .unwrap();
+                assert!(!result.administrative_collision && !result.final_collision);
+                assert_eq!(seen, vec![expected.cloned()]);
+                assert_eq!(admission.usage().unwrap().1, 0);
+            }
+        }
+    }
+    #[test]
+    fn collisions_and_poison_never_call_final_owner_callback() {
+        let tuple = tuple();
+        let a = owner("a");
+        let b = owner("b");
+        let admission = QueueAdmission::new(1, 65536).unwrap();
+        let job = admission.reserve(0).unwrap();
+        // Initial-owner conflict, administrative sibling collision, and an
+        // ordinary sibling collision with no initial owner are distinct paths.
+        for mode in 0..3 {
+            let administrative = mode == 1;
+            let initial = (mode == 0).then_some(&a);
+            let mut reducer = UniqueTupleReducer::new(&tuple, true, initial, &job).unwrap();
+            let origin = if administrative {
+                UniqueClaimOrigin::Administrative
+            } else {
+                UniqueClaimOrigin::Ordinary
+            };
+            for owner in if mode == 0 { vec![&b] } else { vec![&a, &b] } {
+                reducer
+                    .observe(UniqueEvidence {
+                        tuple: &tuple,
+                        initial_loaded: true,
+                        initial_owner: initial,
+                        effect: UniqueEvidenceEffect::Claim { owner, origin },
+                    })
+                    .unwrap();
+            }
+            let result = reducer
+                .finish_with(|_| panic!("colliding owner exposed"))
+                .unwrap();
+            assert!(result.final_collision);
+            assert_eq!(result.administrative_collision, administrative);
+            assert_eq!(admission.usage().unwrap().1, 0);
+        }
+        let mut reducer = UniqueTupleReducer::new(&tuple, true, Some(&a), &job).unwrap();
+        assert!(
+            reducer
+                .observe(UniqueEvidence {
+                    tuple: &tuple,
+                    initial_loaded: true,
+                    initial_owner: Some(&a),
+                    effect: UniqueEvidenceEffect::Release(&b)
+                })
+                .is_err()
+        );
+        assert!(
+            reducer
+                .finish_with(|_| panic!("poisoned owner exposed"))
+                .is_err()
+        );
+        assert_eq!(admission.usage().unwrap().1, 0);
+    }
+    #[test]
+    fn final_owner_callback_retains_credit_through_success_error_and_unwind() {
+        let tuple = tuple();
+        let claimant = owner(&"full-owner\0β".repeat(1024));
+        let admission = QueueAdmission::new(1, 1 << 20).unwrap();
+        let job = admission.reserve(0).unwrap();
+        for mode in 0..3 {
+            let mut reducer = UniqueTupleReducer::new(&tuple, true, None, &job).unwrap();
+            reducer
+                .observe(UniqueEvidence {
+                    tuple: &tuple,
+                    initial_loaded: true,
+                    initial_owner: None,
+                    effect: UniqueEvidenceEffect::Claim {
+                        owner: &claimant,
+                        origin: UniqueClaimOrigin::Ordinary,
+                    },
+                })
+                .unwrap();
+            let retained = admission.usage().unwrap().1;
+            assert!(retained > claimant.key.len() as u64);
+            let filler = job.buffer((1 << 20) - retained).unwrap();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                reducer.finish_with(|owner| {
+                    assert_eq!(admission.usage().unwrap().1, 1 << 20);
+                    let owner = owner.unwrap();
+                    assert_eq!(owner, &claimant);
+                    assert_ne!(owner.key.as_ptr(), claimant.key.as_ptr());
+                    match mode {
+                        0 => Ok(()),
+                        1 => Err(unknown("callback stopped")),
+                        _ => panic!("callback unwind"),
+                    }
+                })
+            }));
+            match mode {
+                0 => {
+                    assert!(!result.unwrap().unwrap().final_collision);
+                }
+                1 => {
+                    assert!(
+                        matches!(result.unwrap(), Err(QueueError::OutcomeUnknown(ref message)) if message == "callback stopped")
+                    );
+                }
+                _ => {
+                    let panic = result.unwrap_err();
+                    assert_eq!(
+                        panic.downcast_ref::<&str>().copied(),
+                        Some("callback unwind")
+                    );
+                }
+            }
+            assert_eq!(admission.usage().unwrap().1, (1 << 20) - retained);
+            drop(filler);
+            assert_eq!(admission.usage().unwrap().1, 0);
+        }
     }
     #[test]
     fn missing_authority_wrong_tuple_release_and_capacity_fail_closed() {
