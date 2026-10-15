@@ -18,3 +18,37 @@ impl QueueNativeAcquired {
             .await
     }
 }
+
+/// All inputs belong to one declared batch and one nonrefunding operation.
+/// Original freshness and caller-order prefix eligibility are established by
+/// the coordinator before the engine seals the publication.
+pub struct QueueNativeBatchPreparation<'a> {
+    pub batch: &'a fireweed_core::queue_contract::CommitBatch,
+    pub definition: &'a AdmittedQueueDefinition,
+    pub budget: Arc<QueueNativeSourceBudget>,
+    pub limits: QueueNativeSourcePreparationLimits,
+}
+impl QueueNativeAcquired {
+    /// Reject foreign declaration/cut/job bindings before compiler reads or
+    /// preparation work. Preparation retains the engine's physical prefix and
+    /// does not submit or acquire a replacement source cut.
+    pub async fn prepare_batch_publication(
+        &self,
+        log: &QueueNativeLog,
+        publication: &fireweed_engine::queue_source_index::QueueSourceBatchPublication<'_>,
+        input: QueueNativeBatchPreparation<'_>,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<QueueNativePublication> {
+        let cut = self.as_source().source_cut(log, job)?;
+        let record = publication.record_for(&cut, input.definition, input.batch, job)?;
+        self.compile_and_prepare(
+            log,
+            record,
+            input.definition,
+            input.budget,
+            input.limits,
+            job,
+        )
+        .await
+    }
+}

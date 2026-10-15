@@ -3,6 +3,7 @@
 use super::*;
 use std::ops::Bound;
 mod group;
+pub use group::QueueNativeBatchPreparation;
 
 #[derive(Clone, Copy, Debug)]
 pub struct QueueNativeSemanticWork {

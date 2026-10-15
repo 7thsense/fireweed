@@ -56833,6 +56833,66 @@
         "fireweed-objectlog",
         "--no-default-features",
         "--lib",
+        "queue_native_log::semantic::tests::compiled::batch::source_batch_handoff_matches_cold_oracle_local",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "queue_native_log::semantic::tests::compiled::batch::source_batch_handoff_matches_cold_oracle_local",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::queue_native_log::semantic::tests::compiled::batch::source_batch_handoff_matches_cold_oracle_local",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--no-default-features",
+        "--lib",
+        "queue_native_log::semantic::tests::compiled::batch::source_batch_handoff_matches_cold_oracle_real_s3",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "queue_native_log::semantic::tests::compiled::batch::source_batch_handoff_matches_cold_oracle_real_s3",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::queue_native_log::semantic::tests::compiled::batch::source_batch_handoff_matches_cold_oracle_real_s3",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--no-default-features",
+        "--lib",
         "queue_native_log::semantic::tests::compiled::source_bridge_complete_producer_matches_cold_oracle_local",
         "--",
         "--exact"
@@ -114969,7 +115029,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "8d2829b806c59d8e0dd0d95d31315014249b16bec8767e47772cb21b968aeffa",
+  "source_inventory_sha256": "c220f256a4c8582fcf741179f7d2f78394125e7e601e9aaebc7a8e2153300445",
   "workspaces": [
     {
       "listing_error_sha256": "",
