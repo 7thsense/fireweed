@@ -192,11 +192,16 @@ mod tests {
                 assert!(output.work["a"].body_loaded);
                 assert_eq!(output.work["a"].record.work.body.as_ref(), vec![9; 1 << 20]);
             } else {
-                assert!(matches!(&result.0, Err(QueueError::OutcomeUnknown(_))), "{case}");
+                assert!(
+                    matches!(&result.0, Err(QueueError::OutcomeUnknown(_))),
+                    "{case}"
+                );
                 if case == "inflated" {
-                    assert!(matches!(&result.0, Err(QueueError::OutcomeUnknown(reason))
+                    assert!(
+                        matches!(&result.0, Err(QueueError::OutcomeUnknown(reason))
                         if reason.contains("cached work body length differs from source")),
-                        "inflation must fail at source metadata before body admission");
+                        "inflation must fail at source metadata before body admission"
+                    );
                 }
             }
             drop(result);
