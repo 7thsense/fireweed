@@ -110,7 +110,9 @@ pub(super) async fn seeded(
     drop(plan);
     (captured, record, requirements)
 }
-async fn identity_objects(local: &object_log::LocalBlobStore) -> Vec<(String, bytes::Bytes)> {
+pub(super) async fn identity_objects(
+    local: &object_log::LocalBlobStore,
+) -> Vec<(String, bytes::Bytes)> {
     let mut found = Vec::new();
     for key in local.list("").await.unwrap() {
         let raw = local.get(&key).await.unwrap().unwrap();

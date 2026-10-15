@@ -26,6 +26,8 @@ mod genesis;
 pub use genesis::load_source_genesis;
 mod header;
 pub use header::{QueueSourceHeader, load_source_header};
+mod original;
+pub use original::{QueueSourceOriginalEvidence, load_source_original};
 
 mod compile;
 mod edits;

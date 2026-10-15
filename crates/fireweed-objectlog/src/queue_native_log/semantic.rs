@@ -49,6 +49,8 @@ mod provision;
 pub use provision::{QueueNativeGenesisIntent, QueueNativeProvisionLimits};
 mod recovery;
 pub use recovery::{QueueNativeRecovered, QueueNativeRecoveryLimits};
+mod original;
+pub use original::{QueueNativeOriginalRequest, QueueNativeResolvedOriginal};
 #[cfg(test)]
 pub struct QueueNativeSemanticEdit<'a> {
     pub key: &'a [u8],

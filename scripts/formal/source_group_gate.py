@@ -21,6 +21,18 @@ sys.modules[model.__name__] = model
 exec(compile(model_bytes, str(model_path), 'exec'), model.__dict__)
 helper.LOADED_SOURCES[str(model_path)] = hashlib.sha256(model_bytes).hexdigest()
 
+# Preserve the five qualified classes and capture the separate F campaign's
+# executed bytes under the SAME provenance checker as its gate and models.
+for alias, module_name in (('original_model','source_original_models'),('original_gate','source_original_gate')):
+    source_path=helper_path.with_name(module_name+'.py')
+    source_bytes=source_path.read_bytes()
+    module=types.ModuleType(module_name)
+    module.__file__=str(source_path)
+    sys.modules[module_name]=module
+    exec(compile(source_bytes,str(source_path),'exec'),module.__dict__)
+    helper.LOADED_SOURCES[str(source_path)]=hashlib.sha256(source_bytes).hexdigest()
+    globals()[alias]=module
+
 WITNESSES = {
     'mixed_check_corruption_ignored': ('mixed_check_corrupt','same','absent',False,'none',False),
     'state_metadata_only_check': ('state_check','same','absent',False,'field',False),
@@ -139,6 +151,10 @@ def completed_header_witness(s,c):
         and s.pin==('pin-'+c.persisted if success else ''))
 
 def run(max_states=100000):
+    fault_sets=[set(faults) for faults in (model.FAULTS,model.PUBLICATION_FAULTS,model.READ_FAULTS,
+        model.PROVISION_FAULTS,model.HEADER_FAULTS,original_model.ORIGINAL_FAULTS)]
+    if sum(map(len,fault_sets))!=len(set.union(*fault_sets)):
+        raise AssertionError('source campaign mutant names must be disjoint')
     specification = model.SourceGroup()
     report, graph = helper.explore(specification, max_states)
     if report['status'] != 'PASS' or not report['complete']: raise AssertionError('incomplete source-group baseline')
@@ -228,8 +244,16 @@ def run(max_states=100000):
             raise AssertionError('insensitive source header recovery mutant '+fault)
         helper.replay(mutant,failure['trace'],expected)
         controls.append({'fault':fault,'trace_sha256':helper.digest(failure['trace']),**failure})
+    original_report,original_controls=original_gate.run_original_campaign(helper,original_model,max_states)
+    controls.extend(original_controls)
+    baselines=[report,publication_report,record_report,genesis_report,header_report,original_report]
+    if [row['name'] for row in baselines]!=[
+        'api007-source-group-preimage','api007-source-group-encoding-preparation',
+        'api007-source-record-read','api007-coupled-genesis-provision',
+        'api007-source-header-recovery','api007-source-original-resolution']:
+        raise AssertionError('six exact source campaign identities required')
     return {'schema':'fireweed-api007-source-group-formal-v1', 'status':'PASS',
-        'baseline':[report, publication_report, record_report, genesis_report, header_report], 'negative_controls':controls,
+        'baseline':baselines, 'negative_controls':controls,
         'qualification':{'finite_abstract_safety':'recorded bounds only', 'production_mapping':'documentary_unexecuted',
             'excluded':['Rust refinement','exact allocation arithmetic','canonical decoding and hashes',
                         'publication/CAS','provider durability','performance','public QueueStore activation']},
@@ -248,6 +272,12 @@ def run(max_states=100000):
             {'symbols':['load_source_header','QueueNativeLog::recover_captured','QueueNativeLog::recover_acquired'],
              'tests':['captured_recovery_retains_persisted_definition_cut_and_ledger_real_s3',
                 'recovery_rejects_malformed_authority_and_releases_memory_without_refunding_work'],
+             'status':'documentary_unexecuted'},
+            {'symbols':['load_source_original','QueueSourceOriginalEvidence::verify_record',
+                'QueueNativeRecovered::resolve_original'],
+             'tests':['original_claim_requires_command_to_lease_binding_after_valid_span_digest_and_decode',
+                'original_conflict_precedes_missing_payload_and_matching_retry_uses_same_ledger',
+                'cancelled_original_resolution_retires_temporary_identity_but_retains_physical_owners_real_s3'],
              'status':'documentary_unexecuted'}]}
 
 def main(max_states, path, root):
