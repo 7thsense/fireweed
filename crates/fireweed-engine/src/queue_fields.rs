@@ -1,7 +1,10 @@
 //! Shared selective field authority and exact resolved edits. This internal
 //! vocabulary is not yet an activated/versioned durable command envelope.
+mod index;
+#[cfg(test)]
 use crate::queue_index::ordered_key;
 use fireweed_core::queue_contract::*;
+pub(crate) use index::{encode_index_tuple, index_is_affected};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 pub type FieldEdits = BTreeMap<String, Option<FieldValue>>;
@@ -195,10 +198,12 @@ pub fn affected_index_fields(
     definition
         .indexes
         .values()
-        .filter(|columns| match change {
-            ResolvedFields::Preserve => false,
-            ResolvedFields::Replace(_) => true,
-            ResolvedFields::Edit(edits) => columns.iter().any(|name| edits.contains_key(name)),
+        .filter(|columns| {
+            index_is_affected(
+                columns,
+                matches!(change, ResolvedFields::Replace(_)),
+                |name| matches!(change, ResolvedFields::Edit(edits) if edits.contains_key(name)),
+            )
         })
         .flat_map(|columns| columns.iter().cloned())
         .collect()
@@ -212,11 +217,11 @@ pub fn resolve_index_effects(
 ) -> QueueResult<Vec<IndexEffect>> {
     let mut effects = Vec::new();
     for (index, columns) in &definition.indexes {
-        let affected = match change {
-            ResolvedFields::Preserve => false,
-            ResolvedFields::Replace(_) => true,
-            ResolvedFields::Edit(edits) => columns.iter().any(|name| edits.contains_key(name)),
-        };
+        let affected = index_is_affected(
+            columns,
+            matches!(change, ResolvedFields::Replace(_)),
+            |name| matches!(change, ResolvedFields::Edit(edits) if edits.contains_key(name)),
+        );
         if !affected {
             continue;
         }
@@ -236,10 +241,18 @@ pub fn resolve_index_effects(
             }
         }
         let unique = definition.unique_indexes.contains(index);
-        let before_unique = unique && old.iter().all(Option::is_some);
-        let after_unique = unique && new.iter().all(Option::is_some);
-        let old = Some(ordered_key(&old)?);
-        let new = Some(ordered_key(&new)?);
+        let old = encode_index_tuple(
+            old.iter()
+                .map(|value| value.map(crate::queue_index::borrowed_value)),
+        )?;
+        let new = encode_index_tuple(
+            new.iter()
+                .map(|value| value.map(crate::queue_index::borrowed_value)),
+        )?;
+        let before_unique = unique && old.complete;
+        let after_unique = unique && new.complete;
+        let old = Some(old.sort);
+        let new = Some(new.sort);
         if old != new {
             effects.push(IndexEffect {
                 index: index.clone(),

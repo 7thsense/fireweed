@@ -15,7 +15,10 @@ use bytes::Bytes;
 use fireweed_core::queue_contract::{QueueAddress, QueueError, QueueResult};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+mod bounds;
+pub use bounds::QueueLogRecordBounds;
 const MAGIC: &[u8; 5] = b"FWQL1";
+const RECORD_HEADER_BYTES: usize = 5 + 8 + 1 + 8;
 const MAGIC_V2: &[u8; 5] = b"FWQL2";
 /// Checksummed framing detects corruption of this complete record, not
 /// authenticated provenance or substitution of a different valid history.
@@ -158,7 +161,7 @@ pub fn view_queue_log_record(raw: &[u8]) -> QueueResult<QueueLogRecordView<'_>> 
             return Err(invalid("truncated checksummed queue-log record"));
         }
         let payload_len = u64::from_le_bytes(
-            raw[14..22]
+            raw[14..RECORD_HEADER_BYTES]
                 .try_into()
                 .map_err(|_| invalid("queue-log payload length"))?,
         );
@@ -246,6 +249,18 @@ pub struct CheckedQueueLogRecord<'a> {
 impl<'a> CheckedQueueLogRecord<'a> {
     pub fn owner(&self) -> &'a OwnedQueueLogRecord {
         self.owner
+    }
+    /// Actual outer payload bounds, excluding framing and any checksum trailer.
+    /// Consumers referencing borrowed inner values must use this codec boundary.
+    pub fn payload_interval(&self) -> QueueResult<std::ops::Range<usize>> {
+        let end = self
+            .owner
+            .bytes()
+            .len()
+            .checked_sub(self.view.format().trailer_len())
+            .filter(|end| *end >= RECORD_HEADER_BYTES)
+            .ok_or_else(|| invalid("checked record payload bounds"))?;
+        Ok(RECORD_HEADER_BYTES..end)
     }
     pub fn view(&self) -> &QueueLogRecordView<'a> {
         &self.view
@@ -447,7 +462,7 @@ fn encode_genesis_with_format(
     let size = usize::try_from(genesis_len_with_format(address, definition, format)?)
         .map_err(|_| QueueError::TooLarge)?;
     let payload = size
-        .checked_sub(22 + format.trailer_len())
+        .checked_sub(RECORD_HEADER_BYTES + format.trailer_len())
         .ok_or(QueueError::TooLarge)?;
     let mut out = admitted_output(size, max_bytes, job)?;
     header(&mut out.bytes, epoch, GENESIS, payload, format)?;
@@ -473,7 +488,7 @@ pub fn checked_publication_record_len(publication_bytes: u64) -> QueueResult<u64
 }
 fn publication_len_with_format(publication_bytes: u64, format: QueueLogFormat) -> QueueResult<u64> {
     publication_bytes
-        .checked_add(22 + format.trailer_len() as u64)
+        .checked_add(RECORD_HEADER_BYTES as u64 + format.trailer_len() as u64)
         .ok_or(QueueError::TooLarge)
 }
 pub fn encode_checked_publication_record(
@@ -597,6 +612,70 @@ mod tests {
     fn job() -> Arc<QueueReservation> {
         Arc::new(QueueAdmission::new(1, 1 << 20).unwrap().reserve(0).unwrap())
     }
+    #[test]
+    fn admitted_genesis_bound_covers_definition_and_full_address_framing() {
+        use fireweed_core::queue_contract::{
+            FieldType, ProvisionRequest, QueueLimits, encoded_len,
+        };
+        for count in [0, 127, 128, 4096] {
+            let mut schema = schema();
+            for n in 0..count {
+                schema
+                    .work
+                    .fields
+                    .insert(format!("field\0雪/{n}"), FieldType::Integer);
+            }
+            schema
+                .state
+                .insert("collection\0λ/".repeat(128), schema.work.clone());
+            let address = QueueAddress {
+                tenant: "tenant\0雪/".repeat(129),
+                queue: "queue\0λ/".repeat(130),
+            };
+            let request = ProvisionRequest {
+                queue: address.clone(),
+                schema: schema.clone(),
+            };
+            let bytes = encoded_len(&request).unwrap();
+            let limits = QueueLimits {
+                max_records: u32::try_from(count.max(1)).unwrap(),
+                max_groups: 1,
+                max_request_bytes: bytes,
+                max_group_bytes: bytes,
+                max_response_bytes: 1,
+                max_body_bytes: 1,
+                max_state_bytes: 1,
+            };
+            request.validate(&limits).unwrap();
+            let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
+            let raw = encode_definition(&schema).unwrap();
+            let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+            let bound = QueueLogRecordBounds::for_limits(&limits).unwrap();
+            let actual = checked_genesis_record_len(&address, &definition).unwrap();
+            assert!(actual <= bound.genesis);
+            let record =
+                encode_checked_genesis(u64::MAX, &address, &definition, &[91; 32], actual, &job)
+                    .unwrap();
+            assert_eq!(record.bytes().len() as u64, actual);
+            assert!(matches!(
+                encode_checked_genesis(
+                    u64::MAX,
+                    &address,
+                    &definition,
+                    &[91; 32],
+                    actual - 1,
+                    &job
+                ),
+                Err(QueueError::TooLarge)
+            ));
+            drop(record);
+            drop(definition);
+            drop(job);
+            assert_eq!(admission.usage().unwrap(), (0, 0));
+        }
+    }
+
     #[test]
     fn checked_genesis_golden_bounds_and_every_single_bit_corruption() {
         let job = job();

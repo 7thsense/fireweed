@@ -115,13 +115,7 @@ impl MaterializedAdministrativeWork<'_> {
     }
 }
 fn owned_value(value: ValueRef<'_>) -> FieldValue {
-    match value {
-        ValueRef::Integer(value) => FieldValue::Integer(value),
-        ValueRef::Float(value) => FieldValue::Float(value),
-        ValueRef::Boolean(value) => FieldValue::Boolean(value),
-        ValueRef::Text(value) => FieldValue::Text(value.into()),
-        ValueRef::Bytes(value) => FieldValue::Bytes(value.into()),
-    }
+    value.into_owned()
 }
 /// Materialize a parsed administrative command against selectively reloaded
 /// physical authority. Never reevaluate selectors, user CAS, leases or time.

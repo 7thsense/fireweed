@@ -194,6 +194,17 @@ impl QueueReservation {
     }
 }
 impl OwnedQueueBufferCharge {
+    /// Admit additional retained capacity without replacing or dropping this
+    /// owner. Failure preserves the original charge and operation identity.
+    pub fn grow(&mut self, bytes: u64) -> QueueResult<()> {
+        let mut additional = self.reservation.buffer(bytes)?;
+        self.bytes = self
+            .bytes
+            .checked_add(additional.bytes)
+            .ok_or_else(|| QueueError::OutcomeUnknown("owned buffer charge overflow".into()))?;
+        additional.bytes = 0;
+        Ok(())
+    }
     /// Logical retained capacity; not a resident-memory measurement.
     pub fn admitted_bytes(&self) -> u64 {
         self.bytes

@@ -1137,6 +1137,83 @@ mod tests {
         g
     }
     #[test]
+    fn admitted_record_bound_covers_fixed_width_expansion_and_long_identities() {
+        use crate::queue_log_record::{QueueLogRecordBounds, checked_publication_record_len};
+        for count in [1, 127, 128, 4096] {
+            let mut q = queue();
+            q.tenant = "雪\0".repeat(128);
+            q.queue = "β/".repeat(129);
+            let schema = schema();
+            let mut g = seed();
+            g.request_id = "request\0λ/".repeat(130);
+            g.work_inserts[0].key = "work\0雪/".repeat(131);
+            g.state_updates[0].key = "state\0λ/".repeat(132);
+            for n in 0..count {
+                g.work_inserts[0]
+                    .fields
+                    .insert(format!("/payload/{n}"), FieldValue::Integer(0));
+            }
+            // Both kinds of empty variable-width values exercise their fixed
+            // eight-byte lengths, while zeros exercise compact integer growth.
+            g.work_inserts[0].fields.insert(
+                "/payload/empty-text".into(),
+                FieldValue::Text(String::new()),
+            );
+            g.work_inserts[0]
+                .fields
+                .insert("/payload/empty-bytes".into(), FieldValue::Bytes(vec![]));
+            let request = CommitBatch {
+                queue: q.clone(),
+                groups: vec![g.clone()],
+            };
+            let bytes = encoded_len(&request).unwrap();
+            let limits = QueueLimits {
+                max_records: 2,
+                max_groups: 1,
+                max_request_bytes: bytes,
+                max_group_bytes: bytes,
+                max_response_bytes: 1 << 20,
+                max_body_bytes: 2,
+                max_state_bytes: 2,
+            };
+            request.preflight(&limits).unwrap();
+            g.validate_for(&q, &schema, &limits).unwrap();
+            let bound = QueueLogRecordBounds::for_limits(&limits).unwrap();
+            let before = RecordSnapshot::default();
+            let mut after = before.clone();
+            let planned = plan_commit_group(&g, &mut after, i64::MIN, &schema).unwrap();
+            let delta =
+                combine_deltas(std::slice::from_ref(&planned), before.next_sequence).unwrap();
+            let receipt = PublicationReceipt::commit(&q, &g, &planned.receipt).unwrap();
+            let pin = DefinitionPin::from_persisted_bytes(&encode_definition(&schema).unwrap());
+            let mut count = Sink::Count(0);
+            write_frame(&mut count, &q, pin, &before, &delta, &[receipt]).unwrap();
+            let Sink::Count(actual) = count else {
+                unreachable!()
+            };
+            assert!(
+                actual > bytes,
+                "real fixed serializer must exercise expansion"
+            );
+            assert!(checked_publication_record_len(actual).unwrap() <= bound.ordinary);
+            let admission = QueueAdmission::new(1, 16 << 20).unwrap();
+            let job = admission.reserve(0).unwrap();
+            let receipt = PublicationReceipt::commit(&q, &g, &planned.receipt).unwrap();
+            let frame =
+                encode_publication_pinned(&q, pin, &before, &delta, &[receipt], actual, &job)
+                    .unwrap();
+            assert_eq!(frame.as_bytes().len() as u64, actual);
+            drop(frame);
+            let receipt = PublicationReceipt::commit(&q, &g, &planned.receipt).unwrap();
+            assert!(matches!(
+                encode_publication_pinned(&q, pin, &before, &delta, &[receipt], actual - 1, &job),
+                Err(PublicationError::FrameLimit)
+            ));
+            assert_eq!(admission.usage().unwrap(), (1, 0));
+        }
+    }
+
+    #[test]
     fn frozen_roundtrip_scan_charging_and_reject_every_truncation() {
         let q = queue();
         let schema = schema();

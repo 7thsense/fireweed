@@ -422,6 +422,171 @@ mod tests {
         combine_deltas(&[delta], 2).unwrap()
     }
     #[test]
+    fn admitted_claim_bound_covers_small_requests_and_large_returned_keys() {
+        use crate::queue_log_record::{QueueLogRecordBounds, encode_checked_claim_record};
+        for (records, repeats, token_bytes) in [(2048u32, 225usize, 257usize), (128, 0, 1)] {
+            let admission = QueueAdmission::new(1, 128 << 20).unwrap();
+            let job = Arc::new(admission.reserve(0).unwrap());
+            let definition =
+                AdmittedQueueDefinition::from_raw(&encode_definition(&schema()).unwrap(), &job)
+                    .unwrap();
+            let mut request = request();
+            request.max_records = records;
+            request.max_bytes = 8 << 20;
+            let request_bytes = encoded_len(&request).unwrap();
+            assert!(request_bytes < 1024);
+            let mut limits = QueueLimits {
+                max_records: records,
+                max_groups: 1,
+                max_request_bytes: request_bytes,
+                max_group_bytes: request_bytes,
+                max_response_bytes: request.max_bytes,
+                max_body_bytes: 1,
+                max_state_bytes: 1,
+            };
+            request.validate(definition.schema(), &limits).unwrap();
+            let mut before = RecordSnapshot {
+                next_sequence: u64::from(records),
+                ..Default::default()
+            };
+            let mut work = Vec::new();
+            let mut versions = Vec::new();
+            let mut fields = BTreeMap::new();
+            let mut bodies = BTreeMap::new();
+            let mut leases = Vec::new();
+            let mut returned = Vec::new();
+            for n in 0..records {
+                let key = format!("{n:04}{}", "雪\0".repeat(repeats));
+                let row = StoredWork {
+                    record: WorkRecord {
+                        work: NewWork {
+                            key: key.clone(),
+                            priority: 0,
+                            available_at: 0,
+                            fields: Default::default(),
+                            body: Default::default(),
+                        },
+                        version: 1,
+                        insertion_sequence: u64::from(n) + 1,
+                        lifecycle: Lifecycle::Pending,
+                        eligible_since: 0,
+                        attempts: 0,
+                        lease_expires_at: None,
+                    },
+                    lease_hash: None,
+                    field_coverage: FieldCoverage::Complete,
+                    body_loaded: true,
+                };
+                before.work.insert(key.clone(), row.clone());
+                before.versions.insert(
+                    RecordIdentity {
+                        collection: None,
+                        key: key.clone(),
+                    },
+                    1,
+                );
+                // Deliberately longer than several production token formats. The
+                // construction bound must not assume today's 68-byte generator.
+                let token = vec![(n % 251) as u8; token_bytes];
+                let planned = plan_claim(
+                    row,
+                    token.clone(),
+                    ClaimContext {
+                        now: 10,
+                        eligible_at: 0,
+                        expires_at: 1_000_010,
+                        insertion_head: u64::from(records),
+                    },
+                )
+                .unwrap();
+                returned.push(ClaimedWork {
+                    record: planned.work.record.clone(),
+                    lease: LeaseCredential {
+                        token: token.clone(),
+                    },
+                });
+                work.push(planned.work);
+                versions.push(RecordVersion {
+                    collection: None,
+                    key: key.clone(),
+                    version: 2,
+                });
+                fields.insert(key.clone(), ResolvedFields::Preserve);
+                bodies.insert(key.clone(), ResolvedBody::Preserve);
+                leases.push(ClaimLease {
+                    key,
+                    token,
+                    version: 2,
+                });
+            }
+            // Tighten S to the actual response instead of leaving enough slack to
+            // hide a missing per-lease metadata allowance.
+            request.max_bytes = encoded_len(&returned).unwrap();
+            limits.max_response_bytes = request.max_bytes;
+            let request_bytes = encoded_len(&request).unwrap();
+            limits.max_request_bytes = request_bytes;
+            limits.max_group_bytes = request_bytes;
+            request.validate(definition.schema(), &limits).unwrap();
+            let delta = CommitDelta {
+                work,
+                work_fields: fields,
+                work_bodies: bodies,
+                deleted_work: vec![],
+                state: vec![],
+                deleted_state: vec![],
+                versions: versions.clone(),
+                next_sequence: u64::from(records),
+                receipt: CommitReceipt {
+                    request_id: String::new(),
+                    outcome: GroupOutcome::Committed { versions },
+                },
+            };
+            let bound = QueueLogRecordBounds::for_limits(&limits).unwrap();
+            let commands = encode_publication_pinned(
+                &request.queue,
+                definition.pin(),
+                &before,
+                &delta,
+                &[],
+                bound.claim,
+                &job,
+            )
+            .unwrap();
+            let receipt = encode_claim_receipt(&leases, bound.claim, &job).unwrap();
+            let input = || ClaimPublicationInput {
+                request: &request,
+                definition: &definition,
+                commands: commands.as_bytes(),
+                receipt: &receipt,
+                claimed_at: 10,
+                limits: &limits,
+            };
+            let publication = encode_claim_publication(input(), bound.claim, &job).unwrap();
+            let complete = encode_checked_claim_record(1, &publication, bound.claim, &job).unwrap();
+            let actual = complete.bytes().len() as u64;
+            if token_bytes == 1 {
+                let obsolete =
+                    request_bytes + 2 * limits.max_response_bytes + 72 * u64::from(records) + 237;
+                assert!(
+                    actual > obsolete,
+                    "short tokens require the token-independent 140-byte allowance"
+                );
+            } else {
+                assert!(
+                    actual > 2 * request_bytes + (1 << 20),
+                    "old request-only estimate cannot admit this valid claim"
+                );
+            }
+            assert!(actual <= bound.claim);
+            assert!(encode_checked_claim_record(1, &publication, actual, &job).is_ok());
+            assert!(matches!(
+                encode_checked_claim_record(1, &publication, actual - 1, &job),
+                Err(QueueError::TooLarge)
+            ));
+        }
+    }
+
+    #[test]
     fn thin_wrapper_binds_priority_order_to_sorted_commands_and_empty_claims() {
         let admission = QueueAdmission::new(1, 1 << 20).unwrap();
         let job = Arc::new(admission.reserve(0).unwrap());

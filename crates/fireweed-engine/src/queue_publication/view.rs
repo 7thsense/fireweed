@@ -14,6 +14,17 @@ pub enum ValueRef<'a> {
     Bytes(&'a [u8]),
 }
 impl ValueRef<'_> {
+    /// Caller admits owned scalar payload capacity before this conversion.
+    pub(crate) fn into_owned(self) -> fireweed_core::queue_contract::FieldValue {
+        use fireweed_core::queue_contract::FieldValue;
+        match self {
+            Self::Integer(value) => FieldValue::Integer(value),
+            Self::Float(value) => FieldValue::Float(value),
+            Self::Boolean(value) => FieldValue::Boolean(value),
+            Self::Text(value) => FieldValue::Text(value.into()),
+            Self::Bytes(value) => FieldValue::Bytes(value.into()),
+        }
+    }
     pub fn field_type(self) -> FieldType {
         match self {
             Self::Integer(_) => FieldType::Integer,

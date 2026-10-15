@@ -937,6 +937,181 @@ mod tests {
         assert!(builder.finish().is_err());
     }
     #[test]
+    fn expanded_zero_before_fields_obey_complete_binary_cap_and_fallback_bound() {
+        use crate::queue_log_record::{QueueLogRecordBounds, encode_checked_publication_record};
+        let mut f = fixture();
+        let fields: Fields = (0..4096)
+            .map(|n| (format!("/payload/{n}"), FieldValue::Integer(0)))
+            .collect();
+        f.admin_before.work.get_mut("a").unwrap().record.work.fields = fields.clone();
+        f.admin.work[0].record.work.fields = fields.clone();
+        let AdministrativeOperation::SelectFirst(clauses) = &f.intent.operation else {
+            unreachable!()
+        };
+        let action = clauses[0].action.clone();
+        f.intent = AdministrativeIntent {
+            evaluated_at: 0,
+            before_fields: Some(fields.keys().cloned().collect()),
+            operation: AdministrativeOperation::Addressed(vec![AdministrativeEntry {
+                key: "a".into(),
+                expected_version: None,
+                precondition: WorkSelector::all(vec![]),
+                action,
+            }]),
+        };
+        f.result.clauses.clear();
+        f.result.items = vec![AdministrativeItemResult {
+            key: "a".into(),
+            outcome: AdministrativeOutcome::Changed { version: 2 },
+            before: Some(AdministrativeBefore {
+                version: 1,
+                lifecycle: Lifecycle::Pending,
+                available_at: 0,
+                eligible_since: 0,
+                attempts: 0,
+                lease_expires_at: None,
+                fields,
+            }),
+        }];
+        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let outcome = AdministrativeReceiptOutcome::Committed {
+            versions: &f.versions,
+            administration: &f.result,
+        };
+        let response_bytes =
+            measure_complete_administrative_receipt(&f.group.request_id, &outcome).unwrap();
+        let receipt = AdministrativePublicationReceipt::new(
+            &f.queue,
+            &f.group,
+            &f.intent,
+            response_bytes,
+            &outcome,
+            &job,
+        )
+        .unwrap();
+        let admin = encode_administrative_work_fragment(&f.admin_before, &f.admin, &job).unwrap();
+        let ordinary = encode_publication(
+            &f.queue,
+            &f.raw_definition,
+            &f.before,
+            &f.ordinary,
+            &[],
+            1 << 20,
+            &job,
+        )
+        .unwrap();
+        let view = view_publication(ordinary.as_bytes()).unwrap();
+        let commands = view
+            .command_fragments()
+            .collect::<PublicationResult<Vec<_>>>()
+            .unwrap();
+        let command_bytes = admin.as_bytes().len() as u64
+            + commands
+                .iter()
+                .map(|command| command.as_bytes().len() as u64)
+                .sum::<u64>();
+        let pin = DefinitionPin::from_persisted_bytes(&f.raw_definition);
+        let binary_bytes =
+            measure_administrative_publication(&f.queue, pin, command_bytes, &receipt).unwrap();
+        assert!(
+            binary_bytes > response_bytes,
+            "fixed-width before-field serialization must expand the compact response"
+        );
+        let limits = QueueLimits {
+            max_records: 4096,
+            max_groups: 1,
+            max_request_bytes: binary_bytes,
+            max_group_bytes: binary_bytes,
+            max_response_bytes: response_bytes,
+            max_body_bytes: 1,
+            max_state_bytes: 1,
+        };
+        let bound = QueueLogRecordBounds::for_limits(&limits).unwrap();
+        let mut builder = AdministrativePublicationBuilder::new(
+            &receipt,
+            pin,
+            &f.before,
+            &f.ordinary,
+            4,
+            command_bytes,
+            binary_bytes,
+            &job,
+        )
+        .unwrap();
+        builder.append_administrative(admin.as_bytes()).unwrap();
+        for command in &commands {
+            builder.append_ordinary(command.as_bytes()).unwrap();
+        }
+        let frame = builder.finish().unwrap();
+        assert_eq!(frame.as_bytes().len() as u64, binary_bytes);
+        let record = encode_checked_publication_record(
+            u64::MAX,
+            frame.as_bytes(),
+            bound.administrative,
+            &job,
+        )
+        .unwrap();
+        assert_eq!(record.bytes().len() as u64, bound.administrative);
+        assert!(matches!(
+            AdministrativePublicationBuilder::new(
+                &receipt,
+                pin,
+                &f.before,
+                &f.ordinary,
+                4,
+                command_bytes,
+                binary_bytes - 1,
+                &job
+            ),
+            Err(PublicationError::FrameLimit)
+        ));
+        let outcome = AdministrativeReceiptOutcome::TooLarge;
+        let receipt = AdministrativePublicationReceipt::new(
+            &f.queue,
+            &f.group,
+            &f.intent,
+            response_bytes,
+            &outcome,
+            &job,
+        )
+        .unwrap();
+        let empty = combine_deltas(&[], f.before.next_sequence).unwrap();
+        let fallback = AdministrativePublicationBuilder::new(
+            &receipt,
+            pin,
+            &f.before,
+            &empty,
+            0,
+            0,
+            binary_bytes - 1,
+            &job,
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+        let under = QueueLogRecordBounds::for_limits(&QueueLimits {
+            max_group_bytes: binary_bytes - 1,
+            ..limits
+        })
+        .unwrap();
+        let record = encode_checked_publication_record(
+            u64::MAX,
+            fallback.as_bytes(),
+            under.administrative,
+            &job,
+        )
+        .unwrap();
+        assert!(record.bytes().len() as u64 <= under.administrative);
+        let view = record.view().unwrap();
+        let crate::queue_log_record::QueueLogPayload::Publication(publication) = view.payload()
+        else {
+            unreachable!()
+        };
+        assert_eq!(publication.summary().commands, 0);
+    }
+
+    #[test]
     fn complete_frame_roundtrip_binds_commands_versions_result_and_fingerprint() {
         let f = fixture();
         let admission = QueueAdmission::new(1, 4 << 20).unwrap();

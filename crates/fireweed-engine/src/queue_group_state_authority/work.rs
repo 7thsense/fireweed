@@ -8,7 +8,7 @@ use crate::queue_publication::{
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkMetadata {
     pub version: u64,
     pub priority: i64,
