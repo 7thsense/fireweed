@@ -240,6 +240,29 @@ async fn native_state_authority_aliases_delete_recreate_and_budget_real_s3() {
     state_read_vector_contract(true).await;
 }
 
+// Observe the committed source position directly. Request groups may share one
+// publication; their count is not the physical log offset.
+async fn source_next_offset(
+    root: &std::path::Path,
+    prefix: Option<&str>,
+    address: &QueueAddress,
+) -> i64 {
+    let store = Arc::new(native_log_fixture(root, prefix).await);
+    let workers = ScratchWorkers::new(1, 1).unwrap();
+    let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+    let job = Arc::new(admission.reserve(0).unwrap());
+    let namespace = store.bind_api007_namespace(address, &job).await.unwrap();
+    let state = store
+        .read_api007_state(namespace, &job, &workers)
+        .await
+        .unwrap();
+    let next = state.state().next_offset;
+    drop(state);
+    workers.close_and_drain().await.unwrap();
+    drop(store);
+    next
+}
+
 async fn corrupt_state_cache_contract(s3: bool) {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -273,6 +296,7 @@ async fn corrupt_state_cache_contract(s3: bool) {
         let expected = seed_states(&queue, &address).await;
         queue.shutdown().await.unwrap();
         drop(queue);
+        let seeded_head = source_next_offset(&root, prefix.as_deref(), &address).await;
         let db = turso::Builder::new_local(root.join("primary.db").to_str().unwrap())
             .build()
             .await
@@ -402,12 +426,17 @@ async fn corrupt_state_cache_contract(s3: bool) {
             .unwrap();
         assert_eq!(
             rows.next().await.unwrap().unwrap().get_value(0).unwrap(),
-            turso::Value::Integer(3),
-            "integrity failure must not append work"
+            turso::Value::Integer(seeded_head),
+            "rebuilt projection must cover the unchanged source"
         );
         drop(rows);
         drop(connection);
         drop(db);
+        assert_eq!(
+            source_next_offset(&root, prefix.as_deref(), &address).await,
+            seeded_head,
+            "integrity failure must not append work"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }
@@ -531,6 +560,7 @@ async fn state_preparation_cache_contract(s3: bool) {
         seed_states(&queue, &address).await;
         queue.shutdown().await.unwrap();
         drop(queue);
+        let seeded_head = source_next_offset(&root, prefix.as_deref(), &address).await;
         let db = turso::Builder::new_local(root.join("primary.db").to_str().unwrap())
             .build()
             .await
@@ -601,6 +631,11 @@ async fn state_preparation_cache_contract(s3: bool) {
             matches!(replay[0].outcome, GroupOutcome::Committed { .. }),
             "{s3} {case}: immutable original replay"
         );
+        assert_eq!(
+            source_next_offset(&root, prefix.as_deref(), &address).await,
+            seeded_head,
+            "original replay cannot append"
+        );
         let group = state_group("fresh", vec![update("a", StateExpect::Version(1), change)]);
         let preview = queue
             .preview(PreviewRequest {
@@ -608,6 +643,11 @@ async fn state_preparation_cache_contract(s3: bool) {
                 group: group.clone(),
             })
             .await;
+        assert_eq!(
+            source_next_offset(&root, prefix.as_deref(), &address).await,
+            seeded_head,
+            "preview cannot append"
+        );
         let committed = queue
             .commit(CommitBatch {
                 queue: address.clone(),
@@ -668,12 +708,17 @@ async fn state_preparation_cache_contract(s3: bool) {
             .unwrap();
         assert_eq!(
             rows.next().await.unwrap().unwrap().get_value(0).unwrap(),
-            turso::Value::Integer(if succeeds { 4 } else { 3 }),
-            "preview and rejected preparation cannot append"
+            turso::Value::Integer(seeded_head + if succeeds { 1 } else { 0 }),
+            "rebuilt projection must cover exactly the committed publication"
         );
         drop(rows);
         drop(connection);
         drop(db);
+        assert_eq!(
+            source_next_offset(&root, prefix.as_deref(), &address).await,
+            seeded_head + if succeeds { 1 } else { 0 },
+            "preview and rejected preparation cannot append"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }
