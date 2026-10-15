@@ -16,10 +16,8 @@ struct LegacySchema {
     progress_bound_nanos: u64,
     max_attempts: u32,
 }
-async fn provision_contract(log: QueueNativeLog) {
-    let admission = QueueAdmission::new(1, 32 << 20).unwrap();
-    let job = Arc::new(admission.reserve(0).unwrap());
-    let legacy = fireweed_engine::queue_storage_layout::encode(&LegacySchema {
+pub(super) fn legacy_definition_bytes() -> Vec<u8> {
+    fireweed_engine::queue_storage_layout::encode(&LegacySchema {
         work: LegacyDefinition {
             fields: BTreeMap::new(),
             indexes: BTreeMap::new(),
@@ -29,7 +27,12 @@ async fn provision_contract(log: QueueNativeLog) {
         progress_bound_nanos: 1,
         max_attempts: 3,
     })
-    .unwrap();
+    .unwrap()
+}
+async fn provision_contract(log: QueueNativeLog) {
+    let admission = QueueAdmission::new(1, 32 << 20).unwrap();
+    let job = Arc::new(admission.reserve(0).unwrap());
+    let legacy = legacy_definition_bytes();
     let persisted = AdmittedQueueDefinition::from_raw(&legacy, &job).unwrap();
     let modern =
         AdmittedQueueDefinition::from_raw(&encode_definition(persisted.schema()).unwrap(), &job)
@@ -673,7 +676,7 @@ impl fireweed_engine::Clock for ProvisionClock {
         }
     }
 }
-async fn append_work_group(
+pub(super) async fn append_work_group(
     log: &QueueNativeLog,
     source: &QueueNativeCaptured,
     address: &QueueAddress,

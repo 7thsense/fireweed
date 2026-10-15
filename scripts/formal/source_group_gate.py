@@ -104,6 +104,40 @@ def completed_genesis_witness(s, case):
     return (s.history == history and s.snapshot == snapshot and s.events == events
         and s.remaining == case.capacity-write-read and s.fences == fences)
 
+HEADER_WORDS = ('validate','genesis-grant','genesis-point','genesis-verified',
+    'sequence-grant','sequence-point','sequence-verified','record-grant',
+    'record-read','correspondence','definition','capsule')
+def completed_header_witness(s,c):
+    # Independent expected event prefixes from immutable fixture facts. No
+    # transition flags, phase-label reconstruction or producer helper calls.
+    count = 12
+    if not (c.scope=='same' and c.limits and c.through>0 and c.offset_zero and c.semantic>0 and c.records>0): count=1
+    elif c.genesis_cut!='original' or c.genesis_key!='Genesis': count=3
+    elif c.semantic<2: count=4
+    elif (c.sequence_cut!='original' or c.sequence_key!='Sequence' or not c.sequence_present
+          or not c.canonical or (c.through==1 and c.sequence!=0)): count=6
+    elif not c.record_ok or c.correspondence!='valid': count=9
+    elif not c.schema: count=10
+    events=HEADER_WORDS[:count]
+    success=count==12
+    writer='original-writer' if c.variant=='acquired' else ''
+    capsule=(c.origin,c.sequence,c.persisted,'pin-'+c.persisted,c.historical,writer,'input-ledger') if success else ()
+    return (s.phase=='done' and s.events==events and s.result==('capsule' if success else 'unknown')
+        and s.capsule==capsule and s.active==c.origin and s.ledger=='input-ledger' and s.writer==writer
+        and s.semantic==c.semantic-int(count>=3)-int(count>=6) and s.records==c.records-int(count>=9)
+        and (s.source_live,s.record_live,s.definition_live)==((True,True,True) if success else (False,False,False))
+        and s.authority_changes==0
+        and s.genesis_cut==((('B' if c.origin=='A' else 'A') if c.genesis_cut=='foreign' else c.origin) if count>=3 else '')
+        and s.genesis_key==(c.genesis_key if count>=3 else '')
+        and s.sequence_cut==((('B' if c.origin=='A' else 'A') if c.sequence_cut=='foreign' else c.origin) if count>=6 else '')
+        and s.sequence_key==(c.sequence_key if count>=6 else '')
+        and s.genesis_verified==(count>=4) and s.sequence_verified==(count>=9)
+        and s.record_cut==(c.origin if count>=9 else '')
+        and s.record_epoch==(c.historical if count>=9 and c.record_ok else 0)
+        and s.correspondence==(count>=10)
+        and s.definition==(c.persisted if success else '')
+        and s.pin==('pin-'+c.persisted if success else ''))
+
 def run(max_states=100000):
     specification = model.SourceGroup()
     report, graph = helper.explore(specification, max_states)
@@ -177,8 +211,25 @@ def run(max_states=100000):
             raise AssertionError('insensitive coupled Genesis mutant '+fault)
         helper.replay(mutant,failure['trace'],expected)
         controls.append({'fault':fault,'trace_sha256':helper.digest(failure['trace']),**failure})
+    header = model.SourceHeaderRecovery()
+    header_report,header_graph = helper.explore(header,max_states)
+    if header_report['status']!='PASS' or not header_report['complete']:
+        raise AssertionError('incomplete source header recovery baseline')
+    h_states,h_edges,_=header_graph
+    header_report['graph_sha256']=helper.digest({'states':[helper.render(s) for s in h_states],'edges':h_edges})
+    header_report['completed_witnesses']={}
+    for name,case in model.HEADER_CASES.items():
+        header_report['completed_witnesses'][name]=helper.witness(header,header_graph,
+            ['SelectHeader-'+name],lambda s,name=name,case=case: s.case==name and completed_header_witness(s,case))
+    for fault,expected in model.HEADER_FAULTS.items():
+        mutant=model.SourceHeaderRecovery(fault)
+        failure,_=helper.explore(mutant,max_states)
+        if failure['status']!='COUNTEREXAMPLE' or failure.get('property')!=expected:
+            raise AssertionError('insensitive source header recovery mutant '+fault)
+        helper.replay(mutant,failure['trace'],expected)
+        controls.append({'fault':fault,'trace_sha256':helper.digest(failure['trace']),**failure})
     return {'schema':'fireweed-api007-source-group-formal-v1', 'status':'PASS',
-        'baseline':[report, publication_report, record_report, genesis_report], 'negative_controls':controls,
+        'baseline':[report, publication_report, record_report, genesis_report, header_report], 'negative_controls':controls,
         'qualification':{'finite_abstract_safety':'recorded bounds only', 'production_mapping':'documentary_unexecuted',
             'excluded':['Rust refinement','exact allocation arithmetic','canonical decoding and hashes',
                         'publication/CAS','provider durability','performance','public QueueStore activation']},
@@ -193,6 +244,10 @@ def run(max_states=100000):
                         'QueueNativeSourceBudget::grant_record_attempt',
                         'QueueNativeSourceBudget::grant_hydration'],
              'tests':['pending_s3_source_record_cancellation_retains_frame_credit_and_spent_work'],
+             'status':'documentary_unexecuted'},
+            {'symbols':['load_source_header','QueueNativeLog::recover_captured','QueueNativeLog::recover_acquired'],
+             'tests':['captured_recovery_retains_persisted_definition_cut_and_ledger_real_s3',
+                'recovery_rejects_malformed_authority_and_releases_memory_without_refunding_work'],
              'status':'documentary_unexecuted'}]}
 
 def main(max_states, path, root):
@@ -206,7 +261,7 @@ def main(max_states, path, root):
         report['provenance_sha256'] = helper.digest(before)
         report['loaded_sources'] = dict(helper.LOADED_SOURCES)
         helper.write_report(path, report)
-        print(helper.canonical({'status':'PASS','models':4,'negative_controls':len(report['negative_controls'])}))
+        print(helper.canonical({'status':'PASS','models':len(report['baseline']),'negative_controls':len(report['negative_controls'])}))
         return 0
     except (ValueError, AssertionError, helper.SearchLimit, OSError, subprocess.CalledProcessError) as error:
         failure = {'schema':'fireweed-api007-source-group-formal-v1','status':'FAIL','error':str(error)}

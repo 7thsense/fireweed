@@ -740,3 +740,251 @@ class CoupledGenesisProvision(Model):
             if not authentic or not s.proof or any(event not in s.events for event in required): return 'GP-PROOF'
             if s.returned != s.snapshot[0]: return 'GP-WINNER'
         if s.phase == 'done' and (s.result,s.returned) != provision_expected(c): return 'GP-OUTCOME'
+
+# Recovery composes header facts with the already-modelled owned record result.
+# Byte decoding and physical hydration remain explicit external assumptions.
+@dataclass(frozen=True)
+class HeaderCase:
+    variant: str = 'captured'
+    origin: str = 'A'
+    scope: str = 'same'
+    limits: bool = True
+    through: int = 1
+    offset_zero: bool = True
+    fence: int = 1
+    historical: int = 1
+    sequence: int = 0
+    canonical: bool = True
+    sequence_present: bool = True
+    genesis_cut: str = 'original'
+    sequence_cut: str = 'original'
+    genesis_key: str = 'Genesis'
+    sequence_key: str = 'Sequence'
+    correspondence: str = 'valid'
+    schema: bool = True
+    record_ok: bool = True
+    persisted: str = 'legacy'
+    semantic: int = 2
+    records: int = 1
+
+HEADER_CASES = {
+    'readonly': HeaderCase(),
+    'acquired': HeaderCase(variant='acquired'),
+    'equal_head_other_original': HeaderCase(origin='B'),
+    'modern_persisted': HeaderCase(persisted='modern'),
+    'advanced_readonly': HeaderCase(through=2,fence=3,sequence=7),
+    'advanced_acquired': HeaderCase(variant='acquired',through=2,fence=3,sequence=7),
+    **{'foreign_'+scope: HeaderCase(scope=scope) for scope in ('log','job','ledger')},
+    'invalid_limits': HeaderCase(limits=False),
+    'empty': HeaderCase(through=0),
+    'missing_offset_zero': HeaderCase(through=2,offset_zero=False),
+    'record_capacity_zero': HeaderCase(records=0),
+    'genesis_cut_aba': HeaderCase(genesis_cut='foreign'),
+    'sequence_cut_aba': HeaderCase(sequence_cut='foreign'),
+    'genesis_full_key': HeaderCase(genesis_key='WrongGenesis'),
+    'sequence_full_key': HeaderCase(sequence_key='WrongSequence'),
+    'missing_sequence': HeaderCase(sequence_present=False),
+    'noncanonical_sequence': HeaderCase(canonical=False),
+    'nonzero_genesis_only': HeaderCase(sequence=1),
+    'one_lookup_short': HeaderCase(semantic=1),
+    'record_error': HeaderCase(record_ok=False),
+    'valid_subspan': HeaderCase(correspondence='subspan'),
+    'wrong_pin': HeaderCase(correspondence='pin'),
+    'invalid_definition': HeaderCase(schema=False),
+}
+HEADER_FAULTS = {
+    'header_recapture': 'HR-CUT', 'header_accept_cut': 'HR-CUT',
+    'header_accept_key': 'HR-KEY', 'header_skip_canonical': 'HR-SEQUENCE',
+    'header_skip_genesis_zero': 'HR-SEQUENCE', 'header_skip_correspondence': 'HR-CORRESPONDENCE',
+    'header_skip_schema': 'HR-DEFINITION', 'header_reencode_definition': 'HR-DEFINITION',
+    'header_replace_ledger': 'HR-LEDGER', 'header_promote_writer': 'HR-WRITER',
+    'header_premature_capsule': 'HR-PREFIX', 'header_wrong_record_source': 'HR-CUT',
+    'header_current_epoch': 'HR-EPOCH', 'header_refresh': 'HR-AUTHORITY',
+    'header_leak_unknown': 'HR-OWNER', 'header_refund_work': 'HR-WORK',
+    'header_reject_sequence_gap': 'HR-OUTCOME', 'header_skip_preflight': 'HR-SCOPE',
+    'header_release_source_early': 'HR-OWNER', 'header_rewind_work': 'HR-WORK',
+}
+@dataclass(frozen=True)
+class HeaderState:
+    case: str = ''
+    phase: str = 'choose'
+    events: tuple = ()
+    active: str = ''
+    ledger: str = 'input-ledger'
+    semantic: int = 0
+    records: int = 0
+    genesis_cut: str = ''
+    sequence_cut: str = ''
+    genesis_key: str = ''
+    sequence_key: str = ''
+    genesis_verified: bool = False
+    sequence_verified: bool = False
+    record_cut: str = ''
+    record_epoch: int = 0
+    correspondence: bool = False
+    definition: str = ''
+    pin: str = ''
+    writer: str = ''
+    source_live: bool = True
+    record_live: bool = False
+    definition_live: bool = False
+    authority_changes: int = 0
+    result: str = ''
+    capsule: tuple = ()
+
+class SourceHeaderRecovery(Model):
+    name = 'api007-source-header-recovery'
+    initial = HeaderState()
+    properties = sorted(set(HEADER_FAULTS.values()))
+    bounds = {'opaque_cut_identities':2,'semantic_points':2,'record_zero_reads':1,
+        'semantic_grants':2,'record_tickets':1,'cases':len(HEADER_CASES),
+        'frontier':'one retained capsule or terminal refusal; no implicit retry'}
+    assumptions = ['SDK cuts and exact-key point evidence are immutable authenticated capabilities',
+        'two opaque identities may have identical numeric heads; full keys remain distinct',
+        'C supplies an owned checked record or error and debits its input ledger; physical I/O is modelled separately',
+        'canonical encoding and stored span/pin/schema validity are immutable fixture predicates, not byte-decoder proofs',
+        'one ticket per semantic point and one abstract C read ticket; no allocation/physical-read arithmetic claim',
+        'finite documentary Root composition only; no Rust refinement, provider, heap/RSS or performance proof']
+    def __init__(self,fault=None):
+        if fault is not None and fault not in HEADER_FAULTS: raise ValueError('unknown header recovery fault')
+        self.fault = fault
+    def frontier(self,s): return s.phase == 'done'
+    def transitions(self,s):
+        if s.phase == 'choose':
+            for name,c in HEADER_CASES.items():
+                yield 'SelectHeader-'+name, replace(s,case=name,phase='validate',active=c.origin,
+                    semantic=c.semantic,records=c.records,writer='original-writer' if c.variant=='acquired' else '')
+            return
+        c=HEADER_CASES[s.case]
+        other='B' if c.origin=='A' else 'A'
+        def step(label,phase,event=None,**kw):
+            return label,replace(s,phase=phase,events=s.events+((event,) if event else ()),**kw)
+        def fail(label,event=None):
+            fields={'result':'unknown','source_live':self.fault=='header_leak_unknown',
+                'record_live':False,'definition_live':False}
+            if self.fault=='header_refund_work': fields.update(semantic=c.semantic,records=c.records)
+            return step(label,'done',event,**fields)
+        def capsule(label,event):
+            definition='modern' if self.fault=='header_reencode_definition' else c.persisted
+            writer='invented-writer' if self.fault=='header_promote_writer' else s.writer
+            epoch=c.fence if self.fault=='header_current_epoch' else s.record_epoch
+            # Producer construction is separate from the gate's fixture oracle.
+            return step(label,'done',event,result='capsule',definition=definition,pin='pin-'+definition,
+                writer=writer,record_epoch=epoch,capsule=(s.active,c.sequence,definition,'pin-'+definition,
+                    epoch,writer,s.ledger))
+        if s.phase == 'validate':
+            valid=(c.scope=='same' and c.limits and c.through>0 and c.offset_zero and c.semantic>0 and c.records>0)
+            if not valid and self.fault!='header_skip_preflight': yield fail('RefuseConstructor','validate')
+            else: yield step('ValidateConstructor','genesis-grant','validate')
+        elif s.phase == 'genesis-grant':
+            if self.fault=='header_replace_ledger': yield step('ReplaceLedger','genesis-point','genesis-grant',semantic=s.semantic-1,ledger='replacement-ledger')
+            elif self.fault=='header_refresh': yield step('RefreshAuthority','genesis-point','genesis-grant',semantic=s.semantic-1,authority_changes=1)
+            elif self.fault=='header_premature_capsule': yield capsule('ForgeEarlyCapsule','capsule')
+            elif self.fault=='header_release_source_early': yield step('ReleaseSourceEarly','genesis-point','genesis-grant',semantic=s.semantic-1,source_live=False)
+            elif s.semantic<1: yield fail('RefuseGenesisWork')
+            else: yield step('GrantGenesis','genesis-point','genesis-grant',semantic=s.semantic-1)
+        elif s.phase == 'genesis-point':
+            yield step('ReadGenesisPoint','genesis-verify','genesis-point',
+                genesis_cut=other if c.genesis_cut=='foreign' else s.active,genesis_key=c.genesis_key)
+        elif s.phase == 'genesis-verify':
+            if ((s.genesis_cut!=c.origin and self.fault!='header_accept_cut')
+                or (s.genesis_key!='Genesis' and self.fault!='header_accept_key')): yield fail('RefuseGenesisEvidence')
+            else: yield step('VerifyGenesisPoint','sequence-grant','genesis-verified',genesis_verified=True)
+        elif s.phase == 'sequence-grant':
+            if self.fault=='header_recapture': yield step('RecaptureEqualNumericHead','sequence-point','sequence-grant',active=other,semantic=s.semantic-1)
+            elif s.semantic<1: yield fail('RefuseSequenceWork')
+            else: yield step('GrantSequence','sequence-point','sequence-grant',semantic=s.semantic-1)
+        elif s.phase == 'sequence-point':
+            yield step('ReadSequencePoint','sequence-verify','sequence-point',
+                sequence_cut=other if c.sequence_cut=='foreign' else s.active,sequence_key=c.sequence_key)
+        elif s.phase == 'sequence-verify':
+            if self.fault=='header_rewind_work':
+                yield 'RewindAndRefundHeader', HeaderState(case=s.case,phase='genesis-grant',
+                    events=('validate',),active=c.origin,semantic=c.semantic,records=c.records,writer=s.writer)
+            elif not c.sequence_present: yield fail('RefuseMissingSequence')
+            elif ((s.sequence_cut!=c.origin and self.fault!='header_accept_cut')
+                or (s.sequence_key!='Sequence' and self.fault!='header_accept_key')): yield fail('RefuseSequenceEvidence')
+            elif not c.canonical and self.fault!='header_skip_canonical': yield fail('RefuseNoncanonicalSequence')
+            elif c.through==1 and c.sequence!=0 and self.fault!='header_skip_genesis_zero': yield fail('RefuseGenesisOnlySequence')
+            elif self.fault=='header_reject_sequence_gap' and c.sequence>c.through: yield fail('RejectAllocationGap')
+            else: yield step('VerifySequencePoint','record-grant','sequence-verified',sequence_verified=True)
+        elif s.phase == 'record-grant':
+            if s.records<1: yield fail('RefuseRecordWork')
+            else: yield step('DispatchOriginalRecordZero','record-result','record-grant',records=s.records-1,
+                record_cut=other if self.fault=='header_wrong_record_source' else s.active)
+        elif s.phase == 'record-result':
+            if not c.record_ok: yield fail('RecordReadFailed','record-read')
+            else: yield step('RetainOwnedRecord','correspondence','record-read',record_live=True,record_epoch=c.historical)
+        elif s.phase == 'correspondence':
+            if c.correspondence!='valid' and self.fault!='header_skip_correspondence': yield fail('RefuseStoredCorrespondence')
+            else: yield step('VerifyStoredCorrespondence','schema','correspondence',correspondence=True)
+        elif s.phase == 'schema':
+            if not c.schema and self.fault!='header_skip_schema': yield fail('RefuseStoredDefinition')
+            else: yield step('AdmitPersistedDefinition','capsule','definition',definition_live=True,
+                definition=c.persisted,pin='pin-'+c.persisted)
+        elif s.phase == 'capsule': yield capsule('ReturnRetainedCapsule','capsule')
+    def violation(self,before,action,s):
+        if before.case:
+            if s.case!=before.case: return 'HR-PREFIX'
+            if s.semantic>before.semantic or s.records>before.records: return 'HR-WORK'
+            if s.events[:len(before.events)]!=before.events: return 'HR-PREFIX'
+        if not s.case: return None
+        c=HEADER_CASES[s.case]
+        prerequisites={'genesis-grant':('validate',),'genesis-point':('genesis-grant',),
+            'genesis-verified':('genesis-point',),'sequence-grant':('genesis-verified',),
+            'sequence-point':('sequence-grant',),'sequence-verified':('sequence-point',),
+            'record-grant':('sequence-verified',),'record-read':('record-grant',),
+            'correspondence':('record-read',),'definition':('correspondence',),'capsule':('definition',)}
+        seen=set()
+        for event in s.events:
+            if event not in {'validate',*prerequisites} or event in seen or not set(prerequisites.get(event,()))<=seen:
+                return 'HR-PREFIX'
+            seen.add(event)
+        if (s.genesis_verified!=('genesis-verified' in seen)
+            or s.sequence_verified!=('sequence-verified' in seen)
+            or s.correspondence!=('correspondence' in seen)): return 'HR-PREFIX'
+        valid_scope=c.scope=='same' and c.limits and c.through>0 and c.offset_zero and c.semantic>0 and c.records>0
+        if s.events and s.events!=('validate',) and not valid_scope: return 'HR-SCOPE'
+        if s.ledger!='input-ledger': return 'HR-LEDGER'
+        if s.authority_changes: return 'HR-AUTHORITY'
+        if s.active!=c.origin: return 'HR-CUT'
+        if s.semantic!=c.semantic-s.events.count('genesis-grant')-s.events.count('sequence-grant') or s.records!=c.records-s.events.count('record-grant') or min(s.semantic,s.records)<0:
+            return 'HR-WORK'
+        # Point observations are bound to immutable fixture evidence even before
+        # acceptance. A forged valid-looking point cannot hide a foreign result.
+        other='B' if c.origin=='A' else 'A'
+        if 'genesis-point' in seen:
+            if s.genesis_cut!=(other if c.genesis_cut=='foreign' else c.origin): return 'HR-CUT'
+            if s.genesis_key!=c.genesis_key: return 'HR-KEY'
+        if 'sequence-point' in seen:
+            if s.sequence_cut!=(other if c.sequence_cut=='foreign' else c.origin): return 'HR-CUT'
+            if s.sequence_key!=c.sequence_key: return 'HR-KEY'
+        if s.genesis_verified and s.genesis_cut!=c.origin: return 'HR-CUT'
+        if s.sequence_verified and s.sequence_cut!=c.origin: return 'HR-CUT'
+        if 'record-grant' in seen and s.record_cut!=c.origin: return 'HR-CUT'
+        if (s.genesis_verified and s.genesis_key!='Genesis') or (s.sequence_verified and s.sequence_key!='Sequence'): return 'HR-KEY'
+        if s.sequence_verified and (not c.sequence_present or not c.canonical or (c.through==1 and c.sequence!=0)):
+            return 'HR-SEQUENCE'
+        if s.correspondence and (not c.record_ok or c.correspondence!='valid'): return 'HR-CORRESPONDENCE'
+        if 'definition' in seen and (not c.schema or s.definition!=c.persisted or s.pin!='pin-'+c.persisted): return 'HR-DEFINITION'
+        if 'record-read' in seen and c.record_ok and s.record_epoch!=c.historical: return 'HR-EPOCH'
+        if s.writer!=('original-writer' if c.variant=='acquired' else ''): return 'HR-WRITER'
+        terminal_unknown=s.phase=='done' and s.result=='unknown'
+        if s.source_live != (not terminal_unknown): return 'HR-OWNER'
+        if s.record_live!=('record-read' in seen and c.record_ok and not terminal_unknown): return 'HR-OWNER'
+        if s.definition_live!=('definition' in seen and not terminal_unknown): return 'HR-OWNER'
+        if (s.definition or s.pin or s.definition_live) and 'definition' not in seen: return 'HR-PREFIX'
+        if s.capsule and 'capsule' not in seen: return 'HR-PREFIX'
+        if s.capsule:
+            if not s.source_live or not s.record_live or not s.definition_live: return 'HR-OWNER'
+            expected=(c.origin,c.sequence,c.persisted,'pin-'+c.persisted,c.historical,
+                'original-writer' if c.variant=='acquired' else '', 'input-ledger')
+            if s.capsule!=expected: return 'HR-OUTCOME'
+        if s.result=='capsule':
+            if 'capsule' not in seen or not s.capsule: return 'HR-PREFIX'
+        if s.phase=='done':
+            expected_success=(valid_scope and c.semantic>=2 and c.genesis_cut=='original' and c.sequence_cut=='original'
+                and c.genesis_key=='Genesis' and c.sequence_key=='Sequence' and c.sequence_present and c.canonical
+                and (c.through!=1 or c.sequence==0) and c.record_ok and c.correspondence=='valid' and c.schema)
+            if s.result!=('capsule' if expected_success else 'unknown'): return 'HR-OUTCOME'
+            if s.result=='unknown' and (s.source_live or s.record_live or s.definition_live or s.capsule): return 'HR-OWNER'

@@ -201,7 +201,8 @@ mod tests {
         }
         fn point<'a>(&'a self, key: &'a Vec<u8>) -> QueueResult<QueueSourcePoint<'a>> {
             let cut = self.inner.cut()?;
-            let cut = if self.fault == "foreign" {
+            let sequence = key.as_slice() == QueueSourceKey::Sequence.encode().unwrap().as_slice();
+            let cut = if self.fault == "foreign" || (sequence && self.fault == "sequence-foreign") {
                 QueueSourceCut::from_captured(
                     &self.foreign,
                     cut.address(),
@@ -213,7 +214,11 @@ mod tests {
                 cut
             };
             Ok(cut.point_from_source(
-                if self.fault == "key" { b"wrong" } else { key },
+                if self.fault == "key" || (sequence && self.fault == "sequence-key") {
+                    b"wrong"
+                } else {
+                    key
+                },
                 self.inner.facts.get(key).map(Vec::as_slice),
             ))
         }
@@ -276,5 +281,65 @@ mod tests {
                 usize::from(fault != "empty" && fault != "job")
             );
         }
+    }
+    #[test]
+    fn source_header_uses_one_cut_for_both_full_keys_and_canonical_sequence() {
+        futures::executor::block_on(async {
+            use crate::queue_source_index::load_source_header;
+            for (fault, through, bytes, expected) in [
+                ("none", 1, Some(encode(&0u64).unwrap()), Some(0)),
+                ("none", 9, Some(encode(&127u64).unwrap()), Some(127)),
+                ("none", 9, Some(encode(&128u64).unwrap()), Some(128)),
+                ("none", 9, Some(encode(&u64::MAX).unwrap()), Some(u64::MAX)),
+                ("sequence-foreign", 9, Some(encode(&0u64).unwrap()), None),
+                ("sequence-key", 9, Some(encode(&0u64).unwrap()), None),
+                ("none", 9, None, None),
+                ("none", 9, Some(vec![]), None),
+                ("none", 9, Some(vec![0x80, 0]), None),
+                ("none", 9, Some(vec![0x81, 0]), None),
+                ("none", 9, Some(vec![1, 0]), None),
+                ("none", 9, Some(vec![0xff; 10]), None),
+                ("none", 9, Some(vec![0; 11]), None),
+                ("none", 1, Some(encode(&1u64).unwrap()), None),
+                ("none", 0, Some(encode(&0u64).unwrap()), None),
+                ("job", 9, Some(encode(&0u64).unwrap()), None),
+            ] {
+                let (job, record, _fact, mut inner) = fixture();
+                inner.through = through;
+                if let Some(bytes) = bytes {
+                    inner
+                        .facts
+                        .insert(QueueSourceKey::Sequence.encode().unwrap(), bytes);
+                }
+                let reader = BoundReader {
+                    inner,
+                    foreign: Arc::new(job.owned_buffer(128).unwrap()),
+                    cuts: AtomicUsize::new(0),
+                    lookups: AtomicUsize::new(0),
+                    fault,
+                };
+                let other = QueueAdmission::new(1, 1 << 20).unwrap();
+                let other_job = Arc::new(other.reserve(0).unwrap());
+                let result =
+                    load_source_header(&reader, if fault == "job" { &other_job } else { &job })
+                        .await;
+                match (result, expected) {
+                    (Ok(header), Some(sequence)) => {
+                        assert_eq!(header.sequence(), sequence);
+                        header
+                            .genesis()
+                            .verify_record(&record.checked().unwrap(), 0)
+                            .unwrap();
+                    }
+                    (Err(QueueError::OutcomeUnknown(_)), None) => {}
+                    _ => panic!("unexpected header result: {fault}/{through}"),
+                }
+                assert_eq!(reader.cuts.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    reader.lookups.load(Ordering::SeqCst),
+                    if through == 0 || fault == "job" { 0 } else { 2 }
+                );
+            }
+        });
     }
 }

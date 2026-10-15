@@ -15,12 +15,13 @@ class SourceGroupGateTests(unittest.TestCase):
         self.assertTrue(baseline['complete'])
         self.assertGreater(baseline['states'], len(gate.model.CASES))
         self.assertEqual(set(baseline['completed_witnesses']), set(gate.WITNESSES))
-        self.assertEqual({c['fault'] for c in self.report['negative_controls']}, set(gate.model.FAULTS) | set(gate.model.PUBLICATION_FAULTS) | set(gate.model.READ_FAULTS) | set(gate.model.PROVISION_FAULTS))
+        self.assertEqual({c['fault'] for c in self.report['negative_controls']}, set(gate.model.FAULTS) | set(gate.model.PUBLICATION_FAULTS) | set(gate.model.READ_FAULTS) | set(gate.model.PROVISION_FAULTS) | set(gate.model.HEADER_FAULTS))
         for control in self.report['negative_controls']:
             spec = (gate.model.SourceGroup if control['fault'] in gate.model.FAULTS else
                     gate.model.SourceGroupPublication if control['fault'] in gate.model.PUBLICATION_FAULTS
                     else gate.model.SourceRecordRead if control['fault'] in gate.model.READ_FAULTS
-                    else gate.model.CoupledGenesisProvision)
+                    else gate.model.CoupledGenesisProvision if control['fault'] in gate.model.PROVISION_FAULTS
+                    else gate.model.SourceHeaderRecovery)
             gate.helper.replay(spec(control['fault']), control['trace'], control['property'])
     def test_publication_boundary_witnesses_and_forged_preparation(self):
         from dataclasses import replace
@@ -163,6 +164,79 @@ class SourceGroupGateTests(unittest.TestCase):
         bad_admission = gate.model.ProvisionState(case='foreign_job',phase='done',remaining=2,
             events=('preflight','open'),result='unknown')
         self.assertEqual(model.violation(blank,'Renamed',bad_admission),'GP-ADMISSION')
+
+    def test_header_recovery_independent_witnesses_and_each_prefix_prerequisite(self):
+        from dataclasses import replace
+        report=self.report['baseline'][4]
+        self.assertTrue(report['complete'])
+        self.assertEqual(set(report['completed_witnesses']),set(gate.model.HEADER_CASES))
+        model=gate.model.SourceHeaderRecovery()
+        for name,c in gate.model.HEADER_CASES.items():
+            state=next(s for _,s in model.transitions(model.initial) if s.case==name)
+            while state.phase!='done': state=list(model.transitions(state))[0][1]
+            self.assertTrue(gate.completed_header_witness(state,c),name)
+            self.assertIsNone(model.violation(state,'Renamed',state))
+            for i in range(len(state.events)):
+                forged=replace(state,events=state.events[:i]+state.events[i+1:])
+                self.assertFalse(gate.completed_header_witness(forged,c),(name,i))
+            # The terminal witness also rejects forged observations/acceptance
+            # flags on refusal paths, independent of the model invariant.
+            for field, value in (('genesis_cut','forged'),('sequence_cut','forged'),
+                    ('genesis_key','forged'),('sequence_key','forged'),
+                    ('genesis_verified',not state.genesis_verified),
+                    ('sequence_verified',not state.sequence_verified),
+                    ('correspondence',not state.correspondence),('record_epoch',99),
+                    ('record_cut','forged'),('definition','forged'),('pin','forged')):
+                self.assertFalse(gate.completed_header_witness(replace(state,**{field:value}),c),(name,field))
+            if state.result=='capsule':
+                for event in gate.HEADER_WORDS:
+                    forged=replace(state,events=tuple(e for e in state.events if e!=event))
+                    self.assertIsNotNone(model.violation(state,'UnrelatedLabel',forged),(name,event))
+                for fields in ({'active':'foreign'}, {'ledger':'replacement'}, {'writer':'invented'},
+                    {'record_cut':'foreign'}, {'genesis_key':'prefix'}, {'sequence_key':'prefix'},
+                    {'record_epoch':99}, {'definition':'reencoded'}, {'source_live':False}):
+                    forged=replace(state,**fields)
+                    self.assertIsNotNone(model.violation(state,'Observe',forged),(name,fields))
+        blank=gate.model.HeaderState(case='readonly',phase='done',result='capsule',active='A')
+        self.assertIsNotNone(model.violation(model.initial,'ForgedSuccess',blank))
+
+    def test_header_recovery_late_unknown_does_not_hide_invalid_accepted_evidence(self):
+        from dataclasses import replace
+        model=gate.model.SourceHeaderRecovery()
+        controls={c['fault']:c for c in self.report['negative_controls']}
+        for fault in gate.model.HEADER_FAULTS:
+            control=controls[fault]
+            self.assertEqual(control['status'],'COUNTEREXAMPLE')
+        state=next(s for _,s in model.transitions(model.initial) if s.case=='readonly')
+        while state.phase!='done': state=list(model.transitions(state))[0][1]
+        forged=replace(state,sequence_cut='foreign',phase='done',result='unknown',capsule=(),
+            source_live=False,record_live=False,definition_live=False)
+        self.assertEqual(model.violation(state,'LaterUnknown',forged),'HR-CUT')
+        for name,phase,fields,expected in (
+                ('genesis_cut_aba','genesis-verify',{'genesis_cut':'A'},'HR-CUT'),
+                ('sequence_cut_aba','sequence-verify',{'sequence_cut':'A'},'HR-CUT'),
+                ('genesis_full_key','genesis-verify',{'genesis_key':'Genesis'},'HR-KEY'),
+                ('sequence_full_key','sequence-verify',{'sequence_key':'Sequence'},'HR-KEY'),
+                ('readonly','record-result',{'record_live':True},'HR-OWNER'),
+                ):
+            prefix=next(s for _,s in model.transitions(model.initial) if s.case==name)
+            while prefix.phase!=phase: prefix=list(model.transitions(prefix))[0][1]
+            self.assertEqual(model.violation(prefix,'ForgedObservation',replace(prefix,**fields)),expected)
+        for fields,expected in (({'capsule':('foreign',)},'HR-OUTCOME'),
+                ({'source_live':False},'HR-OWNER')):
+            self.assertEqual(model.violation(state,'LaterUnknown',replace(state,phase='record-result',result='unknown',**fields)),expected)
+        prefix=next(s for _,s in model.transitions(model.initial) if s.case=='readonly')
+        self.assertEqual(model.violation(prefix,'EarlyRelease',replace(prefix,source_live=False)),'HR-OWNER')
+        prefix=list(model.transitions(prefix))[0][1]
+        for fields,expected in (({'case':''},'HR-PREFIX'),({'case':'acquired'},'HR-PREFIX'),
+                ({'events':()},'HR-PREFIX'),({'semantic':prefix.semantic+1},'HR-WORK'),
+                ({'records':prefix.records+1},'HR-WORK')):
+            self.assertEqual(model.violation(prefix,'RelabeledRewind',replace(prefix,**fields)),expected)
+        progressed=prefix
+        while progressed.phase!='record-grant': progressed=list(model.transitions(progressed))[0][1]
+        self.assertEqual(model.violation(progressed,'RelabeledRewind',prefix),'HR-WORK')
+        for fields in ({'definition':'legacy'}, {'pin':'pin-legacy'}, {'capsule':('forged',)}):
+            self.assertEqual(model.violation(prefix,'LaterUnknown',replace(prefix,**fields,result='unknown')),'HR-PREFIX')
 
     def test_relational_oracle_and_planner_precedence(self):
         swap = gate.WITNESSES['unique_swap']
