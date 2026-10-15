@@ -22,6 +22,13 @@ pub struct QueueNativeEditLimits {
     pub input_bytes: u64,
     pub work: QueueNativeSemanticWork,
 }
+/// Bounds for one attempt; the caller-owned ledger bounds work across attempts.
+#[derive(Clone, Copy)]
+pub struct QueueNativeSourcePreparationLimits {
+    pub compile: fireweed_engine::queue_source_index::QueueSourceCompileLimits,
+    pub read: QueueNativeSourceReadLimits,
+    pub prepare: QueueNativeEditLimits,
+}
 #[cfg(test)]
 pub struct QueueNativeSemanticEdit<'a> {
     pub key: &'a [u8],
@@ -122,6 +129,61 @@ impl QueueNativeAcquired {
             return Err(unknown("semantic namespace, cut or operation differs"));
         }
         Ok(())
+    }
+    /// Compile every semantic fact and the checked record against this exact
+    /// acquired cut, then prepare their single conditional publication. This
+    /// never submits, recaptures authority, or creates a retry work allowance.
+    pub async fn compile_and_prepare(
+        &self,
+        log: &QueueNativeLog,
+        record: &OwnedQueueLogRecord,
+        definition: &AdmittedQueueDefinition,
+        budget: Arc<QueueNativeSourceBudget>,
+        limits: QueueNativeSourcePreparationLimits,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<QueueNativePublication> {
+        self.semantic_scope(log, job)?;
+        log.validate_prepare_record(&self.namespace, &self.writer, record, job)?;
+        let checked = record.checked()?;
+        if !definition.belongs_to(job)
+            || checked.view().definition_pin_bytes() != *definition.pin().as_bytes()
+            || limits.compile.edits == 0
+            || limits.compile.input_bytes == 0
+            || limits.prepare.edits == 0
+            || limits.prepare.input_bytes == 0
+            || limits.prepare.work.pages == 0
+            || limits.prepare.work.hydrated_bytes == 0
+        {
+            return Err(unknown("source preparation definition or limits invalid"));
+        }
+        // Construct even for genesis: foreign ledgers and invalid read limits
+        // must fail before either dispatch path allocates compiler output.
+        let reader = QueueNativeSourceReader::new(self, log, job, budget.clone(), limits.read)?;
+        let compiled = match checked.view().payload() {
+            QueueLogPayload::Genesis(_) => fireweed_engine::queue_source_index::compile_genesis(
+                &checked,
+                self.source_cut(log, job)?,
+                definition,
+                limits.compile,
+                job,
+            )?,
+            QueueLogPayload::Publication(_) | QueueLogPayload::Claim(_) => {
+                fireweed_engine::queue_source_index::compile_publication(
+                    &reader,
+                    &checked,
+                    definition,
+                    limits.compile,
+                    job,
+                )
+                .await?
+            }
+        };
+        // Debit BEFORE preparing; failure and cancellation never refund work.
+        // This ledger is the same one used by every compiler source read.
+        budget.grant(limits.prepare.work)?;
+        let identity = self.record_identity(record, job)?;
+        self.prepare_compiled(log, &compiled, &identity.value, limits.prepare, job)
+            .await
     }
     /// The production transport accepts only the engine's sealed correspondence
     /// result; independently supplied record/edit arrays remain test fixtures.

@@ -730,3 +730,6 @@ mod capability_gate_tests {
 pub mod queue_contract;
 
 pub mod queue_benchmark;
+
+/// Independent cold source-fact oracle shared by domain and adapter tests.
+pub mod queue_source_oracle;

@@ -21,7 +21,7 @@ impl QueueNativeSourceBudget {
             _charge: charge,
         }))
     }
-    fn grant(&self, work: QueueNativeSemanticWork) -> QueueResult<()> {
+    pub(super) fn grant(&self, work: QueueNativeSemanticWork) -> QueueResult<()> {
         let mut remaining = self
             .remaining
             .lock()
@@ -73,6 +73,7 @@ impl<'a> QueueNativeSourceReader<'a> {
         acquired.semantic_scope(log, job)?;
         if !std::ptr::eq(budget._charge.reservation(), job.as_ref())
             || limits.range_pages == 0
+            || limits.page.output_bytes == 0
             || limits.page.rows == 0
             || limits.page.work.pages == 0
             || limits.page.work.hydrated_bytes == 0

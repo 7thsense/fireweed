@@ -90,6 +90,13 @@ provider child through cancellation, caller-runtime shutdown and task panic.
 Retained Root outputs keep separate guards after physical completion; planned
 record reads transfer their unique output guard after dropping the scoped view.
 
+Native source preparation compiles genesis or the complete resolved publication
+against the exact acquired source cut, then prepares record and all semantic
+facts in one conditional publication. Its caller-owned nonrefunding work ledger
+covers both source reads and SDK edit preparation across retries. This internal
+producer does not activate the native QueueStore: provisioning/adoption and all
+planning/selection consumers must establish authenticated source coverage first.
+
 Native conditional publication distinguishes known rejection from ambiguity;
 a late reply/deadline cannot prove no effect. Resolve original identity against
 fresh authority. Claim/commit ownership uses a fresh operational clock at the

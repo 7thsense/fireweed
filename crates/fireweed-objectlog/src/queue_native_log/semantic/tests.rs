@@ -1506,3 +1506,5 @@ async fn s3_selective_field_preimages_run_identical_contract_both_signing_modes(
 }
 
 mod s3_cancellation;
+
+mod compiled;

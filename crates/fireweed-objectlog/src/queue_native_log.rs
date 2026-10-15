@@ -80,6 +80,10 @@ pub struct QueueNativePublication {
     log_identity: Arc<()>,
     _charge: Arc<OwnedQueueBufferCharge>,
 }
+struct QueueNativeRecordIdentity {
+    value: String,
+    _charge: OwnedQueueBufferCharge,
+}
 pub struct QueueNativeGenesis {
     record: OwnedQueueLogRecord,
 }
@@ -753,22 +757,33 @@ impl QueueNativeAcquired {
         record: &OwnedQueueLogRecord,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<QueueNativePublication> {
+        let identity = self.record_identity(record, job)?;
+        log.prepare(&self.namespace, &self.writer, record, &identity.value, job)
+            .await
+    }
+    fn record_identity(
+        &self,
+        record: &OwnedQueueLogRecord,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<QueueNativeRecordIdentity> {
         use sha2::{Digest, Sha256};
         use std::fmt::Write;
-        let _identity_charge = job.owned_buffer(256)?;
-        let mut identity = String::with_capacity(config::RECORD_IDENTITY_BYTES);
+        let charge = job.owned_buffer(256)?;
+        let mut value = String::with_capacity(config::RECORD_IDENTITY_BYTES);
         write!(
-            &mut identity,
+            &mut value,
             "queue-record/{:016x}/{:016x}/",
             self.writer.epoch, self.writer.next_offset
         )
         .expect("String write");
         for byte in Sha256::digest(record.bytes()) {
-            write!(&mut identity, "{byte:02x}").expect("String write");
+            write!(&mut value, "{byte:02x}").expect("String write");
         }
-        debug_assert_eq!(identity.len(), config::RECORD_IDENTITY_BYTES);
-        log.prepare(&self.namespace, &self.writer, record, &identity, job)
-            .await
+        debug_assert_eq!(value.len(), config::RECORD_IDENTITY_BYTES);
+        Ok(QueueNativeRecordIdentity {
+            value,
+            _charge: charge,
+        })
     }
     pub async fn prepare(
         &self,

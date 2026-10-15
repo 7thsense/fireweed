@@ -2,88 +2,17 @@ use super::*;
 use crate::queue_planner::RecordSnapshot;
 use std::collections::BTreeMap;
 
-// Independent complete inventory from the ordinary planner snapshot: no call to
-// WorkIndex::posting or the delta visitor participates in the reference.
+#[allow(dead_code)]
+mod cold_oracle {
+    fireweed_conformance::define_queue_source_oracle!(crate);
+}
+// Shared with real adapter tests; no producer derivation participates.
 pub(in crate::queue_source_index::predecessor) fn inventory(
     snapshot: &RecordSnapshot,
 ) -> BTreeMap<Vec<u8>, Vec<u8>> {
-    fn escaped(out: &mut Vec<u8>, value: &str) {
-        for byte in value.bytes() {
-            if byte == 0 {
-                out.extend_from_slice(&[0, 255]);
-            } else {
-                out.push(byte);
-            }
-        }
-        out.extend_from_slice(&[0, 0]);
-    }
-    fn signed(n: i64) -> [u8; 8] {
-        ((n as u64) ^ (1u64 << 63)).to_be_bytes()
-    }
-    let mut out = BTreeMap::new();
-    for (literal, stored) in &snapshot.work {
-        let row = &stored.record;
-        let mut key = vec![1, 10, 0];
-        escaped(&mut key, literal);
-        out.insert(key, vec![]);
-        let lifecycle = match row.lifecycle {
-            fireweed_core::queue_contract::Lifecycle::Pending => 0,
-            fireweed_core::queue_contract::Lifecycle::Leased => 1,
-            fireweed_core::queue_contract::Lifecycle::Completed => 2,
-            fireweed_core::queue_contract::Lifecycle::Failed => 3,
-        };
-        let mut tuples = vec![
-            (0, vec![lifecycle]),
-            (1, row.attempts.to_be_bytes().to_vec()),
-        ];
-        if let Some(expiry) = row.lease_expires_at {
-            tuples.push((2, signed(expiry).to_vec()));
-        }
-        let candidate = lifecycle <= 1;
-        for (kind, overdue, descending, scheduled) in [
-            (3, false, false, false),
-            (4, false, true, false),
-            (5, false, false, true),
-            (6, true, false, false),
-            (7, true, true, false),
-            (8, true, false, true),
-        ] {
-            if kind != 5 && !candidate {
-                continue;
-            }
-            let mut tuple = Vec::new();
-            if overdue {
-                tuple.extend_from_slice(&signed(row.eligible_since));
-            }
-            let mut primary = signed(if scheduled {
-                row.work.available_at
-            } else {
-                row.work.priority
-            });
-            if descending {
-                for byte in &mut primary {
-                    *byte = !*byte;
-                }
-            }
-            tuple.extend_from_slice(&primary);
-            tuple.extend_from_slice(&row.insertion_sequence.to_be_bytes());
-            tuples.push((kind, tuple));
-        }
-        for (kind, tuple) in tuples {
-            let mut key = vec![1, 11, kind];
-            key.extend_from_slice(&tuple);
-            escaped(&mut key, literal);
-            assert!(out.insert(key, vec![]).is_none());
-        }
-    }
-    for (collection, literal) in snapshot.state.keys() {
-        let mut key = vec![1, 10, 1];
-        escaped(&mut key, collection);
-        escaped(&mut key, literal);
-        assert!(out.insert(key, vec![]).is_none());
-    }
-    out
+    cold_oracle::inventory(snapshot)
 }
+
 pub(in crate::queue_source_index::predecessor) async fn assert_inventory_delta<
     R: QueueSourceReader,
 >(
