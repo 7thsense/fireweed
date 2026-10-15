@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded evidence-to-plan authority gate; documentary Rust correspondence only."""
+"""Bounded source-plan/preparation gate; documentary Rust correspondence only."""
 import hashlib
 from pathlib import Path
 import subprocess
@@ -63,12 +63,32 @@ def run(max_states=100000):
             raise AssertionError('insensitive source-group mutant '+fault)
         helper.replay(mutant, failure['trace'], expected)
         controls.append({'fault':fault, 'trace_sha256':helper.digest(failure['trace']), **failure})
+    publication = model.SourceGroupPublication()
+    publication_report, publication_graph = helper.explore(publication, max_states)
+    if publication_report['status'] != 'PASS' or not publication_report['complete']:
+        raise AssertionError('incomplete publication boundary baseline')
+    p_states, p_edges, _ = publication_graph
+    publication_report['graph_sha256'] = helper.digest({'states':[helper.render(s) for s in p_states], 'edges':p_edges})
+    publication_report['completed_witnesses'] = {}
+    for i, case in enumerate(model.PUBLICATION_CASES):
+        publication_report['completed_witnesses'][str(case)] = helper.witness(publication, publication_graph,
+            ['SelectPublication-'+str(i)], lambda s, case=case: s.case == case and s.phase == 'done'
+                and s.prepared == (case[1] == 'same' and case[2] == 'none'))
+    for fault, expected in model.PUBLICATION_FAULTS.items():
+        mutant = model.SourceGroupPublication(fault)
+        failure, _ = helper.explore(mutant, max_states)
+        if failure['status'] != 'COUNTEREXAMPLE' or failure.get('property') != expected:
+            raise AssertionError('insensitive publication boundary mutant '+fault)
+        helper.replay(mutant, failure['trace'], expected)
+        controls.append({'fault':fault, 'trace_sha256':helper.digest(failure['trace']), **failure})
     return {'schema':'fireweed-api007-source-group-formal-v1', 'status':'PASS',
-        'baseline':[report], 'negative_controls':controls,
+        'baseline':[report, publication_report], 'negative_controls':controls,
         'qualification':{'finite_abstract_safety':'recorded bounds only', 'production_mapping':'documentary_unexecuted',
             'excluded':['Rust refinement','exact allocation arithmetic','canonical decoding and hashes',
                         'publication/CAS','provider durability','performance','public QueueStore activation']},
-        'production_mappings':[{'symbols':['load_group_preimage','QueueSourceGroupPreimage::plan','load_group_fields'],
+        'production_mappings':[{'symbols':['load_group_preimage','QueueSourceGroupPreimage::plan','load_group_fields',
+                'QueueSourceGroupPlan::encode','QueueSourceGroupPublication::record_for',
+                'QueueNativeAcquired::prepare_group_publication'],
             'tests':['fields_cannot_recapture_foreign_cut_then_return_to_original_head',
                      'mixed_work_check_never_reads_another_keys_mutation_fields',
                      'atomic_state_and_next_work_match_shared_full_image_planner',
@@ -85,7 +105,7 @@ def main(max_states, path, root):
         report['provenance_sha256'] = helper.digest(before)
         report['loaded_sources'] = dict(helper.LOADED_SOURCES)
         helper.write_report(path, report)
-        print(helper.canonical({'status':'PASS','models':1,'negative_controls':len(report['negative_controls'])}))
+        print(helper.canonical({'status':'PASS','models':2,'negative_controls':len(report['negative_controls'])}))
         return 0
     except (ValueError, AssertionError, helper.SearchLimit, OSError, subprocess.CalledProcessError) as error:
         failure = {'schema':'fireweed-api007-source-group-formal-v1','status':'FAIL','error':str(error)}

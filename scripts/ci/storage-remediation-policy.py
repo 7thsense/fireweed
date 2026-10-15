@@ -189,7 +189,17 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool,
 
     route_ids = [route["id"] for route in document["harness_routes"]]
     require(len(route_ids) == len(set(route_ids)), "duplicate harness route")
+    harness_route = runpy.run_path(str(GENERATOR))["cargo_harness_route"]
     for route in document["harness_routes"]:
+        features = route.get("features")
+        require(isinstance(features, list) and all(isinstance(feature, str) for feature in features),
+                f"route feature selection missing/invalid: {route['id']}")
+        require(features == sorted(set(features)), f"route features not canonical: {route['id']}")
+        expected = harness_route(route["workspace"], route["package"],
+                                 {"name": route["target"], "kind": route["target_kind"]},
+                                 route["harness_id"], route["listed_kind"], features)
+        require(route["exact_invocation"] == expected["exact_invocation"],
+                f"route feature/selector command differs: {route['id']}")
         require(route["expected_ran"] == 1, f"route lacks ran=1 contract: {route['id']}")
         require(route["exact_invocation"][-1] == "--exact", f"route not exact: {route['id']}")
     doc_ids = [route["id"] for route in document["rustdoc_routes"]]
@@ -389,7 +399,52 @@ def self_test(document: dict[str, object]) -> None:
         pass
     else:
         raise PolicyError("malformed inventory fixture passed")
-    diagnostic_passed = runpy.run_path(str(GENERATOR))["sql_timing_diagnostic_log_passed"]
+    generator = runpy.run_path(str(GENERATOR))
+    route_for = generator["cargo_harness_route"]
+    for features in ([], ["local"], ["default", "local"]):
+        route = route_for("Cargo.toml", "fireweed-turso", {"name": "fireweed_turso", "kind": ["lib"]},
+                          "queue_projection::tests::feature_fixture", "test", features)
+        prefix = ["rustup", "run", "1.99.0", "cargo", "test", "--manifest-path", "Cargo.toml",
+                  "--locked", "-p", "fireweed-turso", "--no-default-features"]
+        if features:
+            prefix += ["--features", ",".join(features)]
+        require(route["features"] == features and route["exact_invocation"] == prefix +
+                ["--lib", "queue_projection::tests::feature_fixture", "--", "--exact"],
+                "Cargo artifact feature selection lost")
+        fixture = copy.deepcopy(document)
+        fixture["harness_routes"] = [route]
+        validate_inventory(fixture, "remediation", check_repository=False)
+        mutants = []
+        omitted = copy.deepcopy(fixture)
+        omitted["harness_routes"][0].pop("features")
+        mutants.append(omitted)
+        extra = copy.deepcopy(fixture)
+        extra["harness_routes"][0]["features"] = sorted(features + ["unexpected"])
+        mutants.append(extra)
+        omitted_flag = copy.deepcopy(fixture)
+        omitted_flag["harness_routes"][0]["exact_invocation"].remove("--no-default-features")
+        mutants.append(omitted_flag)
+        if features:
+            mismatch = copy.deepcopy(fixture)
+            position = mismatch["harness_routes"][0]["exact_invocation"].index("--features") + 1
+            mismatch["harness_routes"][0]["exact_invocation"][position] = "unexpected"
+            mutants.append(mismatch)
+        for mutant in mutants:
+            try:
+                validate_inventory(mutant, "remediation", check_repository=False)
+            except PolicyError as error:
+                require("feature" in str(error), "feature control failed for unrelated reason")
+            else:
+                raise PolicyError("Cargo artifact feature omission/mismatch fixture passed")
+    for invalid in (None, "local", [1]):
+        try:
+            route_for("Cargo.toml", "fireweed-turso", {"name": "fireweed_turso", "kind": ["lib"]},
+                      "fixture", "test", invalid)
+        except ValueError:
+            pass
+        else:
+            raise PolicyError("missing/invalid Cargo artifact feature metadata accepted")
+    diagnostic_passed = generator["sql_timing_diagnostic_log_passed"]
     summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
     ordinary = "running 1 test\ntest module::diagnostic ... ok\n\n" + summary
     interleaved = "running 1 test\ntest module::diagnostic ... measured=1\nmore output\nok\n\n" + summary

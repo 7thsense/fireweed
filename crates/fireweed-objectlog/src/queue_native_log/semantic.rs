@@ -2,6 +2,7 @@
 //! index meaning: the engine must compile all resolved commands before activation.
 use super::*;
 use std::ops::Bound;
+mod group;
 
 #[derive(Clone, Copy, Debug)]
 pub struct QueueNativeSemanticWork {

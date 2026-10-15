@@ -73,7 +73,7 @@ fn ordinary(
             .unwrap(),
         );
         let delta = plan_commit_group(group, &mut after, 10, definition.schema()).unwrap();
-        if group.request_id == "rejected" {
+        if matches!(group.request_id.as_str(), "rejected" | "source-rejected") {
             assert!(
                 matches!(delta.receipt.outcome, GroupOutcome::Rejected(_)),
                 "intentional rejection: {:?}",
@@ -139,7 +139,9 @@ async fn check_source_group(
             }
         }
     }
-    let reader = QueueNativeSourceReader::new(acquired, log, job, ledger, limits().read).unwrap();
+    let reader =
+        QueueNativeSourceReader::new(acquired, log, job, Arc::clone(&ledger), limits().read)
+            .unwrap();
     let queue = QueueAddress {
         tenant: "tenant".into(),
         queue: "producer".into(),
@@ -169,6 +171,128 @@ async fn check_source_group(
     let expected = plan_commit_group(group, &mut image, 10, definition.schema()).unwrap();
     assert_eq!(plan.receipt(), &expected.receipt);
     assert!(plan.cut().same_cut(&reader.cut().unwrap()));
+    let publication = plan
+        .encode(
+            fireweed_engine::queue_source_index::QueueSourceGroupEncodingLimits {
+                frame_bytes: 1 << 20,
+                record_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+    let (cold_record, _) = ordinary(
+        acquired,
+        definition,
+        snapshot,
+        std::slice::from_ref(group),
+        job,
+    );
+    assert_eq!(
+        publication
+            .record_for(&reader.cut().unwrap(), definition, job)
+            .unwrap()
+            .bytes(),
+        cold_record.bytes(),
+    );
+    // Independently captured read bundle at the same numeric head. Reusing the
+    // sealed writer here is test construction only; preparation must reject its
+    // distinct semantic owner before reaching that writer or any source read.
+    let namespace = acquired.retained_namespace(&queue, job).unwrap();
+    let foreign_cut = log.capture(&namespace).await.unwrap();
+    let foreign_bundle = QueueNativeAcquired {
+        log_identity: acquired.log_identity.clone(),
+        namespace,
+        writer: QueueNativeWriter {
+            writer: acquired.writer.writer.clone(),
+            namespace: acquired.writer.namespace.clone(),
+            epoch: acquired.writer.epoch,
+            next_offset: acquired.writer.next_offset,
+        },
+        cut: foreign_cut,
+        semantic_identity: QueueNativeAcquired::identity_charge(job).unwrap(),
+    };
+    assert_eq!(foreign_bundle.head(), acquired.head());
+    let mut changed_schema = definition.schema().clone();
+    changed_schema.max_attempts += 1;
+    let changed_definition = AdmittedQueueDefinition::from_raw(
+        &fireweed_engine::queue_schema_codec::encode_definition(&changed_schema).unwrap(),
+        job,
+    )
+    .unwrap();
+    let foreign_admission = QueueAdmission::new(1, 1 << 20).unwrap();
+    let foreign_job = Arc::new(foreign_admission.reserve(0).unwrap());
+    let directory = tempfile::tempdir().unwrap();
+    let foreign_log =
+        QueueNativeLog::local(directory.path(), "foreign-binding".into(), options(1 << 20))
+            .unwrap();
+    for (target, target_log, target_definition, target_job, message) in [
+        (
+            &foreign_bundle,
+            log,
+            definition,
+            job,
+            "planned publication cut, definition or operation differs",
+        ),
+        (
+            acquired,
+            log,
+            &changed_definition,
+            job,
+            "planned publication cut, definition or operation differs",
+        ),
+        (
+            acquired,
+            log,
+            definition,
+            &foreign_job,
+            "semantic namespace, cut or operation differs",
+        ),
+        (
+            acquired,
+            &foreign_log,
+            definition,
+            job,
+            "semantic namespace, cut or operation differs",
+        ),
+    ] {
+        let probe = budget(job, 1);
+        let error = target
+            .prepare_group_publication(
+                target_log,
+                &publication,
+                target_definition,
+                probe.clone(),
+                limits(),
+                target_job,
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, QueueError::OutcomeUnknown(ref actual) if actual.contains(message)),
+            "{error:?}"
+        );
+        // Every compiler source read requires a ledger grant. The full original
+        // grant remaining proves these failures did no compilation/source work.
+        probe.grant(work()).unwrap();
+        assert!(
+            probe
+                .grant(QueueNativeSemanticWork {
+                    pages: 1,
+                    hydrated_bytes: 1
+                })
+                .is_err()
+        );
+        assert_eq!(
+            log.capture(&acquired.namespace).await.unwrap().head(),
+            before
+        );
+    }
+    foreign_log.shutdown().await.unwrap();
+    let prepared = acquired
+        .prepare_group_publication(log, &publication, definition, ledger, limits(), job)
+        .await
+        .unwrap();
+    drop(prepared);
     assert_eq!(
         log.capture(&acquired.namespace).await.unwrap().head(),
         before
@@ -184,7 +308,6 @@ async fn accept(
     ledger: Arc<QueueNativeSourceBudget>,
     job: &Arc<QueueReservation>,
 ) -> QueueNativeAcquired {
-    let (history, snapshot) = state;
     let original = acquired
         .compile_and_prepare(log, &record, definition, ledger, limits(), job)
         .await
@@ -198,8 +321,20 @@ async fn accept(
         original.resolve(log, 1).await.unwrap(),
         QueueNativeResolution::DurableContent
     );
+    verify_published(log, &acquired, record, definition, state, job).await
+}
+
+async fn verify_published(
+    log: &QueueNativeLog,
+    acquired: &QueueNativeAcquired,
+    record: OwnedQueueLogRecord,
+    definition: &AdmittedQueueDefinition,
+    state: (&mut Vec<OwnedQueueLogRecord>, &RecordSnapshot),
+    job: &Arc<QueueReservation>,
+) -> QueueNativeAcquired {
+    let (history, snapshot) = state;
     history.push(record);
-    let current = fresh(log, &acquired, "producer", job).await;
+    let current = fresh(log, acquired, "producer", job).await;
     assert_eq!(current.head().bounds(), (0, history.len() as u64));
     assert!(
         current
@@ -277,6 +412,69 @@ async fn accept(
     );
     reopened
 }
+async fn accept_source_group(
+    log: &QueueNativeLog,
+    acquired: QueueNativeAcquired,
+    definition: &AdmittedQueueDefinition,
+    group: &CommitGroup,
+    state: (&mut Vec<OwnedQueueLogRecord>, &RecordSnapshot),
+    ledger: Arc<QueueNativeSourceBudget>,
+    job: &Arc<QueueReservation>,
+) -> (QueueNativeAcquired, RecordSnapshot) {
+    use fireweed_engine::queue_source_index::{
+        QueueSourceGroupEncodingLimits, load_group_preimage,
+    };
+    struct Clock;
+    impl fireweed_engine::Clock for Clock {
+        fn now(&self) -> fireweed_core::UtcTimestamp {
+            fireweed_core::UtcTimestamp {
+                seconds: 0,
+                nanoseconds: 10,
+            }
+        }
+    }
+    let (history, before) = state;
+    let (expected, after) = ordinary(
+        &acquired,
+        definition,
+        before,
+        std::slice::from_ref(group),
+        job,
+    );
+    let reader =
+        QueueNativeSourceReader::new(&acquired, log, job, ledger.clone(), limits().read).unwrap();
+    let queue = QueueAddress {
+        tenant: "tenant".into(),
+        queue: "producer".into(),
+    };
+    let queue_limits = QueueLimits::default();
+    let publication = load_group_preimage(&reader, &queue, group, definition, &queue_limits, job)
+        .await
+        .unwrap()
+        .plan(&Clock)
+        .unwrap()
+        .encode(QueueSourceGroupEncodingLimits {
+            frame_bytes: 1 << 20,
+            record_bytes: 1 << 20,
+        })
+        .unwrap();
+    let prepared = acquired
+        .prepare_group_publication(log, &publication, definition, ledger, limits(), job)
+        .await
+        .unwrap();
+    assert!(matches!(
+        prepared.submit(log).await.unwrap(),
+        QueueNativeSubmit::Stored(_)
+    ));
+    assert_eq!(
+        prepared.resolve(log, 1).await.unwrap(),
+        QueueNativeResolution::DurableContent
+    );
+    let current =
+        verify_published(log, &acquired, expected, definition, (history, &after), job).await;
+    (current, after)
+}
+
 async fn producer_contract(log: QueueNativeLog) {
     let admission = QueueAdmission::new(2, 64 << 20).unwrap();
     let job = Arc::new(admission.reserve(0).unwrap());
@@ -359,13 +557,11 @@ async fn producer_contract(log: QueueNativeLog) {
         &job,
     )
     .await;
-    let (record, after) = ordinary(&acquired, &definition, &snapshot, &[seed], &job);
-    snapshot = after;
-    acquired = accept(
+    (acquired, snapshot) = accept_source_group(
         &log,
         acquired,
-        record,
         &definition,
+        &seed,
         (&mut history, &snapshot),
         ledger.clone(),
         &job,
@@ -521,6 +717,33 @@ async fn producer_contract(log: QueueNativeLog) {
         &definition,
         &snapshot,
         &atomic,
+        ledger.clone(),
+        &job,
+    )
+    .await;
+
+    (acquired, snapshot) = accept_source_group(
+        &log,
+        acquired,
+        &definition,
+        &atomic,
+        (&mut history, &snapshot),
+        ledger.clone(),
+        &job,
+    )
+    .await;
+    let mut source_rejected = group("source-rejected");
+    source_rejected.work_updates.push(UnclaimedUpdate {
+        key: "absent".into(),
+        expect: StateExpect::Version(99),
+        change: UnclaimedChange::Delete,
+    });
+    (acquired, snapshot) = accept_source_group(
+        &log,
+        acquired,
+        &definition,
+        &source_rejected,
+        (&mut history, &snapshot),
         ledger.clone(),
         &job,
     )

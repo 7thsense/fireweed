@@ -333,6 +333,36 @@ def cargo_target_argument(kind: list[str], name: str) -> list[str]:
     return ["--lib"]
 
 
+
+def cargo_harness_route(
+    manifest: str, package: str, target: dict[str, object],
+    test_id: str, listed_kind: str, features: list[str],
+) -> dict[str, object]:
+    if not isinstance(features, list) or not all(isinstance(feature, str) for feature in features):
+        raise ValueError("Cargo artifact features must be an explicit string list")
+    features = sorted(set(features))
+    feature_args = ["--no-default-features"]
+    if features:
+        feature_args.extend(["--features", ",".join(features)])
+    return {
+        "id": "::".join([manifest, package, target["name"], listed_kind, test_id]),
+        "workspace": manifest,
+        "package": package,
+        "target": target["name"],
+        "target_kind": target["kind"],
+        "features": features,
+        "harness_id": test_id,
+        "listed_kind": listed_kind,
+        "exact_invocation": [
+            "rustup", "run", "1.99.0", "cargo", "test", "--manifest-path", manifest,
+            "--locked", "-p", package, *feature_args,
+            *cargo_target_argument(target["kind"], target["name"]),
+            test_id, "--", "--exact",
+        ],
+        "expected_ran": 1,
+    }
+
+
 def cargo_routes(
     manifest: str,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object] | None]:
@@ -413,39 +443,12 @@ def cargo_routes(
             test_id, listed_kind = listed.rsplit(": ", 1)
             if listed_kind not in {"test", "benchmark"}:
                 continue
-            selector = cargo_target_argument(target["kind"], target["name"])
-            invocation = [
-                "rustup",
-                "run",
-                "1.99.0",
-                "cargo",
-                "test",
-                "--manifest-path",
-                manifest,
-                "--locked",
-                "-p",
-                package["name"],
-                *selector,
-                test_id,
-                "--",
-                "--exact",
-            ]
-            route_id = "::".join(
-                [manifest, package["name"], target["name"], listed_kind, test_id]
-            )
-            routes.append(
-                {
-                    "id": route_id,
-                    "workspace": manifest,
-                    "package": package["name"],
-                    "target": target["name"],
-                    "target_kind": target["kind"],
-                    "harness_id": test_id,
-                    "listed_kind": listed_kind,
-                    "exact_invocation": invocation,
-                    "expected_ran": 1,
-                }
-            )
+            # Workspace feature unification can enable tests absent from the
+            # package's defaults. Preserve the actual observed package features.
+            routes.append(cargo_harness_route(
+                manifest, package["name"], target, test_id, listed_kind,
+                message["features"],
+            ))
 
     doc_routes: list[dict[str, object]] = []
     for package in packages.values():

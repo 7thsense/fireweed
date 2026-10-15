@@ -611,3 +611,310 @@ fn borrowed_payload_sizes_do_not_multiply_preimage_scratch() {
         before
     );
 }
+
+struct ZeroClock;
+impl crate::Clock for ZeroClock {
+    fn now(&self) -> fireweed_core::UtcTimestamp {
+        fireweed_core::UtcTimestamp {
+            seconds: 0,
+            nanoseconds: 0,
+        }
+    }
+}
+
+#[test]
+fn sealed_encoding_matches_cold_publication_and_rejects_foreign_binding() {
+    futures::executor::block_on(async {
+        let f = fixture();
+        let mut request = group("sealed-transition");
+        request.work_updates.push(UnclaimedUpdate {
+            key: "a".into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Delete,
+        });
+        request.work_inserts.push(work("next", "a"));
+        request.state_updates.push(StateUpdate {
+            collection: "s".into(),
+            key: "state".into(),
+            expect: StateExpect::Version(1),
+            change: StateChange::Put {
+                fields: work("", "changed").fields,
+                value: vec![6].into(),
+            },
+        });
+        let (expected, _) = record(
+            &f.queue,
+            f.definition.schema(),
+            &f.snapshot,
+            &request,
+            &f.job,
+        );
+        let limits = QueueLimits::default();
+        let plan = load_group_preimage(
+            &f.reader,
+            &f.queue,
+            &request,
+            &f.definition,
+            &limits,
+            &f.job,
+        )
+        .await
+        .unwrap()
+        .plan(&ZeroClock)
+        .unwrap();
+        let publication = plan
+            .encode(QueueSourceGroupEncodingLimits {
+                frame_bytes: 1 << 20,
+                record_bytes: 1 << 20,
+            })
+            .unwrap();
+        let cut = f.reader.cut().unwrap();
+        assert_eq!(
+            publication
+                .record_for(&cut, &f.definition, &f.job)
+                .unwrap()
+                .bytes(),
+            expected.bytes()
+        );
+        let foreign_owner = Arc::new(f.job.owned_buffer(128).unwrap());
+        let foreign_cut = QueueSourceCut::from_captured(
+            &foreign_owner,
+            cut.address(),
+            cut.epoch(),
+            cut.through(),
+            &f.job,
+        )
+        .unwrap();
+        assert!(
+            publication
+                .record_for(&foreign_cut, &f.definition, &f.job)
+                .is_err()
+        );
+        let foreign_job = f.admission.reserve(0).unwrap();
+        assert!(
+            publication
+                .record_for(&cut, &f.definition, &foreign_job)
+                .is_err()
+        );
+        // Rejected binding attempts must not invalidate the original capability.
+        assert_eq!(
+            publication
+                .record_for(&cut, &f.definition, &f.job)
+                .unwrap()
+                .bytes(),
+            expected.bytes()
+        );
+    });
+}
+
+#[test]
+fn sealed_encoding_enforces_exact_inner_and_outer_limits() {
+    futures::executor::block_on(async {
+        let f = fixture();
+        let mut request = group("sealed-limits");
+        request.work_inserts.push(work("next", "new"));
+        let (expected, _) = record(
+            &f.queue,
+            f.definition.schema(),
+            &f.snapshot,
+            &request,
+            &f.job,
+        );
+        let frame_bytes = expected
+            .checked()
+            .unwrap()
+            .payload_interval()
+            .unwrap()
+            .len() as u64;
+        let record_bytes = expected.bytes().len() as u64;
+        for (inner, outer, succeeds) in [
+            (frame_bytes, record_bytes, true),
+            (frame_bytes - 1, record_bytes, false),
+            (frame_bytes, record_bytes - 1, false),
+        ] {
+            let limits = QueueLimits::default();
+            let plan = load_group_preimage(
+                &f.reader,
+                &f.queue,
+                &request,
+                &f.definition,
+                &limits,
+                &f.job,
+            )
+            .await
+            .unwrap()
+            .plan(&ZeroClock)
+            .unwrap();
+            let result = plan.encode(QueueSourceGroupEncodingLimits {
+                frame_bytes: inner,
+                record_bytes: outer,
+            });
+            if succeeds {
+                let publication = result.unwrap();
+                assert_eq!(
+                    publication
+                        .record_for(&f.reader.cut().unwrap(), &f.definition, &f.job)
+                        .unwrap()
+                        .bytes(),
+                    expected.bytes()
+                );
+            } else {
+                assert!(matches!(result, Err(QueueError::TooLarge)));
+            }
+        }
+    });
+}
+
+#[test]
+fn sealed_encoding_failure_and_output_drop_release_owned_credit() {
+    futures::executor::block_on(async {
+        let f = fixture();
+        let mut request = group("encoding-credit");
+        request.work_inserts.push(work("next", "new"));
+        let baseline = f.admission.usage().unwrap();
+        let limits = QueueLimits::default();
+        let plan = load_group_preimage(
+            &f.reader,
+            &f.queue,
+            &request,
+            &f.definition,
+            &limits,
+            &f.job,
+        )
+        .await
+        .unwrap()
+        .plan(&ZeroClock)
+        .unwrap();
+        let occupied = f.admission.usage().unwrap().1;
+        let starver = f.job.owned_buffer((32 << 20) - occupied - 1).unwrap();
+        let starver_bytes = starver.admitted_bytes();
+        let result = plan.encode(QueueSourceGroupEncodingLimits {
+            frame_bytes: 1 << 20,
+            record_bytes: 1 << 20,
+        });
+        assert!(matches!(result, Err(QueueError::OutcomeUnknown(_))));
+        assert_eq!(f.admission.usage().unwrap().1, baseline.1 + starver_bytes);
+        drop(starver);
+        assert_eq!(f.admission.usage().unwrap(), baseline);
+        let plan = load_group_preimage(
+            &f.reader,
+            &f.queue,
+            &request,
+            &f.definition,
+            &limits,
+            &f.job,
+        )
+        .await
+        .unwrap()
+        .plan(&ZeroClock)
+        .unwrap();
+        let publication = plan
+            .encode(QueueSourceGroupEncodingLimits {
+                frame_bytes: 1 << 20,
+                record_bytes: 1 << 20,
+            })
+            .unwrap();
+        assert!(f.admission.usage().unwrap().1 > baseline.1);
+        drop(publication);
+        assert_eq!(f.admission.usage().unwrap(), baseline);
+    });
+}
+
+#[test]
+fn sealed_encoding_later_admission_failures_restore_credit() {
+    futures::executor::block_on(async {
+        let f = fixture();
+        let mut request = group(&"literal-request-".repeat(512));
+        request.work_inserts.push(work(
+            &"literal-key-".repeat(256),
+            &"unique-value-".repeat(128),
+        ));
+        let (expected, _) = record(
+            &f.queue,
+            f.definition.schema(),
+            &f.snapshot,
+            &request,
+            &f.job,
+        );
+        let frame_charge = expected
+            .checked()
+            .unwrap()
+            .payload_interval()
+            .unwrap()
+            .len() as u64
+            + 128;
+        let outer_charge = expected.bytes().len() as u64 * 4 + 4096;
+        let baseline = f.admission.usage().unwrap();
+        let limits = QueueLimits::default();
+        for fail_outer in [false, true] {
+            let plan = load_group_preimage(
+                &f.reader,
+                &f.queue,
+                &request,
+                &f.definition,
+                &limits,
+                &f.job,
+            )
+            .await
+            .unwrap()
+            .plan(&ZeroClock)
+            .unwrap();
+            let canonical_charge = crate::queue_memory::group_expansion_budget(
+                &request,
+                &plan.preimage.snapshot,
+                f.definition.schema(),
+            )
+            .unwrap()
+                + 4096;
+            // Receipt-bound validation scratch is smaller than the long literal
+            // frame, so this reaches the intended inner or outer allocation.
+            assert!(frame_charge > plan.delta.versions.len() as u64 * 192 + 1024);
+            let remaining =
+                canonical_charge + frame_charge - 1 + if fail_outer { outer_charge } else { 0 };
+            let occupied = f.admission.usage().unwrap().1;
+            let starver = f
+                .job
+                .owned_buffer((32 << 20) - occupied - remaining)
+                .unwrap();
+            let starver_bytes = starver.admitted_bytes();
+            let result = plan.encode(QueueSourceGroupEncodingLimits {
+                frame_bytes: 1 << 20,
+                record_bytes: 1 << 20,
+            });
+            assert!(matches!(result, Err(QueueError::OutcomeUnknown(_))));
+            assert_eq!(f.admission.usage().unwrap().1, baseline.1 + starver_bytes);
+            drop(starver);
+            assert_eq!(f.admission.usage().unwrap(), baseline);
+        }
+        let plan = load_group_preimage(
+            &f.reader,
+            &f.queue,
+            &request,
+            &f.definition,
+            &limits,
+            &f.job,
+        )
+        .await
+        .unwrap()
+        .plan(&ZeroClock)
+        .unwrap();
+        let publication = plan
+            .encode(QueueSourceGroupEncodingLimits {
+                frame_bytes: 1 << 20,
+                record_bytes: 1 << 20,
+            })
+            .unwrap();
+        // Only the returned checked record remains funded; plan, canonical
+        // containers, receipt validation scratch and inner frame are all gone.
+        assert_eq!(f.admission.usage().unwrap().1, baseline.1 + outer_charge);
+        assert_eq!(
+            publication
+                .record_for(&f.reader.cut().unwrap(), &f.definition, &f.job)
+                .unwrap()
+                .bytes(),
+            expected.bytes()
+        );
+        drop(publication);
+        assert_eq!(f.admission.usage().unwrap(), baseline);
+    });
+}

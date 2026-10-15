@@ -42,4 +42,7 @@ pub use predecessor::{
 };
 
 mod group;
-pub use group::{QueueSourceGroupPlan, QueueSourceGroupPreimage, load_group_preimage};
+pub use group::{
+    QueueSourceGroupEncodingLimits, QueueSourceGroupPlan, QueueSourceGroupPreimage,
+    QueueSourceGroupPublication, load_group_preimage,
+};

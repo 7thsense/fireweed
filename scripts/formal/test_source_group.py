@@ -15,9 +15,31 @@ class SourceGroupGateTests(unittest.TestCase):
         self.assertTrue(baseline['complete'])
         self.assertGreater(baseline['states'], len(gate.model.CASES))
         self.assertEqual(set(baseline['completed_witnesses']), set(gate.WITNESSES))
-        self.assertEqual({c['fault'] for c in self.report['negative_controls']}, set(gate.model.FAULTS))
+        self.assertEqual({c['fault'] for c in self.report['negative_controls']}, set(gate.model.FAULTS) | set(gate.model.PUBLICATION_FAULTS))
         for control in self.report['negative_controls']:
-            gate.helper.replay(gate.model.SourceGroup(control['fault']), control['trace'], control['property'])
+            spec = gate.model.SourceGroup if control['fault'] in gate.model.FAULTS else gate.model.SourceGroupPublication
+            gate.helper.replay(spec(control['fault']), control['trace'], control['property'])
+    def test_publication_boundary_witnesses_and_forged_preparation(self):
+        from dataclasses import replace
+        report = self.report['baseline'][1]
+        self.assertTrue(report['complete'])
+        self.assertEqual(len(report['completed_witnesses']), len(gate.model.PUBLICATION_CASES))
+        model = gate.model.SourceGroupPublication()
+        case = ('rejected', 'same', 'none')
+        state = next(s for _, s in model.transitions(model.initial) if s.case == case)
+        while state.phase != 'done': state = list(model.transitions(state))[0][1]
+        self.assertTrue(state.prepared)
+        self.assertIsNone(model.violation(state, 'Observe', state))
+        blank = gate.model.PublicationState(case=case, phase='done', encoded=True,
+            binding_verified=True, compiler_work=True, prepared=True)
+        self.assertEqual(model.violation(model.initial, 'Forged', blank), 'P-PREFIX')
+        for missing in ({'canonical_allocated':False}, {'frame_allocated':False},
+            {'record_allocated':False}, {'canonical_admitted':False}, {'frame_admitted':False},
+            {'record_admitted':False}, {'plan_live':False}, {'original_declarations':False},
+            {'encoded':False}, {'binding_verified':False}, {'compiler_work':False}, {'acknowledged':True}):
+            forged = replace(state, **missing)
+            self.assertIsNotNone(model.violation(state, 'Renamed', forged), missing)
+
     def test_relational_oracle_and_planner_precedence(self):
         swap = gate.WITNESSES['unique_swap']
         self.assertEqual(gate.model.ghost_unique(swap), ('committed', ('B', 'A')))

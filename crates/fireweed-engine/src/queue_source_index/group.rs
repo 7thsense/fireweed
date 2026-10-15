@@ -1,6 +1,7 @@
 //! Addressed ordinary-group preimages from one authenticated source cut.
 //! No projection transaction, source replay or alternate business planner lives here.
 mod admission;
+mod publication;
 use super::*;
 use crate::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
@@ -10,6 +11,7 @@ use crate::{
 };
 use admission::request_scratch;
 use fireweed_core::queue_contract::*;
+pub use publication::{QueueSourceGroupEncodingLimits, QueueSourceGroupPublication};
 use serde::de::DeserializeOwned;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -23,6 +25,7 @@ fn unknown(reason: &str) -> QueueError {
 /// state Check's metadata-only image must never be retargeted to Put/Delete.
 pub struct QueueSourceGroupPreimage<'a> {
     cut: QueueSourceCut<'a>,
+    queue: &'a QueueAddress,
     group: &'a CommitGroup,
     definition: &'a AdmittedQueueDefinition,
     snapshot: RecordSnapshot,
@@ -142,6 +145,7 @@ pub async fn load_group_preimage<'a, R: QueueSourceReader>(
         .ok_or_else(|| unknown("missing sequence"))?;
     let mut output = QueueSourceGroupPreimage {
         cut,
+        queue,
         group,
         definition,
         snapshot: RecordSnapshot {

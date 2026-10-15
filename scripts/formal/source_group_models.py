@@ -1,4 +1,4 @@
-"""Finite evidence-to-plan safety; independent of Rust, publication and providers."""
+"""Finite source-plan and speculative preparation safety, independent of Rust/providers."""
 from dataclasses import dataclass, replace
 from itertools import product
 from models import Model
@@ -218,3 +218,101 @@ class SourceGroup(Model):
         if s.phase == 'done' and s.result != expected(s.case): return 'G-OUTCOME'
         if s.result == 'committed' and s.final_owners != ghost_unique(s.case)[1]: return 'G-OUTCOME'
         if s.sealed and (s.clock != 1 or s.cancelled or s.result not in ('committed', 'rejected')): return 'G-SEAL'
+
+# A separate bounded boundary model starts with a legitimately sealed plan.
+# It proves no Rust refinement, codec fidelity, provider CAS or durability.
+PUBLICATION_CASES = tuple(product(('committed', 'rejected'),
+    ('same', 'cut', 'definition', 'job'), ('none', 'canonical', 'frame', 'record')))
+PUBLICATION_FAULTS = {
+    'canonical_before_admission': 'P-ADMISSION',
+    'release_plan_before_encoding': 'P-LIFETIME',
+    'replace_declarations': 'P-BIND',
+    'skip_cut_binding': 'P-PREPARE',
+    'skip_definition_binding': 'P-PREPARE',
+    'skip_job_binding': 'P-PREPARE',
+    'debit_before_binding': 'P-PREFIX',
+    'prepare_acknowledges': 'P-ACK',
+    'skip_allocation_prefix': 'P-PREFIX',
+}
+
+@dataclass(frozen=True)
+class PublicationState:
+    case: tuple = ()
+    phase: str = 'choose'
+    plan_live: bool = True
+    canonical_admitted: bool = False
+    canonical_allocated: bool = False
+    frame_admitted: bool = False
+    frame_allocated: bool = False
+    record_admitted: bool = False
+    record_allocated: bool = False
+    original_declarations: bool = True
+    encoded: bool = False
+    binding_verified: bool = False
+    compiler_work: bool = False
+    prepared: bool = False
+    acknowledged: bool = False
+
+class SourceGroupPublication(Model):
+    name = 'api007-source-group-encoding-preparation'
+    initial = PublicationState()
+    properties = sorted(set(PUBLICATION_FAULTS.values()))
+    bounds = {'cases': len(PUBLICATION_CASES), 'opaque_roots': 2,
+              'equal_numeric_heads': True, 'frontier': 'terminal preparation or refusal'}
+    assumptions = ['input is a sealed committed or rejected source-group plan',
+        'cut mismatch includes equal numeric epoch/through with distinct opaque roots',
+        'canonical, frame and record admission are abstract nonzero funding guards',
+        'encoding retains original queue/request/definition/epoch/sequence/before-image/receipt',
+        'preparation performs no submit, refresh, durable resolution or acknowledgement',
+        'finite abstract safety only; no Rust refinement, exact sizing, codec fidelity or provider durability']
+    def __init__(self, fault=None):
+        if fault is not None and fault not in PUBLICATION_FAULTS: raise ValueError('unknown publication fault')
+        self.fault = fault
+    def frontier(self, s): return s.phase == 'done'
+    def transitions(self, s):
+        if s.phase == 'choose':
+            for i, case in enumerate(PUBLICATION_CASES):
+                yield 'SelectPublication-'+str(i), replace(s, case=case, phase='canonical')
+            return
+        outcome, binding, failure = s.case
+        if s.phase == 'canonical':
+            if self.fault == 'skip_allocation_prefix':
+                yield 'ForgePreparedWithoutBuffers', replace(s, encoded=True, binding_verified=True, compiler_work=True, prepared=True, phase='done')
+            elif self.fault == 'canonical_before_admission':
+                yield 'UnfundedCanonicalization', replace(s, canonical_allocated=True, phase='frame')
+            elif failure == 'canonical': yield 'RefuseCanonicalAdmission', replace(s, phase='done')
+            else: yield 'AdmitThenCanonicalize', replace(s, canonical_admitted=True, canonical_allocated=True,
+                plan_live=self.fault != 'release_plan_before_encoding', phase='frame')
+        elif s.phase == 'frame':
+            if failure == 'frame': yield 'RefuseFrameAdmission', replace(s, phase='done')
+            else: yield 'AdmitThenEncodeFrame', replace(s, frame_admitted=True, frame_allocated=True,
+                original_declarations=self.fault != 'replace_declarations', phase='record')
+        elif s.phase == 'record':
+            if failure == 'record': yield 'RefuseRecordAdmission', replace(s, phase='done')
+            else: yield 'AdmitThenEncodeRecord', replace(s, record_admitted=True,
+                record_allocated=True, encoded=True, phase='binding')
+        elif s.phase == 'binding':
+            if self.fault == 'debit_before_binding':
+                yield 'CompilerBeforeBinding', replace(s, compiler_work=True, phase='prepare')
+            elif binding != 'same' and self.fault != 'skip_'+binding+'_binding':
+                yield 'RefuseForeignBinding', replace(s, phase='done')
+            else: yield 'VerifyOriginalBinding', replace(s, binding_verified=True, phase='prepare')
+        elif s.phase == 'prepare':
+            yield 'CompileAndPrepareWithoutSubmit', replace(s, compiler_work=True, prepared=True,
+                acknowledged=self.fault == 'prepare_acknowledges', phase='done')
+    def violation(self, before, action, s):
+        if ((s.canonical_allocated and not s.canonical_admitted)
+            or (s.frame_allocated and not s.frame_admitted)
+            or (s.record_allocated and not s.record_admitted)): return 'P-ADMISSION'
+        canonical = s.canonical_allocated and s.canonical_admitted
+        frame = canonical and s.frame_allocated and s.frame_admitted
+        record = frame and s.record_allocated and s.record_admitted
+        if s.frame_allocated and not canonical: return 'P-PREFIX'
+        if s.record_allocated and not frame: return 'P-PREFIX'
+        if (s.encoded or s.binding_verified or s.compiler_work or s.prepared) and not record: return 'P-PREFIX'
+        if s.canonical_allocated and not s.plan_live: return 'P-LIFETIME'
+        if not s.original_declarations: return 'P-BIND'
+        if s.binding_verified and s.case[1] != 'same': return 'P-PREPARE'
+        if s.compiler_work and not (s.encoded and s.binding_verified): return 'P-PREFIX'
+        if s.acknowledged: return 'P-ACK'
+        if s.prepared and not (s.encoded and s.binding_verified and s.compiler_work): return 'P-PREFIX'
