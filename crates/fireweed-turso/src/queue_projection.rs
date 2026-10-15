@@ -3321,10 +3321,7 @@ mod tests {
                 let (sql, pool) =
                     selection::candidate_sql(&explain_request, &schema(), queue_id, 11).unwrap();
                 let mut rows = connection
-                    .query(
-                        &format!("EXPLAIN QUERY PLAN {sql}"),
-                        vec![Value::Blob(pool)],
-                    )
+                    .query(&format!("EXPLAIN QUERY PLAN {sql}"), pool)
                     .await
                     .unwrap();
                 let mut details = Vec::new();
@@ -3482,6 +3479,80 @@ mod tests {
         workers.close_and_drain().await.unwrap();
     }
     #[tokio::test]
+    async fn native_candidate_handles_wide_and_empty_key_lists() {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let (projection, definition) =
+            bootstrap(&directory.path().join("wide-keys.db"), &job, &workers).await;
+        seed(&projection, &definition, &job, &workers, false).await;
+        let mut request = ClaimRequest {
+            queue: address(),
+            request_id: "wide-keys".into(),
+            filter: Filter {
+                keys: Some(
+                    (0..5001)
+                        .map(|n| format!("missing/é\0{n}"))
+                        .chain(["a".into()])
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 2,
+            max_bytes: 4096,
+            fields: Some(Default::default()),
+            include_body: false,
+        };
+        assert_eq!(
+            select_fixture(
+                &projection,
+                &definition,
+                request.clone(),
+                11,
+                2,
+                &job,
+                &workers
+            )
+            .await
+            .unwrap()
+            .keys(),
+            &["a".to_string()]
+        );
+        request.filter.keys.as_mut().unwrap().remove("a");
+        assert!(
+            select_fixture(
+                &projection,
+                &definition,
+                request.clone(),
+                11,
+                2,
+                &job,
+                &workers
+            )
+            .await
+            .unwrap()
+            .keys()
+            .is_empty()
+        );
+        request.filter.keys.as_mut().unwrap().clear();
+        assert!(
+            select_fixture(&projection, &definition, request, 11, 2, &job, &workers)
+                .await
+                .unwrap()
+                .keys()
+                .is_empty()
+        );
+        drop(projection);
+        drop(definition);
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        workers.close_and_drain().await.unwrap();
+    }
+    #[tokio::test]
     async fn native_candidate_conjunction_handles_5001_additional_fields() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("wide-conjunction.db");
@@ -3551,6 +3622,7 @@ mod tests {
             "meta/f5000".into(),
             Predicate::Equal(FieldValue::Integer(-1)),
         );
+        let explain_request = request.clone();
         assert!(
             select_fixture(&projection, &definition, request, 11, 3, &job, &workers)
                 .await
@@ -3558,12 +3630,42 @@ mod tests {
                 .keys()
                 .is_empty()
         );
+        let wide = selection::candidate_sql(&explain_request, definition.schema(), 1, 11).unwrap();
+        let mut narrow_request = explain_request;
+        narrow_request
+            .filter
+            .fields
+            .retain(|name, _| name == "meta/f0");
+        let narrow = selection::candidate_sql(&narrow_request, definition.schema(), 1, 11).unwrap();
+        let task = Arc::clone(&projection);
+        let shapes = workers.run(move || Ok(crate::tx::block_on_owned_apply(async {
+            let writer = task.writer.lock().await;
+            let connection = writer.as_ref().unwrap();
+            let mut shapes = Vec::new();
+            for (sql, params) in [narrow, wide] {
+                let mut rows = connection.query(&format!("EXPLAIN {sql}"), params).await.map_err(unknown)?;
+                let mut variables = 0usize;
+                let mut destinations = std::collections::BTreeSet::new();
+                while let Some(row) = rows.next().await.map_err(unknown)? {
+                    if matches!(row.get_value(1).map_err(unknown)?, Value::Text(ref opcode) if opcode == "Variable") {
+                        variables += 1;
+                        destinations.insert(integer(&row.get_value(3).map_err(unknown)?)?);
+                    }
+                }
+                shapes.push((variables, destinations.len()));
+            }
+            Ok::<_, QueueError>(shapes)
+        }))).await.unwrap().unwrap();
+        // The pinned VM clones the entire bound value per Variable destination.
+        // Cardinality must affect metadata length, never destination count.
+        assert_eq!(shapes, [(11, 11), (11, 11)]);
         drop(projection);
         drop(definition);
         drop(job);
         assert_eq!(admission.usage().unwrap(), (0, 0));
         workers.close_and_drain().await.unwrap();
     }
+
     #[tokio::test]
     async fn selective_and_empty_current_replay_omit_opaque_payload_under_small_admission() {
         let directory = tempfile::tempdir().unwrap();

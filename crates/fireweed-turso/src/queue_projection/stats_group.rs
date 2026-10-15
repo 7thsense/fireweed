@@ -14,7 +14,7 @@ pub(super) async fn load_groups(
         return Ok(Vec::new());
     }
     let definition = &snapshot.definition.schema().work;
-    let mut pool = super::filter_sql::BytePool(Vec::new());
+    let mut pool = super::filter_sql::BytePool::default();
     let (with, mut filter) = super::filter_sql::filter_sql(
         &request.filter,
         definition,
@@ -29,41 +29,20 @@ pub(super) async fn load_groups(
             encode_lifecycle(lifecycle)
         ));
     }
-    let mut dimensions = Vec::new();
-    for (n, name) in request.group_by.iter().enumerate() {
-        let field = field_number(definition, name)?;
-        let (hash, name) = if field >= 0 {
-            ("NULL".into(), "NULL".into())
-        } else {
-            (
-                pool.bytes(&discovery_digest(name.as_bytes())),
-                pool.bytes(name.as_bytes()),
-            )
-        };
-        dimensions.push(format!("({n},{field},{hash},{name})"));
-    }
+    let dimensions = pool.dimensions(request.group_by.iter().map(String::as_str), definition)?;
     let prefix = if with.is_empty() {
         "WITH ".into()
     } else {
         format!("{},", with.trim_end())
     };
     let ctes = format!(
-        "{prefix}group_dims(n,field,name_hash,name) AS (VALUES {}),filtered AS (SELECT r.id,r.lifecycle,r.lease_until,r.lease_hash,r.eligible_since,r.available_at FROM q7_records r WHERE r.queue_id={} AND r.collection=0 AND r.active=1{filter}),group_values AS (SELECT r.id AS record_id,p.n,f.full_key FROM filtered r CROSS JOIN group_dims p LEFT JOIN q7_fields f ON f.record_id=r.id AND f.queue_id={} AND f.collection=0 AND f.field=p.field WHERE p.field>=0 UNION ALL SELECT r.id AS record_id,p.n,f.full_key FROM filtered r CROSS JOIN group_dims p LEFT JOIN q7_additional f ON f.record_id=r.id AND f.queue_id={} AND f.collection=0 AND f.name_hash=p.name_hash AND f.name=p.name WHERE p.field<0)",
-        dimensions.join(","),
-        snapshot.queue_id,
-        snapshot.queue_id,
-        snapshot.queue_id
+        "{prefix}{},filtered AS (SELECT r.id,r.lifecycle,r.lease_until,r.lease_hash,r.eligible_since,r.available_at FROM q7_records r WHERE r.queue_id={} AND r.collection=0 AND r.active=1{filter}),group_values AS (SELECT r.id AS record_id,p.n,f.full_key FROM filtered r CROSS JOIN group_dims p LEFT JOIN q7_fields f ON f.record_id=r.id AND f.queue_id={} AND f.collection=0 AND f.field=p.field WHERE p.field>=0 UNION ALL SELECT r.id AS record_id,p.n,f.full_key FROM filtered r CROSS JOIN group_dims p LEFT JOIN q7_additional f ON f.record_id=r.id AND f.queue_id={} AND f.collection=0 AND f.name_hash=p.name_hash AND f.name=p.name WHERE p.field<0)",
+        dimensions, snapshot.queue_id, snapshot.queue_id, snapshot.queue_id
     );
-    let params = || {
-        if pool.0.is_empty() {
-            vec![]
-        } else {
-            vec![Value::Blob(pool.0.clone())]
-        }
-    };
+    let params = || pool.params();
     // Bound one composed grouping key before native sorting/aggregation. The
     // metadata pass never fetches a field value or work body.
-    let width=one(connection,&format!("{ctes} SELECT CASE WHEN MIN(bytes)<0 THEN -1 ELSE COALESCE(MAX(bytes),0) END FROM (SELECT record_id,CASE WHEN MIN(CASE WHEN full_key IS NULL OR typeof(full_key)='blob' THEN 1 ELSE 0 END)=0 THEN -1 ELSE COALESCE(SUM(length(full_key)),0) END AS bytes FROM group_values GROUP BY record_id)"),params(),1).await?.ok_or_else(||unknown("group width metadata missing"))?;
+    let width=one(connection,&format!("{ctes} SELECT CASE WHEN MIN(bytes)<0 THEN -1 ELSE COALESCE(MAX(bytes),0) END FROM (SELECT record_id,CASE WHEN MIN(CASE WHEN full_key IS NULL OR typeof(full_key)='blob' THEN 1 ELSE 0 END)=0 THEN -1 ELSE COALESCE(SUM(length(full_key)),0) END AS bytes FROM group_values GROUP BY record_id)"),params()?,1).await?.ok_or_else(||unknown("group width metadata missing"))?;
     let width = u64::try_from(integer(&width[0])?).map_err(unknown)?;
     let key = width
         .checked_mul(2)
@@ -81,7 +60,7 @@ pub(super) async fn load_groups(
         "{ctes},tuples AS (SELECT r.id AS record_id,(SELECT group_concat(cell,'') FROM (SELECT CASE WHEN full_key IS NULL THEN '0;' ELSE '1'||hex(full_key)||';' END AS cell FROM group_values v WHERE v.record_id=r.id ORDER BY v.n LIMIT -1)) AS group_key FROM filtered r) SELECT min(r.id),{aggregate} FROM filtered r JOIN tuples t ON t.record_id=r.id GROUP BY t.group_key ORDER BY t.group_key LIMIT {}",
         u64::from(limits.max_records) + 1
     );
-    let mut rows = connection.query(&sql, params()).await.map_err(unknown)?;
+    let mut rows = connection.query(&sql, params()?).await.map_err(unknown)?;
     let mut representatives = Vec::new();
     while let Some(row) = rows.next().await.map_err(unknown)? {
         if representatives.len() >= limits.max_records as usize {

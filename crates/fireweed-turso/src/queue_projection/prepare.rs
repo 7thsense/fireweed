@@ -156,11 +156,7 @@ impl NativeTransactionWork for PrepareWorker {
             snapshot.queue_id,
             now,
         )?;
-        let params = if pool.is_empty() {
-            vec![]
-        } else {
-            vec![Value::Blob(pool)]
-        };
+        let params = pool;
         let mut rows = connection.query(&sql, params).await.map_err(unknown)?;
         let mut candidates = vec![];
         let mut key_bytes = 0u64;

@@ -81,11 +81,7 @@ impl NativeTransactionWork for SelectionWorker {
             snapshot.queue_id,
             self.input.now,
         )?;
-        let params = if pool.is_empty() {
-            Vec::new()
-        } else {
-            vec![Value::Blob(pool)]
-        };
+        let params = pool;
         let mut rows = connection.query(&sql, params).await.map_err(unknown)?;
         let mut keys = Vec::new();
         let mut size = 0u64;
@@ -127,8 +123,8 @@ pub(super) fn candidate_sql(
     schema: &QueueSchema,
     queue_id: i64,
     now: i64,
-) -> QueueResult<(String, Vec<u8>)> {
-    let mut pool = super::filter_sql::BytePool(Vec::new());
+) -> QueueResult<(String, Vec<Value>)> {
+    let mut pool = super::filter_sql::BytePool::default();
     let (with, filter) =
         super::filter_sql::filter_sql(&request.filter, &schema.work, queue_id, 0, &mut pool)?;
     // Match the established PostgreSQL progress policy with exact i128 arithmetic.
@@ -147,7 +143,7 @@ pub(super) fn candidate_sql(
             "{with}SELECT CASE WHEN typeof(r.id)='integer' THEN r.id ELSE NULL END,CASE WHEN typeof(r.key)='blob' THEN length(r.key) ELSE -1 END FROM q7_records r WHERE r.queue_id={queue_id} AND r.collection=0 AND r.active=1 AND (r.lifecycle=0 OR (r.lifecycle=1 AND r.lease_until<={now})) AND r.available_at<={}{filter} ORDER BY CASE WHEN {overdue} THEN 0 ELSE 1 END,CASE WHEN {overdue} THEN r.eligible_since ELSE 0 END,{order},r.insertion_sequence LIMIT {}",
             request.eligible_at, request.max_records
         ),
-        pool.0,
+        pool.into_params()?,
     ))
 }
 

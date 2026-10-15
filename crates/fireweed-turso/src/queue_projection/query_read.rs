@@ -371,7 +371,7 @@ fn query_sql(
     now: i64,
     after: Option<&QueryCursor>,
 ) -> QueueResult<(String, Vec<Value>)> {
-    let mut pool = super::filter_sql::BytePool(Vec::new());
+    let mut pool = super::filter_sql::BytePool::default();
     let (with, mut filter) = super::filter_sql::filter_sql(
         &request.filter,
         definition,
@@ -384,8 +384,8 @@ fn query_sql(
     }
     let (join, sort) = query_sort(request, definition)?;
     if let Some(after) = after {
-        let sp = pool.bytes(&after.sort);
-        let kp = pool.bytes(&after.key);
+        let sp = pool.bytes(&after.sort)?;
+        let kp = pool.bytes(&after.key)?;
         let op = if request.descending { "<" } else { ">" };
         filter.push_str(&format!(" AND ({sort},r.key){op}({sp},{kp})"));
     }
@@ -394,14 +394,7 @@ fn query_sql(
         "{with}SELECT CASE WHEN typeof(r.id)='integer' THEN r.id ELSE NULL END,CASE WHEN typeof(r.key)='blob' THEN length(r.key) ELSE -1 END,CASE WHEN typeof({sort})='blob' THEN length({sort}) ELSE -1 END FROM q7_records r{join} WHERE r.queue_id={queue_id} AND r.collection={collection} AND r.active=1{filter} ORDER BY {sort} {direction},r.key {direction} LIMIT {}",
         u64::from(request.max_records) + 1
     );
-    Ok((
-        sql,
-        if pool.0.is_empty() {
-            vec![]
-        } else {
-            vec![Value::Blob(pool.0)]
-        },
-    ))
+    Ok((sql, pool.into_params()?))
 }
 
 #[cfg(test)]

@@ -198,7 +198,8 @@ fn totals_sql(
     queue_id: i64,
     now: i64,
 ) -> QueueResult<(String, Vec<Value>)> {
-    let mut pool = super::filter_sql::BytePool(Vec::new());
+    let mut pool = super::filter_sql::BytePool::default();
+    let mut bucket_pool = super::filter_sql::BytePool::default();
     let (with, mut filter) =
         super::filter_sql::filter_sql(&request.filter, definition, queue_id, 0, &mut pool)?;
     let effective = effective_lifecycle(now);
@@ -215,8 +216,8 @@ fn totals_sql(
         let (table, identity) = if number >= 0 {
             ("q7_fields", format!("f.field={number}"))
         } else {
-            let hash = pool.bytes(&discovery_digest(dimension.field.as_bytes()));
-            let name = pool.bytes(dimension.field.as_bytes());
+            let hash = bucket_pool.bucket_bytes(&discovery_digest(dimension.field.as_bytes()))?;
+            let name = bucket_pool.bucket_bytes(dimension.field.as_bytes())?;
             (
                 "q7_additional",
                 format!("f.name_hash={hash} AND f.name={name}"),
@@ -227,10 +228,10 @@ fn totals_sql(
         for bin in &dimension.buckets {
             let lower = ordered_key(&[Some(&bin.lower_inclusive)])?;
             let upper = ordered_key(&[Some(&bin.upper_exclusive)])?;
-            let lp = pool.bytes(&discovery_prefix(&lower));
-            let up = pool.bytes(&discovery_prefix(&upper));
-            let lk = pool.bytes(&lower);
-            let uk = pool.bytes(&upper);
+            let lp = bucket_pool.bucket_bytes(&discovery_prefix(&lower))?;
+            let up = bucket_pool.bucket_bytes(&discovery_prefix(&upper))?;
+            let lk = bucket_pool.bucket_bytes(&lower)?;
+            let uk = bucket_pool.bucket_bytes(&upper)?;
             let predicate = format!(
                 "EXISTS(SELECT 1 FROM {table} f WHERE {scope} AND f.prefix>={lp} AND f.prefix<={up} AND f.full_key>={lk} AND f.full_key<{uk})"
             );
@@ -243,16 +244,17 @@ fn totals_sql(
         ));
     }
     columns.push(format!("(SELECT count(*) FROM q7_records r WHERE r.queue_id={queue_id} AND r.collection=0 AND r.active=1{base_filter} AND NOT ({}))",super::work::raw_valid_authority()));
+    let mut params = pool.into_params()?;
+    if !bucket_pool.literal_bytes.is_empty() {
+        params.resize(2, Value::Null);
+        params.push(Value::Blob(bucket_pool.into_scalar_bytes()?));
+    }
     Ok((
         format!(
             "{with}SELECT {} FROM q7_records r WHERE r.queue_id={queue_id} AND r.collection=0 AND r.active=1{filter}",
             columns.join(",")
         ),
-        if pool.0.is_empty() {
-            vec![]
-        } else {
-            vec![Value::Blob(pool.0)]
-        },
+        params,
     ))
 }
 
@@ -300,6 +302,48 @@ mod tests {
             }),
         }
     }
+    #[test]
+    fn bucket_binding_does_not_include_wide_filter_literals() {
+        let schema = super::super::tests::schema();
+        let mut request = request();
+        let (_, narrow) = totals_sql(&request, &schema.work, 1, 11).unwrap();
+        assert_eq!(narrow.len(), 3);
+        assert!(matches!(narrow[0], Value::Null));
+        assert!(matches!(narrow[1], Value::Null));
+        request.filter.fields = (0..5001)
+            .map(|n| {
+                (
+                    format!("meta/f{n}"),
+                    Predicate::Equal(FieldValue::Integer(n)),
+                )
+            })
+            .collect();
+        let (sql, wide) = totals_sql(&request, &schema.work, 1, 11).unwrap();
+        assert_eq!(wide.len(), 3);
+        assert_eq!(wide[2], narrow[2]);
+        assert_eq!(sql.matches("?1").count(), 10);
+        assert!(sql.contains("substr(?3,"));
+        request.filter = Filter::default();
+        request.buckets = None;
+        assert!(
+            totals_sql(&request, &schema.work, 1, 11)
+                .unwrap()
+                .1
+                .is_empty()
+        );
+        request.buckets = Some(NumericBucketDimension {
+            field: "u".into(),
+            buckets: vec![],
+            missing_label: "missing".into(),
+        });
+        assert!(
+            totals_sql(&request, &schema.work, 1, 11)
+                .unwrap()
+                .1
+                .is_empty()
+        );
+    }
+
     fn input(
         definition: &AdmittedQueueDefinition,
         job: &Arc<QueueReservation>,

@@ -46,8 +46,8 @@ fn field_identity(
     if field >= 0 {
         Ok(("q7_fields", format!("f.field={field}")))
     } else {
-        let hash = pool.bytes(&discovery_digest(name.as_bytes()));
-        let name = pool.bytes(name.as_bytes());
+        let hash = pool.bytes(&discovery_digest(name.as_bytes()))?;
+        let name = pool.bytes(name.as_bytes())?;
         Ok((
             "q7_additional",
             format!("f.name_hash={hash} AND f.name={name}"),
@@ -66,8 +66,8 @@ fn scalar_field(
     let (predicate, index) = match predicate {
         Predicate::Equal(value) => {
             let encoded = ordered_key(&[Some(value)])?;
-            let hash = pool.bytes(&discovery_digest(&encoded));
-            let key = pool.bytes(&encoded);
+            let hash = pool.bytes(&discovery_digest(&encoded))?;
+            let key = pool.bytes(&encoded)?;
             (
                 format!("f.hash={hash} AND f.full_key={key}"),
                 if table == "q7_fields" {
@@ -88,8 +88,8 @@ fn scalar_field(
             let floor = scalar_type_prefix(value.field_type());
             let mut ceiling = floor;
             ceiling[2] += 1;
-            let floor = pool.bytes(&floor);
-            let ceiling = pool.bytes(&ceiling);
+            let floor = pool.bytes(&floor)?;
+            let ceiling = pool.bytes(&ceiling)?;
             let mut parts = vec![format!("f.prefix>={floor} AND f.prefix<{ceiling}")];
             for (bound, lower) in [(lower, true), (upper, false)] {
                 if let Some(bound) = bound {
@@ -98,8 +98,8 @@ fn scalar_field(
                         Bound::Excluded(v) => (v, false),
                     };
                     let encoded = ordered_key(&[Some(value)])?;
-                    let prefix = pool.bytes(&discovery_prefix(&encoded));
-                    let key = pool.bytes(&encoded);
+                    let prefix = pool.bytes(&discovery_prefix(&encoded))?;
+                    let key = pool.bytes(&encoded)?;
                     let op = match (lower, inclusive) {
                         (true, true) => ">=",
                         (true, false) => ">",
@@ -141,7 +141,7 @@ fn leaf(
             .and_then(|n| n.checked_add(65536))
             .ok_or(QueueError::TooLarge)?,
     )?;
-    let mut pool = BytePool(Vec::new());
+    let mut pool = BytePool::default();
     let active = format!("(r.lifecycle=1 AND COALESCE(r.lease_until>{evaluated},0))");
     let sql = match node {
         SelectorNode::Field { name, predicate } => match scalar {
@@ -167,8 +167,8 @@ fn leaf(
         }
         SelectorNode::Keys(_) => {
             let key = key.ok_or_else(|| unknown("key scalar missing"))?;
-            let hash = pool.bytes(&discovery_digest(key.as_bytes()));
-            let key = pool.bytes(key.as_bytes());
+            let hash = pool.bytes(&discovery_digest(key.as_bytes()))?;
+            let key = pool.bytes(key.as_bytes())?;
             base(queue, &format!("r.key_hash={hash} AND r.key={key}"), true)
         }
         SelectorNode::StoredLifecycleIn(_) => base(
@@ -212,7 +212,7 @@ fn leaf(
     };
     Ok(Leaf {
         sql,
-        bytes: pool.0,
+        bytes: pool.into_scalar_bytes()?,
         _charge: charge,
     })
 }
