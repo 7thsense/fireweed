@@ -54,6 +54,12 @@ jobs:
         with:
           cache-on-failure: true
 
+      # This standalone fixture has its own lockfile. Prime its complete
+      # dependency closure before the release verifier's offline checks.
+      - name: Fetch locked public boundary fixture dependencies
+        timeout-minutes: 5
+        run: cargo +1.99.0 fetch --locked --manifest-path scripts/ci/fixtures/public-crate-boundary/Cargo.toml
+
       - name: Enforce queue module boundaries and negative controls
         run: python3 scripts/ci/check_queue_boundaries.py --controls
 
