@@ -124,13 +124,13 @@ jobs:
           python3 scripts/ci/queue-pg-execution.py \
             --pg-bin /usr/lib/postgresql/16/bin \
             --fixture-parent "$RUNNER_TEMP" \
-            --output target/queue-pg-execution
+            --output target/queue-pg-execution-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Storage remediation policy
-        run: bash scripts/ci/storage-remediation-policy.sh --mode-file scripts/ci/storage-remediation-policy.mode --queue-evidence target/queue-pg-execution/report.json
+        run: bash scripts/ci/storage-remediation-policy.sh --mode-file scripts/ci/storage-remediation-policy.mode --queue-evidence target/queue-pg-execution-${{ github.run_id }}-${{ github.run_attempt }}/report.json
       - name: Retain PostgreSQL correctness execution evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: api007-postgres-execution
-          path: target/queue-pg-execution
+          path: target/queue-pg-execution-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error

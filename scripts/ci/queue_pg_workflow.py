@@ -24,11 +24,11 @@ def validate(workflow):
           python3 scripts/ci/queue-pg-execution.py \\
             --pg-bin /usr/lib/postgresql/16/bin \\
             --fixture-parent "$RUNNER_TEMP" \\
-            --output target/queue-pg-execution
+            --output target/queue-pg-execution-${{ github.run_id }}-${{ github.run_attempt }}
 ''',
-        '      - name: Storage remediation policy\n        run: bash scripts/ci/storage-remediation-policy.sh --mode-file scripts/ci/storage-remediation-policy.mode --queue-evidence target/queue-pg-execution/report.json\n',
+        '      - name: Storage remediation policy\n        run: bash scripts/ci/storage-remediation-policy.sh --mode-file scripts/ci/storage-remediation-policy.mode --queue-evidence target/queue-pg-execution-${{ github.run_id }}-${{ github.run_attempt }}/report.json\n',
         '      - name: Retain PostgreSQL correctness execution evidence\n        if: always()\n        uses: actions/upload-artifact@v4\n',
-        '          path: target/queue-pg-execution\n',
+        '          path: target/queue-pg-execution-${{ github.run_id }}-${{ github.run_attempt }}\n',
         '          if-no-files-found: error\n',
     )
     for fragment in required:
@@ -44,8 +44,11 @@ def self_test(workflow):
         ('api007-postgres:', 'disabled-postgres:'),
         ('runs-on: ubuntu-24.04', 'runs-on: ubuntu-latest'),
         ('--pg-bin /usr/lib/postgresql/16/bin', '--pg-bin /usr/bin'),
-        ('--queue-evidence target/queue-pg-execution/report.json', ''),
-        ('--output target/queue-pg-execution', '--output target/unrelated'),
+        ('--queue-evidence target/queue-pg-execution-${{ github.run_id }}-${{ github.run_attempt }}/report.json', ''),
+        ('--output target/queue-pg-execution-${{ github.run_id }}-${{ github.run_attempt }}', '--output target/unrelated'),
+        ('${{ github.run_attempt }}', '1'),
+        ('${{ github.run_id }}', 'stale'),
+        ('path: target/queue-pg-execution-${{ github.run_id }}-${{ github.run_attempt }}', 'path: target/queue-pg-execution'),
         ('run: python3 scripts/ci/queue_pg_controls.py --pg-bin /usr/lib/postgresql/16/bin', 'run: true'),
         ('    runs-on: ubuntu-24.04', '    if: false\n    runs-on: ubuntu-24.04'),
         ('    runs-on: ubuntu-24.04', '    continue-on-error: true\n    runs-on: ubuntu-24.04'),
