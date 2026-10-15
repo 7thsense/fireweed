@@ -125,7 +125,46 @@ pub fn plan_claim(
 ) -> QueueResult<ClaimTransition> {
     validate_raw_work_lease(&work)?;
     CheckedFields::new(&work.record.work.fields, &work.field_coverage)?;
-    let record = &mut work.record;
+    let record = &work.record;
+    let next = plan_claim_metadata(
+        crate::queue_group_state_authority::WorkMetadata {
+            version: record.version,
+            priority: record.work.priority,
+            available_at: record.work.available_at,
+            insertion_sequence: record.insertion_sequence,
+            lifecycle: record.lifecycle,
+            eligible_since: record.eligible_since,
+            attempts: record.attempts,
+            lease_expires_at: record.lease_expires_at,
+            lease_hash: work.lease_hash,
+        },
+        &token,
+        context,
+    )?;
+    work.record.version = next.version;
+    work.record.attempts = next.attempts;
+    work.record.lifecycle = next.lifecycle;
+    work.record.lease_expires_at = next.lease_expires_at;
+    work.lease_hash = next.lease_hash;
+    Ok(ClaimTransition {
+        work,
+        lease: LeaseCredential { token },
+    })
+}
+/// The same claim policy without materializing or copying body/field payloads.
+/// Source compilation compares this result to the resolved command; relational
+/// backends reach it through plan_claim above after their native selection.
+pub(crate) fn plan_claim_metadata(
+    mut record: crate::queue_group_state_authority::WorkMetadata,
+    token: &[u8],
+    context: ClaimContext,
+) -> QueueResult<crate::queue_group_state_authority::WorkMetadata> {
+    ClaimOwnership {
+        lifecycle: record.lifecycle,
+        expires_at: record.lease_expires_at,
+        token_hash: record.lease_hash,
+    }
+    .validate_metadata()?;
     if record.version == 0
         || record.insertion_sequence == 0
         || record.insertion_sequence > context.insertion_head
@@ -139,13 +178,13 @@ pub fn plan_claim(
             && record
                 .lease_expires_at
                 .is_some_and(|expiry| expiry <= context.now));
-    if !pending || record.work.available_at > context.eligible_at {
+    if !pending || record.available_at > context.eligible_at {
         return Err(authority("native selection returned ineligible work"));
     }
     if token.is_empty() || context.expires_at <= context.now {
         return Err(QueueError::Invalid("invalid claim lease".into()));
     }
-    if work.lease_hash == Some(lease_hash(&token)) {
+    if record.lease_hash == Some(lease_hash(token)) {
         return Err(authority("reused predecessor lease token"));
     }
     let version = record
@@ -160,11 +199,8 @@ pub fn plan_claim(
     record.attempts = attempts;
     record.lifecycle = Lifecycle::Leased;
     record.lease_expires_at = Some(context.expires_at);
-    work.lease_hash = Some(lease_hash(&token));
-    Ok(ClaimTransition {
-        work,
-        lease: LeaseCredential { token },
-    })
+    record.lease_hash = Some(lease_hash(token));
+    Ok(record)
 }
 #[cfg(test)]
 mod tests {
