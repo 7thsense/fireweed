@@ -95,5 +95,42 @@ jobs:
             --manifest scripts/ci/public-release-gates-ci.json \
             --evidence target/public-release-gate.json
 
+
+  api007-postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUST_TEST_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install PostgreSQL 16 and check prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-16 ripgrep
+          /usr/lib/postgresql/16/bin/postgres --version
+      - name: Install Rust 1.99.0
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Reuse Cargo build state
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Qualification runner cancellation controls
+        run: python3 scripts/ci/queue_pg_controls.py --pg-bin /usr/lib/postgresql/16/bin
+      - name: Execute exact PostgreSQL correctness routes
+        run: |
+          python3 scripts/ci/queue-pg-execution.py \
+            --pg-bin /usr/lib/postgresql/16/bin \
+            --fixture-parent "$RUNNER_TEMP" \
+            --output target/queue-pg-execution
       - name: Storage remediation policy
-        run: bash scripts/ci/storage-remediation-policy.sh --mode-file scripts/ci/storage-remediation-policy.mode
+        run: bash scripts/ci/storage-remediation-policy.sh --mode-file scripts/ci/storage-remediation-policy.mode --queue-evidence target/queue-pg-execution/report.json
+      - name: Retain PostgreSQL correctness execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api007-postgres-execution
+          path: target/queue-pg-execution
+          if-no-files-found: error

@@ -14,6 +14,9 @@ import tomllib
 
 from stock_turso_policy import StockTursoError, read_and_validate as validate_stock_turso, self_test as stock_turso_self_test
 
+from queue_pg_evidence import verify_report as verify_queue_report
+from queue_pg_workflow import validate as validate_queue_workflow, self_test as queue_workflow_self_test
+
 from fireweed_test_placement import PlacementError
 from fireweed_test_placement import self_test as fireweed_placement_self_test
 from fireweed_test_placement import validate as validate_fireweed_test_placement
@@ -112,7 +115,8 @@ def current_inventory() -> dict[str, object]:
     return json.loads(completed.stdout)
 
 
-def validate_inventory(document: object, policy: str, *, check_repository: bool) -> int:
+def validate_inventory(document: object, policy: str, *, check_repository: bool,
+                       executed_queue_ids: frozenset[str] = frozenset()) -> int:
     require(isinstance(document, dict), "inventory must be an object")
     required = {
         "schema_version",
@@ -231,6 +235,11 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
             and machete_exceptions[0]["dependency_chain"] == ["P12a", "P2f"],
             "cargo-machete exceptions must be empty or the single P12a-bound Turso dependency",
         )
+    eligible_queue_ids = {row['id'] for row in registries['ignored_tests']
+        if row['status'] == 'debt' and row['category'] == 'ignored_test'
+        and row['path'].startswith(('crates/fireweed-postgres/', 'crates/fireweed/'))}
+    require(executed_queue_ids <= eligible_queue_ids,
+            'queue execution cannot exempt unrelated categories or packages')
     for category, rows in registries.items():
         require(isinstance(rows, list), f"{category} registry")
         for row in rows:
@@ -241,7 +250,10 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
             require(row["dependency_chain"], f"unwired debt {row['id']}")
             require(row["status"] in {"debt", "legacy_false_green", "discovery_negative"}, "debt status")
             if row["status"] != "discovery_negative":
-                debt_count += 1
+                if (category != "ignored_tests" or row.get("category") != "ignored_test"
+                        or row["id"] not in executed_queue_ids or row["status"] != "debt"):
+                    debt_count += 1
+    require(executed_queue_ids <= debt_ids, "execution evidence contains unknown debt IDs")
     validate_external_dependencies(
         document["external_dependency_observations"], required_registries, debt_ids,
         check_repository=check_repository,
@@ -325,6 +337,7 @@ def validate_cargo_scope(text: str) -> None:
 def validate_shape() -> None:
     require(parse_mode(MODE_FILE) in {"remediation", "closure"}, "versioned mode file invalid")
     ci = CI.read_text()
+    validate_queue_workflow(ci)
     workflow_marker = "run: bash scripts/ci/verify-github-actions-policy.sh"
     release_marker = "python3 scripts/ci/public-release-gate.py"
     policy_marker = "bash scripts/ci/storage-remediation-policy.sh --mode-file scripts/ci/storage-remediation-policy.mode"
@@ -347,6 +360,7 @@ def validate_shape() -> None:
 
 def self_test(document: dict[str, object]) -> None:
     validate_shape()
+    queue_workflow_self_test(CI.read_text())
     fireweed_placement_self_test(document["fireweed_test_placement"])
     cargo = CARGO_MANIFEST.read_text()
     validate_cargo_scope(cargo)
@@ -460,6 +474,18 @@ def self_test(document: dict[str, object]) -> None:
             pass
         else:
             raise PolicyError(f"retired vendor dependency ignores passed: {pairs}")
+    unrelated = copy.deepcopy(document)
+    row = next(row for row in unrelated['debt_registries']['ignored_tests'] if row['status'] == 'debt')
+    unrelated['debt_registries']['ignored_tests'].remove(row)
+    row['category'] = 'no_op'
+    unrelated['debt_registries']['no_ops'].append(row)
+    try:
+        validate_inventory(unrelated, 'remediation', check_repository=False,
+                           executed_queue_ids=frozenset({row['id']}))
+    except PolicyError:
+        pass
+    else:
+        raise PolicyError('queue execution incorrectly exempted unrelated debt category')
     stock_turso_self_test()
     validate_stock_turso(ROOT)
 
@@ -470,6 +496,7 @@ def main() -> int:
     group.add_argument("--policy", choices=["remediation", "closure"])
     group.add_argument("--mode-file", type=Path)
     group.add_argument("--self-test", action="store_true")
+    parser.add_argument("--queue-evidence", type=Path)
     args = parser.parse_args()
     try:
         document = json.loads(INVENTORY.read_text())
@@ -479,15 +506,16 @@ def main() -> int:
             return 0
         policy = args.policy or parse_mode(args.mode_file)
         validate_shape()
-        debt_count = validate_inventory(document, policy, check_repository=True)
+        executed = frozenset(verify_queue_report(args.queue_evidence)) if args.queue_evidence else frozenset()
+        debt_count = validate_inventory(document, policy, check_repository=True, executed_queue_ids=executed)
         if policy == "remediation":
             print(f"storage remediation policy: {debt_count} assigned product debt rows (report-only; not closure)")
         else:
-            print("storage remediation policy: zero product debt; product closure enabled")
+            print(f"storage remediation policy: zero unexecuted product debt; {len(executed)} queue rows verified by execution and retained in inventory")
         count = len(document["external_dependency_observations"]["findings"])
         print(f"external dependency observations: {count}; not qualified by product closure")
         return 0
-    except (PolicyError, StockTursoError, PlacementError, json.JSONDecodeError, KeyError, TypeError, OSError, tomllib.TOMLDecodeError) as error:
+    except (ValueError, PolicyError, StockTursoError, PlacementError, json.JSONDecodeError, KeyError, TypeError, OSError, tomllib.TOMLDecodeError) as error:
         print(f"storage remediation policy failed: {error}", file=sys.stderr)
         return 1
 

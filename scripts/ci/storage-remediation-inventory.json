@@ -474,9 +474,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "d51beec80f57aa665738",
+        "id": "37a265ba95863fbd824e",
         "identity": "#[ignore = \"requires FIREWEED_API007_PG_BIN; creates and crashes a private PostgreSQL cluster\"]",
-        "line": 180,
+        "line": 186,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/tests/queue_server_crash.rs",
         "status": "debt"
@@ -4479,6 +4479,62 @@
           "P10px",
           "P2f"
         ],
+        "detail": "early_success=false",
+        "id": "e163301422d4bbad72bb",
+        "identity": "raise ValueError(f'missing qualification fixture variable FIREWEED_S3_TEST_{suffix}')",
+        "line": 88,
+        "owner": "P10px",
+        "path": "scripts/ci/queue-pg-execution.py",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "cbd1edac05026a72aacb",
+        "identity": "'missing/extra fixture logs')",
+        "line": 103,
+        "owner": "P10px",
+        "path": "scripts/ci/queue_pg_evidence.py",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "d30a064bf840fac8c1df",
+        "identity": "raise ValueError(f'missing PostgreSQL binary: {name}')",
+        "line": 21,
+        "owner": "P10px",
+        "path": "scripts/ci/queue_pg_fixture.py",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "eb58b2b5810becae23a2",
+        "identity": "'enumeration failure skipped primary cluster stop')",
+        "line": 54,
+        "owner": "P10px",
+        "path": "scripts/ci/queue_pg_fixture_controls.py",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P10px",
+          "P2f"
+        ],
         "detail": "fail_closed=true",
         "id": "d8e0cffb4848cff6ed59",
         "identity": "# FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1 is set (then missing fixtures fail the gate).",
@@ -4634,9 +4690,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "945c0a9e900e1498bb1d",
+        "id": "c7f0e9326ed3c31963a6",
         "identity": "echo \"missing governed services authorization: scripts/ci/governed-product-services.json\" >&2",
-        "line": 114,
+        "line": 115,
         "owner": "P10px",
         "path": "scripts/ci/verify-github-actions-policy.sh",
         "status": "discovery_negative"
@@ -4670,6 +4726,20 @@
         "line": 12,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/tests/composed_relational_reconnect.rs",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "opt_in",
+        "dependency_chain": [
+          "P10pp",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "4b2c677a9eed0e7b0c83",
+        "identity": "\"missing private-cluster binary {name}\"",
+        "line": 35,
+        "owner": "P10pp",
+        "path": "crates/fireweed-postgres/tests/queue_server_crash.rs",
         "status": "discovery_negative"
       },
       {
@@ -97164,22 +97234,22 @@
         "text": "\"release-repeat-suites.toml drift; regenerate with --write\","
       },
       {
-        "line": 81,
+        "line": 83,
         "path": "scripts/ci/pr-gate.sh",
         "text": "bash \"${SCRIPT_DIR}/verify-product-workflow-names.sh\" --self-test"
       },
       {
-        "line": 82,
+        "line": 84,
         "path": "scripts/ci/pr-gate.sh",
         "text": "bash \"${SCRIPT_DIR}/verify-product-workflow-names.sh\" \"${SCRIPT_DIR}/release-repeat-suites.toml\""
       },
       {
-        "line": 127,
+        "line": 129,
         "path": "scripts/ci/pr-gate.sh",
         "text": "bash \"${SCRIPT_DIR}/verify-product-workflow-names.sh\" --self-test"
       },
       {
-        "line": 128,
+        "line": 130,
         "path": "scripts/ci/pr-gate.sh",
         "text": "bash \"${SCRIPT_DIR}/verify-product-workflow-names.sh\" \"${SCRIPT_DIR}/release-repeat-suites.toml\""
       },
@@ -97375,7 +97445,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "3d1b3e97571bcd4cf7ac8a36a19ce3a45893ea2f5e3bea3eee1fab2f076960a6",
+  "source_inventory_sha256": "e2ccff38dbdd9bd009022095d16aa4d3d6b57657a707285b80cc777703a30f76",
   "workspaces": [
     {
       "listing_error_sha256": "",

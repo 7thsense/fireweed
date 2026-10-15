@@ -35,7 +35,13 @@ impl PrivateCluster {
                 "missing private-cluster binary {name}"
             );
         }
-        let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let parent = std::env::var_os("FIREWEED_API007_PG_CRASH_PARENT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+        assert!(
+            parent.is_absolute(),
+            "private-cluster parent must be absolute"
+        );
         std::fs::create_dir_all(&parent).unwrap();
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

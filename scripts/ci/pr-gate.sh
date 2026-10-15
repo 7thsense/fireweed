@@ -15,10 +15,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE=""
+QUEUE_EVIDENCE=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --mode) MODE="$2"; shift 2 ;;
+        --queue-evidence) QUEUE_EVIDENCE=(--queue-evidence "$2"); shift 2 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -59,7 +61,7 @@ if [[ "$MODE" == "enforcing" || "$MODE" == "closure" ]]; then
 fi
 
 echo "--- storage remediation policy [${POLICY_MODE}] ---"
-bash "${SCRIPT_DIR}/storage-remediation-policy.sh" --policy "${POLICY_MODE}"
+bash "${SCRIPT_DIR}/storage-remediation-policy.sh" --policy "${POLICY_MODE}" "${QUEUE_EVIDENCE[@]}"
 
 if [[ "$MODE" == "remediation" || "$MODE" == "closure" ]]; then
     echo "=== pr-gate [${MODE}] PASSED ==="

@@ -51,6 +51,7 @@ grep -Fq 'bash scripts/ci/storage-remediation-policy.sh --mode-file scripts/ci/s
 grep -Fq 'run: bash scripts/ci/verify-github-actions-policy.sh' "${ci}"
 grep -Fq 'python3 scripts/ci/public-release-gate.py' "${ci}"
 grep -Fq 'bash scripts/ci/s3-qualification-endpoint.sh install' "${ci}"
+python3 scripts/ci/queue_pg_workflow.py
 
 release_gate="${repo_root}/scripts/ci/release-gate.sh"
 grep -Fq -- '--governed-performance-only' "${release_gate}"
