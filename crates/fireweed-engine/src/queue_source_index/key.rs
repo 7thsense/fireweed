@@ -3,7 +3,7 @@
 use crate::queue_index;
 use fireweed_core::queue_contract::{Lifecycle, QueueError, QueueResult};
 
-const VERSION: u8 = 1;
+pub(super) const VERSION: u8 = 1;
 #[derive(Clone, Copy)]
 pub enum QueueSourceKey<'a> {
     Genesis,
@@ -39,9 +39,12 @@ pub enum QueueSourceKey<'a> {
         request_id: &'a str,
     },
     LifecycleCount(Lifecycle),
-    IntrinsicPosting {
-        kind: u8,
-        sort: &'a [u8],
+    LiveKey {
+        collection: Option<&'a str>,
+        key: &'a str,
+    },
+    WorkIntrinsic {
+        posting: super::QueueSourceWorkPosting,
         key: &'a str,
     },
 }
@@ -94,7 +97,9 @@ impl QueueSourceKey<'_> {
             Self::UniqueOwner { .. } => 6,
             Self::Original { .. } => 7,
             Self::LifecycleCount(_) => 8,
-            Self::IntrinsicPosting { .. } => 9,
+            // Family 9 is reserved; its former opaque kinds were never sealed.
+            Self::LiveKey { .. } => 10,
+            Self::WorkIntrinsic { .. } => 11,
         };
         sink.raw(&[VERSION, family])?;
         match self {
@@ -152,14 +157,13 @@ impl QueueSourceKey<'_> {
                 sink.raw(&[domain])?;
                 sink.literal(request_id.as_bytes())
             }
-            Self::IntrinsicPosting { kind, sort, key } => {
-                if kind > 5 {
-                    return Err(QueueError::OutcomeUnknown(
-                        "invalid intrinsic index kind".into(),
-                    ));
-                }
-                sink.raw(&[kind])?;
-                sink.literal(sort)?;
+            Self::LiveKey { collection, key } => {
+                sink.collection(collection)?;
+                sink.literal(key.as_bytes())
+            }
+            Self::WorkIntrinsic { posting, key } => {
+                sink.raw(&[posting.index().tag()])?;
+                sink.raw(posting.sort())?;
                 sink.literal(key.as_bytes())
             }
             Self::LifecycleCount(lifecycle) => sink.raw(&[match lifecycle {
@@ -205,6 +209,23 @@ pub fn record_fields_prefix(collection: Option<&str>, key: &str) -> QueueResult<
     sink.raw(&[VERSION, 3])?;
     sink.collection(collection)?;
     sink.literal(key.as_bytes())?;
+    Ok(out)
+}
+/// Complete live-key namespace, including State collection identity.
+pub fn live_keys_prefix_len(collection: Option<&str>) -> QueueResult<usize> {
+    let mut sink = Sink { out: None, len: 0 };
+    sink.raw(&[VERSION, 10])?;
+    sink.collection(collection)?;
+    Ok(sink.len)
+}
+pub fn live_keys_prefix(collection: Option<&str>) -> QueueResult<Vec<u8>> {
+    let mut out = Vec::with_capacity(live_keys_prefix_len(collection)?);
+    let mut sink = Sink {
+        out: Some(&mut out),
+        len: 0,
+    };
+    sink.raw(&[VERSION, 10])?;
+    sink.collection(collection)?;
     Ok(out)
 }
 /// Exclusive upper bound for a byte prefix. No successor means unbounded.

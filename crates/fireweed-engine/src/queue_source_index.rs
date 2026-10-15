@@ -6,8 +6,16 @@ pub use reference::QueueSourceSpan;
 mod scope;
 pub use scope::{QueueSourceCut, QueueSourcePoint};
 
+mod intrinsic;
+pub use intrinsic::{
+    QueueSourceWorkIndex, QueueSourceWorkPosting, QueueSourceWorkPrefix, QueueSourceWorkValue,
+};
+
 mod key;
-pub use key::{QueueSourceKey, prefix_successor, record_fields_prefix, record_fields_prefix_len};
+pub use key::{
+    QueueSourceKey, live_keys_prefix, live_keys_prefix_len, prefix_successor, record_fields_prefix,
+    record_fields_prefix_len,
+};
 
 mod cell;
 pub use cell::{
@@ -27,7 +35,8 @@ pub use fields::{QueueSourceFields, load_command_fields, source_field_value};
 mod predecessor;
 pub use predecessor::{
     QueueSourceAggregateAccumulator, QueueSourceAggregateEdits, QueueSourceCommand,
-    QueueSourceNamedEffect, QueueSourceOriginalEdits, QueueSourcePredecessor,
-    QueueSourcePublicationContext, QueueSourceRecordEditAccumulator, QueueSourceRecordEdits,
-    QueueSourceRecordTransition, QueueSourceUniqueOwnerAccumulator, QueueSourceUniqueOwnerEdits,
+    QueueSourceIntrinsicAccumulator, QueueSourceIntrinsicEdits, QueueSourceNamedEffect,
+    QueueSourceOriginalEdits, QueueSourcePredecessor, QueueSourcePublicationContext,
+    QueueSourceRecordEditAccumulator, QueueSourceRecordEdits, QueueSourceRecordTransition,
+    QueueSourceUniqueOwnerAccumulator, QueueSourceUniqueOwnerEdits,
 };

@@ -1,4 +1,8 @@
 //! Bind resolved commands, schema and preimages to one authenticated source cut.
+mod intrinsics;
+#[cfg(test)]
+mod test_fixture;
+pub use intrinsics::{QueueSourceIntrinsicAccumulator, QueueSourceIntrinsicEdits};
 mod aggregates;
 mod originals;
 pub use originals::QueueSourceOriginalEdits;
@@ -885,6 +889,7 @@ mod tests {
                 let transition = context.record_transition(&predecessor).await.unwrap();
                 let edit_baseline = admission.usage().unwrap();
                 check_work_record_edits(&context, &transition, &snapshot, &after, &schema);
+                super::intrinsics::tests::assert_inventory_delta(&context, &snapshot, &after).await;
                 assert_eq!(admission.usage().unwrap(), edit_baseline);
                 let mut effects = BTreeMap::new();
                 let mut order = Vec::new();
@@ -1605,6 +1610,32 @@ mod tests {
             for row in &claim_delta.work {
                 after_claim.insert(row.record.work.key.clone(), row.clone());
             }
+            let mut claimed_snapshot = snapshot.clone();
+            claimed_snapshot.work = after_claim.clone();
+            claimed_snapshot
+                .versions
+                .extend(claim_delta.versions.iter().map(|v| {
+                    (
+                        RecordIdentity {
+                            collection: v.collection.clone(),
+                            key: v.key.clone(),
+                        },
+                        v.version,
+                    )
+                }));
+            super::intrinsics::tests::assert_inventory_delta(
+                &context,
+                &snapshot,
+                &claimed_snapshot,
+            )
+            .await;
+            super::intrinsics::tests::assert_one_claim_and_renewal(
+                &context,
+                &snapshot,
+                &claimed_snapshot,
+                &token,
+            )
+            .await;
             let expected: BTreeMap<_, _> = [Lifecycle::Pending, Lifecycle::Leased]
                 .into_iter()
                 .map(|lifecycle| {
@@ -1833,7 +1864,8 @@ mod tests {
                 },
                 1,
             );
-            let (recreated, _) = record(&queue, &schema, &deleted_snapshot, &create, &job);
+            let (recreated, recreated_snapshot) =
+                record(&queue, &schema, &deleted_snapshot, &create, &job);
             let checked_recreated = recreated.checked().unwrap();
             let recreated_context = QueueSourcePublicationContext::begin(
                 &tombstone_reader,
@@ -1854,6 +1886,12 @@ mod tests {
                 .record_transition(&recreated_predecessor)
                 .await
                 .unwrap();
+            super::intrinsics::tests::assert_inventory_delta(
+                &recreated_context,
+                &deleted_snapshot,
+                &recreated_snapshot,
+            )
+            .await;
             assert_eq!(
                 check_named_postings(
                     &recreated_transition,
@@ -2052,6 +2090,8 @@ mod tests {
                         &job,
                     );
 
+                    super::intrinsics::tests::assert_inventory_delta(&context, &snapshot, &patched)
+                        .await;
                     let Some(QueueSourceLive::State { value }) = transition.fact().live else {
                         panic!()
                     };
@@ -2081,7 +2121,7 @@ mod tests {
                 expect: StateExpect::Version(1),
                 change: StateChange::Delete,
             });
-            let (deleted, _) = record(&queue, &schema, &snapshot, &delete, &job);
+            let (deleted, deleted_snapshot) = record(&queue, &schema, &snapshot, &delete, &job);
             let checked_delete = deleted.checked().unwrap();
             {
                 let context = QueueSourcePublicationContext::begin(
@@ -2100,6 +2140,12 @@ mod tests {
                     (2, 0)
                 );
                 assert!(transition.fact().live.is_none());
+                super::intrinsics::tests::assert_inventory_delta(
+                    &context,
+                    &snapshot,
+                    &deleted_snapshot,
+                )
+                .await;
                 let mut deleted_fields = Vec::new();
                 transition
                     .visit_field_changes(&mut |name, old, new| {
@@ -2153,6 +2199,12 @@ mod tests {
                 assert!(predecessor.fact().is_none());
                 let transition = context.record_transition(&predecessor).await.unwrap();
                 assert_eq!(transition.fact().field_count, 0);
+                super::intrinsics::tests::assert_inventory_delta(
+                    &context,
+                    &snapshot,
+                    &created_snapshot,
+                )
+                .await;
                 assert_eq!(
                     check_named_postings(
                         &transition,
@@ -2202,6 +2254,12 @@ mod tests {
                     ),
                     1
                 );
+                super::intrinsics::tests::assert_inventory_delta(
+                    &context,
+                    &snapshot,
+                    &complete_snapshot,
+                )
+                .await;
                 let mut complete_owner = false;
                 transition
                     .visit_named_postings(&job, &mut |effect| {
