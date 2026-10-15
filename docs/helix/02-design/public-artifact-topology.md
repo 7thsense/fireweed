@@ -42,6 +42,7 @@ target package names are intentionally identical.
 | fireweed | fireweed | publishable | crates.io | 1 | default = memory, objectlog, turso; minimal = no default features; postgres opt-in; memory log is volatile | The sole supported Rust facade and constructor surface. |
 | fireweed-core | fireweed-core | repository-only | - | - | no public feature contract | Domain types are exposed only through the facade. |
 | fireweed-engine | fireweed-engine | repository-only | - | - | no public feature contract | Raw ports and coordination internals must not become an external construction surface. |
+| fireweed-queue-spool | fireweed-queue-spool | repository-only | - | - | no public feature contract | Shared owned-operation lifecycle and physical scratch, supported only through the facade. |
 | fireweed-projection | fireweed-projection | repository-only | - | - | no public feature contract | Shared projection implementation, supported only through shipped profiles. |
 | fireweed-relational | fireweed-relational | repository-only | - | - | no public feature contract | Driver-neutral relational implementation shared by internal adapters. |
 | fireweed-memory | fireweed-memory | repository-only | - | - | always built for the default facade; development-only durability | Reference adapter used by the facade, tests, and local evaluation. |
