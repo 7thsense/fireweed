@@ -23,7 +23,8 @@ helper.LOADED_SOURCES[str(model_path)] = hashlib.sha256(model_bytes).hexdigest()
 
 # Preserve the five qualified classes and capture the separate F campaign's
 # executed bytes under the SAME provenance checker as its gate and models.
-for alias, module_name in (('original_model','source_original_models'),('original_gate','source_original_gate')):
+for alias, module_name in (('original_model','source_original_models'),('original_gate','source_original_gate'),
+                          ('batch_model','source_batch_models'),('batch_gate','source_batch_gate')):
     source_path=helper_path.with_name(module_name+'.py')
     source_bytes=source_path.read_bytes()
     module=types.ModuleType(module_name)
@@ -152,7 +153,7 @@ def completed_header_witness(s,c):
 
 def run(max_states=100000):
     fault_sets=[set(faults) for faults in (model.FAULTS,model.PUBLICATION_FAULTS,model.READ_FAULTS,
-        model.PROVISION_FAULTS,model.HEADER_FAULTS,original_model.ORIGINAL_FAULTS)]
+        model.PROVISION_FAULTS,model.HEADER_FAULTS,original_model.ORIGINAL_FAULTS,batch_model.BATCH_FAULTS)]
     if sum(map(len,fault_sets))!=len(set.union(*fault_sets)):
         raise AssertionError('source campaign mutant names must be disjoint')
     specification = model.SourceGroup()
@@ -246,12 +247,15 @@ def run(max_states=100000):
         controls.append({'fault':fault,'trace_sha256':helper.digest(failure['trace']),**failure})
     original_report,original_controls=original_gate.run_original_campaign(helper,original_model,max_states)
     controls.extend(original_controls)
-    baselines=[report,publication_report,record_report,genesis_report,header_report,original_report]
+    batch_report,batch_controls=batch_gate.run_batch_campaign(helper,batch_model,max_states)
+    controls.extend(batch_controls)
+    baselines=[report,publication_report,record_report,genesis_report,header_report,original_report,batch_report]
     if [row['name'] for row in baselines]!=[
         'api007-source-group-preimage','api007-source-group-encoding-preparation',
         'api007-source-record-read','api007-coupled-genesis-provision',
-        'api007-source-header-recovery','api007-source-original-resolution']:
-        raise AssertionError('six exact source campaign identities required')
+        'api007-source-header-recovery','api007-source-original-resolution',
+        'api007-source-batch-composition']:
+        raise AssertionError('seven exact source campaign identities required')
     return {'schema':'fireweed-api007-source-group-formal-v1', 'status':'PASS',
         'baseline':baselines, 'negative_controls':controls,
         'qualification':{'finite_abstract_safety':'recorded bounds only', 'production_mapping':'documentary_unexecuted',
@@ -278,6 +282,14 @@ def run(max_states=100000):
              'tests':['original_claim_requires_command_to_lease_binding_after_valid_span_digest_and_decode',
                 'original_conflict_precedes_missing_payload_and_matching_retry_uses_same_ledger',
                 'cancelled_original_resolution_retires_temporary_identity_but_retains_physical_owners_real_s3'],
+             'status':'documentary_unexecuted'},
+            {'symbols':['load_batch_preimage','QueueSourceBatchPreimage::plan',
+                'QueueSourceBatchPlan::encode_prefix','QueueSourceBatchPublication::record_for',
+                'required_work_fields_by_key'],
+             'tests':['source_batch_overlay_preserves_released_unique_absence_and_state_highwaters',
+                'source_batch_fields_are_unioned_per_identity_and_late_probes_precede_its_clock',
+                'source_batch_complete_nonmonotonic_run_fits_even_when_first_write_does_not',
+                'source_batch_validates_aggregate_positional_response_before_any_source_call'],
              'status':'documentary_unexecuted'}]}
 
 def main(max_states, path, root):

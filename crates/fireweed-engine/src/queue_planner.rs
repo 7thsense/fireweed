@@ -213,7 +213,7 @@ pub fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> QueueResult<Commi
 }
 /// Union only the addressed materialization read-set. Cross-group duplicate keys
 /// are expected; never validate or execute this envelope as one atomic group.
-pub fn load_envelope(groups: &[CommitGroup]) -> CommitGroup {
+pub fn load_envelope<'a>(groups: impl IntoIterator<Item = &'a CommitGroup>) -> CommitGroup {
     let mut all = CommitGroup {
         administration: None,
         request_id: "internal-read-set".into(),
@@ -664,47 +664,80 @@ pub fn required_work_fields(
     group: &CommitGroup,
     schema: &QueueSchema,
 ) -> QueueResult<BTreeSet<String>> {
+    let dependencies = WorkFieldDependencies::new(schema)?;
     let mut names = BTreeSet::new();
-    let indexes = schema
-        .work
-        .unique_indexes
-        .iter()
-        .map(|name| {
-            schema.work.indexes.get(name).ok_or_else(|| {
-                QueueError::OutcomeUnknown("missing unique index read authority".into())
-            })
-        })
-        .collect::<QueueResult<Vec<_>>>()?;
-    let unique_columns = || indexes.iter().flat_map(|columns| columns.iter());
-    let mut patches = Vec::new();
     for update in &group.claimed_updates {
-        if update.disposition == Disposition::Delete {
-            names.extend(unique_columns().cloned());
-        }
-        patches.push(&update.patch);
+        dependencies.claimed(&mut names, update);
     }
     for update in &group.work_updates {
-        match &update.change {
-            UnclaimedChange::Patch(patch) | UnclaimedChange::Administrative { patch, .. } => {
-                patches.push(patch)
-            }
-            UnclaimedChange::Replace(_) | UnclaimedChange::Delete => {
-                names.extend(unique_columns().cloned())
-            }
-        }
+        dependencies.unclaimed(&mut names, update);
     }
     if !group.work_inserts.is_empty() {
-        names.extend(unique_columns().cloned());
+        dependencies.unique(&mut names);
     }
-    for patch in patches {
+    Ok(names)
+}
+/// Group borrowed declarations once, then union the same dependency closure per
+/// identity. Synthetic read-sets may repeat keys across ordered logical groups.
+pub fn required_work_fields_by_key<'a>(
+    group: &'a CommitGroup,
+    schema: &QueueSchema,
+) -> QueueResult<BTreeMap<&'a str, BTreeSet<String>>> {
+    let dependencies = WorkFieldDependencies::new(schema)?;
+    let mut output = BTreeMap::<&str, BTreeSet<String>>::new();
+    for update in &group.claimed_updates {
+        dependencies.claimed(output.entry(&update.key).or_default(), update);
+    }
+    for update in &group.work_updates {
+        dependencies.unclaimed(output.entry(&update.key).or_default(), update);
+    }
+    for work in &group.work_inserts {
+        dependencies.unique(output.entry(&work.key).or_default());
+    }
+    Ok(output)
+}
+struct WorkFieldDependencies<'a> {
+    definition: &'a CollectionDefinition,
+    unique_columns: Vec<&'a String>,
+}
+impl<'a> WorkFieldDependencies<'a> {
+    fn new(schema: &'a QueueSchema) -> QueueResult<Self> {
+        let mut unique_columns = Vec::new();
+        for name in &schema.work.unique_indexes {
+            unique_columns.extend(schema.work.indexes.get(name).ok_or_else(|| {
+                QueueError::OutcomeUnknown("missing unique index read authority".into())
+            })?);
+        }
+        Ok(Self {
+            definition: &schema.work,
+            unique_columns,
+        })
+    }
+    fn unique(&self, names: &mut BTreeSet<String>) {
+        names.extend(self.unique_columns.iter().map(|name| (*name).clone()));
+    }
+    fn patch(&self, names: &mut BTreeSet<String>, patch: &WorkPatch) {
         names.extend(patch.fields.keys().cloned());
-        for columns in schema.work.indexes.values() {
+        for columns in self.definition.indexes.values() {
             if columns.iter().any(|name| patch.fields.contains_key(name)) {
                 names.extend(columns.iter().cloned());
             }
         }
     }
-    Ok(names)
+    fn claimed(&self, names: &mut BTreeSet<String>, update: &ClaimedUpdate) {
+        if update.disposition == Disposition::Delete {
+            self.unique(names);
+        }
+        self.patch(names, &update.patch);
+    }
+    fn unclaimed(&self, names: &mut BTreeSet<String>, update: &UnclaimedUpdate) {
+        match &update.change {
+            UnclaimedChange::Patch(patch) | UnclaimedChange::Administrative { patch, .. } => {
+                self.patch(names, patch)
+            }
+            UnclaimedChange::Replace(_) | UnclaimedChange::Delete => self.unique(names),
+        }
+    }
 }
 /// Complete prospective tuples for an insert vector, independent of per-item
 /// acceptance. Load authority once, then apply individual items in request order.

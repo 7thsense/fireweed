@@ -22,7 +22,7 @@ class SourceOriginalTests(unittest.TestCase):
             self.assertIsNone(spec.violation(before,'UnrelatedLabel',s),name)
         return spec,s
     def test_all_six_identities_witnesses_and_disjoint_replayed_controls(self):
-        self.assertEqual([r['name'] for r in self.report['baseline']],
+        self.assertEqual([r['name'] for r in self.report['baseline'][:6]],
             ['api007-source-group-preimage','api007-source-group-encoding-preparation',
              'api007-source-record-read','api007-coupled-genesis-provision',
              'api007-source-header-recovery','api007-source-original-resolution'])

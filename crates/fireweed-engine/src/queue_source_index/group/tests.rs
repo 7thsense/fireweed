@@ -1,3 +1,4 @@
+mod batch;
 use super::*;
 use crate::{
     queue_admission::QueueAdmission,
@@ -20,6 +21,9 @@ struct Fixture {
     job: Arc<QueueReservation>,
 }
 fn fixture() -> Fixture {
+    fixture_with_work(vec![work("a", "a"), work("b", "b")])
+}
+fn fixture_with_work(items: Vec<NewWork>) -> Fixture {
     let admission = QueueAdmission::new(2, 32 << 20).unwrap();
     let job = Arc::new(admission.reserve(0).unwrap());
     let collection = CollectionDefinition {
@@ -45,9 +49,7 @@ fn fixture() -> Fixture {
     };
     let genesis = encode_checked_genesis(1, &queue, &definition, &[7; 32], 1 << 20, &job).unwrap();
     let mut seed = group("seed");
-    for key in ["a", "b"] {
-        seed.work_inserts.push(work(key, key));
-    }
+    seed.work_inserts = items;
     seed.state_updates.push(StateUpdate {
         collection: "s".into(),
         key: "state".into(),
@@ -916,5 +918,134 @@ fn sealed_encoding_later_admission_failures_restore_credit() {
         );
         drop(publication);
         assert_eq!(f.admission.usage().unwrap(), baseline);
+    });
+}
+
+#[test]
+fn preview_consumes_source_plan_and_retains_independent_output_funding() {
+    futures::executor::block_on(async {
+        let f = fixture();
+        let admission = f.admission.clone();
+        let mut request = group("preview-independent");
+        request.work_updates.push(UnclaimedUpdate {
+            key: "a".into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Delete,
+        });
+        let clock = Clock::default();
+        let before = admission.usage().unwrap();
+        let output = load_group_preimage(
+            &f.reader,
+            &f.queue,
+            &request,
+            &f.definition,
+            &QueueLimits::default(),
+            &f.job,
+        )
+        .await
+        .unwrap()
+        .plan(&clock)
+        .unwrap()
+        .into_preview(1 << 20)
+        .unwrap();
+        assert_eq!(clock.0.load(Ordering::SeqCst), 1);
+        assert!(admission.usage().unwrap().1 > before.1);
+        drop(f);
+        assert_eq!(
+            admission.usage().unwrap().0,
+            1,
+            "output retains its reservation after all source owners retire"
+        );
+        assert!(admission.usage().unwrap().1 > 0);
+        // A caller that disappears before handoff still destroys the DTO before
+        // its final output guard; no naked result escapes this branch.
+        drop(output);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+    });
+}
+
+#[test]
+fn preview_response_limit_drops_consumed_plan_without_publishing_an_original() {
+    futures::executor::block_on(async {
+        let f = fixture();
+        let mut request = group("preview-too-large");
+        request.work_updates.push(UnclaimedUpdate {
+            key: "a".into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Delete,
+        });
+        let before = f.admission.usage().unwrap();
+        let facts = f.reader.facts.clone();
+        let output = load_group_preimage(
+            &f.reader,
+            &f.queue,
+            &request,
+            &f.definition,
+            &QueueLimits::default(),
+            &f.job,
+        )
+        .await
+        .unwrap()
+        .plan(&Clock::default())
+        .unwrap()
+        .into_preview(0);
+        assert_eq!(output.err().unwrap(), QueueError::TooLarge);
+        assert_eq!(f.admission.usage().unwrap(), before);
+        assert_eq!(f.reader.facts, facts);
+    });
+}
+
+#[test]
+fn source_planning_accepts_exact_signed_timestamp_boundaries_and_rejects_adjacent_overflow() {
+    struct BoundaryClock(fireweed_core::UtcTimestamp);
+    impl crate::Clock for BoundaryClock {
+        fn now(&self) -> fireweed_core::UtcTimestamp {
+            self.0
+        }
+    }
+    futures::executor::block_on(async {
+        let f = fixture();
+        let mut request = group("signed-clock");
+        request.work_updates.push(UnclaimedUpdate {
+            key: "a".into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Delete,
+        });
+        for (seconds, nanoseconds, expected) in [
+            (-9_223_372_037, 145_224_192, Some(i64::MIN)),
+            (9_223_372_036, 854_775_807, Some(i64::MAX)),
+            (-9_223_372_037, 145_224_191, None),
+            (9_223_372_036, 854_775_808, None),
+        ] {
+            let clock = BoundaryClock(fireweed_core::UtcTimestamp {
+                seconds,
+                nanoseconds,
+            });
+            let plan = load_group_preimage(
+                &f.reader,
+                &f.queue,
+                &request,
+                &f.definition,
+                &QueueLimits::default(),
+                &f.job,
+            )
+            .await
+            .unwrap()
+            .plan(&clock);
+            if let Some(exact) = expected {
+                assert_eq!(timestamp_nanos(clock.0).unwrap(), exact);
+                assert!(matches!(
+                    plan.unwrap().receipt().outcome,
+                    GroupOutcome::Committed { .. }
+                ));
+            } else {
+                assert_eq!(
+                    plan.err().unwrap(),
+                    QueueError::OutcomeUnknown(
+                        "source group preimage: clock outside queue time domain".into()
+                    )
+                );
+            }
+        }
     });
 }

@@ -67,6 +67,25 @@ re-evaluated replay. The gate reuses source-bound exploration and target-only ou
 checks; it does not qualify negative claim predicates, Snorri rejection ordering,
 FP4 administration, physical memory/durability or public backend correspondence.
 
+## Captured-source composition gate
+
+Run `python3 scripts/formal/check_source_group.py`. Require all seven campaigns:
+addressed group preimages, sealed encoding/preparation, owned record reads,
+coupled genesis, source-header recovery, original resolution and batch composition.
+Preserve their separate scopes, completed witnesses and disjoint negative controls.
+
+The batch campaign bounds three groups, two work identities, one state identity,
+two unique tuples and two opaque cuts with equal numeric heads. Check admission
+before validation, exact per-identity field and probe authority, ordered state/HWM
+and sequence evolution, rejection conservation, probes before clocks, immutable
+beforeimages, complete-run-first packing and exact retained prefixes. Clock scope
+is ordering and no resampling; time-dependent lease semantics remain separate.
+Require exact binding and output ownership at every prefix, including later errors.
+Original freshness, resolved predecessors, conditional durability, Rust encoding,
+allocator bounds and performance remain independent implementation obligations.
+Missing campaigns/witnesses, failed exploration, source changes and forged success
+must replace stale PASS reports with failure. Keep runtime reports outside Helix.
+
 ## Implementation correspondence
 
 Execute independently predicted transitions through the identical public facade on both backends. Compare exact work/state/receipt identities, membership/order, tokens, current versions/expiry, attempts, rejection effects, new work and successful read coverage. Include concurrency, lost replies, expiry, renewal, cancellation, clock delay, collision/ABA, original-genesis corruption, S3 stale head/epoch, commit crash/reopen and interrupted projection apply. Record intended and actually matched edges separately. Primitive/internal diagnostics cannot substitute for successful public-path observations.

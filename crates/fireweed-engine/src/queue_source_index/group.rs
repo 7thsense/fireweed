@@ -1,6 +1,11 @@
 //! Addressed ordinary-group preimages from one authenticated source cut.
 //! No projection transaction, source replay or alternate business planner lives here.
 mod admission;
+mod batch;
+pub use batch::{
+    QueueSourceBatchPlan, QueueSourceBatchPreimage, QueueSourceBatchPublication,
+    load_batch_preimage,
+};
 mod publication;
 use super::*;
 use crate::{
@@ -31,8 +36,8 @@ pub struct QueueSourceGroupPreimage<'a> {
     snapshot: RecordSnapshot,
     job: &'a Arc<QueueReservation>,
     // All retained maps/strings and their guards are destroyed before this owner.
-    field_charges: Vec<OwnedQueueBufferCharge>,
-    charge: OwnedQueueBufferCharge,
+    _field_charges: Vec<OwnedQueueBufferCharge>,
+    _charge: OwnedQueueBufferCharge,
 }
 /// A speculative result, with the authenticated before-image retained privately
 /// for later bound publication encoding. No durable acknowledgement is implied.
@@ -48,6 +53,31 @@ impl QueueSourceGroupPlan<'_> {
     }
     pub fn cut(&self) -> QueueSourceCut<'_> {
         self.preimage.cut
+    }
+    /// Consume the speculative plan without publishing a receipt. The returned
+    /// DTO has an independent owner; dropping the preimage cannot release it.
+    pub fn into_preview(
+        self,
+        max_response_bytes: u64,
+    ) -> QueueResult<
+        crate::queue_contract::OwnedQueueValue<PreviewResult, Vec<OwnedQueueBufferCharge>>,
+    > {
+        let encoded = encoded_len(&self.delta.receipt)?;
+        let headers = crate::queue_memory::receipt_headers(&self.delta.receipt)?;
+        let capacity = encoded
+            .checked_mul(16)
+            .and_then(|n| n.checked_add(headers.checked_mul(2)?))
+            .and_then(|n| n.checked_add(4096))
+            .ok_or(QueueError::TooLarge)?;
+        let charge = self.preimage.job.owned_buffer(capacity)?;
+        let preview = PreviewResult::try_from(self.delta.receipt.outcome)?;
+        if encoded_len(&preview)? > max_response_bytes {
+            return Err(QueueError::TooLarge);
+        }
+        Ok(crate::queue_contract::OwnedQueueValue::new(
+            preview,
+            vec![charge],
+        ))
     }
 }
 impl<'a> QueueSourceGroupPreimage<'a> {
@@ -67,11 +97,7 @@ impl<'a> QueueSourceGroupPreimage<'a> {
         if time.nanoseconds >= 1_000_000_000 {
             return Err(unknown("invalid clock nanoseconds"));
         }
-        let now = time
-            .seconds
-            .checked_mul(1_000_000_000)
-            .and_then(|n| n.checked_add(i64::from(time.nanoseconds)))
-            .ok_or_else(|| unknown("clock outside queue time domain"))?;
+        let now = timestamp_nanos(time).map_err(|_| unknown("clock outside queue time domain"))?;
         let delta = queue_planner::plan_commit_group(
             self.group,
             &mut image,
@@ -112,7 +138,47 @@ pub async fn load_group_preimage<'a, R: QueueSourceReader>(
     job: &'a Arc<QueueReservation>,
 ) -> QueueResult<QueueSourceGroupPreimage<'a>> {
     let charge = job.owned_buffer(request_scratch(group, definition.schema())?)?;
+    validate_ordinary_group(queue, group, definition, limits)?;
+    let mut image = load_image(reader, queue, group, definition, job, charge).await?;
+    image.load_unique(reader, group, definition, job).await?;
+    Ok(QueueSourceGroupPreimage {
+        cut: image.cut,
+        queue,
+        group,
+        definition,
+        job,
+        snapshot: image.snapshot,
+        _field_charges: image.field_charges,
+        _charge: image.charge,
+    })
+}
+fn validate_ordinary_group(
+    queue: &QueueAddress,
+    group: &CommitGroup,
+    definition: &AdmittedQueueDefinition,
+    limits: &QueueLimits,
+) -> QueueResult<()> {
     group.preflight_for(queue, limits)?;
+    if group.administration.is_some() || group.work_updates.iter().any(|u|
+        matches!(&u.change, UnclaimedChange::Administrative { patch, .. } if patch.body.is_some())) {
+        return Err(unknown("administrative body source resolver is not available"));
+    }
+    group.validate_for(queue, definition.schema(), limits)
+}
+struct SourceImage<'a> {
+    cut: QueueSourceCut<'a>,
+    snapshot: RecordSnapshot,
+    field_charges: Vec<OwnedQueueBufferCharge>,
+    charge: OwnedQueueBufferCharge,
+}
+async fn load_image<'a, R: QueueSourceReader>(
+    reader: &'a R,
+    queue: &QueueAddress,
+    group: &CommitGroup,
+    definition: &AdmittedQueueDefinition,
+    job: &Arc<QueueReservation>,
+    charge: OwnedQueueBufferCharge,
+) -> QueueResult<SourceImage<'a>> {
     let cut = reader.cut()?;
     if !cut.belongs_to(job)
         || !definition.belongs_to(job)
@@ -124,13 +190,6 @@ pub async fn load_group_preimage<'a, R: QueueSourceReader>(
             "queue, definition, operation or nonempty cut differs",
         ));
     }
-    // Administrative selection and old-body materialization need their own
-    // exact-cut source resolver. Never claim an empty placeholder is loaded.
-    if group.administration.is_some() || group.work_updates.iter().any(|u|
-        matches!(&u.change, UnclaimedChange::Administrative { patch, .. } if patch.body.is_some())) {
-        return Err(unknown("administrative body source resolver is not available"));
-    }
-    group.validate_for(queue, definition.schema(), limits)?;
     let genesis = super::genesis::load_source_genesis_at(reader, cut, job).await?;
     if genesis.definition_pin != definition.pin()
         || genesis.source.log_offset() != 0
@@ -141,20 +200,17 @@ pub async fn load_group_preimage<'a, R: QueueSourceReader>(
     let next_sequence = fixed(reader, cut, QueueSourceKey::Sequence, job)
         .await?
         .ok_or_else(|| unknown("missing sequence"))?;
-    let mut output = QueueSourceGroupPreimage {
+    let mut output = SourceImage {
         cut,
-        queue,
-        group,
-        definition,
         snapshot: RecordSnapshot {
             next_sequence,
             ..Default::default()
         },
-        job,
         field_charges: Vec::new(),
         charge,
     };
-    let names = queue_planner::required_work_fields(group, definition.schema())?;
+    let names_by_key = queue_planner::required_work_fields_by_key(group, definition.schema())?;
+    let no_fields = BTreeSet::new();
     let mut keys = BTreeMap::<&str, bool>::new();
     for update in &group.claimed_updates {
         *keys.entry(&update.key).or_default() |= update.disposition != Disposition::Check;
@@ -167,7 +223,6 @@ pub async fn load_group_preimage<'a, R: QueueSourceReader>(
     {
         keys.insert(key, true);
     }
-    let no_fields = BTreeSet::new();
     for (key, needs_fields) in keys {
         let fact: Option<QueueSourceRecord> = fixed(
             reader,
@@ -196,6 +251,13 @@ pub async fn load_group_preimage<'a, R: QueueSourceReader>(
                     "work sequence or body lies outside captured source",
                 ));
             }
+            let names = if needs_fields {
+                names_by_key
+                    .get(key)
+                    .ok_or_else(|| unknown("missing addressed work field declaration"))?
+            } else {
+                &no_fields
+            };
             let (fields, coverage, guard) = super::fields::load_group_fields(
                 reader,
                 cut,
@@ -205,7 +267,7 @@ pub async fn load_group_preimage<'a, R: QueueSourceReader>(
                 },
                 fact.field_count,
                 &definition.schema().work,
-                Some(if needs_fields { &names } else { &no_fields }),
+                Some(names),
                 job,
             )
             .await?
@@ -236,9 +298,13 @@ pub async fn load_group_preimage<'a, R: QueueSourceReader>(
             );
         }
     }
+    let mut states = BTreeMap::new();
     for update in &group.state_updates {
-        let collection = update.collection.as_str();
-        let key = update.key.as_str();
+        *states
+            .entry((update.collection.as_str(), update.key.as_str()))
+            .or_insert(false) |= update.change != StateChange::Check;
+    }
+    for ((collection, key), needs_fields) in states {
         let schema = definition
             .schema()
             .state
@@ -267,7 +333,7 @@ pub async fn load_group_preimage<'a, R: QueueSourceReader>(
             if value.span().log_offset() >= cut.through() {
                 return Err(unknown("state value lies outside captured source"));
             }
-            let fields = if update.change == StateChange::Check {
+            let fields = if !needs_fields {
                 Fields::new()
             } else {
                 let (fields, _, guard) = super::fields::load_group_fields(
@@ -299,45 +365,67 @@ pub async fn load_group_preimage<'a, R: QueueSourceReader>(
             );
         }
     }
-    // Admit tuple generation before the existing dependency algorithm allocates.
-    let bytes =
-        crate::queue_memory::group_expansion_budget(group, &output.snapshot, definition.schema())?;
-    output.charge.grow(bytes)?;
-    let probes =
-        queue_planner::prospective_unique_probes(group, &output.snapshot, definition.schema())?;
-    for tuple in probes {
-        let key = QueueSourceKey::UniqueOwner {
-            collection: tuple.collection.as_deref(),
-            index: &tuple.index,
-            sort: &tuple.full_sort_key,
-        };
-        let _key_charge = job.owned_buffer(key.encoded_len()? as u64)?;
-        let key = key.encode()?;
-        let owner = reader.lookup(&key).await?;
-        let point = reader.point(&owner)?;
-        if let Some(value) = point.value_for(&cut, &key)? {
-            let owner = super::cell::unique_owner(value, tuple.collection.as_deref())?;
-            output.charge.grow(
-                (owner.key.len() as u64)
-                    .checked_add(owner.collection.map_or(0, |v| v.len() as u64))
-                    .and_then(|n| n.checked_mul(4))
-                    .and_then(|n| n.checked_add(1024))
-                    .ok_or(QueueError::TooLarge)?,
-            )?;
-            output.snapshot.unique_owners.insert(
-                tuple.clone(),
-                RecordIdentity {
-                    collection: owner.collection.map(str::to_owned),
-                    key: owner.key.into(),
-                },
-            );
-        }
-        output.snapshot.unique_probes_loaded.insert(tuple);
-    }
     if !reader.cut()?.same_cut(&cut) {
         return Err(unknown("reader changed captured cut"));
     }
     Ok(output)
+}
+
+impl SourceImage<'_> {
+    async fn load_unique<R: QueueSourceReader>(
+        &mut self,
+        reader: &R,
+        group: &CommitGroup,
+        definition: &AdmittedQueueDefinition,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<()> {
+        let cut = self.cut;
+        // Admit tuple generation before the existing dependency algorithm allocates.
+        let bytes = crate::queue_memory::group_expansion_budget(
+            group,
+            &self.snapshot,
+            definition.schema(),
+        )?;
+        self.charge.grow(bytes)?;
+        let probes =
+            queue_planner::prospective_unique_probes(group, &self.snapshot, definition.schema())?;
+        for tuple in probes {
+            if self.snapshot.unique_probes_loaded.contains(&tuple) {
+                continue;
+            }
+            let key = QueueSourceKey::UniqueOwner {
+                collection: tuple.collection.as_deref(),
+                index: &tuple.index,
+                sort: &tuple.full_sort_key,
+            };
+            let _key_charge = job.owned_buffer(key.encoded_len()? as u64)?;
+            let key = key.encode()?;
+            let owner = reader.lookup(&key).await?;
+            let point = reader.point(&owner)?;
+            if let Some(value) = point.value_for(&cut, &key)? {
+                let owner = super::cell::unique_owner(value, tuple.collection.as_deref())?;
+                self.charge.grow(
+                    (owner.key.len() as u64)
+                        .checked_add(owner.collection.map_or(0, |v| v.len() as u64))
+                        .and_then(|n| n.checked_mul(4))
+                        .and_then(|n| n.checked_add(1024))
+                        .ok_or(QueueError::TooLarge)?,
+                )?;
+                self.snapshot.unique_owners.insert(
+                    tuple.clone(),
+                    RecordIdentity {
+                        collection: owner.collection.map(str::to_owned),
+                        key: owner.key.into(),
+                    },
+                );
+            }
+            self.snapshot.unique_probes_loaded.insert(tuple);
+        }
+        if !reader.cut()?.same_cut(&cut) {
+            return Err(unknown("unique probe reader changed cut"));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -45,7 +45,7 @@ impl QueueSourceGroupPublication<'_> {
         Ok(&self.record)
     }
 }
-fn publication_error(error: PublicationError) -> QueueError {
+pub(super) fn publication_error(error: PublicationError) -> QueueError {
     match error {
         PublicationError::Admission(error) => error,
         PublicationError::FrameLimit | PublicationError::Overflow => QueueError::TooLarge,

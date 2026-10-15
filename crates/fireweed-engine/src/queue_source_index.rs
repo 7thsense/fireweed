@@ -50,6 +50,7 @@ pub use predecessor::{
 
 mod group;
 pub use group::{
+    QueueSourceBatchPlan, QueueSourceBatchPreimage, QueueSourceBatchPublication,
     QueueSourceGroupEncodingLimits, QueueSourceGroupPlan, QueueSourceGroupPreimage,
-    QueueSourceGroupPublication, load_group_preimage,
+    QueueSourceGroupPublication, load_batch_preimage, load_group_preimage,
 };
