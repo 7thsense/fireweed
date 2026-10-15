@@ -21,9 +21,7 @@ struct Effect<'a> {
 /// This accumulator carries no usable compiled seal or publication handle.
 pub struct QueueSourceUniqueOwnerAccumulator<'c, 'a, R: QueueSourceReader> {
     context: &'c QueueSourcePublicationContext<'a, R>,
-    processed: u64,
-    last: Option<IdentityRef<'a>>,
-    poisoned: bool,
+    coverage: super::coverage::CommandCoverage<'c, 'a>,
     groups: BTreeMap<UniqueIdentity, Vec<Effect<'a>>>,
     // Map keys/evidence drop before their transferred buffer guards.
     key_charges: Vec<OwnedQueueBufferCharge>,
@@ -87,9 +85,10 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
     ) -> QueueResult<QueueSourceUniqueOwnerAccumulator<'c, 'a, R>> {
         Ok(QueueSourceUniqueOwnerAccumulator {
             context: self,
-            processed: 0,
-            last: None,
-            poisoned: false,
+            coverage: super::coverage::CommandCoverage::new(
+                &self._charge,
+                self.publication().summary().commands,
+            ),
             groups: BTreeMap::new(),
             key_charges: Vec::new(),
             _charge: self.job.owned_buffer(
@@ -100,21 +99,7 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
 }
 impl<'c, 'a, R: QueueSourceReader> QueueSourceUniqueOwnerAccumulator<'c, 'a, R> {
     pub fn observe(&mut self, transition: &QueueSourceRecordTransition<'_, 'a>) -> QueueResult<()> {
-        if self.poisoned {
-            return Err(unknown("unique owner accumulator poisoned"));
-        }
-        self.poisoned = true;
-        if !std::ptr::eq(transition.context_owner(), &self.context._charge) {
-            return Err(unknown("unique owner transition context differs"));
-        }
-        let owner = transition.publication_identity();
-        if self.processed >= self.context.publication().summary().commands
-            || self
-                .last
-                .is_some_and(|last| (last.collection, last.key) >= (owner.collection, owner.key))
-        {
-            return Err(unknown("unique owner command coverage differs"));
-        }
+        let owner = self.coverage.begin(transition)?;
         transition.visit_named_postings(self.context.job, &mut |effect| {
             for (sort, claim) in [
                 (effect.before.filter(|_| effect.before_unique), false),
@@ -127,9 +112,7 @@ impl<'c, 'a, R: QueueSourceReader> QueueSourceUniqueOwnerAccumulator<'c, 'a, R> 
             }
             Ok(())
         })?;
-        self.processed = self.processed.checked_add(1).ok_or(QueueError::TooLarge)?;
-        self.last = Some(owner);
-        self.poisoned = false;
+        self.coverage.complete(owner)?;
         Ok(())
     }
     fn retain(
@@ -177,9 +160,7 @@ impl<'c, 'a, R: QueueSourceReader> QueueSourceUniqueOwnerAccumulator<'c, 'a, R> 
         Ok(())
     }
     pub async fn finish(self) -> QueueResult<QueueSourceUniqueOwnerEdits<'a>> {
-        if self.poisoned || self.processed != self.context.publication().summary().commands {
-            return Err(unknown("incomplete unique owner command coverage"));
-        }
+        self.coverage.verify()?;
         let context = self.context;
         let mut output = QueueSourceUniqueOwnerEdits {
             output: super::super::edits::SourceEdits::new(

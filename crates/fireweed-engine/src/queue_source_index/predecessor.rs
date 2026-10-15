@@ -1,4 +1,7 @@
 //! Bind resolved commands, schema and preimages to one authenticated source cut.
+mod aggregates;
+mod coverage;
+pub use aggregates::{QueueSourceAggregateAccumulator, QueueSourceAggregateEdits};
 mod record_edits;
 pub use record_edits::{QueueSourceRecordEditAccumulator, QueueSourceRecordEdits};
 
@@ -743,6 +746,22 @@ mod tests {
                     .encode()
                     .unwrap(),
                     queue_storage_layout::encode(value).unwrap(),
+                );
+            }
+            for lifecycle in [
+                Lifecycle::Pending,
+                Lifecycle::Leased,
+                Lifecycle::Completed,
+                Lifecycle::Failed,
+            ] {
+                let count = snapshot
+                    .work
+                    .values()
+                    .filter(|row| row.record.lifecycle == lifecycle)
+                    .count() as u64;
+                facts.insert(
+                    QueueSourceKey::LifecycleCount(lifecycle).encode().unwrap(),
+                    queue_storage_layout::encode(&count).unwrap(),
                 );
             }
             let reader = Reader {
@@ -1563,6 +1582,41 @@ mod tests {
                 (2, Lifecycle::Leased, 1)
             );
             assert_eq!(body.span().log_offset(), 1);
+            let mut aggregates = context
+                .aggregates(super::super::QueueSourceCompileLimits {
+                    edits: 5,
+                    input_bytes: 4096,
+                })
+                .unwrap();
+            aggregates.observe(&claim_transition).unwrap();
+            let counts = aggregates.finish().await.unwrap();
+            let actual: BTreeMap<_, _> = counts
+                .edits()
+                .map(|(key, value)| {
+                    (
+                        key.to_vec(),
+                        postcard::from_bytes::<u64>(value.unwrap()).unwrap(),
+                    )
+                })
+                .collect();
+            let mut after_claim = snapshot.work.clone();
+            for row in &claim_delta.work {
+                after_claim.insert(row.record.work.key.clone(), row.clone());
+            }
+            let expected: BTreeMap<_, _> = [Lifecycle::Pending, Lifecycle::Leased]
+                .into_iter()
+                .map(|lifecycle| {
+                    (
+                        QueueSourceKey::LifecycleCount(lifecycle).encode().unwrap(),
+                        after_claim
+                            .values()
+                            .filter(|row| row.record.lifecycle == lifecycle)
+                            .count() as u64,
+                    )
+                })
+                .collect();
+            assert_eq!(actual, expected);
+            drop(counts);
             let mut changed_delta = claim_delta.clone();
             changed_delta.work[0].record.work.priority += 1;
             let changed_claim = encode_claim(&changed_delta);

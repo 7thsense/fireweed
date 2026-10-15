@@ -1,9 +1,6 @@
 //! Provisional record/field/posting edits; never sufficient to publish a record.
 use super::*;
-use crate::{
-    queue_publication::IdentityRef,
-    queue_source_index::{QueueSourceCompileLimits, edits::SourceEdits},
-};
+use crate::queue_source_index::{QueueSourceCompileLimits, edits::SourceEdits};
 
 pub struct QueueSourceRecordEdits<'a> {
     output: SourceEdits<'a>,
@@ -23,9 +20,7 @@ impl QueueSourceRecordEdits<'_> {
 }
 pub struct QueueSourceRecordEditAccumulator<'c, 'a, R: QueueSourceReader> {
     context: &'c QueueSourcePublicationContext<'a, R>,
-    processed: u64,
-    last: Option<IdentityRef<'a>>,
-    poisoned: bool,
+    coverage: super::coverage::CommandCoverage<'c, 'a>,
     output: SourceEdits<'a>,
 }
 impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
@@ -35,28 +30,17 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
     ) -> QueueResult<QueueSourceRecordEditAccumulator<'c, 'a, R>> {
         Ok(QueueSourceRecordEditAccumulator {
             context: self,
-            processed: 0,
-            last: None,
-            poisoned: false,
+            coverage: super::coverage::CommandCoverage::new(
+                &self._charge,
+                self.publication().summary().commands,
+            ),
             output: SourceEdits::new(self.checked.owner(), self.cut, self.job, limits, "record")?,
         })
     }
 }
 impl<'a, R: QueueSourceReader> QueueSourceRecordEditAccumulator<'_, 'a, R> {
     pub fn observe(&mut self, transition: &QueueSourceRecordTransition<'_, 'a>) -> QueueResult<()> {
-        if self.poisoned {
-            return Err(unknown("record edit accumulator poisoned"));
-        }
-        self.poisoned = true;
-        let identity = transition.publication_identity();
-        if !std::ptr::eq(transition.context_owner(), &self.context._charge)
-            || self.processed >= self.context.publication().summary().commands
-            || self.last.is_some_and(|last| {
-                (last.collection, last.key) >= (identity.collection, identity.key)
-            })
-        {
-            return Err(unknown("record edit command coverage differs"));
-        }
+        let identity = self.coverage.begin(transition)?;
         self.output.insert(
             QueueSourceKey::Record {
                 collection: identity.collection,
@@ -105,15 +89,11 @@ impl<'a, R: QueueSourceReader> QueueSourceRecordEditAccumulator<'_, 'a, R> {
             }
             Ok(())
         })?;
-        self.processed = self.processed.checked_add(1).ok_or(QueueError::TooLarge)?;
-        self.last = Some(identity);
-        self.poisoned = false;
+        self.coverage.complete(identity)?;
         Ok(())
     }
     pub fn finish(self) -> QueueResult<QueueSourceRecordEdits<'a>> {
-        if self.poisoned || self.processed != self.context.publication().summary().commands {
-            return Err(unknown("incomplete record edit command coverage"));
-        }
+        self.coverage.verify()?;
         Ok(QueueSourceRecordEdits {
             output: self.output,
         })

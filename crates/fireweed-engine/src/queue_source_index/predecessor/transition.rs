@@ -34,6 +34,9 @@ impl QueueSourceRecordTransition<'_, '_> {
     }
 }
 impl<'c, 'a> QueueSourceRecordTransition<'c, 'a> {
+    pub(super) fn before_fact(&self) -> Option<QueueSourceRecord> {
+        self.predecessor.fact()
+    }
     pub(super) fn context_owner(&self) -> &'c OwnedQueueBufferCharge {
         self.predecessor.command.owner
     }
