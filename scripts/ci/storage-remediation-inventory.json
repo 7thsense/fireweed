@@ -4480,9 +4480,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "e163301422d4bbad72bb",
+        "id": "9553aa9ed397d23b57d3",
         "identity": "raise ValueError(f'missing qualification fixture variable FIREWEED_S3_TEST_{suffix}')",
-        "line": 88,
+        "line": 92,
         "owner": "P10px",
         "path": "scripts/ci/queue-pg-execution.py",
         "status": "discovery_negative"
@@ -4494,9 +4494,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "cbd1edac05026a72aacb",
+        "id": "9bb8d7cc24641128c61e",
         "identity": "'missing/extra fixture logs')",
-        "line": 103,
+        "line": 104,
         "owner": "P10px",
         "path": "scripts/ci/queue_pg_evidence.py",
         "status": "discovery_negative"
@@ -97445,7 +97445,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "e2ccff38dbdd9bd009022095d16aa4d3d6b57657a707285b80cc777703a30f76",
+  "source_inventory_sha256": "dd8ae9ffdce7110d3895380e1933ae09fec5803b3ffafedab3cfa1d507d87003",
   "workspaces": [
     {
       "listing_error_sha256": "",

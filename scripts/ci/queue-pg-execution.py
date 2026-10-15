@@ -81,6 +81,10 @@ def main():
         report['postgres_version'] = fixture.version
         report['postgres_qualification'] = fixture.qualification
         environment = fixture.test_environment()
+        # Exactly one test is selected per serial route. Use libtest's concurrent
+        # formatter so inherited child/stdout cannot split its successful name.
+        environment['RUST_TEST_THREADS'] = '2'
+        report['libtest_threads'] = 2
         environment['FIREWEED_API007_BENCH_RECORDS'] = '100'
         for suffix in ('ENDPOINT', 'BUCKET', 'ACCESS_KEY', 'SECRET_KEY'):
             value = s3_environment.get('FIREWEED_S3_TEST_' + suffix)

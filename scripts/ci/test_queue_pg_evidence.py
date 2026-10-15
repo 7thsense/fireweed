@@ -21,7 +21,7 @@ class EvidenceControls(unittest.TestCase):
         self.routes = load_routes(evidence.ROOT)
         self.report = {
             'schema': 'fireweed.queue_pg_execution.v1', 'scope': 'correctness_only_not_tp005',
-            'status': 'PASS', 'cleanup': True, 'cleanup_errors': [],
+            'status': 'PASS', 'cleanup': True, 'cleanup_errors': [], 'libtest_threads': 2,
             'revision': 'test-revision', 'sources': {'Cargo.lock': 'test-lock-digest'},
             'postgres_version': 'postgres (PostgreSQL) 16.15', 'reaped_adopted': [],
             'postgres_qualification': {'current_user': 'fireweed_queue',
@@ -72,6 +72,8 @@ class EvidenceControls(unittest.TestCase):
     def test_structural_and_stale_evidence_fails(self):
         mutations = [
             lambda r: r.update(status='INCOMPLETE'),
+            lambda r: r.pop('libtest_threads'),
+            lambda r: r.update(libtest_threads=1),
             lambda r: r.update(cleanup=False),
             lambda r: r.update(cleanup_errors=['stop failed']),
             lambda r: r.update(revision='old-revision'),

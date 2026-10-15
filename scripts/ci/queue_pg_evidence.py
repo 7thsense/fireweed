@@ -43,6 +43,7 @@ def verify_report(path):
             and report['scope'] == 'correctness_only_not_tp005', 'queue evidence schema/scope')
     require(report['status'] == 'PASS' and report['cleanup'] is True
             and report['cleanup_errors'] == [], 'queue execution or cleanup incomplete')
+    require(report.get('libtest_threads') == 2, 'fixed libtest formatter setting missing or changed')
     require(report['revision'] == subprocess.check_output(
         ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(), 'queue evidence HEAD is stale')
     require(report['sources'] == sources(), 'queue evidence source/lock/route hashes are stale')

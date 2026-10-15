@@ -71,7 +71,7 @@ def cargo_route(entry):
     args = ['cargo', 'test', '--locked', '-p', entry['package'], *entry['target']]
     if entry['package'] == 'fireweed':
         args += ['--features', 'postgres,objectlog,turso']
-    return args + ['--', '--ignored', '--exact', entry['test']]
+    return args + ['--', '--ignored', '--test-threads=2', '--exact', entry['test']]
 
 
 def validate_listing(entry, output):
