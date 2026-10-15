@@ -155,7 +155,7 @@ class SourceBatchTests(unittest.TestCase):
         finally:out.unlink(missing_ok=True)
     def test_missing_seventh_campaign_cannot_leave_a_six_campaign_pass(self):
         self.fail_closed(lambda:patch.object(model.SourceBatchComposition,'name','omitted-batch'),
-            'seven exact source campaign identities required')
+            'eight exact source campaign identities required')
     def test_only_seventh_search_limit_and_runtime_error_replace_stale_pass(self):
         original=gate.helper.explore
         def limited(spec,cap):

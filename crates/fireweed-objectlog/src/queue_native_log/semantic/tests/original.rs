@@ -1,6 +1,7 @@
 use super::*;
 use crate::queue_native_log::tests::{provision_limits, source_budget};
 const ID: &str = " original\0α ";
+const SECOND_ID: &str = " second original\0β ";
 fn limits() -> QueueNativeRecoveryLimits {
     let p = provision_limits();
     QueueNativeRecoveryLimits {
@@ -465,13 +466,77 @@ async fn resolved_original_retains_exact_capsule_record_literal_and_credits_real
         cleanup(env, &prefix).await;
     }
 }
+#[derive(Clone, Copy)]
+enum OriginalResolutionMode {
+    Single,
+    RetainedBatch,
+    ConvertedBatch,
+}
+async fn resolve_cancelled_mode(
+    mode: OriginalResolutionMode,
+    log: &QueueNativeLog,
+    recovered: &QueueNativeRecovered,
+    fp: &[u8; 32],
+    job: &Arc<QueueReservation>,
+) -> QueueResult<usize> {
+    let request = QueueNativeOriginalRequest::Replay {
+        domain: 2,
+        request_id: ID,
+        fingerprint_format: 3,
+        fingerprint: fp,
+    };
+    match mode {
+        OriginalResolutionMode::Single => {
+            let value = recovered
+                .resolve_original(log, request, limits(), job)
+                .await?;
+            Ok(value.outcome_bytes()?.unwrap().len())
+        }
+        OriginalResolutionMode::RetainedBatch => {
+            let value = recovered
+                .resolve_original_batch(log, &[request], limits(), job)
+                .await?;
+            Ok(value.original(0)?.outcome_bytes()?.unwrap().len())
+        }
+        OriginalResolutionMode::ConvertedBatch => {
+            let value = recovered
+                .convert_original_batch(
+                    log,
+                    &[
+                        request,
+                        QueueNativeOriginalRequest::Lookup {
+                            domain: 2,
+                            request_id: SECOND_ID,
+                        },
+                    ],
+                    limits(),
+                    job,
+                    |v| Ok(v.outcome_bytes()?.unwrap().len()),
+                )
+                .await?;
+            Ok(value.values().iter().sum())
+        }
+    }
+}
 #[tokio::test]
 async fn cancelled_original_resolution_retires_temporary_identity_but_retains_physical_owners_real_s3()
  {
+    cancelled_original_mode(OriginalResolutionMode::Single).await;
+}
+#[tokio::test]
+async fn cancelled_original_batch_retires_containers_but_retains_physical_owners_real_s3() {
+    cancelled_original_mode(OriginalResolutionMode::RetainedBatch).await;
+}
+#[tokio::test]
+async fn cancelled_converted_original_batch_retires_containers_but_retains_physical_owners_real_s3()
+{
+    cancelled_original_mode(OriginalResolutionMode::ConvertedBatch).await;
+}
+async fn cancelled_original_mode(mode: OriginalResolutionMode) {
     use std::time::Duration;
     let env = crate::shared_s3_test_env();
     for disabled in [false, true] {
-        let proxy = super::s3_cancellation::Proxy::new(&env.endpoint);
+        let proxy = Arc::new(super::s3_cancellation::Proxy::new(&env.endpoint));
         let prefix = format!(
             "original-cancel/{}/{disabled}",
             std::time::SystemTime::now()
@@ -501,7 +566,29 @@ async fn cancelled_original_resolution_retires_temporary_identity_but_retains_ph
         );
         let admission = QueueAdmission::new(1, 64 << 20).unwrap();
         let job = Arc::new(admission.reserve(0).unwrap());
-        let (recovered, fp) = seeded(&log, &job, false).await;
+        let (mut recovered, fp) = seeded(&log, &job, false).await;
+        let converted = matches!(mode, OriginalResolutionMode::ConvertedBatch);
+        if converted {
+            let address = QueueAddress {
+                tenant: "tenant".into(),
+                queue: "original\0queue".into(),
+            };
+            let advanced = super::provision::append_work_group(
+                &log,
+                recovered.as_source(),
+                &address,
+                recovered.definition(),
+                SECOND_ID,
+                &job,
+            )
+            .await;
+            let budget = recovered.budget().clone();
+            drop(recovered);
+            recovered = log
+                .recover_captured(advanced, budget, limits(), &job)
+                .await
+                .unwrap();
+        }
         let recovered = Arc::new(recovered);
         let head = recovered.as_source().head();
         let plan = log
@@ -510,8 +597,29 @@ async fn cancelled_original_resolution_retires_temporary_identity_but_retains_ph
             .await
             .unwrap()
             .unwrap();
-        let req = plan.requirements().unwrap();
+        let first_req = plan.requirements().unwrap();
         drop(plan);
+        let second_plan = if converted {
+            Some(
+                log.log
+                    .plan_read(&recovered.as_source().cut.cut, 2)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let req = second_plan
+            .as_ref()
+            .map(|p| p.requirements().unwrap())
+            .unwrap_or(first_req);
+        let attempts = if converted { 2 } else { 1 };
+        let hydration_reads =
+            first_req.hydration_reads() + if converted { req.hydration_reads() } else { 0 };
+        let hydration_bytes =
+            first_req.hydration_bytes() + if converted { req.hydration_bytes() } else { 0 };
+        drop(second_plan);
         let baseline = admission.usage().unwrap();
         let work = recovered.budget().remaining_work();
         let guard = (std::mem::size_of::<OwnedQueueBufferCharge>()
@@ -536,52 +644,135 @@ async fn cancelled_original_resolution_retires_temporary_identity_but_retains_ph
             }
             .encoded_len()
             .unwrap()) as u64;
-        let (started, release) = proxy.arm_matching(Some(b"/coupled-data/"));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Converted {
+            _raw: Vec<u8>,
+            dropped: Arc<AtomicUsize>,
+            _charge: OwnedQueueBufferCharge,
+        }
+        impl Drop for Converted {
+            fn drop(&mut self) {
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let produced = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let initial_gate = if converted {
+            None
+        } else {
+            Some(proxy.arm_matching(Some(b"/coupled-data/")))
+        };
+        let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
         let caller = {
             let (log, recovered, job) = (log.clone(), recovered.clone(), job.clone());
+            let (proxy, produced, dropped) = (proxy.clone(), produced.clone(), dropped.clone());
             tokio::spawn(async move {
-                let output = recovered
-                    .resolve_original(
-                        &log,
+                if converted {
+                    let mut armed_tx = Some(armed_tx);
+                    let requests = [
                         QueueNativeOriginalRequest::Replay {
                             domain: 2,
                             request_id: ID,
                             fingerprint_format: 3,
                             fingerprint: &fp,
                         },
-                        limits(),
-                        &job,
-                    )
-                    .await
-                    .unwrap();
-                assert!(output.outcome_bytes().unwrap().is_some());
+                        QueueNativeOriginalRequest::Lookup {
+                            domain: 2,
+                            request_id: SECOND_ID,
+                        },
+                    ];
+                    let _values = recovered
+                        .convert_original_batch(&log, &requests, limits(), &job, |view| {
+                            let raw = view.outcome_bytes()?.unwrap();
+                            let charge = job.owned_buffer(raw.len() as u64)?;
+                            let value = Converted {
+                                _raw: raw.to_vec(),
+                                dropped: dropped.clone(),
+                                _charge: charge,
+                            };
+                            if produced.fetch_add(1, Ordering::SeqCst) == 0 {
+                                // Test instrumentation gates the NEXT physical read, after
+                                // an independently funded provisional value exists.
+                                armed_tx
+                                    .take()
+                                    .unwrap()
+                                    .send(proxy.arm_matching(Some(b"/coupled-data/")))
+                                    .unwrap();
+                            }
+                            Ok(value)
+                        })
+                        .await
+                        .unwrap();
+                } else {
+                    assert!(
+                        resolve_cancelled_mode(mode, &log, &recovered, &fp, &job)
+                            .await
+                            .unwrap()
+                            > 0
+                    );
+                }
             })
+        };
+        let (started, release) = if let Some(gate) = initial_gate {
+            gate
+        } else {
+            tokio::time::timeout(Duration::from_secs(10), armed_rx)
+                .await
+                .unwrap()
+                .unwrap()
         };
         let request = tokio::time::timeout(Duration::from_secs(10), started)
             .await
             .unwrap()
             .unwrap();
         assert!(request.starts_with(b"GET ") || request.starts_with(b"HEAD "));
-        assert_eq!(
-            admission.usage().unwrap(),
-            (pending.0, pending.1 + identity + evidence)
-        );
+        if matches!(mode, OriginalResolutionMode::Single) {
+            assert_eq!(
+                admission.usage().unwrap(),
+                (pending.0, pending.1 + identity + evidence)
+            );
+        } else {
+            let live = admission.usage().unwrap();
+            assert_eq!(live.0, pending.0);
+            assert!(
+                live.1 > pending.1 + evidence,
+                "batch identities and containers are funded before C completes"
+            );
+        }
+        if converted {
+            assert_eq!(produced.load(Ordering::SeqCst), 1);
+            assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        }
         caller.abort();
         assert!(matches!(caller.await,Err(e)if e.is_cancelled()));
+        if converted {
+            assert_eq!(
+                dropped.load(Ordering::SeqCst),
+                1,
+                "prior provisional DTO retires on second-read cancellation"
+            );
+        }
         assert_eq!(
             admission.usage().unwrap(),
             pending,
             "only C physical owners survive the cancelled F future"
         );
         let spent = recovered.budget().remaining_work();
-        semantic_spent(work, spent);
+        assert_eq!(
+            work.semantic.pages - spent.semantic.pages,
+            attempts * limits().read.page.work.pages
+        );
+        assert_eq!(
+            work.semantic.hydrated_bytes - spent.semantic.hydrated_bytes,
+            attempts * limits().read.page.work.hydrated_bytes
+        );
         assert_eq!(
             (
                 work.record_attempts - spent.record_attempts,
                 work.hydration_reads - spent.hydration_reads,
                 work.hydration_body_bytes - spent.hydration_body_bytes
             ),
-            (1, req.hydration_reads(), req.hydration_bytes())
+            (attempts, hydration_reads, hydration_bytes)
         );
         release.send(()).unwrap();
         assert_eq!(
@@ -609,32 +800,29 @@ async fn cancelled_original_resolution_retires_temporary_identity_but_retains_ph
                 settled.hydration_body_bytes
             )
         );
-        let output = recovered
-            .resolve_original(
-                &log,
-                QueueNativeOriginalRequest::Replay {
-                    domain: 2,
-                    request_id: ID,
-                    fingerprint_format: 3,
-                    fingerprint: &fp,
-                },
-                limits(),
-                &job,
-            )
-            .await
-            .unwrap();
-        assert!(output.outcome_bytes().unwrap().is_some());
+        assert!(
+            resolve_cancelled_mode(mode, &log, &recovered, &fp, &job)
+                .await
+                .unwrap()
+                > 0
+        );
         let retried = recovered.budget().remaining_work();
-        semantic_spent(spent, retried);
+        assert_eq!(
+            spent.semantic.pages - retried.semantic.pages,
+            attempts * limits().read.page.work.pages
+        );
+        assert_eq!(
+            spent.semantic.hydrated_bytes - retried.semantic.hydrated_bytes,
+            attempts * limits().read.page.work.hydrated_bytes
+        );
         assert_eq!(
             (
                 spent.record_attempts - retried.record_attempts,
                 spent.hydration_reads - retried.hydration_reads,
                 spent.hydration_body_bytes - retried.hydration_body_bytes
             ),
-            (1, req.hydration_reads(), req.hydration_bytes())
+            (attempts, hydration_reads, hydration_bytes)
         );
-        drop(output);
         assert_eq!(admission.usage().unwrap(), baseline);
         drop(recovered);
         log.shutdown().await.unwrap();

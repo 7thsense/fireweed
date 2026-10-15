@@ -24,7 +24,9 @@ helper.LOADED_SOURCES[str(model_path)] = hashlib.sha256(model_bytes).hexdigest()
 # Preserve the five qualified classes and capture the separate F campaign's
 # executed bytes under the SAME provenance checker as its gate and models.
 for alias, module_name in (('original_model','source_original_models'),('original_gate','source_original_gate'),
-                          ('batch_model','source_batch_models'),('batch_gate','source_batch_gate')):
+                          ('batch_model','source_batch_models'),('batch_gate','source_batch_gate'),
+                          ('original_batch_model','source_original_batch_models'),
+                          ('original_batch_gate','source_original_batch_gate')):
     source_path=helper_path.with_name(module_name+'.py')
     source_bytes=source_path.read_bytes()
     module=types.ModuleType(module_name)
@@ -33,6 +35,10 @@ for alias, module_name in (('original_model','source_original_models'),('origina
     exec(compile(source_bytes,str(source_path),'exec'),module.__dict__)
     helper.LOADED_SOURCES[str(source_path)]=hashlib.sha256(source_bytes).hexdigest()
     globals()[alias]=module
+
+# Bind the exact captured function; later sys.modules mutation cannot replace
+# the invariant through a deferred import (including import-failure controls).
+original_batch_model.PREFIX_ORACLE=original_batch_gate.prefix_violation
 
 WITNESSES = {
     'mixed_check_corruption_ignored': ('mixed_check_corrupt','same','absent',False,'none',False),
@@ -153,7 +159,7 @@ def completed_header_witness(s,c):
 
 def run(max_states=100000):
     fault_sets=[set(faults) for faults in (model.FAULTS,model.PUBLICATION_FAULTS,model.READ_FAULTS,
-        model.PROVISION_FAULTS,model.HEADER_FAULTS,original_model.ORIGINAL_FAULTS,batch_model.BATCH_FAULTS)]
+        model.PROVISION_FAULTS,model.HEADER_FAULTS,original_model.ORIGINAL_FAULTS,batch_model.BATCH_FAULTS,original_batch_model.FAULTS)]
     if sum(map(len,fault_sets))!=len(set.union(*fault_sets)):
         raise AssertionError('source campaign mutant names must be disjoint')
     specification = model.SourceGroup()
@@ -249,13 +255,15 @@ def run(max_states=100000):
     controls.extend(original_controls)
     batch_report,batch_controls=batch_gate.run_batch_campaign(helper,batch_model,max_states)
     controls.extend(batch_controls)
-    baselines=[report,publication_report,record_report,genesis_report,header_report,original_report,batch_report]
+    original_batch_report,original_batch_controls=original_batch_gate.run_campaign(helper,original_batch_model,max_states)
+    controls.extend(original_batch_controls)
+    baselines=[report,publication_report,record_report,genesis_report,header_report,original_report,batch_report,original_batch_report]
     if [row['name'] for row in baselines]!=[
         'api007-source-group-preimage','api007-source-group-encoding-preparation',
         'api007-source-record-read','api007-coupled-genesis-provision',
         'api007-source-header-recovery','api007-source-original-resolution',
-        'api007-source-batch-composition']:
-        raise AssertionError('seven exact source campaign identities required')
+        'api007-source-batch-composition','api007-source-original-batch-resolution']:
+        raise AssertionError('eight exact source campaign identities required')
     return {'schema':'fireweed-api007-source-group-formal-v1', 'status':'PASS',
         'baseline':baselines, 'negative_controls':controls,
         'qualification':{'finite_abstract_safety':'recorded bounds only', 'production_mapping':'documentary_unexecuted',
@@ -293,6 +301,12 @@ def run(max_states=100000):
                 'source_batch_fields_are_unioned_per_identity_and_late_probes_precede_its_clock',
                 'source_batch_complete_nonmonotonic_run_fits_even_when_first_write_does_not',
                 'source_batch_validates_aggregate_positional_response_before_any_source_call'],
+             'status':'documentary_unexecuted'},
+            {'symbols':['verify_source_originals','QueueSourceOriginalObservation',
+                'QueueNativeRecovered::resolve_original_batch','QueueNativeRecovered::convert_original_batch'],
+             'tests':['original_batch_verifies_reversed_positions_and_rejects_one_wrong_equal_span',
+                'original_batch_reads_shared_frames_once_and_streams_distinct_offsets_real_s3',
+                'cancelled_converted_original_batch_retires_containers_but_retains_physical_owners_real_s3'],
              'status':'documentary_unexecuted'}]}
 
 def main(max_states, path, root):

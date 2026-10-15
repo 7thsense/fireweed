@@ -42,7 +42,7 @@ pub(super) fn unique_owner<'a>(
 
 /// Isolated projection bytes require their own digest. The span's full-record
 /// checksum is used only for complete checked source records on a cache miss.
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueSourcePayload {
     span: QueueSourceSpan,
     sha256: [u8; 32],
@@ -127,7 +127,7 @@ impl QueueSourceRecord {
         }
     }
 }
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueSourceOriginal {
     pub fingerprint_format: u8,
     pub fingerprint: [u8; 32],

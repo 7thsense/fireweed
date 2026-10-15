@@ -4,6 +4,7 @@ use std::ops::Range;
 
 /// Replay always supplies the caller's canonical fingerprint. Receipt lookup
 /// explicitly omits that comparison; both modes require full source membership.
+#[derive(Clone, Copy)]
 pub enum QueueNativeOriginalRequest<'a> {
     Replay {
         domain: u8,
@@ -25,6 +26,7 @@ pub struct QueueNativeResolvedOriginal<'a> {
     domain: u8,
     offset: Option<u64>,
     fingerprint: Option<(u8, [u8; 32])>,
+    observation: Option<fireweed_engine::queue_source_index::QueueSourceOriginalObservation>,
     outcome: Option<Range<usize>>,
     recovered: &'a QueueNativeRecovered,
     _charge: OwnedQueueBufferCharge,
@@ -41,6 +43,12 @@ impl QueueNativeResolvedOriginal<'_> {
     }
     pub fn source_offset(&self) -> Option<u64> {
         self.offset
+    }
+    /// Continuity information only; never a transferable publication proof.
+    pub fn observation(
+        &self,
+    ) -> Option<fireweed_engine::queue_source_index::QueueSourceOriginalObservation> {
+        self.observation
     }
     pub fn fingerprint(&self) -> Option<(u8, [u8; 32])> {
         self.fingerprint
@@ -71,27 +79,7 @@ impl QueueNativeRecovered {
         self.budget().scope(job)?;
         limits.read.validate()?;
         limits.record.validate()?;
-        let (domain, id, expected) = match request {
-            QueueNativeOriginalRequest::Replay {
-                domain,
-                request_id,
-                fingerprint_format,
-                fingerprint,
-            } => {
-                if !(fingerprint_format == 3 || (domain == 2 && fingerprint_format == 4)) {
-                    return Err(QueueError::Invalid(
-                        "invalid expected fingerprint format".into(),
-                    ));
-                }
-                (domain, request_id, Some((fingerprint_format, fingerprint)))
-            }
-            QueueNativeOriginalRequest::Lookup { domain, request_id } => (domain, request_id, None),
-        };
-        if domain > 2 || id.trim().is_empty() {
-            return Err(QueueError::Invalid(
-                "invalid original domain or literal ID".into(),
-            ));
-        }
+        let (domain, id, expected) = batch::request_parts(request)?;
         let bytes = (id.len() as u64)
             .checked_add(std::mem::size_of::<QueueNativeResolvedOriginal<'_>>() as u64)
             .ok_or(QueueError::TooLarge)?;
@@ -114,6 +102,7 @@ impl QueueNativeRecovered {
         let request_id = evidence.request_id().to_owned();
         let domain = evidence.domain();
         let fingerprint = evidence.fingerprint();
+        let observation = evidence.observation();
         let offset = evidence.source_offset();
         let (record, outcome) = if let Some(offset) = offset {
             let record = self
@@ -146,9 +135,16 @@ impl QueueNativeRecovered {
             domain,
             offset,
             fingerprint,
+            observation,
             outcome,
             recovered: self,
             _charge: charge,
         })
     }
 }
+
+mod batch;
+pub use batch::{
+    QueueNativeConvertedOriginals, QueueNativeOriginalBatch, QueueNativeOriginalIdentity,
+    QueueNativeOriginalStatus, QueueNativeOriginalView,
+};

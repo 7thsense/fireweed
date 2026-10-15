@@ -5,7 +5,6 @@ use super::{
 use crate::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
     queue_log_record::{CheckedQueueLogRecord, QueueLogPayload},
-    queue_publication::view_receipt_outcome,
     queue_schema_codec::DefinitionPin,
 };
 use fireweed_core::queue_contract::{QueueError, QueueResult};
@@ -86,6 +85,11 @@ impl QueueSourceOriginalEvidence<'_> {
     pub fn source_offset(&self) -> Option<u64> {
         self.fact.map(|fact| fact.outcome.span().log_offset())
     }
+    /// Complete typed fixed-fact equality for continuity across recaptures.
+    /// This copied value grants no source, absence or publication authority.
+    pub fn observation(&self) -> Option<QueueSourceOriginalObservation> {
+        self.fact.map(QueueSourceOriginalObservation)
+    }
     pub fn fingerprint(&self) -> Option<(u8, [u8; 32])> {
         self.fact
             .map(|fact| (fact.fingerprint_format, fact.fingerprint))
@@ -114,68 +118,26 @@ impl QueueSourceOriginalEvidence<'_> {
         definition_pin: DefinitionPin,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<&'r [u8]> {
-        let fact = self
-            .fact
-            .ok_or_else(|| unknown("absent original has no outcome"))?;
-        // The record accessor projects the actual embedded Publication/Claim
-        // command pin; FWQL does not carry a second independent definition pin.
-        if !self.cut.belongs_to(job)
-            || !record.owner().belongs_to(job)
-            || record.view().address() != self.cut.address()
-            || record.view().epoch() > self.cut.epoch()
-            || record.view().definition_pin_bytes() != *definition_pin.as_bytes()
-            || observed_offset >= self.cut.through()
-        {
-            return Err(unknown(
-                "historical record owner, address, epoch or stored pin differs",
-            ));
-        }
-        let mut outcome = None;
-        match record.view().payload() {
-            QueueLogPayload::Publication(publication) if self.domain != 1 => {
-                for receipt in publication.receipts() {
-                    let receipt = receipt.map_err(|_| unknown("invalid stored receipt"))?;
-                    if receipt.domain == self.domain && receipt.request_id == self.request_id {
-                        if outcome.is_some()
-                            || receipt.fingerprint_format != fact.fingerprint_format
-                            || *receipt.fingerprint != fact.fingerprint
-                        {
-                            return Err(unknown("stored receipt identity or fingerprint differs"));
-                        }
-                        outcome = Some(receipt.encoded_outcome());
-                    }
-                }
-            }
-            QueueLogPayload::Claim(claim) if self.domain == 1 => {
-                if claim.request_id() != self.request_id
-                    || claim.fingerprint_format() != fact.fingerprint_format
-                    || *claim.fingerprint() != fact.fingerprint
-                {
-                    return Err(unknown("stored claim identity or fingerprint differs"));
-                }
-                outcome = Some(claim.receipt_bytes());
-            }
-            _ => return Err(unknown("original points at another record domain")),
-        }
-        let outcome =
-            outcome.ok_or_else(|| unknown("literal receipt missing from original record"))?;
-        if fact.outcome.span() != QueueSourceSpan::from_checked(record, observed_offset, outcome)? {
-            return Err(unknown("outcome is not the exact matching receipt span"));
-        }
-        // resolve verifies full FWQL2 checksum and physical offset; the isolated
-        // digest remains required even after exact receipt membership is known.
-        fact.outcome.span().resolve(record, observed_offset)?;
-        fact.outcome.verify_cached(outcome)?;
-        match record.view().payload() {
-            QueueLogPayload::Claim(claim) => claim.validate_binding(job)?,
-            _ => {
-                view_receipt_outcome(self.domain, fact.fingerprint_format, outcome)
-                    .map_err(|_| unknown("invalid stored outcome encoding"))?;
-            }
-        }
-        Ok(outcome)
+        let verified =
+            verify_source_originals(&[self], record, observed_offset, definition_pin, job)?;
+        verified.outcome(0)
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+/// Domain and full literal identity must be compared separately. Unlike the
+/// projection descriptor this includes the complete physical span and checksum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueueSourceOriginalObservation(QueueSourceOriginal);
+impl QueueSourceOriginalObservation {
+    pub fn fingerprint(&self) -> (u8, [u8; 32]) {
+        (self.0.fingerprint_format, self.0.fingerprint)
+    }
+    pub fn source_offset(&self) -> u64 {
+        self.0.outcome.span().log_offset()
+    }
+}
+mod batch;
+pub use batch::{QueueSourceVerifiedOriginals, verify_source_originals};

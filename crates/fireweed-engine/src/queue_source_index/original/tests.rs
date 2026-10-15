@@ -718,3 +718,167 @@ fn original_claim_requires_command_to_lease_binding_after_valid_span_digest_and_
         }
     });
 }
+
+#[test]
+fn original_batch_verifies_reversed_positions_and_rejects_one_wrong_equal_span() {
+    futures::executor::block_on(async {
+        let (job, definition, mut reader, record) = fixture();
+        {
+            let a = load_source_original(&reader, 2, "a\0α", &job)
+                .await
+                .unwrap();
+            let b = load_source_original(&reader, 2, "b\0β", &job)
+                .await
+                .unwrap();
+            let checked = record.checked().unwrap();
+            let verified =
+                verify_source_originals(&[&b, &a], &checked, 1, definition.pin(), &job).unwrap();
+            let raw_b = b.fact.unwrap().outcome.span().resolve(&checked, 1).unwrap();
+            let raw_a = a.fact.unwrap().outcome.span().resolve(&checked, 1).unwrap();
+            assert_eq!(
+                raw_a, raw_b,
+                "equal bytes must still retain distinct receipt spans"
+            );
+            assert_ne!(raw_a.as_ptr(), raw_b.as_ptr());
+            assert_eq!(verified.outcome(0).unwrap().as_ptr(), raw_b.as_ptr());
+            assert_eq!(verified.outcome(1).unwrap().as_ptr(), raw_a.as_ptr());
+            assert!(verified.outcome(2).is_err());
+            let duplicate =
+                verify_source_originals(&[&a, &a], &checked, 1, definition.pin(), &job).unwrap();
+            assert_eq!(duplicate.outcome(0).unwrap().as_ptr(), raw_a.as_ptr());
+            assert_eq!(duplicate.outcome(1).unwrap().as_ptr(), raw_a.as_ptr());
+            for fault in ["span", "digest", "fingerprint"] {
+                let mut changed = a.fact.unwrap();
+                match fault {
+                    "span" => changed.outcome = b.fact.unwrap().outcome,
+                    "fingerprint" => changed.fingerprint[0] ^= 1,
+                    _ => {
+                        let mut json = serde_json::to_value(changed).unwrap();
+                        let byte = json["outcome"]["sha256"][0].as_u64().unwrap();
+                        json["outcome"]["sha256"][0] = serde_json::json!(byte ^ 1);
+                        changed = serde_json::from_value(json).unwrap();
+                    }
+                }
+                let mut inconsistent = Reader {
+                    through: reader.through,
+                    identity: reader.identity.clone(),
+                    facts: reader.facts.clone(),
+                };
+                inconsistent
+                    .facts
+                    .insert(key(2, "a\0α"), encode(&changed).unwrap());
+                let second = load_source_original(&inconsistent, 2, "a\0α", &job)
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(
+                        verify_source_originals(
+                            &[&a, &second],
+                            &checked,
+                            1,
+                            definition.pin(),
+                            &job
+                        ),
+                        Err(QueueError::OutcomeUnknown(_))
+                    ),
+                    "only the second duplicate differs: {fault}"
+                );
+            }
+            let foreign = Reader {
+                through: reader.through,
+                identity: Arc::new(job.owned_buffer(128).unwrap()),
+                facts: reader.facts.clone(),
+            };
+            let foreign_b = load_source_original(&foreign, 2, "b\0β", &job)
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    verify_source_originals(&[&a, &foreign_b], &checked, 1, definition.pin(), &job),
+                    Err(QueueError::OutcomeUnknown(_))
+                ),
+                "equal numeric heads do not make equal opaque cuts"
+            );
+        }
+        let a: QueueSourceOriginal =
+            crate::queue_storage_layout::decode(&reader.facts[&key(2, "a\0α")]).unwrap();
+        let mut b: QueueSourceOriginal =
+            crate::queue_storage_layout::decode(&reader.facts[&key(2, "b\0β")]).unwrap();
+        b.outcome = a.outcome;
+        reader.facts.insert(key(2, "b\0β"), encode(&b).unwrap());
+        let a = load_source_original(&reader, 2, "a\0α", &job)
+            .await
+            .unwrap();
+        let b = load_source_original(&reader, 2, "b\0β", &job)
+            .await
+            .unwrap();
+        assert!(
+            matches!(verify_source_originals(&[&a,&b], &record.checked().unwrap(), 1, definition.pin(), &job),
+            Err(QueueError::OutcomeUnknown(m)) if m.contains("exact matching receipt span"))
+        );
+    });
+}
+
+#[test]
+fn original_observation_compares_full_typed_span_and_accepts_equivalent_encoding() {
+    futures::executor::block_on(async {
+        let (job, _, mut reader, _) = fixture();
+        reader.through = 4;
+        let full_key = key(2, "a\0α");
+        let bytes = reader.facts[&full_key].clone();
+        let fact: QueueSourceOriginal = crate::queue_storage_layout::decode(&bytes).unwrap();
+        let original = load_source_original(&reader, 2, "a\0α", &job)
+            .await
+            .unwrap()
+            .observation()
+            .unwrap();
+        for (parent, field) in [
+            ("span", "log_offset"),
+            ("span", "byte_offset"),
+            ("span", "byte_length"),
+            ("span", "record_checksum"),
+            ("outcome", "sha256"),
+        ] {
+            let mut json = serde_json::to_value(fact).unwrap();
+            let target = if parent == "span" {
+                &mut json["outcome"]["span"][field]
+            } else {
+                &mut json["outcome"][field]
+            };
+            if let Some(n) = target.as_u64() {
+                *target = serde_json::json!(n + 1);
+            } else {
+                let n = target[0].as_u64().unwrap();
+                target[0] = serde_json::json!(n ^ 1);
+            }
+            let changed: QueueSourceOriginal = serde_json::from_value(json).unwrap();
+            // Projection descriptors omit offsets and checksum; equality must not.
+            reader
+                .facts
+                .insert(full_key.clone(), encode(&changed).unwrap());
+            let observed = load_source_original(&reader, 2, "a\0α", &job)
+                .await
+                .unwrap()
+                .observation()
+                .unwrap();
+            assert_ne!(original, observed, "{parent}/{field}");
+        }
+        // Postcard accepts this longer representation of the same u64 offset.
+        // Continuity compares typed fields, never a raw-encoding hash.
+        assert_eq!(bytes[33], 1);
+        let mut equivalent = bytes.clone();
+        equivalent.splice(33..34, [0x81, 0]);
+        assert_eq!(
+            crate::queue_storage_layout::decode::<QueueSourceOriginal>(&equivalent).unwrap(),
+            fact
+        );
+        reader.facts.insert(full_key, equivalent);
+        assert_eq!(
+            load_source_original(&reader, 2, "a\0α", &job)
+                .await
+                .unwrap()
+                .observation(),
+            Some(original)
+        );
+    });
+}

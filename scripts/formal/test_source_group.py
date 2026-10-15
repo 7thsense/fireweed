@@ -15,7 +15,7 @@ class SourceGroupGateTests(unittest.TestCase):
         self.assertTrue(baseline['complete'])
         self.assertGreater(baseline['states'], len(gate.model.CASES))
         self.assertEqual(set(baseline['completed_witnesses']), set(gate.WITNESSES))
-        self.assertEqual({c['fault'] for c in self.report['negative_controls']}, set(gate.model.FAULTS) | set(gate.model.PUBLICATION_FAULTS) | set(gate.model.READ_FAULTS) | set(gate.model.PROVISION_FAULTS) | set(gate.model.HEADER_FAULTS) | set(gate.original_model.ORIGINAL_FAULTS) | set(gate.batch_model.BATCH_FAULTS))
+        self.assertEqual({c['fault'] for c in self.report['negative_controls']}, set(gate.model.FAULTS) | set(gate.model.PUBLICATION_FAULTS) | set(gate.model.READ_FAULTS) | set(gate.model.PROVISION_FAULTS) | set(gate.model.HEADER_FAULTS) | set(gate.original_model.ORIGINAL_FAULTS) | set(gate.batch_model.BATCH_FAULTS) | set(gate.original_batch_model.FAULTS))
         for control in self.report['negative_controls']:
             spec = (gate.model.SourceGroup if control['fault'] in gate.model.FAULTS else
                     gate.model.SourceGroupPublication if control['fault'] in gate.model.PUBLICATION_FAULTS
@@ -23,7 +23,8 @@ class SourceGroupGateTests(unittest.TestCase):
                     else gate.model.CoupledGenesisProvision if control['fault'] in gate.model.PROVISION_FAULTS
                     else gate.model.SourceHeaderRecovery if control['fault'] in gate.model.HEADER_FAULTS
                     else gate.original_model.SourceOriginalResolution if control['fault'] in gate.original_model.ORIGINAL_FAULTS
-                    else gate.batch_model.SourceBatchComposition)
+                    else gate.batch_model.SourceBatchComposition if control['fault'] in gate.batch_model.BATCH_FAULTS
+                    else gate.original_batch_model.SourceOriginalBatch)
             gate.helper.replay(spec(control['fault']), control['trace'], control['property'])
     def test_publication_boundary_witnesses_and_forged_preparation(self):
         from dataclasses import replace
