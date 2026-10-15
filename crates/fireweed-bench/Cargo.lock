@@ -1327,6 +1327,7 @@ dependencies = [
  "object-log",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
 ]
 
@@ -2496,13 +2497,14 @@ dependencies = [
 [[package]]
 name = "object-log"
 version = "0.3.6"
-source = "git+https://github.com/7thsense/object-log.git?rev=a2674fe940a57fe72259d582efb4fd99fa5db544#a2674fe940a57fe72259d582efb4fd99fa5db544"
+source = "git+https://github.com/7thsense/object-log.git?rev=3e7bc3118bcd1edcc5405e79f6a42287c5b9347d#3e7bc3118bcd1edcc5405e79f6a42287c5b9347d"
 dependencies = [
  "async-trait",
  "aws-sdk-s3",
  "aws-smithy-http-client",
  "base64 0.22.1",
  "bytes",
+ "getrandom 0.4.3",
  "rustls",
  "serde",
  "serde_json",

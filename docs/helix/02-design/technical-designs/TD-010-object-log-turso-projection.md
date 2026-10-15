@@ -84,6 +84,12 @@ rollback/autocommit or poison before release/reuse. Caller cancellation cannot
 cancel accepted work or release its reservation. Worker completion and final
 reservation drain are separate shutdown obligations.
 
+Native transport passes a preadmitted set of Root byte guards through the SDK's
+scoped operation owner. Copied-input and output admission follows the final
+provider child through cancellation, caller-runtime shutdown and task panic.
+Retained Root outputs keep separate guards after physical completion; planned
+record reads transfer their unique output guard after dropping the scoped view.
+
 Native conditional publication distinguishes known rejection from ambiguity;
 a late reply/deadline cannot prove no effect. Resolve original identity against
 fresh authority. Claim/commit ownership uses a fresh operational clock at the

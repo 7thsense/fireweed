@@ -21,7 +21,7 @@ PURE = {
 ADAPTERS = {
     "fireweed-postgres": {"async-trait", "tokio-postgres", "tokio", "fireweed-core", "fireweed-engine", "fireweed-queue-spool", "fireweed-projection", "fireweed-objectlog", "axon-esf", "postgres", "native-tls", "postgres-native-tls", "serde", "serde_json", "postcard", "bytes", "futures", "sha2"},
     "fireweed-turso": {"fireweed-projection", "fireweed-core", "fireweed-engine", "fireweed-queue-spool", "fireweed-relational", "bytes", "serde_json", "tokio", "turso", "turso_core"},
-    "fireweed-objectlog": {"async-trait", "futures", "fireweed-core", "fireweed-engine", "fireweed-projection", "fireweed-queue-spool", "object-log", "aws-sdk-s3", "tokio", "serde", "serde_json", "bytes"},
+    "fireweed-objectlog": {"async-trait", "futures", "fireweed-core", "fireweed-engine", "fireweed-projection", "fireweed-queue-spool", "object-log", "aws-sdk-s3", "tokio", "serde", "serde_json", "bytes", "sha2"},
 }
 # One exact existing dependency, not an adapter-wide exemption. Remove when the
 # named legacy composition retires; new source locations are not permitted.
