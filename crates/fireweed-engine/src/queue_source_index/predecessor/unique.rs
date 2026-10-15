@@ -8,8 +8,6 @@ use crate::{
         UniqueClaimOrigin, UniqueEvidence, UniqueEvidenceEffect, UniqueTupleReducer,
     },
 };
-use fireweed_core::queue_contract::encoded_len;
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy)]
@@ -47,24 +45,6 @@ impl QueueSourceUniqueOwnerEdits<'_> {
     fn push(&mut self, key: &[u8], owner: Option<&RecordIdentity>) -> QueueResult<()> {
         self.output.insert_encoded(key, owner)
     }
-}
-#[derive(Serialize, Deserialize)]
-struct OwnerRef<'a> {
-    #[serde(borrow)]
-    collection: Option<&'a str>,
-    key: &'a str,
-}
-fn owner_ref<'a>(bytes: &'a [u8], collection: Option<&str>) -> QueueResult<OwnerRef<'a>> {
-    let (owner, rest): (OwnerRef<'a>, _) =
-        postcard::take_from_bytes(bytes).map_err(|_| unknown("invalid source unique owner"))?;
-    if !rest.is_empty()
-        || owner.collection != collection
-        || owner.key.trim().is_empty()
-        || encoded_len(&owner)? != bytes.len() as u64
-    {
-        return Err(unknown("invalid source unique owner identity"));
-    }
-    Ok(owner)
 }
 fn identity_bytes(owner: IdentityRef<'_>) -> QueueResult<u64> {
     (owner.key.len() as u64)
@@ -183,7 +163,7 @@ impl<'c, 'a, R: QueueSourceReader> QueueSourceUniqueOwnerAccumulator<'c, 'a, R> 
             let point = context.reader.point(&lookup)?;
             let borrowed = point
                 .value_for(&context.cut, &source_key)?
-                .map(|bytes| owner_ref(bytes, tuple.collection.as_deref()))
+                .map(|bytes| super::super::cell::unique_owner(bytes, tuple.collection.as_deref()))
                 .transpose()?;
             let _initial_charge =
                 context

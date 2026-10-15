@@ -117,6 +117,64 @@ fn ordinary(
         after,
     )
 }
+// Exercise the real exact-cut source reader as a planner input, independently
+// of the compiler that later publishes facts. The reference remains the cold
+// full-image shared planner and no projection/cache rows are consulted.
+async fn check_source_group(
+    log: &QueueNativeLog,
+    acquired: &QueueNativeAcquired,
+    definition: &AdmittedQueueDefinition,
+    snapshot: &RecordSnapshot,
+    group: &CommitGroup,
+    ledger: Arc<QueueNativeSourceBudget>,
+    job: &Arc<QueueReservation>,
+) {
+    use fireweed_engine::queue_source_index::{QueueSourceReader, load_group_preimage};
+    struct Clock;
+    impl fireweed_engine::Clock for Clock {
+        fn now(&self) -> fireweed_core::UtcTimestamp {
+            fireweed_core::UtcTimestamp {
+                seconds: 0,
+                nanoseconds: 10,
+            }
+        }
+    }
+    let reader = QueueNativeSourceReader::new(acquired, log, job, ledger, limits().read).unwrap();
+    let queue = QueueAddress {
+        tenant: "tenant".into(),
+        queue: "producer".into(),
+    };
+    let before = acquired.head();
+    let plan = load_group_preimage(
+        &reader,
+        &queue,
+        group,
+        definition,
+        &QueueLimits::default(),
+        job,
+    )
+    .await
+    .unwrap()
+    .plan(&Clock)
+    .unwrap();
+    let mut image = snapshot.clone();
+    image.unique_probes_loaded.extend(
+        fireweed_engine::queue_planner::prospective_unique_probes(
+            group,
+            &image,
+            definition.schema(),
+        )
+        .unwrap(),
+    );
+    let expected = plan_commit_group(group, &mut image, 10, definition.schema()).unwrap();
+    assert_eq!(plan.receipt(), &expected.receipt);
+    assert!(plan.cut().same_cut(&reader.cut().unwrap()));
+    assert_eq!(
+        log.capture(&acquired.namespace).await.unwrap().head(),
+        before
+    );
+}
+
 async fn accept(
     log: &QueueNativeLog,
     acquired: QueueNativeAcquired,
@@ -291,6 +349,16 @@ async fn producer_contract(log: QueueNativeLog) {
         ]),
         body: vec![0, 1, 2].into(),
     });
+    check_source_group(
+        &log,
+        &acquired,
+        &definition,
+        &snapshot,
+        &seed,
+        ledger.clone(),
+        &job,
+    )
+    .await;
     let (record, after) = ordinary(&acquired, &definition, &snapshot, &[seed], &job);
     snapshot = after;
     acquired = accept(
@@ -329,6 +397,26 @@ async fn producer_contract(log: QueueNativeLog) {
         expect: StateExpect::Version(99),
         change: UnclaimedChange::Delete,
     });
+    check_source_group(
+        &log,
+        &acquired,
+        &definition,
+        &snapshot,
+        &release,
+        ledger.clone(),
+        &job,
+    )
+    .await;
+    check_source_group(
+        &log,
+        &acquired,
+        &definition,
+        &snapshot,
+        &rejected,
+        ledger.clone(),
+        &job,
+    )
+    .await;
     let mut deletion = release.clone();
     deletion.request_id = "complete-field-range".into();
     deletion.claimed_updates[0].disposition = Disposition::Delete;
@@ -400,7 +488,7 @@ async fn producer_contract(log: QueueNativeLog) {
         record,
         &definition,
         (&mut history, &snapshot),
-        ledger,
+        ledger.clone(),
         &job,
     )
     .await;
@@ -409,6 +497,34 @@ async fn producer_contract(log: QueueNativeLog) {
         snapshot.state[&("workflow".into(), "run".into())].version,
         1
     );
+
+    let mut atomic = group("source-preview-state-and-next");
+    atomic.state_updates.push(StateUpdate {
+        collection: "workflow".into(),
+        key: "run".into(),
+        expect: StateExpect::Version(1),
+        change: StateChange::Put {
+            fields: Fields::new(),
+            value: vec![8, 9].into(),
+        },
+    });
+    atomic.work_inserts.push(NewWork {
+        key: "next".into(),
+        priority: 1,
+        available_at: 0,
+        fields: Fields::from([("tag".into(), FieldValue::Integer(99))]),
+        body: vec![4].into(),
+    });
+    check_source_group(
+        &log,
+        &acquired,
+        &definition,
+        &snapshot,
+        &atomic,
+        ledger.clone(),
+        &job,
+    )
+    .await;
 
     for duplicate in [false, true] {
         let id = if duplicate {
@@ -507,7 +623,7 @@ async fn producer_contract(log: QueueNativeLog) {
         acquired.head()
     );
     drop((forged, poison, proposed));
-    drop((acquired, history, definition));
+    drop((acquired, history, definition, ledger));
     log.shutdown().await.unwrap();
     drop(job);
     assert_eq!(admission.usage().unwrap(), (0, 0));

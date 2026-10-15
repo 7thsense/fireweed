@@ -40,3 +40,6 @@ pub use predecessor::{
     QueueSourceRecordEditAccumulator, QueueSourceRecordEdits, QueueSourceRecordTransition,
     QueueSourceUniqueOwnerAccumulator, QueueSourceUniqueOwnerEdits, compile_publication,
 };
+
+mod group;
+pub use group::{QueueSourceGroupPlan, QueueSourceGroupPreimage, load_group_preimage};

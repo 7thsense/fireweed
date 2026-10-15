@@ -31,6 +31,7 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts/formal -p 'test_*.py'
           python3 scripts/formal/check.py --output target/formal-analysis.json
+          python3 scripts/formal/check_source_group.py --output target/api007-formal/source-group.json
           python3 scripts/formal/generate_replay.py --output target/replay-corpus.json
 
       - name: Retain bounded formal evidence
@@ -38,7 +39,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: formal-analysis
-          path: target/formal-analysis.json
+          path: |
+            target/formal-analysis.json
+            target/api007-formal/source-group.json
           if-no-files-found: error
 
       - name: Install repository check prerequisites

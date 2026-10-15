@@ -298,7 +298,7 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::{
         queue_admission::QueueAdmission,
@@ -314,10 +314,10 @@ mod tests {
     };
     use fireweed_core::queue_contract::*;
     use std::collections::BTreeMap;
-    pub(super) struct Reader {
-        pub(super) through: u64,
-        pub(super) identity: Arc<OwnedQueueBufferCharge>,
-        pub(super) facts: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub(in crate::queue_source_index) struct Reader {
+        pub(in crate::queue_source_index) through: u64,
+        pub(in crate::queue_source_index) identity: Arc<OwnedQueueBufferCharge>,
+        pub(in crate::queue_source_index) facts: BTreeMap<Vec<u8>, Vec<u8>>,
     }
     impl QueueSourceReader for Reader {
         type Point = Vec<u8>;
@@ -605,7 +605,7 @@ mod tests {
         }
         calls
     }
-    pub(super) fn group(id: &str) -> CommitGroup {
+    pub(in crate::queue_source_index) fn group(id: &str) -> CommitGroup {
         CommitGroup {
             request_id: id.into(),
             administration: None,
@@ -615,7 +615,7 @@ mod tests {
             work_inserts: vec![],
         }
     }
-    pub(super) fn record(
+    pub(in crate::queue_source_index) fn record(
         queue: &QueueAddress,
         schema: &QueueSchema,
         before: &RecordSnapshot,

@@ -6,7 +6,7 @@ use super::{
 use crate::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
     queue_fields::{CheckedFields, FieldCoverage},
-    queue_publication::{CommandRef, EffectRef, FieldsCommandRef, ValueRef},
+    queue_publication::{CommandRef, EffectRef, FieldsCommandRef, IdentityRef, ValueRef},
 };
 use fireweed_core::queue_contract::{
     CollectionDefinition, FieldValue, Fields, QueueError, QueueResult,
@@ -54,6 +54,9 @@ pub struct QueueSourceFields {
     _charge: OwnedQueueBufferCharge,
 }
 impl QueueSourceFields {
+    pub(super) fn into_parts(self) -> (Fields, FieldCoverage, OwnedQueueBufferCharge) {
+        (self.fields, self.coverage, self._charge)
+    }
     pub fn checked(&self) -> QueueResult<CheckedFields<'_>> {
         CheckedFields::new(&self.fields, &self.coverage)
     }
@@ -189,67 +192,146 @@ pub async fn load_command_fields<R: QueueSourceReader>(
                 }
             }
         }
-        // Names are already charged. Borrow them independently of the output
-        // field tree so retaining values cannot invalidate the traversal.
-        let FieldCoverage::Selected { names, .. } = &output.coverage else {
-            unreachable!()
-        };
-        let names_bytes = names.iter().try_fold(0usize, |n, name| {
-            n.checked_add(name.len())
-                .and_then(|n| n.checked_add(std::mem::size_of::<String>()))
-                .ok_or(QueueError::TooLarge)
-        })?;
-        output.charge(names_bytes, job)?;
-        let FieldCoverage::Selected { names, .. } = &output.coverage else {
-            unreachable!()
-        };
-        let names: Vec<_> = names.iter().cloned().collect();
-        for name in names {
-            let key = QueueSourceKey::Field {
-                collection: command.identity.collection,
-                key: command.identity.key,
-                field: &name,
-            };
-            let _key_charge = job.owned_buffer(key.encoded_len()? as u64)?;
-            let key = key.encode()?;
-            let owner = reader.lookup(&key).await?;
-            let point = reader.point(&owner)?;
-            if let Some(bytes) = point.value_for(&cut, &key)? {
-                output.retain(&name, bytes, definition, job)?;
-            }
-        }
+        fill_selected(reader, cut, command.identity, definition, job, &mut output).await?;
     } else {
-        let len = record_fields_prefix_len(command.identity.collection, command.identity.key)?;
-        let _bounds = job.owned_buffer(len.checked_mul(2).ok_or(QueueError::TooLarge)? as u64)?;
-        let lower = record_fields_prefix(command.identity.collection, command.identity.key)?;
-        let mut upper = lower.clone();
-        if !prefix_successor(&mut upper) {
-            return Err(unknown("field family has no upper bound"));
-        }
-        let range = reader.complete_range(&lower, &upper).await?;
-        reader.visit_range(&range, &lower, &upper, &mut |point| {
-            let bytes = point
-                .value_for(&cut, point.key())?
-                .ok_or_else(|| unknown("absent field inside membership range"))?;
-            let suffix = point
-                .key()
-                .strip_prefix(lower.as_slice())
-                .ok_or_else(|| unknown("field range prefix differs"))?;
-            let _name_charge = job.owned_buffer(
-                suffix
-                    .len()
-                    .checked_add(std::mem::size_of::<String>())
-                    .ok_or(QueueError::TooLarge)? as u64,
-            )?;
-            let name = field_name(suffix)?;
-            output.retain(&name, bytes, definition, job)
-        })?;
-        if output.fields.len() as u64 != expected_count {
-            return Err(unknown("complete field membership count differs"));
-        }
-        output.coverage = FieldCoverage::Complete;
+        fill_complete(
+            reader,
+            cut,
+            command.identity,
+            expected_count,
+            definition,
+            job,
+            &mut output,
+        )
+        .await?;
     }
     Ok(output)
+}
+// Shared source-loading machinery. A planning request declares field knowledge
+// directly; it must not manufacture a resolved write command to read a preimage.
+pub(super) async fn load_group_fields<R: QueueSourceReader>(
+    reader: &R,
+    cut: super::QueueSourceCut<'_>,
+    identity: IdentityRef<'_>,
+    expected_count: u64,
+    definition: &CollectionDefinition,
+    names: Option<&BTreeSet<String>>,
+    job: &Arc<QueueReservation>,
+) -> QueueResult<QueueSourceFields> {
+    if !cut.belongs_to(job) {
+        return Err(unknown("reader operation differs"));
+    }
+    let charge = job.owned_buffer((std::mem::size_of::<QueueSourceFields>() + 1024) as u64)?;
+    let mut output = QueueSourceFields {
+        fields: Fields::new(),
+        coverage: FieldCoverage::Selected {
+            names: BTreeSet::new(),
+            prefixes: BTreeSet::new(),
+        },
+        _charge: charge,
+    };
+    if let Some(names) = names {
+        for name in names {
+            output.name(name, job)?;
+        }
+        fill_selected(reader, cut, identity, definition, job, &mut output).await?;
+    } else {
+        fill_complete(
+            reader,
+            cut,
+            identity,
+            expected_count,
+            definition,
+            job,
+            &mut output,
+        )
+        .await?;
+    }
+    if output.present_count() as u64 > expected_count {
+        return Err(unknown(
+            "selected fields exceed authenticated membership count",
+        ));
+    }
+    Ok(output)
+}
+async fn fill_selected<R: QueueSourceReader>(
+    reader: &R,
+    cut: super::QueueSourceCut<'_>,
+    identity: IdentityRef<'_>,
+    definition: &CollectionDefinition,
+    job: &Arc<QueueReservation>,
+    output: &mut QueueSourceFields,
+) -> QueueResult<()> {
+    // Names are already charged. Borrow them independently of the output
+    // field tree so retaining values cannot invalidate the traversal.
+    let FieldCoverage::Selected { names, .. } = &output.coverage else {
+        unreachable!()
+    };
+    let names_bytes = names.iter().try_fold(0usize, |n, name| {
+        n.checked_add(name.len())
+            .and_then(|n| n.checked_add(std::mem::size_of::<String>()))
+            .ok_or(QueueError::TooLarge)
+    })?;
+    output.charge(names_bytes, job)?;
+    let FieldCoverage::Selected { names, .. } = &output.coverage else {
+        unreachable!()
+    };
+    let names: Vec<_> = names.iter().cloned().collect();
+    for name in names {
+        let key = QueueSourceKey::Field {
+            collection: identity.collection,
+            key: identity.key,
+            field: &name,
+        };
+        let _key_charge = job.owned_buffer(key.encoded_len()? as u64)?;
+        let key = key.encode()?;
+        let owner = reader.lookup(&key).await?;
+        let point = reader.point(&owner)?;
+        if let Some(bytes) = point.value_for(&cut, &key)? {
+            output.retain(&name, bytes, definition, job)?;
+        }
+    }
+    Ok(())
+}
+async fn fill_complete<R: QueueSourceReader>(
+    reader: &R,
+    cut: super::QueueSourceCut<'_>,
+    identity: IdentityRef<'_>,
+    expected_count: u64,
+    definition: &CollectionDefinition,
+    job: &Arc<QueueReservation>,
+    output: &mut QueueSourceFields,
+) -> QueueResult<()> {
+    let len = record_fields_prefix_len(identity.collection, identity.key)?;
+    let _bounds = job.owned_buffer(len.checked_mul(2).ok_or(QueueError::TooLarge)? as u64)?;
+    let lower = record_fields_prefix(identity.collection, identity.key)?;
+    let mut upper = lower.clone();
+    if !prefix_successor(&mut upper) {
+        return Err(unknown("field family has no upper bound"));
+    }
+    let range = reader.complete_range(&lower, &upper).await?;
+    reader.visit_range(&range, &lower, &upper, &mut |point| {
+        let bytes = point
+            .value_for(&cut, point.key())?
+            .ok_or_else(|| unknown("absent field inside membership range"))?;
+        let suffix = point
+            .key()
+            .strip_prefix(lower.as_slice())
+            .ok_or_else(|| unknown("field range prefix differs"))?;
+        let _name_charge = job.owned_buffer(
+            suffix
+                .len()
+                .checked_add(std::mem::size_of::<String>())
+                .ok_or(QueueError::TooLarge)? as u64,
+        )?;
+        let name = field_name(suffix)?;
+        output.retain(&name, bytes, definition, job)
+    })?;
+    if output.fields.len() as u64 != expected_count {
+        return Err(unknown("complete field membership count differs"));
+    }
+    output.coverage = FieldCoverage::Complete;
+    Ok(())
 }
 fn field_name(mut suffix: &[u8]) -> QueueResult<String> {
     let mut bytes = Vec::with_capacity(suffix.len());

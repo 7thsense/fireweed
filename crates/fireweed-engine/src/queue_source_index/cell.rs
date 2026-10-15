@@ -11,6 +11,35 @@ use fireweed_core::queue_contract::{QueueError, QueueResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Decode borrowing before any admitted identity clone. Shared by source
+/// preimage loading and publication validation; both use the full tuple domain.
+pub(super) fn unique_owner<'a>(
+    bytes: &'a [u8],
+    collection: Option<&str>,
+) -> QueueResult<crate::queue_publication::IdentityRef<'a>> {
+    #[derive(Serialize, Deserialize)]
+    struct Owner<'a> {
+        #[serde(borrow)]
+        collection: Option<&'a str>,
+        key: &'a str,
+    }
+    let (owner, rest): (Owner<'a>, _) = postcard::take_from_bytes(bytes)
+        .map_err(|_| QueueError::OutcomeUnknown("invalid source unique owner".into()))?;
+    if !rest.is_empty()
+        || owner.collection != collection
+        || owner.key.trim().is_empty()
+        || fireweed_core::queue_contract::encoded_len(&owner)? != bytes.len() as u64
+    {
+        return Err(QueueError::OutcomeUnknown(
+            "invalid source unique owner identity".into(),
+        ));
+    }
+    Ok(crate::queue_publication::IdentityRef {
+        collection: owner.collection,
+        key: owner.key,
+    })
+}
+
 /// Isolated projection bytes require their own digest. The span's full-record
 /// checksum is used only for complete checked source records on a cache miss.
 #[derive(Clone, Copy, Serialize, Deserialize)]
