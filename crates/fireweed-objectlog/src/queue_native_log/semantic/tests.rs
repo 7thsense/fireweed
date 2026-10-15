@@ -70,7 +70,7 @@ async fn bundle_for_schema(
     let ns = log.provision_namespace(&address, job).await.unwrap();
     let acquired = log.acquire_bundle(ns, job).await.unwrap();
     let record = encode_checked_genesis(
-        acquired.head().epoch(),
+        acquired.as_source().head().epoch(),
         &address,
         &definition,
         &[7; 32],
@@ -90,7 +90,7 @@ async fn fresh(
         tenant: "tenant".into(),
         queue: name.into(),
     };
-    let ns = prior.retained_namespace(&address, job).unwrap();
+    let ns = prior.as_source().retained_namespace(&address, job).unwrap();
     log.acquire_bundle(ns, job).await.unwrap()
 }
 async fn storage_image(
@@ -122,6 +122,7 @@ async fn source_pages_contract(log: QueueNativeLog) {
     let (first, record) = bundle(&log, "queue", &job).await;
     assert!(
         first
+            .as_source()
             .semantic_lookup(&log, b"a", work(), &job)
             .await
             .is_err()
@@ -163,6 +164,7 @@ async fn source_pages_contract(log: QueueNativeLog) {
     );
     assert!(
         first
+            .as_source()
             .semantic_lookup(&log, b"a", work(), &job)
             .await
             .is_err()
@@ -170,6 +172,7 @@ async fn source_pages_contract(log: QueueNativeLog) {
     let current = fresh(&log, &first, "queue", &job).await;
     assert_eq!(
         current
+            .as_source()
             .semantic_lookup(&log, b"a", work(), &job)
             .await
             .unwrap()
@@ -179,6 +182,7 @@ async fn source_pages_contract(log: QueueNativeLog) {
     );
     assert!(
         current
+            .as_source()
             .semantic_lookup(&log, b"absent", work(), &job)
             .await
             .unwrap()
@@ -186,6 +190,7 @@ async fn source_pages_contract(log: QueueNativeLog) {
     );
     assert_eq!(
         current
+            .as_source()
             .semantic_lookup(&log, b"b\0full", work(), &job)
             .await
             .unwrap()
@@ -195,21 +200,24 @@ async fn source_pages_contract(log: QueueNativeLog) {
     );
     assert!(
         current
+            .as_source()
             .semantic_lookup(&log, b"a", work(), &foreign)
             .await
             .is_err()
     );
     {
-        let cut = current.source_cut(&log, &job).unwrap();
+        let cut = current.as_source().source_cut(&log, &job).unwrap();
         let present = current
+            .as_source()
             .source_lookup(&log, b"a", work(), &job)
             .await
             .unwrap();
         let absent = current
+            .as_source()
             .source_lookup(&log, b"absent", work(), &job)
             .await
             .unwrap();
-        let present_proof = present.evidence(&current, &log, &job).unwrap();
+        let present_proof = present.evidence(current.as_source(), &log, &job).unwrap();
         assert_eq!(
             present_proof.value_for(&cut, b"a").unwrap(),
             Some(b"".as_slice())
@@ -217,19 +225,32 @@ async fn source_pages_contract(log: QueueNativeLog) {
         assert!(present_proof.value_for(&cut, b"other").is_err());
         assert_eq!(
             absent
-                .evidence(&current, &log, &job)
+                .evidence(current.as_source(), &log, &job)
                 .unwrap()
                 .value_for(&cut, b"absent")
                 .unwrap(),
             None
         );
-        assert!(present.evidence(&current, &log, &foreign).is_err());
+        assert!(
+            present
+                .evidence(current.as_source(), &log, &foreign)
+                .is_err()
+        );
         let other = fresh(&log, &current, "queue", &job).await;
-        assert!(present.evidence(&other, &log, &job).is_err());
-        super::reader::reader_contract(&current, &log, &job, &foreign, &other, &admission).await;
+        assert!(present.evidence(other.as_source(), &log, &job).is_err());
+        super::reader::reader_contract(
+            current.as_source(),
+            &log,
+            &job,
+            &foreign,
+            other.as_source(),
+            &admission,
+        )
+        .await;
     }
     let baseline = admission.usage().unwrap();
     let first_page = current
+        .as_source()
         .semantic_scan(&log, Bound::Unbounded, Bound::Unbounded, scan_limit(), &job)
         .await
         .unwrap();
@@ -244,18 +265,21 @@ async fn source_pages_contract(log: QueueNativeLog) {
     let mut big_row = scan_limit();
     big_row.output_bytes = 8192;
     let page = current
+        .as_source()
         .semantic_scan_next(&log, &alias, big_row, &job)
         .await
         .unwrap();
     assert_eq!(page.rows().next().unwrap().key(), b"b\0full");
     assert_eq!(page.rows().next().unwrap().value(), large);
     let repeated = current
+        .as_source()
         .semantic_scan_next(&log, &alias, big_row, &job)
         .await
         .unwrap();
     assert_eq!(repeated.rows().next().unwrap().key(), b"b\0full");
     assert!(
         current
+            .as_source()
             .semantic_scan_next(&log, &alias, big_row, &foreign)
             .await
             .is_err()
@@ -263,18 +287,21 @@ async fn source_pages_contract(log: QueueNativeLog) {
     let other_bundle = fresh(&log, &current, "queue", &job).await;
     assert!(
         other_bundle
+            .as_source()
             .semantic_scan_next(&log, &alias, big_row, &job)
             .await
             .is_err()
     );
     let second_token = page.continuation().unwrap();
     let last = current
+        .as_source()
         .semantic_scan_next(&log, &second_token, scan_limit(), &job)
         .await
         .unwrap();
     assert_eq!(last.rows().next().unwrap().key(), b"c");
     assert_eq!(last.status(), QueueNativeScanStatus::LimitReached);
     let end = current
+        .as_source()
         .semantic_scan_next(&log, &last.continuation().unwrap(), scan_limit(), &job)
         .await
         .unwrap();
@@ -326,7 +353,7 @@ async fn coupled_framing_checks_exact_boundary() {
         };
         let definition = genesis.validate_definition(&job).unwrap();
         let record = encode_checked_genesis(
-            acquired.head().epoch(),
+            acquired.as_source().head().epoch(),
             &address,
             &definition,
             &[7; 32],
@@ -345,7 +372,7 @@ async fn coupled_framing_checks_exact_boundary() {
             ));
         }
         assert_eq!(
-            log.capture(&acquired.namespace)
+            log.capture(&acquired.source.namespace)
                 .await
                 .unwrap()
                 .head()
@@ -371,19 +398,20 @@ async fn nonempty_legacy_cut_cannot_be_silently_promoted() {
     let current = fresh(&log, &first, "queue", &job).await;
     assert!(
         current
+            .as_source()
             .semantic_lookup(&log, b"missing", work(), &job)
             .await
             .is_err()
     );
     // The SDK refuses direct promotion, independently of Root's unique-genesis guard.
-    let before = log.capture(&current.namespace).await.unwrap().head();
+    let before = log.capture(&current.source.namespace).await.unwrap().head();
     let provider = object_log::LocalBlobStore::new(dir.path());
     let before_storage = storage_image(&provider, "legacy").await;
     let result = log
         .log
         .prepare_with_edits(
             &current.writer.writer,
-            &current.cut.cut,
+            &current.source.cut.cut,
             &[NativeAppend {
                 identity: "legacy-promotion",
                 payload: b"later",
@@ -399,7 +427,7 @@ async fn nonempty_legacy_cut_cannot_be_silently_promoted() {
         .await;
     assert!(result.is_err());
     assert_eq!(
-        log.capture(&current.namespace).await.unwrap().head(),
+        log.capture(&current.source.namespace).await.unwrap().head(),
         before
     );
     assert_eq!(storage_image(&provider, "legacy").await, before_storage);
@@ -437,7 +465,7 @@ async fn root_output_admission_is_checked_before_source_and_released_by_last_ali
     let (map_key, map_bytes) = removed.unwrap();
     provider.delete(&map_key).await.unwrap();
     let limits = scan_limit();
-    let probe = QueueNativeAcquired::page_charge(&job, limits, 0).unwrap();
+    let probe = QueueNativeCaptured::page_charge(&job, limits, 0).unwrap();
     let retained = probe.admitted_bytes();
     let scratch = ownership::physical_owner_bytes::<2>();
     let needed = retained + scratch;
@@ -445,6 +473,7 @@ async fn root_output_admission_is_checked_before_source_and_released_by_last_ali
     let available = cap - admission.usage().unwrap().1;
     let blocker = job.owned_buffer(available - needed + 1).unwrap();
     let err = current
+        .as_source()
         .semantic_scan(&log, Bound::Unbounded, Bound::Unbounded, limits, &job)
         .await
         .err()
@@ -455,6 +484,7 @@ async fn root_output_admission_is_checked_before_source_and_released_by_last_ali
     drop(blocker);
     let blocker = job.owned_buffer(available - needed).unwrap();
     let error = current
+        .as_source()
         .semantic_scan(&log, Bound::Unbounded, Bound::Unbounded, limits, &job)
         .await
         .err()
@@ -463,6 +493,7 @@ async fn root_output_admission_is_checked_before_source_and_released_by_last_ali
         if !message.contains("admitted buffer capacity exhausted")));
     provider.put(&map_key, map_bytes).await.unwrap();
     let page = current
+        .as_source()
         .semantic_scan(&log, Bound::Unbounded, Bound::Unbounded, limits, &job)
         .await
         .unwrap();
@@ -479,6 +510,7 @@ async fn root_output_admission_is_checked_before_source_and_released_by_last_ali
     log.shutdown().await.unwrap();
     assert!(
         current
+            .as_source()
             .semantic_scan(&log, Bound::Unbounded, Bound::Unbounded, limits, &job)
             .await
             .is_err()
@@ -510,6 +542,7 @@ async fn caller_cancellation_retains_completed_output_in_owned_task() {
     publication.submit(&log).await.unwrap();
     let current = Arc::new(fresh(&log, &first, "queue", &job).await);
     let page = current
+        .as_source()
         .semantic_scan(&log, Bound::Unbounded, Bound::Unbounded, scan_limit(), &job)
         .await
         .unwrap();
@@ -523,6 +556,7 @@ async fn caller_cancellation_retains_completed_output_in_owned_task() {
         let job = job.clone();
         tokio::spawn(async move {
             let page = current
+                .as_source()
                 .semantic_scan_next(&log, &token, scan_limit(), &job)
                 .await
                 .unwrap();
@@ -590,12 +624,14 @@ async fn missing_authenticated_map_is_never_absence_or_complete() {
     provider.delete(&key).await.unwrap();
     assert!(
         current
+            .as_source()
             .semantic_lookup(&log, b"absent", work(), &job)
             .await
             .is_err()
     );
     assert!(
         current
+            .as_source()
             .semantic_scan(&log, Bound::Unbounded, Bound::Unbounded, scan_limit(), &job)
             .await
             .is_err()
@@ -603,6 +639,7 @@ async fn missing_authenticated_map_is_never_absence_or_complete() {
     provider.put(&key, bytes).await.unwrap();
     assert!(
         current
+            .as_source()
             .semantic_lookup(&log, b"absent", work(), &job)
             .await
             .unwrap()
@@ -611,6 +648,7 @@ async fn missing_authenticated_map_is_never_absence_or_complete() {
     let mut limits = scan_limit();
     limits.rows = 2;
     let page = current
+        .as_source()
         .semantic_scan(&log, Bound::Unbounded, Bound::Unbounded, limits, &job)
         .await
         .unwrap();
@@ -619,6 +657,7 @@ async fn missing_authenticated_map_is_never_absence_or_complete() {
     let other_log = QueueNativeLog::local(dir.path(), "other".into(), options(1 << 20)).unwrap();
     other_log.shutdown().await.unwrap();
     let err = current
+        .as_source()
         .semantic_lookup(&other_log, b"absent", work(), &job)
         .await
         .err()
@@ -629,12 +668,14 @@ async fn missing_authenticated_map_is_never_absence_or_complete() {
     // Foreign ownership must win over a closed SDK error, before SDK admission.
     let (foreign, _) = bundle(&log, "foreign", &job).await;
     let page = current
+        .as_source()
         .semantic_scan(&log, Bound::Unbounded, Bound::Unbounded, scan_limit(), &job)
         .await
         .unwrap();
     let token = page.continuation().unwrap();
     assert!(
         foreign
+            .as_source()
             .semantic_scan_next(&log, &token, scan_limit(), &job)
             .await
             .is_err()
@@ -658,7 +699,7 @@ async fn bundle_identity_admission_precedes_authoritative_fence() {
     let retained = log.open(&address, &job).await.unwrap().unwrap();
     let before = log.capture(&retained).await.unwrap().head();
     let image = storage_image(&provider, "preflight").await;
-    let probe = QueueNativeAcquired::identity_charge(&job).unwrap();
+    let probe = QueueNativeCaptured::identity_charge(&job).unwrap();
     let scratch = ownership::physical_owner_bytes::<1>();
     let needed = probe.admitted_bytes() + scratch;
     drop(probe);
@@ -673,7 +714,7 @@ async fn bundle_identity_admission_precedes_authoritative_fence() {
     let blocker = job.owned_buffer(available - needed).unwrap();
     let acquired = log.acquire_bundle(namespace, &job).await.unwrap();
     assert_eq!(admission.usage().unwrap().1, cap - scratch);
-    assert_eq!(acquired.head().epoch(), before.epoch() + 1);
+    assert_eq!(acquired.as_source().head().epoch(), before.epoch() + 1);
     drop(acquired);
     drop(blocker);
     log.shutdown().await.unwrap();
@@ -704,6 +745,7 @@ async fn long_empty_value_key_charges_page_and_retained_continuation_copy() {
         work: work(),
     };
     let page = current
+        .as_source()
         .semantic_scan(&log, Bound::Unbounded, Bound::Unbounded, limits, &job)
         .await
         .unwrap();
@@ -720,6 +762,7 @@ async fn long_empty_value_key_charges_page_and_retained_continuation_copy() {
     drop(token);
     assert_eq!(admission.usage().unwrap(), held);
     let end = current
+        .as_source()
         .semantic_scan_next(&log, &alias, limits, &job)
         .await
         .unwrap();
@@ -791,7 +834,7 @@ async fn compiled_genesis_contract(log: QueueNativeLog) {
     let job = Arc::new(admission.reserve(0).unwrap());
     let foreign_job = Arc::new(admission.reserve(0).unwrap());
     let (first, record) = bundle(&log, "queue", &job).await;
-    let cut = first.source_cut(&log, &job).unwrap();
+    let cut = first.as_source().source_cut(&log, &job).unwrap();
     let checked = record.checked().unwrap();
     let QueueLogPayload::Genesis(genesis_view) = checked.view().payload() else {
         panic!()
@@ -906,14 +949,20 @@ async fn compiled_genesis_contract(log: QueueNativeLog) {
     );
     let key = QueueSourceKey::Genesis.encode().unwrap();
     let point = current
+        .as_source()
         .source_lookup(&log, &key, work(), &job)
         .await
         .unwrap();
-    let cut = current.source_cut(&log, &job).unwrap();
-    let evidence = point.evidence(&current, &log, &job).unwrap();
+    let cut = current.as_source().source_cut(&log, &job).unwrap();
+    let evidence = point.evidence(current.as_source(), &log, &job).unwrap();
     let genesis: QueueSourceGenesis =
         decode(evidence.value_for(&cut, &key).unwrap().unwrap()).unwrap();
-    let loaded = current.read(&log, 0, 4096, &job).await.unwrap().unwrap();
+    let loaded = current
+        .as_source()
+        .read(&log, 0, 4096, &job)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         genesis
             .source
@@ -928,6 +977,7 @@ async fn compiled_genesis_contract(log: QueueNativeLog) {
     for (key, value) in exact.edits() {
         assert_eq!(
             current
+                .as_source()
                 .semantic_lookup(&log, key, work(), &job)
                 .await
                 .unwrap()
@@ -939,6 +989,7 @@ async fn compiled_genesis_contract(log: QueueNativeLog) {
     let mut limits = scan_limit();
     limits.rows = 7;
     let page = current
+        .as_source()
         .semantic_scan(&log, Bound::Unbounded, Bound::Unbounded, limits, &job)
         .await
         .unwrap();
@@ -966,6 +1017,7 @@ async fn compiled_genesis_contract(log: QueueNativeLog) {
         .filter(|key| **key != QueueSourceKey::Genesis.encode().unwrap())
     {
         let value = current
+            .as_source()
             .semantic_lookup(&log, key, work(), &job)
             .await
             .unwrap()
@@ -1109,7 +1161,7 @@ async fn field_preimages_contract(log: QueueNativeLog) {
         let checked = genesis.checked().unwrap();
         let compiled = fireweed_engine::queue_source_index::compile_genesis(
             &checked,
-            first.source_cut(&log, &job).unwrap(),
+            first.as_source().source_cut(&log, &job).unwrap(),
             &definition,
             fireweed_engine::queue_source_index::QueueSourceCompileLimits {
                 edits: 6,
@@ -1139,7 +1191,7 @@ async fn field_preimages_contract(log: QueueNativeLog) {
     )
     .unwrap();
     let seed_record = fireweed_engine::queue_log_record::encode_checked_publication_record(
-        seeded.head().epoch(),
+        seeded.as_source().head().epoch(),
         seed_frame.as_bytes(),
         1 << 20,
         &job,
@@ -1215,15 +1267,20 @@ async fn field_preimages_contract(log: QueueNativeLog) {
         .unwrap();
     let current = fresh(&log, &seeded, "fields", &job).await;
     let budget = QueueNativeSourceBudget::new(
-        QueueNativeSemanticWork {
-            pages: 16000,
-            hydrated_bytes: 1 << 20,
+        QueueNativeSourceWork {
+            semantic: QueueNativeSemanticWork {
+                pages: 16000,
+                hydrated_bytes: 1 << 20,
+            },
+            record_attempts: 0,
+            hydration_reads: 0,
+            hydration_body_bytes: 0,
         },
         &job,
     )
     .unwrap();
     let reader = QueueNativeSourceReader::new(
-        &current,
+        current.as_source(),
         &log,
         &job,
         budget,
@@ -1297,7 +1354,7 @@ async fn field_preimages_contract(log: QueueNativeLog) {
             .is_err()
     );
     let target = fireweed_engine::queue_log_record::encode_checked_publication_record(
-        current.head().epoch(),
+        current.as_source().head().epoch(),
         frame.as_bytes(),
         1 << 20,
         &job,
@@ -1508,3 +1565,247 @@ async fn s3_selective_field_preimages_run_identical_contract_both_signing_modes(
 mod s3_cancellation;
 
 mod compiled;
+mod record;
+
+#[tokio::test]
+async fn captured_source_preserves_fence_and_rejects_equal_head_foreign_evidence() {
+    use fireweed_engine::queue_source_index::{
+        QueueSourceCompileLimits, QueueSourceKey, QueueSourceReader,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let log = QueueNativeLog::local(directory.path(), "captured-source".into(), options(1 << 20))
+        .unwrap();
+    let admission = QueueAdmission::new(2, 32 << 20).unwrap();
+    let job = Arc::new(admission.reserve(0).unwrap());
+    let (acquired, genesis) = bundle(&log, "captured", &job).await;
+    let checked = genesis.checked().unwrap();
+    let QueueLogPayload::Genesis(view) = checked.view().payload() else {
+        panic!()
+    };
+    let definition = view.validate_definition(&job).unwrap();
+    let read_limits = QueueNativeSourceReadLimits {
+        page: scan_limit(),
+        range_pages: 16,
+    };
+    let budget = QueueNativeSourceBudget::new(
+        QueueNativeSourceWork {
+            semantic: QueueNativeSemanticWork {
+                pages: work().pages * 100,
+                hydrated_bytes: work().hydrated_bytes * 100,
+            },
+            record_attempts: 0,
+            hydration_reads: 0,
+            hydration_body_bytes: 0,
+        },
+        &job,
+    )
+    .unwrap();
+    let original = acquired
+        .compile_and_prepare(
+            &log,
+            &genesis,
+            &definition,
+            budget.clone(),
+            QueueNativeSourcePreparationLimits {
+                compile: QueueSourceCompileLimits {
+                    edits: 100,
+                    input_bytes: 1 << 16,
+                },
+                read: read_limits,
+                prepare: edits_limit(),
+            },
+            &job,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        original.submit(&log).await.unwrap(),
+        QueueNativeSubmit::Stored(_)
+    ));
+    assert_eq!(
+        original.resolve(&log, 1).await.unwrap(),
+        QueueNativeResolution::DurableContent
+    );
+    let address = QueueAddress {
+        tenant: "tenant".into(),
+        queue: "captured".into(),
+    };
+    let namespace = acquired
+        .as_source()
+        .retained_namespace(&address, &job)
+        .unwrap();
+    let before = log.capture(&namespace).await.unwrap().head();
+    let captured = log.capture_source(namespace, &job).await.unwrap();
+    assert_eq!(captured.head(), before);
+    let other = log
+        .capture_source(captured.retained_namespace(&address, &job).unwrap(), &job)
+        .await
+        .unwrap();
+    assert_eq!(other.head(), before);
+    assert!(
+        !captured
+            .source_cut(&log, &job)
+            .unwrap()
+            .same_cut(&other.source_cut(&log, &job).unwrap())
+    );
+    // Borrowing an acquired source does not recapture or mint a new identity.
+    assert!(
+        acquired
+            .as_source()
+            .source_cut(&log, &job)
+            .unwrap()
+            .same_cut(&acquired.as_source().source_cut(&log, &job).unwrap())
+    );
+    let genesis_key = QueueSourceKey::Genesis.encode().unwrap();
+    let point = captured
+        .source_lookup(&log, &genesis_key, work(), &job)
+        .await
+        .unwrap();
+    let evidence = point.evidence(&captured, &log, &job).unwrap();
+    let cut = captured.source_cut(&log, &job).unwrap();
+    let fact: fireweed_engine::queue_source_index::QueueSourceGenesis =
+        fireweed_engine::queue_storage_layout::decode(
+            evidence
+                .value_for(&cut, &genesis_key)
+                .unwrap()
+                .expect("present genesis fact"),
+        )
+        .unwrap();
+    assert_eq!(fact.definition_pin, definition.pin());
+    assert!(point.evidence(&other, &log, &job).is_err());
+    let reader =
+        QueueNativeSourceReader::new(&captured, &log, &job, budget.clone(), read_limits).unwrap();
+    let foreign_reader =
+        QueueNativeSourceReader::new(&other, &log, &job, budget.clone(), read_limits).unwrap();
+    let range = reader.complete_range(b"", b"\xff").await.unwrap();
+    let mut count = 0;
+    reader
+        .visit_range(&range, b"", b"\xff", &mut |_| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(count, 6, "exact coupled genesis fact inventory");
+    assert!(
+        foreign_reader
+            .visit_range(&range, b"", b"\xff", &mut |_| Ok(()))
+            .is_err()
+    );
+    let page = captured
+        .semantic_scan(&log, Bound::Unbounded, Bound::Unbounded, scan_limit(), &job)
+        .await
+        .unwrap();
+    let token = page
+        .continuation()
+        .expect("genesis has more than one source fact");
+    assert!(
+        other
+            .semantic_scan_next(&log, &token, scan_limit(), &job)
+            .await
+            .is_err()
+    );
+    assert_eq!(page.rows().next().unwrap().key(), genesis_key);
+    let replay = captured
+        .semantic_scan_next(&log, &token, scan_limit(), &job)
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.rows().next().unwrap().key(),
+        QueueSourceKey::Sequence.encode().unwrap()
+    );
+    let stored = captured.read(&log, 0, 4096, &job).await.unwrap().unwrap();
+    assert_eq!(stored.bytes(), genesis.bytes());
+    let checked_stored = stored.checked().unwrap();
+    assert_eq!(
+        fact.source.resolve(&checked_stored, 0).unwrap(),
+        &stored.bytes()[checked_stored.payload_interval().unwrap()]
+    );
+    assert!(captured.read(&log, 1, 4096, &job).await.unwrap().is_none());
+    let namespace = captured.retained_namespace(&address, &job).unwrap();
+    assert_eq!(log.capture(&namespace).await.unwrap().head(), before);
+    drop((reader, foreign_reader));
+    drop((
+        namespace, stored, token, page, replay, range, point, other, captured, original, acquired,
+        definition, genesis, budget,
+    ));
+    log.shutdown().await.unwrap();
+    drop(job);
+    assert_eq!(admission.usage().unwrap(), (0, 0));
+}
+
+#[tokio::test]
+async fn captured_source_scope_and_exact_root_admission_precede_closed_sdk_dispatch() {
+    let directory = tempfile::tempdir().unwrap();
+    let other_directory = tempfile::tempdir().unwrap();
+    let log = QueueNativeLog::local(
+        directory.path(),
+        "capture-admission".into(),
+        options(1 << 20),
+    )
+    .unwrap();
+    let other_log = QueueNativeLog::local(
+        other_directory.path(),
+        "foreign-capture".into(),
+        options(1 << 20),
+    )
+    .unwrap();
+    const ROOT_BYTES: u64 = 32 << 20;
+    let admission = QueueAdmission::new(2, ROOT_BYTES).unwrap();
+    let job = Arc::new(admission.reserve(0).unwrap());
+    let foreign_job = Arc::new(admission.reserve(0).unwrap());
+    let (acquired, genesis) = bundle(&log, "captured", &job).await;
+    let address = QueueAddress {
+        tenant: "tenant".into(),
+        queue: "captured".into(),
+    };
+    log.shutdown().await.unwrap();
+    // A legitimate dispatch now has a deterministic, different failure. Scope
+    // and funding refusals must happen before that SDK boundary, not after it.
+    let identity_bytes =
+        (std::mem::size_of::<OwnedQueueBufferCharge>() + 2 * std::mem::size_of::<usize>()) as u64;
+    let owner_bytes = ownership::physical_owner_bytes::<2>();
+    for (case, remaining, expected) in [
+        (0, 0, "namespace belongs to another log"),
+        (1, 0, "captured namespace belongs to another operation"),
+        (2, identity_bytes - 1, "admitted buffer capacity exhausted"),
+        (
+            3,
+            identity_bytes + owner_bytes - 1,
+            "admitted buffer capacity exhausted",
+        ),
+        (4, identity_bytes + owner_bytes, "native execution closed"),
+    ] {
+        let baseline = admission.usage().unwrap();
+        let namespace = acquired
+            .as_source()
+            .retained_namespace(&address, &job)
+            .unwrap();
+        let occupied = admission.usage().unwrap().1;
+        let starver = job.owned_buffer(ROOT_BYTES - occupied - remaining).unwrap();
+        let starver_bytes = starver.admitted_bytes();
+        let target = if case == 0 { &other_log } else { &log };
+        let target_job = if case == 1 { &foreign_job } else { &job };
+        let error = target
+            .capture_source(namespace, target_job)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, QueueError::OutcomeUnknown(ref message) if message.contains(expected)),
+            "case {case}: {error:?}"
+        );
+        // Failed capture consumes its namespace but must release every temporary
+        // identity and owner-set allocation, including the dispatched SDK error.
+        assert_eq!(
+            admission.usage().unwrap(),
+            (baseline.0, baseline.1 + starver_bytes)
+        );
+        drop(starver);
+        assert_eq!(admission.usage().unwrap(), baseline);
+    }
+    other_log.shutdown().await.unwrap();
+    drop((acquired, genesis, job, foreign_job));
+    assert_eq!(admission.usage().unwrap(), (0, 0));
+}
+
+mod provision;

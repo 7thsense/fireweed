@@ -10,7 +10,7 @@ impl QueueNativeAcquired {
         limits: QueueNativeSourcePreparationLimits,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<QueueNativePublication> {
-        let cut = self.source_cut(log, job)?;
+        let cut = self.as_source().source_cut(log, job)?;
         // Equal epochs/offsets never substitute for the original bundle owner.
         // Reject before delegating, so no compiler read or nonrefund debit occurs.
         let record = publication.record_for(&cut, definition, job)?;

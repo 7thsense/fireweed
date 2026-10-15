@@ -8,9 +8,9 @@ ddx:
 
 The owner retired this interface direction on 2026-10-10. API-007/ADR-026 govern.
 This inventory retains evidence rather than reviving the proposed contract.
-Source: `rescue/sindri-2026-10-01/wip-main` at
-`1b65a5b731ddea052c1c5b77d9916732c09c8aae`. Before deletion, preserve that commit
-under `archive/api006-design-20261010`; the archive is historical, not a work queue.
+The retired branch has been removed. Its historical source commit
+`1b65a5b731ddea052c1c5b77d9916732c09c8aae` is retained by the
+`archive/api006-design-20261010` tag. This archive is not a work queue.
 
 ## Evidence to carry forward
 

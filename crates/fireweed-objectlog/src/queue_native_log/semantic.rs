@@ -30,6 +30,23 @@ pub struct QueueNativeSourcePreparationLimits {
     pub read: QueueNativeSourceReadLimits,
     pub prepare: QueueNativeEditLimits,
 }
+impl QueueNativeSourcePreparationLimits {
+    fn validate(self) -> QueueResult<()> {
+        self.read.validate()?;
+        if self.compile.edits == 0
+            || self.compile.input_bytes == 0
+            || self.prepare.edits == 0
+            || self.prepare.input_bytes == 0
+            || self.prepare.work.pages == 0
+            || self.prepare.work.hydrated_bytes == 0
+        {
+            return Err(unknown("source preparation limits invalid"));
+        }
+        Ok(())
+    }
+}
+mod provision;
+pub use provision::{QueueNativeGenesisIntent, QueueNativeProvisionLimits};
 #[cfg(test)]
 pub struct QueueNativeSemanticEdit<'a> {
     pub key: &'a [u8],
@@ -115,22 +132,6 @@ impl QueueNativeSemanticPage {
     }
 }
 impl QueueNativeAcquired {
-    pub(super) fn identity_charge(
-        job: &Arc<QueueReservation>,
-    ) -> QueueResult<Arc<OwnedQueueBufferCharge>> {
-        let bytes =
-            std::mem::size_of::<OwnedQueueBufferCharge>() + 2 * std::mem::size_of::<usize>();
-        Ok(Arc::new(job.owned_buffer(bytes as u64)?))
-    }
-    fn semantic_scope(&self, log: &QueueNativeLog, job: &Arc<QueueReservation>) -> QueueResult<()> {
-        if !Arc::ptr_eq(&self.log_identity, &log.identity)
-            || !self.namespace.belongs_to(job)
-            || !Arc::ptr_eq(&self.namespace.identity, &self.cut.namespace)
-        {
-            return Err(unknown("semantic namespace, cut or operation differs"));
-        }
-        Ok(())
-    }
     /// Compile every semantic fact and the checked record against this exact
     /// acquired cut, then prepare their single conditional publication. This
     /// never submits, recaptures authority, or creates a retry work allowance.
@@ -143,27 +144,23 @@ impl QueueNativeAcquired {
         limits: QueueNativeSourcePreparationLimits,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<QueueNativePublication> {
-        self.semantic_scope(log, job)?;
-        log.validate_prepare_record(&self.namespace, &self.writer, record, job)?;
+        self.source.semantic_scope(log, job)?;
+        log.validate_prepare_record(&self.source.namespace, &self.writer, record, job)?;
         let checked = record.checked()?;
         if !definition.belongs_to(job)
             || checked.view().definition_pin_bytes() != *definition.pin().as_bytes()
-            || limits.compile.edits == 0
-            || limits.compile.input_bytes == 0
-            || limits.prepare.edits == 0
-            || limits.prepare.input_bytes == 0
-            || limits.prepare.work.pages == 0
-            || limits.prepare.work.hydrated_bytes == 0
         {
             return Err(unknown("source preparation definition or limits invalid"));
         }
+        limits.validate()?;
         // Construct even for genesis: foreign ledgers and invalid read limits
         // must fail before either dispatch path allocates compiler output.
-        let reader = QueueNativeSourceReader::new(self, log, job, budget.clone(), limits.read)?;
+        let reader =
+            QueueNativeSourceReader::new(self.as_source(), log, job, budget.clone(), limits.read)?;
         let compiled = match checked.view().payload() {
             QueueLogPayload::Genesis(_) => fireweed_engine::queue_source_index::compile_genesis(
                 &checked,
-                self.source_cut(log, job)?,
+                self.source.source_cut(log, job)?,
                 definition,
                 limits.compile,
                 job,
@@ -196,7 +193,7 @@ impl QueueNativeAcquired {
         limits: QueueNativeEditLimits,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<QueueNativePublication> {
-        let cut = self.source_cut(log, job)?;
+        let cut = self.source.source_cut(log, job)?;
         compiled.verify(&cut, job)?;
         self.prepare_semantic_entries(
             log,
@@ -237,8 +234,8 @@ impl QueueNativeAcquired {
         limits: QueueNativeEditLimits,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<QueueNativePublication> {
-        self.semantic_scope(log, job)?;
-        log.validate_prepare_record(&self.namespace, &self.writer, record, job)?;
+        self.source.semantic_scope(log, job)?;
+        log.validate_prepare_record(&self.source.namespace, &self.writer, record, job)?;
         if u64::try_from(entries.len()).map_err(|_| QueueError::TooLarge)? > limits.edits {
             return Err(unknown("semantic edit count admission exhausted"));
         }
@@ -268,6 +265,10 @@ impl QueueNativeAcquired {
             .map_err(|_| QueueError::TooLarge)?
             .checked_add(input_bytes)
             .ok_or(QueueError::TooLarge)?;
+        #[cfg(test)]
+        if let Some(probe) = &log.submit_probe {
+            probe.preparing();
+        }
         let charge = log.preparation_charge(record, identity, charged_bytes, job)?;
         let references: Vec<_> = entries
             .map(|(key, value)| object_log::NativeSemanticEdit { key, value })
@@ -276,12 +277,12 @@ impl QueueNativeAcquired {
             .log
             .with_operation_owner(ownership::physical_owner([
                 charge.clone(),
-                self.semantic_identity.clone(),
-                self.namespace._charge.clone(),
+                self.source.semantic_identity.clone(),
+                self.source.namespace._charge.clone(),
             ])?)
             .prepare_with_edits(
                 &self.writer.writer,
-                &self.cut.cut,
+                &self.source.cut.cut,
                 &[NativeAppend {
                     identity,
                     payload: record.bytes(),
@@ -301,6 +302,65 @@ impl QueueNativeAcquired {
             log_identity: log.identity.clone(),
             _charge: charge,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests;
+
+/// Exact-key evidence owner, including authenticated absence. Unlike a naked
+/// Option value this retains the originating full key, bundle and Root guard.
+pub struct QueueNativeSourcePoint {
+    value: Option<QueueNativeSemanticValue>,
+    key: Vec<u8>,
+    bundle: Arc<OwnedQueueBufferCharge>,
+    _charge: OwnedQueueBufferCharge,
+}
+impl QueueNativeSourcePoint {
+    pub fn evidence<'a>(
+        &'a self,
+        acquired: &'a QueueNativeCaptured,
+        log: &QueueNativeLog,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<fireweed_engine::queue_source_index::QueueSourcePoint<'a>> {
+        acquired.semantic_scope(log, job)?;
+        if !Arc::ptr_eq(&self.bundle, &acquired.semantic_identity)
+            || !std::ptr::eq(self._charge.reservation(), job.as_ref())
+        {
+            return Err(unknown(
+                "source point belongs to another captured source or operation",
+            ));
+        }
+        Ok(acquired.source_cut(log, job)?.point_from_source(
+            &self.key,
+            self.value.as_ref().map(QueueNativeSemanticValue::bytes),
+        ))
+    }
+}
+mod reader;
+pub use reader::{
+    QueueNativeSourceBudget, QueueNativeSourceRange, QueueNativeSourceReadLimits,
+    QueueNativeSourceReader, QueueNativeSourceWork,
+};
+mod record;
+pub use record::QueueNativeSourceRecordLimits;
+
+impl QueueNativeCaptured {
+    pub(super) fn identity_charge(
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Arc<OwnedQueueBufferCharge>> {
+        let bytes =
+            std::mem::size_of::<OwnedQueueBufferCharge>() + 2 * std::mem::size_of::<usize>();
+        Ok(Arc::new(job.owned_buffer(bytes as u64)?))
+    }
+    fn semantic_scope(&self, log: &QueueNativeLog, job: &Arc<QueueReservation>) -> QueueResult<()> {
+        if !Arc::ptr_eq(&self.log_identity, &log.identity)
+            || !self.namespace.belongs_to(job)
+            || !Arc::ptr_eq(&self.namespace.identity, &self.cut.namespace)
+        {
+            return Err(unknown("semantic namespace, cut or operation differs"));
+        }
+        Ok(())
     }
     pub async fn semantic_lookup(
         &self,
@@ -425,41 +485,6 @@ impl QueueNativeAcquired {
             charge,
         })
     }
-}
-
-#[cfg(test)]
-mod tests;
-
-/// Exact-key evidence owner, including authenticated absence. Unlike a naked
-/// Option value this retains the originating full key, bundle and Root guard.
-pub struct QueueNativeSourcePoint {
-    value: Option<QueueNativeSemanticValue>,
-    key: Vec<u8>,
-    bundle: Arc<OwnedQueueBufferCharge>,
-    _charge: OwnedQueueBufferCharge,
-}
-impl QueueNativeSourcePoint {
-    pub fn evidence<'a>(
-        &'a self,
-        acquired: &'a QueueNativeAcquired,
-        log: &QueueNativeLog,
-        job: &Arc<QueueReservation>,
-    ) -> QueueResult<fireweed_engine::queue_source_index::QueueSourcePoint<'a>> {
-        acquired.semantic_scope(log, job)?;
-        if !Arc::ptr_eq(&self.bundle, &acquired.semantic_identity)
-            || !std::ptr::eq(self._charge.reservation(), job.as_ref())
-        {
-            return Err(unknown(
-                "source point belongs to another acquired bundle or operation",
-            ));
-        }
-        Ok(acquired.source_cut(log, job)?.point_from_source(
-            &self.key,
-            self.value.as_ref().map(QueueNativeSemanticValue::bytes),
-        ))
-    }
-}
-impl QueueNativeAcquired {
     pub fn source_cut<'a>(
         &'a self,
         log: &QueueNativeLog,
@@ -497,9 +522,3 @@ impl QueueNativeAcquired {
         })
     }
 }
-
-mod reader;
-pub use reader::{
-    QueueNativeSourceBudget, QueueNativeSourceRange, QueueNativeSourceReadLimits,
-    QueueNativeSourceReader,
-};

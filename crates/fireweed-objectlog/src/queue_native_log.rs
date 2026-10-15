@@ -46,9 +46,13 @@ mod semantic;
 pub use semantic::*;
 mod config;
 pub use config::{QueueNativeLogOptions, QueueNativeS3Connection, QueueNativeS3TransportOptions};
+#[cfg(test)]
+mod submit_test_probe;
 pub struct QueueNativeLog {
     identity: Arc<()>,
     log: NativeLog,
+    #[cfg(test)]
+    submit_probe: Option<Arc<submit_test_probe::SubmitProbe>>,
 }
 pub struct QueueNativeNamespace {
     namespace: NativeNamespace,
@@ -67,13 +71,18 @@ pub struct QueueNativeWriter {
     epoch: u64,
     next_offset: u64,
 }
-pub struct QueueNativeAcquired {
+/// An immutable captured cut. Capture alone does not establish valid source-map authority.
+pub struct QueueNativeCaptured {
     log_identity: Arc<()>,
     namespace: QueueNativeNamespace,
-    writer: QueueNativeWriter,
     cut: QueueNativeCut,
-    // Last Root guard outlives all retained SDK fields during destruction.
+    // This final Root guard must outlive all retained SDK fields.
     semantic_identity: Arc<OwnedQueueBufferCharge>,
+}
+pub struct QueueNativeAcquired {
+    // The writer must drop before the source's final physical owner.
+    writer: QueueNativeWriter,
+    source: QueueNativeCaptured,
 }
 pub struct QueueNativePublication {
     publication: NativePublication,
@@ -145,6 +154,8 @@ impl QueueNativeLog {
         Self {
             log,
             identity: Arc::new(()),
+            #[cfg(test)]
+            submit_probe: None,
         }
     }
     pub async fn open(
@@ -235,6 +246,36 @@ impl QueueNativeLog {
             .ok_or(QueueError::TooLarge)?;
         ownership::shared_charge(job, bytes)
     }
+    pub async fn capture_source(
+        &self,
+        namespace: QueueNativeNamespace,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<QueueNativeCaptured> {
+        self.validate_namespace(&namespace)?;
+        if !namespace.belongs_to(job) {
+            return Err(unknown("captured namespace belongs to another operation"));
+        }
+        let semantic_identity = QueueNativeCaptured::identity_charge(job)?;
+        let cut = self
+            .log
+            .with_operation_owner(ownership::physical_owner([
+                namespace._charge.clone(),
+                semantic_identity.clone(),
+            ])?)
+            .capture(&namespace.namespace)
+            .await
+            .map_err(unknown)?;
+        let cut = QueueNativeCut {
+            cut,
+            namespace: namespace.identity.clone(),
+        };
+        Ok(QueueNativeCaptured {
+            log_identity: self.identity.clone(),
+            namespace,
+            cut,
+            semantic_identity,
+        })
+    }
     pub async fn capture(&self, namespace: &QueueNativeNamespace) -> QueueResult<QueueNativeCut> {
         self.validate_namespace(namespace)?;
         Ok(QueueNativeCut {
@@ -252,12 +293,20 @@ impl QueueNativeLog {
         namespace: &QueueNativeNamespace,
     ) -> QueueResult<(QueueNativeWriter, QueueNativeCut)> {
         self.validate_namespace(namespace)?;
+        #[cfg(test)]
+        if let Some(probe) = &self.submit_probe {
+            probe.acquiring();
+        }
         let writer = self
             .log
             .with_operation_owner(ownership::physical_owner([namespace._charge.clone()])?)
             .acquire(&namespace.namespace)
             .await
             .map_err(unknown)?;
+        #[cfg(test)]
+        if let Some(probe) = &self.submit_probe {
+            probe.after_acquisition().await?;
+        }
         let cut = self
             .log
             .with_operation_owner(ownership::physical_owner([namespace._charge.clone()])?)
@@ -317,16 +366,18 @@ impl QueueNativeLog {
                 "acquisition namespace belongs to another operation",
             ));
         }
-        let semantic_identity = QueueNativeAcquired::identity_charge(job)?;
+        let semantic_identity = QueueNativeCaptured::identity_charge(job)?;
         for attempt in 0..8 {
             match self.acquire_with_cut(&namespace).await {
                 Ok((writer, cut)) => {
                     return Ok(QueueNativeAcquired {
-                        log_identity: self.identity.clone(),
-                        semantic_identity,
-                        namespace,
                         writer,
-                        cut,
+                        source: QueueNativeCaptured {
+                            log_identity: self.identity.clone(),
+                            namespace,
+                            cut,
+                            semantic_identity,
+                        },
                     });
                 }
                 Err(error) => {
@@ -378,6 +429,10 @@ impl QueueNativeLog {
         job: &Arc<QueueReservation>,
     ) -> QueueResult<QueueNativePublication> {
         self.validate_prepare_record(namespace, writer, record, job)?;
+        #[cfg(test)]
+        if let Some(probe) = &self.submit_probe {
+            probe.preparing();
+        }
         let charge = self.preparation_charge(record, identity, 0, job)?;
         let publication = self
             .log
@@ -408,20 +463,30 @@ impl QueueNativeLog {
         if !Arc::ptr_eq(&self.identity, &publication.log_identity) {
             return Err(unknown("publication belongs to another log"));
         }
-        Ok(
-            match self
-                .log
-                .with_operation_owner(ownership::physical_owner([publication._charge.clone()])?)
-                .submit(&publication.publication)
-                .await
-                .map_err(unknown)?
-            {
-                NativePublishOutcome::Stored(inner) => {
-                    QueueNativeSubmit::Stored(QueueNativeHead { inner })
-                }
-                NativePublishOutcome::Conflict => QueueNativeSubmit::Conflict,
-            },
-        )
+        let native = self
+            .log
+            .with_operation_owner(ownership::physical_owner([publication._charge.clone()])?);
+        #[cfg(test)]
+        if let Some(probe) = &self.submit_probe {
+            probe.dispatching();
+        }
+        let result = native.submit(&publication.publication).await;
+        drop(native);
+        let actual = match result.map_err(unknown)? {
+            NativePublishOutcome::Stored(inner) => {
+                QueueNativeSubmit::Stored(QueueNativeHead { inner })
+            }
+            NativePublishOutcome::Conflict => QueueNativeSubmit::Conflict,
+        };
+        #[cfg(test)]
+        if let Some(probe) = &self.submit_probe
+            && probe.lose_reply_after(&actual).await?
+        {
+            return Err(unknown(
+                "injected Root submit reply loss after actual SDK Stored",
+            ));
+        }
+        Ok(actual)
     }
     pub async fn resolve(
         &self,
@@ -551,136 +616,6 @@ impl QueueNativeLog {
             job,
         )?))
     }
-    pub async fn adopt_genesis(
-        &self,
-        namespace: &QueueNativeNamespace,
-        cut: &QueueNativeCut,
-        incoming: &AdmittedQueueDefinition,
-        hard_record_bytes: u64,
-        job: &Arc<QueueReservation>,
-    ) -> QueueResult<QueueNativeGenesis> {
-        if !incoming.belongs_to(job) || !std::ptr::eq(namespace._charge.reservation(), job.as_ref())
-        {
-            return Err(unknown("genesis definition belongs to another operation"));
-        }
-        let record = self
-            .read_admitted(namespace, cut, 0, hard_record_bytes, job)
-            .await?
-            .ok_or_else(|| unknown("selected queue has no genesis"))?;
-        let view = view_queue_log_record(record.bytes())?;
-        let QueueLogPayload::Genesis(genesis) = view.payload() else {
-            return Err(unknown("offset zero is not genesis"));
-        };
-        let definition = genesis.validate_definition(job)?;
-        if definition.schema() != incoming.schema() {
-            return Err(QueueError::DefinitionConflict);
-        }
-        drop(definition);
-        let confirmed = self.capture(namespace).await?;
-        if confirmed.head() != cut.head() {
-            return Err(unknown("genesis authority changed before confirmation"));
-        }
-        Ok(QueueNativeGenesis { record })
-    }
-    /// Internal provisioning retains each original until fresh winner adoption.
-    pub async fn provision_record(
-        &self,
-        address: &QueueAddress,
-        definition: &AdmittedQueueDefinition,
-        candidate_secret: &[u8; 32],
-        known_queue: bool,
-        hard_record_bytes: u64,
-        job: &Arc<QueueReservation>,
-    ) -> QueueResult<OwnedQueueLogRecord> {
-        if !definition.belongs_to(job) {
-            return Err(unknown("provision definition belongs to another operation"));
-        }
-        let namespace = match self.open(address, job).await? {
-            Some(namespace) => namespace,
-            None if known_queue => return Err(unknown("known queue binding missing")),
-            None => self.provision_namespace(address, job).await?,
-        };
-        let cut = self.capture(&namespace).await?;
-        if cut.head().bounds().1 > 0 {
-            return Ok(self
-                .adopt_genesis(&namespace, &cut, definition, hard_record_bytes, job)
-                .await?
-                .record);
-        }
-        if known_queue {
-            return Err(unknown("known queue has empty genesis authority"));
-        }
-        let semantic_identity = QueueNativeAcquired::identity_charge(job)?;
-        let mut acquired_parts = None;
-        for attempt in 0..8 {
-            match self.acquire_with_cut(&namespace).await {
-                Ok(parts) => {
-                    acquired_parts = Some(parts);
-                    break;
-                }
-                Err(error) => {
-                    let fresh = self.capture(&namespace).await?;
-                    if fresh.head().bounds().1 > 0 {
-                        return Ok(self
-                            .adopt_genesis(&namespace, &fresh, definition, hard_record_bytes, job)
-                            .await?
-                            .record);
-                    }
-                    if attempt == 7 {
-                        return Err(error);
-                    }
-                    tokio::task::yield_now().await;
-                }
-            }
-        }
-        let (writer, cut) =
-            acquired_parts.ok_or_else(|| unknown("bounded genesis acquisition exhausted"))?;
-        let acquired = QueueNativeAcquired {
-            log_identity: self.identity.clone(),
-            semantic_identity,
-            namespace,
-            writer,
-            cut,
-        };
-        if acquired.head().bounds().1 > 0 {
-            return Ok(self
-                .adopt_genesis(
-                    &acquired.namespace,
-                    &acquired.cut,
-                    definition,
-                    hard_record_bytes,
-                    job,
-                )
-                .await?
-                .record);
-        }
-        let record = fireweed_engine::queue_log_record::encode_checked_genesis(
-            acquired.head().epoch(),
-            address,
-            definition,
-            candidate_secret,
-            hard_record_bytes,
-            job,
-        )?;
-        let original = acquired.prepare_record(self, &record, job).await?;
-        let _ = original.submit(self).await;
-        // Never manufacture absence or a replacement after possible publication.
-        let fresh = self.capture(&acquired.namespace).await?;
-        if fresh.head().bounds().1 == 0 {
-            return Err(unknown("genesis publication remains unresolved"));
-        }
-        let winner = self
-            .adopt_genesis(
-                &acquired.namespace,
-                &fresh,
-                definition,
-                hard_record_bytes,
-                job,
-            )
-            .await?;
-        drop(original);
-        Ok(winner.record)
-    }
     pub async fn shutdown(&self) -> QueueResult<()> {
         self.log.shutdown().await.map_err(unknown)
     }
@@ -699,7 +634,7 @@ impl QueueNativePublication {
         log.resolve(self, entries).await
     }
 }
-impl QueueNativeAcquired {
+impl QueueNativeCaptured {
     /// Preserve the authenticated namespace family when advancing a retained cut.
     pub fn retained_namespace(
         &self,
@@ -717,7 +652,11 @@ impl QueueNativeAcquired {
             .namespace
             .address
             .len()
-            .checked_add(std::mem::size_of::<QueueNativeNamespace>())
+            // A retained alias can outlive the original namespace charge.
+            // Conservatively fund its shared identity Arc header independently.
+            .checked_add(
+                std::mem::size_of::<QueueNativeNamespace>() + 2 * std::mem::size_of::<usize>(),
+            )
             .ok_or(QueueError::TooLarge)?;
         let charge = ownership::shared_charge(job, u64::try_from(bytes).map_err(unknown)?)?;
         Ok(QueueNativeNamespace {
@@ -751,6 +690,11 @@ impl QueueNativeAcquired {
         log.read_admitted(&self.namespace, &self.cut, offset, hard_record_bytes, job)
             .await
     }
+}
+impl QueueNativeAcquired {
+    pub fn as_source(&self) -> &QueueNativeCaptured {
+        &self.source
+    }
     pub async fn prepare_record(
         &self,
         log: &QueueNativeLog,
@@ -758,8 +702,14 @@ impl QueueNativeAcquired {
         job: &Arc<QueueReservation>,
     ) -> QueueResult<QueueNativePublication> {
         let identity = self.record_identity(record, job)?;
-        log.prepare(&self.namespace, &self.writer, record, &identity.value, job)
-            .await
+        log.prepare(
+            &self.source.namespace,
+            &self.writer,
+            record,
+            &identity.value,
+            job,
+        )
+        .await
     }
     fn record_identity(
         &self,
@@ -792,7 +742,7 @@ impl QueueNativeAcquired {
         identity: &str,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<QueueNativePublication> {
-        log.prepare(&self.namespace, &self.writer, record, identity, job)
+        log.prepare(&self.source.namespace, &self.writer, record, identity, job)
             .await
     }
 }
@@ -829,6 +779,54 @@ mod tests {
         };
         genesis.validate_definition(job).unwrap()
     }
+    pub(super) fn provision_limits() -> QueueNativeProvisionLimits {
+        let work = QueueNativeSemanticWork {
+            pages: 4096,
+            hydrated_bytes: 16 << 20,
+        };
+        QueueNativeProvisionLimits {
+            preparation: QueueNativeSourcePreparationLimits {
+                compile: fireweed_engine::queue_source_index::QueueSourceCompileLimits {
+                    edits: 128,
+                    input_bytes: 1 << 20,
+                },
+                read: QueueNativeSourceReadLimits {
+                    page: QueueNativeScanLimits {
+                        rows: 128,
+                        output_bytes: 1 << 20,
+                        work,
+                    },
+                    range_pages: 16,
+                },
+                prepare: QueueNativeEditLimits {
+                    edits: 128,
+                    input_bytes: 1 << 20,
+                    work,
+                },
+            },
+            record: QueueNativeSourceRecordLimits {
+                payload_bytes: 4096,
+                logical_identity_bytes: 4096,
+                physical_identity_bytes: 4096,
+                frame_bytes: 8192,
+            },
+        }
+    }
+    pub(super) fn source_budget(job: &Arc<QueueReservation>) -> Arc<QueueNativeSourceBudget> {
+        QueueNativeSourceBudget::new(
+            QueueNativeSourceWork {
+                semantic: QueueNativeSemanticWork {
+                    pages: 100_000,
+                    hydrated_bytes: 1 << 30,
+                },
+                record_attempts: 100,
+                hydration_reads: 10_000,
+                hydration_body_bytes: 1 << 30,
+            },
+            job,
+        )
+        .unwrap()
+    }
     async fn genesis_race_contract(make: impl Fn() -> QueueNativeLog) {
         let address = QueueAddress {
             tenant: "tenant".into(),
@@ -857,7 +855,15 @@ mod tests {
             .provision_namespace(&address, &first_job)
             .await
             .unwrap();
-        let first_writer = first.acquire(&first_namespace).await.unwrap();
+        let first_acquired = first
+            .acquire_bundle(first_namespace, &first_job)
+            .await
+            .unwrap();
+        let first_namespace = first_acquired
+            .as_source()
+            .retained_namespace(&address, &first_job)
+            .unwrap();
+        let first_writer = &first_acquired.writer;
         let first_record = encode_checked_genesis(
             first_writer.epoch,
             &address,
@@ -867,18 +873,27 @@ mod tests {
             &first_job,
         )
         .unwrap();
-        let original = first
-            .prepare(
-                &first_namespace,
-                &first_writer,
+        let original = first_acquired
+            .compile_and_prepare(
+                &first,
                 &first_record,
-                "first-genesis",
+                &first_definition,
+                source_budget(&first_job),
+                provision_limits().preparation,
                 &first_job,
             )
             .await
             .unwrap();
         let second_namespace = second.open(&address, &second_job).await.unwrap().unwrap();
-        let second_writer = second.acquire(&second_namespace).await.unwrap();
+        let second_acquired = second
+            .acquire_bundle(second_namespace, &second_job)
+            .await
+            .unwrap();
+        let second_namespace = second_acquired
+            .as_source()
+            .retained_namespace(&address, &second_job)
+            .unwrap();
+        let second_writer = &second_acquired.writer;
         let second_record = encode_checked_genesis(
             second_writer.epoch,
             &address,
@@ -888,12 +903,13 @@ mod tests {
             &second_job,
         )
         .unwrap();
-        let winner = second
-            .prepare(
-                &second_namespace,
-                &second_writer,
+        let winner = second_acquired
+            .compile_and_prepare(
+                &second,
                 &second_record,
-                "second-genesis",
+                &second_definition,
+                source_budget(&second_job),
+                provision_limits().preparation,
                 &second_job,
             )
             .await
@@ -928,7 +944,7 @@ mod tests {
             first
                 .prepare(
                     &first_namespace,
-                    &second_writer,
+                    second_writer,
                     &first_record,
                     "foreign-writer",
                     &first_job
@@ -936,17 +952,32 @@ mod tests {
                 .await,
             Err(QueueError::OutcomeUnknown(_))
         ));
+        let source = first
+            .capture_source(
+                first_acquired
+                    .as_source()
+                    .retained_namespace(&address, &first_job)
+                    .unwrap(),
+                &first_job,
+            )
+            .await
+            .unwrap();
+        let budget = source_budget(&first_job);
         let adopted = first
             .adopt_genesis(
-                &first_namespace,
-                &first_cut,
+                &source,
                 &first_definition,
-                4096,
+                budget.clone(),
+                provision_limits(),
                 &first_job,
             )
             .await
             .unwrap();
         assert_eq!(genesis_secret(&adopted), [22; 32]);
+        assert_eq!(
+            genesis_definition(&adopted, &first_job).schema(),
+            first_definition.schema()
+        );
         let mut different = schema.clone();
         different.max_attempts += 1;
         let different =
@@ -954,7 +985,7 @@ mod tests {
                 .unwrap();
         assert!(matches!(
             first
-                .adopt_genesis(&first_namespace, &first_cut, &different, 4096, &first_job)
+                .adopt_genesis(&source, &different, budget, provision_limits(), &first_job)
                 .await,
             Err(QueueError::DefinitionConflict)
         ));
@@ -1002,8 +1033,18 @@ mod tests {
         let definition =
             AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), &job).unwrap();
         assert!(matches!(
-            log.provision_record(&address, &definition, &[9; 32], true, 4096, &job)
-                .await,
+            log.provision_record(
+                &address,
+                QueueNativeGenesisIntent {
+                    definition: &definition,
+                    candidate_secret: &[9; 32],
+                    known_queue: true
+                },
+                source_budget(&job),
+                provision_limits(),
+                &job
+            )
+            .await,
             Err(QueueError::OutcomeUnknown(_))
         ));
         assert!(
@@ -1028,8 +1069,18 @@ mod tests {
             ));
         }
         assert!(matches!(
-            log.provision_record(&address, &definition, &[9; 32], true, 4096, &job)
-                .await,
+            log.provision_record(
+                &address,
+                QueueNativeGenesisIntent {
+                    definition: &definition,
+                    candidate_secret: &[9; 32],
+                    known_queue: true
+                },
+                source_budget(&job),
+                provision_limits(),
+                &job
+            )
+            .await,
             Err(QueueError::OutcomeUnknown(_))
         ));
         assert_eq!(log.capture(&namespace).await.unwrap().head(), before);
@@ -1076,7 +1127,7 @@ mod tests {
         let namespace = log.provision_namespace(&address, &job).await.unwrap();
         let first = log.acquire_bundle(namespace, &job).await.unwrap();
         let record = encode_checked_genesis(
-            first.head().epoch(),
+            first.as_source().head().epoch(),
             &address,
             &definition,
             &[7; 32],
@@ -1089,7 +1140,10 @@ mod tests {
             log.submit(&original).await.unwrap(),
             QueueNativeSubmit::Stored(_)
         ));
-        let retained = first.retained_namespace(&address, &job).unwrap();
+        let retained = first
+            .as_source()
+            .retained_namespace(&address, &job)
+            .unwrap();
         let captured = log.capture(&retained).await.unwrap();
         let keys = provider.list("rewrite").await.unwrap();
         let head_key = keys.iter().find(|key| key.ends_with("/head")).unwrap();
@@ -1170,7 +1224,7 @@ mod tests {
             let namespace = log.provision_namespace(&address, &job).await.unwrap();
             let acquired = log.acquire_bundle(namespace, &job).await.unwrap();
             let record = encode_checked_genesis(
-                acquired.head().epoch(),
+                acquired.as_source().head().epoch(),
                 &address,
                 &definition,
                 &[17; 32],
@@ -1272,7 +1326,7 @@ mod tests {
         let owned = tokio::spawn(async move {
             started.send(()).unwrap();
             resume.await.unwrap();
-            let result = acquired.read(&log, 0, 256 << 20, &job).await;
+            let result = acquired.as_source().read(&log, 0, 256 << 20, &job).await;
             assert!(matches!(&result, Ok(None)));
             log.shutdown().await.unwrap();
             drop((acquired, job));
@@ -1451,17 +1505,26 @@ mod tests {
         drop(retained);
         assert_eq!(retained_alias.as_ref(), record.bytes());
         drop(retained_alias);
-        let genesis = transport
-            .adopt_genesis(&namespace, &cut, &definition, 4096, &job)
+        let source = transport
+            .capture_source(transport.open(&address, &job).await.unwrap().unwrap(), &job)
             .await
             .unwrap();
-        assert_eq!(genesis_secret(&genesis), [37; 32]);
-        assert_eq!(genesis_definition(&genesis, &job).raw(), definition.raw());
-        assert_eq!(genesis.record.bytes(), record.bytes());
+        assert!(matches!(
+            transport
+                .adopt_genesis(
+                    &source,
+                    &definition,
+                    source_budget(&job),
+                    provision_limits(),
+                    &job
+                )
+                .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
         assert_eq!(cut.head().bounds(), (0, 1));
         transport.shutdown().await.unwrap();
         drop((
-            transport, namespace, writer, original, cut, empty, refreshed, genesis,
+            transport, namespace, writer, original, cut, empty, refreshed, source,
         ));
         let fresh = QueueNativeLog::new(
             NativeLog::local(
@@ -1473,16 +1536,29 @@ mod tests {
         );
         let namespace = fresh.open(&address, &job).await.unwrap().unwrap();
         let cut = fresh.capture(&namespace).await.unwrap();
-        let genesis = fresh
-            .adopt_genesis(&namespace, &cut, &definition, 4096, &job)
+        let source = fresh
+            .capture_source(fresh.open(&address, &job).await.unwrap().unwrap(), &job)
             .await
             .unwrap();
-        assert_eq!(genesis_secret(&genesis), [37; 32]);
-        drop(genesis);
+        assert_eq!(source.head(), cut.head());
+        assert!(matches!(
+            fresh
+                .adopt_genesis(
+                    &source,
+                    &definition,
+                    source_budget(&job),
+                    provision_limits(),
+                    &job
+                )
+                .await,
+            Err(QueueError::OutcomeUnknown(_))
+        ));
+        drop(source);
         let acquired = fresh.acquire_bundle(namespace, &job).await.unwrap();
-        assert_eq!(acquired.head().bounds(), (0, 1));
+        assert_eq!(acquired.as_source().head().bounds(), (0, 1));
         assert_eq!(
             acquired
+                .as_source()
                 .read(&fresh, 0, 256 << 20, &job)
                 .await
                 .unwrap()

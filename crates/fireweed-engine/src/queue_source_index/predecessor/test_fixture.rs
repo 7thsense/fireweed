@@ -7,7 +7,7 @@ use crate::{
     queue_planner::RecordSnapshot,
     queue_publication::{BodyCommandRef, EffectRef},
     queue_schema_codec::encode_definition,
-    queue_source_index::{QueueSourcePayload, QueueSourceSpan},
+    queue_source_index::{QueueSourceGenesis, QueueSourcePayload, QueueSourceSpan},
 };
 use fireweed_core::queue_contract::*;
 

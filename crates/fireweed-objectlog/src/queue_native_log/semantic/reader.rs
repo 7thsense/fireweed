@@ -6,14 +6,22 @@ use std::sync::Mutex;
 /// One non-reusable ledger for an entire compilation request, including retries.
 /// Keep and share this owner when constructing readers for that request.
 pub struct QueueNativeSourceBudget {
-    remaining: Mutex<QueueNativeSemanticWork>,
+    remaining: Mutex<QueueNativeSourceWork>,
     _charge: OwnedQueueBufferCharge,
 }
+/// Distinct cumulative work limits for the SAME request, including failed reads
+/// and retries. Record attempts each bound an SDK lookup of at most 17 pages;
+/// hydration counts bound SDK object reads/body caps, excluding transport retries.
+/// Root and SDK memory pools are admitted independently of this work ledger.
+#[derive(Clone, Copy)]
+pub struct QueueNativeSourceWork {
+    pub semantic: QueueNativeSemanticWork,
+    pub record_attempts: u64,
+    pub hydration_reads: u64,
+    pub hydration_body_bytes: u64,
+}
 impl QueueNativeSourceBudget {
-    pub fn new(
-        work: QueueNativeSemanticWork,
-        job: &Arc<QueueReservation>,
-    ) -> QueueResult<Arc<Self>> {
+    pub fn new(work: QueueNativeSourceWork, job: &Arc<QueueReservation>) -> QueueResult<Arc<Self>> {
         let bytes = std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>();
         let charge = job.owned_buffer(bytes as u64)?;
         Ok(Arc::new(Self {
@@ -26,11 +34,14 @@ impl QueueNativeSourceBudget {
             .remaining
             .lock()
             .map_err(|_| unknown("source work ledger poisoned"))?;
-        let pages = remaining.pages.checked_sub(work.pages);
-        let bytes = remaining.hydrated_bytes.checked_sub(work.hydrated_bytes);
+        let pages = remaining.semantic.pages.checked_sub(work.pages);
+        let bytes = remaining
+            .semantic
+            .hydrated_bytes
+            .checked_sub(work.hydrated_bytes);
         match (pages, bytes) {
             (Some(pages), Some(hydrated_bytes)) => {
-                *remaining = QueueNativeSemanticWork {
+                remaining.semantic = QueueNativeSemanticWork {
                     pages,
                     hydrated_bytes,
                 };
@@ -38,6 +49,71 @@ impl QueueNativeSourceBudget {
             }
             _ => Err(unknown("request source work admission exhausted")),
         }
+    }
+    pub(super) fn scope(&self, job: &QueueReservation) -> QueueResult<()> {
+        if !std::ptr::eq(self._charge.reservation(), job) {
+            return Err(unknown("source work ledger belongs to another operation"));
+        }
+        Ok(())
+    }
+    /// Nonmutating entry preflight for mandatory adoption. This is not a
+    /// reservation: exact nonrefundable grants still occur at dispatch, and
+    /// protocol metadata has its own fixed bounds. No write allowance is needed.
+    pub(super) fn ensure_adoption_capacity(
+        &self,
+        work: QueueNativeSemanticWork,
+    ) -> QueueResult<()> {
+        let remaining = self
+            .remaining
+            .lock()
+            .map_err(|_| unknown("source work ledger poisoned"))?;
+        if remaining.semantic.pages < work.pages
+            || remaining.semantic.hydrated_bytes < work.hydrated_bytes
+            || remaining.record_attempts == 0
+            || remaining.hydration_reads == 0
+            || remaining.hydration_body_bytes == 0
+        {
+            return Err(unknown("request source adoption admission exhausted"));
+        }
+        Ok(())
+    }
+    pub(super) fn grant_record_attempt(&self) -> QueueResult<()> {
+        let mut remaining = self
+            .remaining
+            .lock()
+            .map_err(|_| unknown("source work ledger poisoned"))?;
+        remaining.record_attempts = remaining
+            .record_attempts
+            .checked_sub(1)
+            .ok_or_else(|| unknown("request record attempts exhausted"))?;
+        Ok(())
+    }
+    pub(super) fn grant_hydration(
+        &self,
+        requirements: object_log::NativeReadRequirements,
+    ) -> QueueResult<()> {
+        let mut remaining = self
+            .remaining
+            .lock()
+            .map_err(|_| unknown("source work ledger poisoned"))?;
+        let reads = remaining
+            .hydration_reads
+            .checked_sub(requirements.hydration_reads());
+        let bytes = remaining
+            .hydration_body_bytes
+            .checked_sub(requirements.hydration_bytes());
+        match (reads, bytes) {
+            (Some(reads), Some(bytes)) => {
+                remaining.hydration_reads = reads;
+                remaining.hydration_body_bytes = bytes;
+                Ok(())
+            }
+            _ => Err(unknown("request record hydration exhausted")),
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn remaining_work(&self) -> QueueNativeSourceWork {
+        *self.remaining.lock().unwrap()
     }
 }
 
@@ -48,8 +124,21 @@ pub struct QueueNativeSourceReadLimits {
     pub page: QueueNativeScanLimits,
     pub range_pages: usize,
 }
+impl QueueNativeSourceReadLimits {
+    pub(super) fn validate(self) -> QueueResult<()> {
+        if self.range_pages == 0
+            || self.page.output_bytes == 0
+            || self.page.rows == 0
+            || self.page.work.pages == 0
+            || self.page.work.hydrated_bytes == 0
+        {
+            return Err(unknown("source read limits invalid"));
+        }
+        Ok(())
+    }
+}
 pub struct QueueNativeSourceReader<'a> {
-    acquired: &'a QueueNativeAcquired,
+    source: &'a QueueNativeCaptured,
     log: &'a QueueNativeLog,
     job: &'a Arc<QueueReservation>,
     budget: Arc<QueueNativeSourceBudget>,
@@ -64,24 +153,17 @@ pub struct QueueNativeSourceRange {
 }
 impl<'a> QueueNativeSourceReader<'a> {
     pub fn new(
-        acquired: &'a QueueNativeAcquired,
+        source: &'a QueueNativeCaptured,
         log: &'a QueueNativeLog,
         job: &'a Arc<QueueReservation>,
         budget: Arc<QueueNativeSourceBudget>,
         limits: QueueNativeSourceReadLimits,
     ) -> QueueResult<Self> {
-        acquired.semantic_scope(log, job)?;
-        if !std::ptr::eq(budget._charge.reservation(), job.as_ref())
-            || limits.range_pages == 0
-            || limits.page.output_bytes == 0
-            || limits.page.rows == 0
-            || limits.page.work.pages == 0
-            || limits.page.work.hydrated_bytes == 0
-        {
-            return Err(unknown("source reader scope or limits invalid"));
-        }
+        source.semantic_scope(log, job)?;
+        budget.scope(job)?;
+        limits.validate()?;
         Ok(Self {
-            acquired,
+            source,
             log,
             job,
             budget,
@@ -131,16 +213,16 @@ impl QueueSourceReader for QueueNativeSourceReader<'_> {
     type Point = QueueNativeSourcePoint;
     type Range = QueueNativeSourceRange;
     fn cut(&self) -> QueueResult<QueueSourceCut<'_>> {
-        self.acquired.source_cut(self.log, self.job)
+        self.source.source_cut(self.log, self.job)
     }
     async fn lookup(&self, full_key: &[u8]) -> QueueResult<Self::Point> {
         self.budget.grant(self.limits.page.work)?;
-        self.acquired
+        self.source
             .source_lookup(self.log, full_key, self.limits.page.work, self.job)
             .await
     }
     fn point<'a>(&'a self, owner: &'a Self::Point) -> QueueResult<QueueSourcePoint<'a>> {
-        owner.evidence(self.acquired, self.log, self.job)
+        owner.evidence(self.source, self.log, self.job)
     }
     async fn complete_range(&self, lower: &[u8], upper: &[u8]) -> QueueResult<Self::Range> {
         if lower >= upper {
@@ -161,12 +243,12 @@ impl QueueSourceReader for QueueNativeSourceReader<'_> {
             pages: Vec::with_capacity(self.limits.range_pages),
             lower: lower.to_vec(),
             upper: upper.to_vec(),
-            bundle: self.acquired.semantic_identity.clone(),
+            bundle: self.source.semantic_identity.clone(),
             _charge: charge,
         };
         self.budget.grant(self.limits.page.work)?;
         let mut page = self
-            .acquired
+            .source
             .semantic_scan(
                 self.log,
                 Bound::Included(lower),
@@ -180,7 +262,7 @@ impl QueueSourceReader for QueueNativeSourceReader<'_> {
             let continuation = if complete { None } else { page.continuation() };
             range.pages.push(page);
             if complete {
-                range.validate(&self.acquired.semantic_identity, self.job, lower, upper)?;
+                range.validate(&self.source.semantic_identity, self.job, lower, upper)?;
                 return Ok(range);
             }
             if range.pages.len() == self.limits.range_pages {
@@ -190,7 +272,7 @@ impl QueueSourceReader for QueueNativeSourceReader<'_> {
                 continuation.ok_or_else(|| unknown("source range continuation missing"))?;
             self.budget.grant(self.limits.page.work)?;
             page = self
-                .acquired
+                .source
                 .semantic_scan_next(self.log, &continuation, self.limits.page, self.job)
                 .await?;
         }
@@ -202,7 +284,7 @@ impl QueueSourceReader for QueueNativeSourceReader<'_> {
         upper: &[u8],
         visitor: &mut dyn for<'a> FnMut(QueueSourcePoint<'a>) -> QueueResult<()>,
     ) -> QueueResult<()> {
-        owner.validate(&self.acquired.semantic_identity, self.job, lower, upper)?;
+        owner.validate(&self.source.semantic_identity, self.job, lower, upper)?;
         let cut = self.cut()?;
         for page in &owner.pages {
             for row in page.inner.rows() {
@@ -215,11 +297,11 @@ impl QueueSourceReader for QueueNativeSourceReader<'_> {
 
 #[cfg(test)]
 pub(super) async fn reader_contract(
-    acquired: &QueueNativeAcquired,
+    source: &QueueNativeCaptured,
     log: &QueueNativeLog,
     job: &Arc<QueueReservation>,
     foreign: &Arc<QueueReservation>,
-    other: &QueueNativeAcquired,
+    other: &QueueNativeCaptured,
     admission: &Arc<fireweed_engine::queue_admission::QueueAdmission>,
 ) {
     let work = QueueNativeSemanticWork {
@@ -236,17 +318,22 @@ pub(super) async fn reader_contract(
     };
     let budget = |calls| {
         QueueNativeSourceBudget::new(
-            QueueNativeSemanticWork {
-                pages: work.pages * calls,
-                hydrated_bytes: work.hydrated_bytes * calls,
+            QueueNativeSourceWork {
+                semantic: QueueNativeSemanticWork {
+                    pages: work.pages * calls,
+                    hydrated_bytes: work.hydrated_bytes * calls,
+                },
+                record_attempts: 0,
+                hydration_reads: 0,
+                hydration_body_bytes: 0,
             },
             job,
         )
         .unwrap()
     };
     let shared = budget(2);
-    let reader = QueueNativeSourceReader::new(acquired, log, job, shared.clone(), limits).unwrap();
-    let retry = QueueNativeSourceReader::new(acquired, log, job, shared.clone(), limits).unwrap();
+    let reader = QueueNativeSourceReader::new(source, log, job, shared.clone(), limits).unwrap();
+    let retry = QueueNativeSourceReader::new(source, log, job, shared.clone(), limits).unwrap();
     let present = reader.lookup(b"a").await.unwrap();
     let absent = retry.lookup(b"absent").await.unwrap();
     assert_eq!(
@@ -266,11 +353,11 @@ pub(super) async fn reader_contract(
         None
     );
     assert!(reader.lookup(b"a").await.is_err()); // successful calls share one ledger
-    assert!(QueueNativeSourceReader::new(acquired, log, foreign, shared, limits).is_err());
+    assert!(QueueNativeSourceReader::new(source, log, foreign, shared, limits).is_err());
     let foreign_reader = QueueNativeSourceReader::new(other, log, job, budget(8), limits).unwrap();
     assert!(foreign_reader.point(&present).is_err());
 
-    let reader = QueueNativeSourceReader::new(acquired, log, job, budget(8), limits).unwrap();
+    let reader = QueueNativeSourceReader::new(source, log, job, budget(8), limits).unwrap();
     let range = reader.complete_range(b"a", b"z").await.unwrap();
     assert_eq!(range.pages.len(), 4); // includes exact-boundary empty Complete
     let mut seen = Vec::new();
@@ -317,7 +404,7 @@ pub(super) async fn reader_contract(
     );
     assert_eq!(visits, 0); // missing completion cannot expose a prefix
 
-    let reader = QueueNativeSourceReader::new(acquired, log, job, budget(8), limits).unwrap();
+    let reader = QueueNativeSourceReader::new(source, log, job, budget(8), limits).unwrap();
     let interior = reader.complete_range(b"b\0full", b"c").await.unwrap();
     let mut seen = Vec::new();
     reader
@@ -341,14 +428,14 @@ pub(super) async fn reader_contract(
     assert_eq!(visits, 0);
 
     // Three successful page reads exhaust the aggregate grant before Complete.
-    let reader = QueueNativeSourceReader::new(acquired, log, job, budget(3), limits).unwrap();
+    let reader = QueueNativeSourceReader::new(source, log, job, budget(3), limits).unwrap();
     assert!(reader.complete_range(b"a", b"z").await.is_err());
     assert!(reader.lookup(b"a").await.is_err());
     let short = QueueNativeSourceReadLimits {
         range_pages: 3,
         ..limits
     };
-    let reader = QueueNativeSourceReader::new(acquired, log, job, budget(8), short).unwrap();
+    let reader = QueueNativeSourceReader::new(source, log, job, budget(8), short).unwrap();
     assert!(reader.complete_range(b"a", b"z").await.is_err());
 
     // Exactly the container grant reaches the per-page grant; N-1 fails before
@@ -359,7 +446,7 @@ pub(super) async fn reader_contract(
     for spare in [container - 1, container] {
         let ledger = budget(8);
         let reader =
-            QueueNativeSourceReader::new(acquired, log, job, ledger.clone(), limits).unwrap();
+            QueueNativeSourceReader::new(source, log, job, ledger.clone(), limits).unwrap();
         let before = admission.usage().unwrap();
         let padding = job.owned_buffer((32 << 20) - before.1 - spare).unwrap();
         let full = admission.usage().unwrap();
@@ -367,13 +454,13 @@ pub(super) async fn reader_contract(
         assert_eq!(admission.usage().unwrap(), full);
         let remaining = *ledger.remaining.lock().unwrap();
         assert_eq!(
-            remaining.pages,
+            remaining.semantic.pages,
             work.pages * if spare == container { 7 } else { 8 }
         );
         drop(padding);
         assert_eq!(admission.usage().unwrap(), before);
     }
-    let reader = QueueNativeSourceReader::new(acquired, log, job, budget(8), limits).unwrap();
+    let reader = QueueNativeSourceReader::new(source, log, job, budget(8), limits).unwrap();
     let before = admission.usage().unwrap();
     let owned_range = reader.complete_range(b"a", b"z").await.unwrap();
     assert!(admission.usage().unwrap().1 > before.1);
@@ -392,11 +479,23 @@ pub(super) async fn reader_contract(
         },
         ..limits
     };
-    let tiny_budget = QueueNativeSourceBudget::new(tiny, job).unwrap();
+    let tiny_budget = QueueNativeSourceBudget::new(
+        QueueNativeSourceWork {
+            semantic: tiny,
+            record_attempts: 0,
+            hydration_reads: 0,
+            hydration_body_bytes: 0,
+        },
+        job,
+    )
+    .unwrap();
     let reader =
-        QueueNativeSourceReader::new(acquired, log, job, tiny_budget.clone(), tiny_limits).unwrap();
+        QueueNativeSourceReader::new(source, log, job, tiny_budget.clone(), tiny_limits).unwrap();
     assert!(reader.lookup(b"a").await.is_err());
     let remaining = *tiny_budget.remaining.lock().unwrap();
-    assert_eq!((remaining.pages, remaining.hydrated_bytes), (0, 0));
+    assert_eq!(
+        (remaining.semantic.pages, remaining.semantic.hydrated_bytes),
+        (0, 0)
+    );
     assert!(reader.lookup(b"a").await.is_err());
 }

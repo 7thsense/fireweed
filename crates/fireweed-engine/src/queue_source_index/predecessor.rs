@@ -15,8 +15,8 @@ mod record_edits;
 pub use record_edits::{QueueSourceRecordEditAccumulator, QueueSourceRecordEdits};
 
 use super::{
-    QueueSourceCut, QueueSourceFields, QueueSourceGenesis, QueueSourceKey, QueueSourceLive,
-    QueueSourceReader, QueueSourceRecord, load_command_fields,
+    QueueSourceCut, QueueSourceFields, QueueSourceKey, QueueSourceLive, QueueSourceReader,
+    QueueSourceRecord, load_command_fields,
 };
 use crate::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
@@ -98,10 +98,7 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
             output_quota: None,
             _charge: charge,
         };
-        let genesis: QueueSourceGenesis = context
-            .fixed(QueueSourceKey::Genesis)
-            .await?
-            .ok_or_else(|| unknown("source genesis fact missing"))?;
+        let genesis = super::genesis::load_source_genesis_at(reader, cut, job).await?;
         if genesis.definition_pin != definition.pin()
             || genesis.source.log_offset() != 0
             || genesis.source.byte_length() == 0
@@ -310,7 +307,9 @@ pub(super) mod tests {
         queue_planner::{RecordIdentity, RecordSnapshot, plan_commit_group},
         queue_publication::{BodyCommandRef, EffectRef, PublicationReceipt, encode_publication},
         queue_schema_codec::encode_definition,
-        queue_source_index::{QueueSourcePayload, QueueSourcePoint, QueueSourceSpan},
+        queue_source_index::{
+            QueueSourceGenesis, QueueSourcePayload, QueueSourcePoint, QueueSourceSpan,
+        },
     };
     use fireweed_core::queue_contract::*;
     use std::collections::BTreeMap;

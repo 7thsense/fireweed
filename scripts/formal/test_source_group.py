@@ -15,9 +15,12 @@ class SourceGroupGateTests(unittest.TestCase):
         self.assertTrue(baseline['complete'])
         self.assertGreater(baseline['states'], len(gate.model.CASES))
         self.assertEqual(set(baseline['completed_witnesses']), set(gate.WITNESSES))
-        self.assertEqual({c['fault'] for c in self.report['negative_controls']}, set(gate.model.FAULTS) | set(gate.model.PUBLICATION_FAULTS))
+        self.assertEqual({c['fault'] for c in self.report['negative_controls']}, set(gate.model.FAULTS) | set(gate.model.PUBLICATION_FAULTS) | set(gate.model.READ_FAULTS) | set(gate.model.PROVISION_FAULTS))
         for control in self.report['negative_controls']:
-            spec = gate.model.SourceGroup if control['fault'] in gate.model.FAULTS else gate.model.SourceGroupPublication
+            spec = (gate.model.SourceGroup if control['fault'] in gate.model.FAULTS else
+                    gate.model.SourceGroupPublication if control['fault'] in gate.model.PUBLICATION_FAULTS
+                    else gate.model.SourceRecordRead if control['fault'] in gate.model.READ_FAULTS
+                    else gate.model.CoupledGenesisProvision)
             gate.helper.replay(spec(control['fault']), control['trace'], control['property'])
     def test_publication_boundary_witnesses_and_forged_preparation(self):
         from dataclasses import replace
@@ -39,6 +42,127 @@ class SourceGroupGateTests(unittest.TestCase):
             {'encoded':False}, {'binding_verified':False}, {'compiler_work':False}, {'acknowledged':True}):
             forged = replace(state, **missing)
             self.assertIsNotNone(model.violation(state, 'Renamed', forged), missing)
+
+    def test_record_shared_ledger_and_retained_alias_witnesses(self):
+        from dataclasses import replace
+        report = self.report['baseline'][2]
+        self.assertTrue(report['complete'])
+        self.assertEqual(set(report['completed_witnesses']), set(gate.READ_WITNESSES))
+        for name, witness in report['completed_witnesses'].items():
+            state = witness['trace'][-1]['state']
+            self.assertEqual((state['phase'], state['credit'], state['semantic']), ('done', 0, 7))
+            events = [tuple(event) for event in state['events']]
+            if name in ('reads_one_short', 'bytes_one_short'):
+                self.assertNotIn(('grant', 0), events)
+                self.assertNotIn(('grant', 1), events)
+            else:
+                self.assertIn(('plan', 0), events)
+                self.assertIn(('plan', 1), events)
+                self.assertIn(('alias', 1), events)
+            if name == 'cancel_then_retry':
+                pending = next(row['state'] for row in witness['trace']
+                    if row['action'] == 'CancelCallerPhysicalStillRunning')
+                self.assertEqual((pending['credit'], pending['attempts'], pending['reads'], pending['body']),
+                    (9, 1, 2, 5))
+            if name == 'retained_aliases':
+                retained = next(row['state'] for row in reversed(witness['trace'])
+                    if row['action'] == 'PhysicalRetiresAliasSurvives')
+                self.assertEqual(retained['credit'], 18)
+        for name, witness in report['completed_witnesses'].items():
+            row = witness['trace'][-1]['state']
+            state = gate.model.ReadState(**{**row, 'case':tuple(row['case']),
+                'events':tuple(tuple(event) for event in row['events'])})
+            case = gate.READ_WITNESSES[name]
+            self.assertTrue(gate.completed_record_witness(state, case))
+            for i in range(len(state.events)):
+                self.assertFalse(gate.completed_record_witness(
+                    replace(state, events=state.events[:i]+state.events[i+1:]), case))
+        model = gate.model.SourceRecordRead()
+        state = gate.model.ReadState(case=('same',2,4,10,'success'), phase='next',
+            attempts=1, reads=2, body=5, credit=9,
+            events=(('plan',0),('grant',0),('fund',0),('hydrate',0),('retire',0),('alias',0)))
+        self.assertIsNone(model.violation(state, 'Renamed', state))
+        self.assertEqual(model.violation(state, 'Renamed', replace(state, phase='done')), 'R-OWNER')
+        empty_done = gate.model.ReadState(case=('same',2,4,10,'success'),
+            phase='done', attempts=2, reads=4, body=10)
+        self.assertEqual(model.violation(state, 'Renamed', empty_done), 'R-OWNER')
+        forged_alias = gate.model.ReadState(case=('same',2,4,10,'success'),
+            attempts=2, reads=4, body=10, events=(('alias',0),))
+        self.assertEqual(model.violation(state, 'Renamed', forged_alias), 'R-AUTHORITY')
+        pending = replace(state, events=state.events[:4])
+        self.assertIsNone(model.violation(state, 'Renamed', pending))
+        early_release = replace(pending, credit=0, events=pending.events+(('release',0),))
+        self.assertEqual(model.violation(pending, 'Renamed', early_release), 'R-OWNER')
+        live_alias_release = replace(state, credit=0, events=state.events+(('release',0),))
+        self.assertEqual(model.violation(state, 'Renamed', live_alias_release), 'R-OWNER')
+        for missing in range(5):
+            forged = replace(state, events=state.events[:missing]+state.events[missing+1:])
+            self.assertIsNotNone(model.violation(state, 'Renamed', forged))
+        for changes, expected in (({'attempts':2},'R-WORK'), ({'reads':4},'R-WORK'),
+                ({'body':10},'R-WORK'), ({'credit':3},'R-OWNER'),
+                ({'semantic':8},'R-SEMANTIC'), ({'acknowledged':True},'R-ACK'),
+                ({'case':('same',2,4,10,'malformed')},'R-AUTHORITY')):
+            self.assertEqual(model.violation(state, 'Renamed', replace(state, **changes)), expected)
+
+    def test_genesis_history_oracle_witnesses_and_forged_success(self):
+        from dataclasses import replace
+        report = self.report['baseline'][3]
+        self.assertTrue(report['complete'])
+        self.assertEqual(set(report['completed_witnesses']),set(gate.model.PROVISION_CASES))
+        model = gate.model.CoupledGenesisProvision()
+        for name,case in gate.model.PROVISION_CASES.items():
+            state = next(s for _,s in model.transitions(model.initial) if s.case == name)
+            while state.phase != 'done': state = list(model.transitions(state))[0][1]
+            self.assertTrue(gate.completed_genesis_witness(state,case),name)
+            self.assertIsNone(model.violation(state,'Renamed',state))
+            for i in range(len(state.events)):
+                self.assertFalse(gate.completed_genesis_witness(replace(state,
+                    events=state.events[:i]+state.events[i+1:]),case),(name,i))
+            self.assertFalse(gate.completed_genesis_witness(replace(state,
+                events=state.events+('open',)),case),name)
+            if 'possible' in state.events:
+                self.assertEqual(model.violation(state,'Renamed',replace(state,
+                    possible_submit=False,original_live=False)),'GP-ORIGINAL')
+            if name == 'known_missing':
+                forged = replace(state,history=(gate.model.GENESIS_A,),remaining=1,fences=1,
+                    possible_submit=True,original_live=True,
+                    events=('preflight','open','empty','acquire','grant-write','possible','cas','reply-lost'))
+                self.assertEqual(model.violation(state,'Renamed',forged),'GP-INITIAL')
+            if name == 'delayed_commit_after_empty':
+                trace = report['completed_witnesses'][name]['trace']
+                returned = next(row['state'] for row in trace if row['action'] == 'ReturnUnknownBeforePhysicalSettlement')
+                self.assertEqual((returned['result'],returned['phase'],returned['history']),('unknown','settling',()))
+                early = replace(state,phase='capture',history=(),
+                    events=state.events[:state.events.index('capture')]+('return-unknown',))
+                self.assertEqual(model.violation(state,'Renamed',early),'GP-ORIGINAL')
+            if name == 'equivalent_encoding_other_secret':
+                forged = replace(state,fences=1,events=('preflight','open','empty','acquire')+state.events[2:])
+                self.assertEqual(model.violation(state,'Renamed',forged),'GP-INITIAL')
+            if name == 'own_lost_reply':
+                early = replace(state,phase='capture',original_live=False,remaining=1,
+                    result='unknown',returned=(),snapshot=(),
+                    events=state.events[:state.events.index('capture')]+('return-unknown',))
+                self.assertEqual(model.violation(state,'Renamed',early),'GP-ORIGINAL')
+                self.assertIn('reply-lost',state.events)
+                self.assertEqual(state.history[0],gate.model.GENESIS_A)
+            if name == 'delayed_commit_after_empty':
+                self.assertEqual((state.result,state.snapshot,state.history),
+                    ('unknown',(),(gate.model.GENESIS_A,)))
+            if state.result == 'success':
+                for event in ('capture','grant-read','point','record','verified'):
+                    events = list(state.events); events.remove(event)
+                    forged = replace(state,events=tuple(events))
+                    self.assertIsNotNone(model.violation(state,'Renamed',forged),(name,event))
+                for changes in ({'proof':False},{'full_span':False},{'full_key':False},
+                    {'stored_pin':'forged'},{'point_cut':'foreign'},{'snapshot':()}):
+                    self.assertIsNotNone(model.violation(state,'Renamed',replace(state,**changes)),changes)
+        blank = gate.model.ProvisionState(case='equivalent_encoding_other_secret',phase='done',
+            history=(gate.model.GENESIS_B,),snapshot=(gate.model.GENESIS_B,),remaining=2,
+            result='success',returned=gate.model.GENESIS_B)
+        self.assertIsNotNone(model.violation(blank,'Renamed',blank))
+        bad_admission = gate.model.ProvisionState(case='foreign_job',phase='done',remaining=2,
+            events=('preflight','open'),result='unknown')
+        self.assertEqual(model.violation(blank,'Renamed',bad_admission),'GP-ADMISSION')
 
     def test_relational_oracle_and_planner_precedence(self):
         swap = gate.WITNESSES['unique_swap']

@@ -22,6 +22,9 @@ pub use cell::{
     QueueSourceGenesis, QueueSourceLive, QueueSourceOriginal, QueueSourcePayload, QueueSourceRecord,
 };
 
+mod genesis;
+pub use genesis::load_source_genesis;
+
 mod compile;
 mod edits;
 pub use compile::{QueueSourceCompileLimits, QueueSourceCompiled, compile_genesis};

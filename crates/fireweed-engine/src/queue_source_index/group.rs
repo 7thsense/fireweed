@@ -131,9 +131,7 @@ pub async fn load_group_preimage<'a, R: QueueSourceReader>(
         return Err(unknown("administrative body source resolver is not available"));
     }
     group.validate_for(queue, definition.schema(), limits)?;
-    let genesis: QueueSourceGenesis = fixed(reader, cut, QueueSourceKey::Genesis, job)
-        .await?
-        .ok_or_else(|| unknown("missing genesis"))?;
+    let genesis = super::genesis::load_source_genesis_at(reader, cut, job).await?;
     if genesis.definition_pin != definition.pin()
         || genesis.source.log_offset() != 0
         || genesis.source.byte_length() == 0

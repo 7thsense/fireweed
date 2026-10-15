@@ -31,9 +31,14 @@ fn limits() -> QueueNativeSourcePreparationLimits {
 }
 fn budget(job: &Arc<QueueReservation>, calls: u64) -> Arc<QueueNativeSourceBudget> {
     QueueNativeSourceBudget::new(
-        QueueNativeSemanticWork {
-            pages: work().pages * calls,
-            hydrated_bytes: work().hydrated_bytes * calls,
+        QueueNativeSourceWork {
+            semantic: QueueNativeSemanticWork {
+                pages: work().pages * calls,
+                hydrated_bytes: work().hydrated_bytes * calls,
+            },
+            record_attempts: 0,
+            hydration_reads: 0,
+            hydration_body_bytes: 0,
         },
         job,
     )
@@ -108,7 +113,7 @@ fn ordinary(
     .unwrap();
     (
         fireweed_engine::queue_log_record::encode_checked_publication_record(
-            acquired.head().epoch(),
+            acquired.as_source().head().epoch(),
             frame.as_bytes(),
             1 << 20,
             job,
@@ -139,14 +144,19 @@ async fn check_source_group(
             }
         }
     }
-    let reader =
-        QueueNativeSourceReader::new(acquired, log, job, Arc::clone(&ledger), limits().read)
-            .unwrap();
+    let reader = QueueNativeSourceReader::new(
+        acquired.as_source(),
+        log,
+        job,
+        Arc::clone(&ledger),
+        limits().read,
+    )
+    .unwrap();
     let queue = QueueAddress {
         tenant: "tenant".into(),
         queue: "producer".into(),
     };
-    let before = acquired.head();
+    let before = acquired.as_source().head();
     let plan = load_group_preimage(
         &reader,
         &queue,
@@ -196,21 +206,29 @@ async fn check_source_group(
     // Independently captured read bundle at the same numeric head. Reusing the
     // sealed writer here is test construction only; preparation must reject its
     // distinct semantic owner before reaching that writer or any source read.
-    let namespace = acquired.retained_namespace(&queue, job).unwrap();
+    let namespace = acquired
+        .as_source()
+        .retained_namespace(&queue, job)
+        .unwrap();
     let foreign_cut = log.capture(&namespace).await.unwrap();
     let foreign_bundle = QueueNativeAcquired {
-        log_identity: acquired.log_identity.clone(),
-        namespace,
         writer: QueueNativeWriter {
             writer: acquired.writer.writer.clone(),
             namespace: acquired.writer.namespace.clone(),
             epoch: acquired.writer.epoch,
             next_offset: acquired.writer.next_offset,
         },
-        cut: foreign_cut,
-        semantic_identity: QueueNativeAcquired::identity_charge(job).unwrap(),
+        source: QueueNativeCaptured {
+            log_identity: acquired.source.log_identity.clone(),
+            namespace,
+            cut: foreign_cut,
+            semantic_identity: QueueNativeCaptured::identity_charge(job).unwrap(),
+        },
     };
-    assert_eq!(foreign_bundle.head(), acquired.head());
+    assert_eq!(
+        foreign_bundle.as_source().head(),
+        acquired.as_source().head()
+    );
     let mut changed_schema = definition.schema().clone();
     changed_schema.max_attempts += 1;
     let changed_definition = AdmittedQueueDefinition::from_raw(
@@ -283,7 +301,10 @@ async fn check_source_group(
                 .is_err()
         );
         assert_eq!(
-            log.capture(&acquired.namespace).await.unwrap().head(),
+            log.capture(&acquired.source.namespace)
+                .await
+                .unwrap()
+                .head(),
             before
         );
     }
@@ -294,7 +315,10 @@ async fn check_source_group(
         .unwrap();
     drop(prepared);
     assert_eq!(
-        log.capture(&acquired.namespace).await.unwrap().head(),
+        log.capture(&acquired.source.namespace)
+            .await
+            .unwrap()
+            .head(),
         before
     );
 }
@@ -335,15 +359,20 @@ async fn verify_published(
     let (history, snapshot) = state;
     history.push(record);
     let current = fresh(log, acquired, "producer", job).await;
-    assert_eq!(current.head().bounds(), (0, history.len() as u64));
+    assert_eq!(
+        current.as_source().head().bounds(),
+        (0, history.len() as u64)
+    );
     assert!(
         current
+            .as_source()
             .read(log, history.len() as u64, 1 << 20, job)
             .await
             .unwrap()
             .is_none()
     );
     let page = current
+        .as_source()
         .semantic_scan(
             log,
             Bound::Unbounded,
@@ -357,6 +386,7 @@ async fn verify_published(
     let mut persisted = Vec::new();
     for (offset, expected) in history.iter().enumerate() {
         let record = current
+            .as_source()
             .read(log, offset as u64, 1 << 20, job)
             .await
             .unwrap()
@@ -385,15 +415,20 @@ async fn verify_published(
         .unwrap()
         .unwrap();
     let reopened = log.acquire_bundle(ns, job).await.unwrap();
-    assert_eq!(reopened.head().bounds(), (0, history.len() as u64));
+    assert_eq!(
+        reopened.as_source().head().bounds(),
+        (0, history.len() as u64)
+    );
     assert!(
         reopened
+            .as_source()
             .read(log, history.len() as u64, 1 << 20, job)
             .await
             .unwrap()
             .is_none()
     );
     let page = reopened
+        .as_source()
         .semantic_scan(
             log,
             Bound::Unbounded,
@@ -441,8 +476,14 @@ async fn accept_source_group(
         std::slice::from_ref(group),
         job,
     );
-    let reader =
-        QueueNativeSourceReader::new(&acquired, log, job, ledger.clone(), limits().read).unwrap();
+    let reader = QueueNativeSourceReader::new(
+        acquired.as_source(),
+        log,
+        job,
+        ledger.clone(),
+        limits().read,
+    )
+    .unwrap();
     let queue = QueueAddress {
         tenant: "tenant".into(),
         queue: "producer".into(),
@@ -657,8 +698,11 @@ async fn producer_contract(log: QueueNativeLog) {
     );
     assert_eq!(admission.usage().unwrap(), baseline);
     assert_eq!(
-        log.capture(&acquired.namespace).await.unwrap().head(),
-        acquired.head()
+        log.capture(&acquired.source.namespace)
+            .await
+            .unwrap()
+            .head(),
+        acquired.as_source().head()
     );
     drop(range_record);
     snapshot = after;
@@ -782,8 +826,11 @@ async fn producer_contract(log: QueueNativeLog) {
             "intended {expected}"
         );
         assert_eq!(
-            log.capture(&acquired.namespace).await.unwrap().head(),
-            acquired.head()
+            log.capture(&acquired.source.namespace)
+                .await
+                .unwrap()
+                .head(),
+            acquired.as_source().head()
         );
     }
     // Deliberately forge an incomplete source map through the test-only raw-edit
@@ -842,8 +889,11 @@ async fn producer_contract(log: QueueNativeLog) {
         matches!(error, QueueError::OutcomeUnknown(message) if message.contains("source lifecycle count missing"))
     );
     assert_eq!(
-        log.capture(&acquired.namespace).await.unwrap().head(),
-        acquired.head()
+        log.capture(&acquired.source.namespace)
+            .await
+            .unwrap()
+            .head(),
+        acquired.as_source().head()
     );
     drop((forged, poison, proposed));
     drop((acquired, history, definition, ledger));
@@ -952,7 +1002,7 @@ fn claim_record(
     .unwrap();
     (
         fireweed_engine::queue_log_record::encode_checked_claim_record(
-            acquired.head().epoch(),
+            acquired.as_source().head().epoch(),
             &publication,
             1 << 20,
             job,
@@ -1083,7 +1133,7 @@ async fn source_bridge_genesis_scope_limits_and_nonrefunding_preparation_work() 
         assert_eq!(admission.usage().unwrap(), baseline);
     }
     assert_eq!(
-        log.capture(&acquired.namespace)
+        log.capture(&acquired.source.namespace)
             .await
             .unwrap()
             .head()
@@ -1105,7 +1155,7 @@ async fn source_bridge_genesis_scope_limits_and_nonrefunding_preparation_work() 
     );
     assert_eq!(admission.usage().unwrap(), retained);
     assert_eq!(
-        log.capture(&acquired.namespace)
+        log.capture(&acquired.source.namespace)
             .await
             .unwrap()
             .head()
@@ -1263,7 +1313,7 @@ fn fp4_record(
     }
     let frame = builder.finish().unwrap();
     let record = fireweed_engine::queue_log_record::encode_checked_publication_record(
-        acquired.head().epoch(),
+        acquired.as_source().head().epoch(),
         frame.as_bytes(),
         1 << 20,
         job,

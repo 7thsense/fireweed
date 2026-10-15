@@ -13,6 +13,7 @@ use std::{
 struct Gate {
     entered: tokio::sync::oneshot::Sender<Vec<u8>>,
     release: std::sync::mpsc::Receiver<()>,
+    path_fragment: Option<&'static [u8]>,
 }
 struct JoinAll {
     children: Vec<thread::JoinHandle<()>>,
@@ -38,7 +39,7 @@ fn register(socket: &TcpStream, sockets: &Mutex<Vec<TcpStream>>, stop: &AtomicBo
     owned.push(socket.try_clone().unwrap());
     true
 }
-struct Proxy {
+pub(super) struct Proxy {
     endpoint: String,
     armed: Arc<Mutex<Option<Gate>>>,
     stop: Arc<AtomicBool>,
@@ -49,7 +50,7 @@ struct Proxy {
     spawned: Arc<AtomicUsize>,
 }
 impl Proxy {
-    fn new(endpoint: &str) -> Self {
+    pub(super) fn new(endpoint: &str) -> Self {
         let upstream = endpoint
             .strip_prefix("http://")
             .expect("loopback HTTP fixture")
@@ -111,7 +112,19 @@ impl Proxy {
                         }
                     };
                     if raw.starts_with(b"GET ") || raw.starts_with(b"HEAD ") {
-                        let pending = gate.lock().unwrap().take();
+                        let pending = {
+                            let mut armed = gate.lock().unwrap();
+                            let line = raw[..end].split(|b| *b == b'\r').next().unwrap();
+                            if armed.as_ref().is_some_and(|gate| {
+                                gate.path_fragment.is_none_or(|fragment| {
+                                    line.windows(fragment.len()).any(|bytes| bytes == fragment)
+                                })
+                            }) {
+                                armed.take()
+                            } else {
+                                None
+                            }
+                        };
                         if let Some(gate) = pending {
                             let _ = gate
                                 .entered
@@ -182,8 +195,20 @@ impl Proxy {
             spawned,
         }
     }
+    pub(super) fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
     fn arm(
         &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<Vec<u8>>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        self.arm_matching(None)
+    }
+    pub(super) fn arm_matching(
+        &self,
+        path_fragment: Option<&'static [u8]>,
     ) -> (
         tokio::sync::oneshot::Receiver<Vec<u8>>,
         std::sync::mpsc::Sender<()>,
@@ -196,11 +221,169 @@ impl Proxy {
                 .unwrap()
                 .replace(Gate {
                     entered,
-                    release: resume
+                    release: resume,
+                    path_fragment,
                 })
                 .is_none()
         );
         (started, release)
+    }
+}
+
+#[tokio::test]
+async fn pending_s3_source_record_cancellation_retains_frame_credit_and_spent_work() {
+    use object_log::BlobStore;
+    for disabled in [false, true] {
+        let env = crate::shared_s3_test_env();
+        let proxy = Proxy::new(&env.endpoint);
+        let prefix = format!(
+            "pending-root-record/{}/{disabled}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut limits = options(1 << 20);
+        limits.operations = 1;
+        let log = Arc::new(
+            QueueNativeLog::s3(
+                QueueNativeS3Connection {
+                    endpoint: &proxy.endpoint,
+                    region: &env.region,
+                    bucket: &env.bucket,
+                    access_key: &env.access_key,
+                    secret_key: &env.secret_key,
+                },
+                prefix.clone(),
+                limits,
+                QueueNativeS3TransportOptions {
+                    disable_payload_signing: disabled,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let admission = QueueAdmission::new(1, 32 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let (source, expected, req) = super::record::seeded(&log, &job, "queue").await;
+        let source = Arc::new(source);
+        let before = source.head();
+        let budget = super::record::ledger(
+            &job,
+            2,
+            2 * req.hydration_reads(),
+            2 * req.hydration_bytes(),
+        );
+        let baseline = admission.usage().unwrap();
+        let guard = (std::mem::size_of::<OwnedQueueBufferCharge>()
+            + 2 * std::mem::size_of::<usize>()) as u64;
+        let pending = (
+            baseline.0,
+            baseline.1
+                + 65536
+                + guard
+                + 4 * req.frame_bytes()
+                + 4096
+                + guard
+                + ownership::physical_owner_bytes::<4>(),
+        );
+        // Skip index/identity reads and stop precisely at the full native frame.
+        let (started, release) = proxy.arm_matching(Some(b"/coupled-data/"));
+        let caller = {
+            let (source, log, budget, job) =
+                (source.clone(), log.clone(), budget.clone(), job.clone());
+            tokio::spawn(async move {
+                source
+                    .read_source_record(&log, 0, super::record::record_limits(), &budget, &job)
+                    .await
+            })
+        };
+        let request = tokio::time::timeout(Duration::from_secs(10), started)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(request.starts_with(b"GET ") || request.starts_with(b"HEAD "));
+        let line = std::str::from_utf8(&request).unwrap();
+        let target = line
+            .split_ascii_whitespace()
+            .nth(1)
+            .unwrap()
+            .split('?')
+            .next()
+            .unwrap();
+        assert!(
+            target.starts_with(&format!("/{}/{prefix}/namespaces/candidates/", env.bucket)),
+            "{line}"
+        );
+        let (_, digest) = target.split_once("/coupled-data/").unwrap();
+        assert!(
+            digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "{line}"
+        );
+        assert_eq!(admission.usage().unwrap(), pending);
+        let left = budget.remaining_work();
+        assert_eq!(
+            (
+                left.record_attempts,
+                left.hydration_reads,
+                left.hydration_body_bytes
+            ),
+            (1, req.hydration_reads(), req.hydration_bytes())
+        );
+        caller.abort();
+        assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+        assert_eq!(
+            admission.usage().unwrap(),
+            pending,
+            "pending physical frame read retains metadata, whole-frame and owner-set credit"
+        );
+        release.send(()).unwrap();
+        // Single-operation capacity is the physical-retirement barrier.
+        assert_eq!(log.capture(&source.namespace).await.unwrap().head(), before);
+        assert_eq!(admission.usage().unwrap(), baseline);
+        let left = budget.remaining_work();
+        assert_eq!(
+            (
+                left.record_attempts,
+                left.hydration_reads,
+                left.hydration_body_bytes
+            ),
+            (1, req.hydration_reads(), req.hydration_bytes()),
+            "cancellation never refunds work"
+        );
+        let read = source
+            .read_source_record(&log, 0, super::record::record_limits(), &budget, &job)
+            .await
+            .unwrap();
+        assert_eq!(read.bytes(), expected.bytes());
+        let left = budget.remaining_work();
+        assert_eq!(
+            (
+                left.record_attempts,
+                left.hydration_reads,
+                left.hydration_body_bytes
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            (left.semantic.pages, left.semantic.hydrated_bytes),
+            (work().pages, work().hydrated_bytes)
+        );
+        drop((read, source, expected, budget));
+        log.shutdown().await.unwrap();
+        drop((log, job));
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        proxy.close();
+        let cleanup = object_log::S3BlobStore::new(
+            &env.endpoint,
+            &env.region,
+            &env.bucket,
+            &env.access_key,
+            &env.secret_key,
+        );
+        for key in cleanup.list(&prefix).await.unwrap() {
+            cleanup.delete(&key).await.unwrap();
+        }
     }
 }
 impl Proxy {
@@ -321,6 +504,7 @@ async fn pending_s3_scan_cancellation_keeps_input_output_credit_until_physical_c
         let current = Arc::new(fresh(&log, &first, "queue", &job).await);
         let baseline = admission.usage().unwrap();
         let page = current
+            .as_source()
             .semantic_scan(&log, Bound::Unbounded, Bound::Unbounded, scan_limit(), &job)
             .await
             .unwrap();
@@ -331,6 +515,7 @@ async fn pending_s3_scan_cancellation_keeps_input_output_credit_until_physical_c
             let (log, current, job) = (log.clone(), current.clone(), job.clone());
             tokio::spawn(async move {
                 current
+                    .as_source()
                     .semantic_scan_next(&log, &input, scan_limit(), &job)
                     .await
             })
@@ -358,20 +543,135 @@ async fn pending_s3_scan_cancellation_keeps_input_output_credit_until_physical_c
         );
         release.send(()).unwrap();
         // A single SDK slot makes this an explicit physical-completion barrier.
-        log.capture(&current.namespace).await.unwrap();
+        log.capture(&current.source.namespace).await.unwrap();
         assert_eq!(admission.usage().unwrap(), baseline);
         let page = current
+            .as_source()
             .semantic_scan(&log, Bound::Unbounded, Bound::Unbounded, scan_limit(), &job)
             .await
             .unwrap();
         assert_eq!(page.rows().next().unwrap().key(), b"a");
         let token = page.continuation().unwrap();
         let replay = current
+            .as_source()
             .semantic_scan_next(&log, &token, scan_limit(), &job)
             .await
             .unwrap();
         assert_eq!(replay.rows().next().unwrap().key(), b"b");
         drop((page, token, replay, publication, current, first, record));
+        log.shutdown().await.unwrap();
+        drop(log);
+        drop(job);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        proxy.close();
+        let cleanup = object_log::S3BlobStore::new(
+            &env.endpoint,
+            &env.region,
+            &env.bucket,
+            &env.access_key,
+            &env.secret_key,
+        );
+        for key in cleanup.list(&prefix).await.unwrap() {
+            cleanup.delete(&key).await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn pending_s3_capture_cancellation_keeps_sole_namespace_and_identity_until_retirement() {
+    use object_log::BlobStore;
+    let env = crate::shared_s3_test_env();
+    for disabled in [false, true] {
+        let proxy = Proxy::new(&env.endpoint);
+        let prefix = format!(
+            "pending-root-capture/{}/{disabled}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut limits = options(1 << 20);
+        limits.operations = 1;
+        let log = Arc::new(
+            QueueNativeLog::s3(
+                QueueNativeS3Connection {
+                    endpoint: &proxy.endpoint,
+                    region: &env.region,
+                    bucket: &env.bucket,
+                    access_key: &env.access_key,
+                    secret_key: &env.secret_key,
+                },
+                prefix.clone(),
+                limits,
+                QueueNativeS3TransportOptions {
+                    disable_payload_signing: disabled,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let admission = QueueAdmission::new(1, 32 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let (first, record) = bundle(&log, "queue", &job).await;
+        let before = first.as_source().head();
+        let baseline = admission.usage().unwrap();
+        let namespace = first
+            .as_source()
+            .retained_namespace(
+                &QueueAddress {
+                    tenant: "tenant".into(),
+                    queue: "queue".into(),
+                },
+                &job,
+            )
+            .unwrap();
+        let namespace_bytes = namespace._charge.admitted_bytes();
+        let identity_bytes = (std::mem::size_of::<OwnedQueueBufferCharge>()
+            + 2 * std::mem::size_of::<usize>()) as u64;
+        let expected_pending = (
+            baseline.0,
+            baseline.1 + namespace_bytes + identity_bytes + ownership::physical_owner_bytes::<2>(),
+        );
+        let (started, release) = proxy.arm();
+        // This newly retained namespace has no other Root owner in the caller.
+        let caller = {
+            let (log, job) = (log.clone(), job.clone());
+            tokio::spawn(async move { log.capture_source(namespace, &job).await })
+        };
+        let request = tokio::time::timeout(Duration::from_secs(10), started)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(request.starts_with(b"GET ") || request.starts_with(b"HEAD "));
+        let line = std::str::from_utf8(&request).unwrap();
+        let target = line.split_ascii_whitespace().nth(1).unwrap();
+        // capture_known first revalidates the immutable namespace binding,
+        // before reading the candidate head. The gate stops that first read.
+        let binding_prefix = format!("/{}/{prefix}/namespaces/bindings/", env.bucket);
+        let binding = target
+            .split('?')
+            .next()
+            .unwrap()
+            .strip_prefix(&binding_prefix)
+            .unwrap_or_else(|| panic!("gated binding request: {line}"));
+        assert!(
+            binding.len() == 64 && binding.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "gated binding request: {line}"
+        );
+        assert_eq!(admission.usage().unwrap(), expected_pending);
+        caller.abort();
+        assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
+        assert_eq!(
+            admission.usage().unwrap(),
+            expected_pending,
+            "blocked physical capture owns namespace, identity and owner-set credit"
+        );
+        release.send(()).unwrap();
+        // The one SDK operation slot is an explicit physical-retirement barrier.
+        let after = log.capture(&first.source.namespace).await.unwrap().head();
+        assert_eq!(after, before, "capture must not fence or append");
+        assert_eq!(admission.usage().unwrap(), baseline);
+        drop((first, record));
         log.shutdown().await.unwrap();
         drop(log);
         drop(job);
