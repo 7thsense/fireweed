@@ -1,5 +1,7 @@
 //! Bind resolved commands, schema and preimages to one authenticated source cut.
 mod aggregates;
+mod originals;
+pub use originals::QueueSourceOriginalEdits;
 mod coverage;
 pub use aggregates::{QueueSourceAggregateAccumulator, QueueSourceAggregateEdits};
 mod record_edits;

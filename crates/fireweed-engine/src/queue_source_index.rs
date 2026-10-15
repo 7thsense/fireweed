@@ -27,7 +27,7 @@ pub use fields::{QueueSourceFields, load_command_fields, source_field_value};
 mod predecessor;
 pub use predecessor::{
     QueueSourceAggregateAccumulator, QueueSourceAggregateEdits, QueueSourceCommand,
-    QueueSourceNamedEffect, QueueSourcePredecessor, QueueSourcePublicationContext,
-    QueueSourceRecordEditAccumulator, QueueSourceRecordEdits, QueueSourceRecordTransition,
-    QueueSourceUniqueOwnerAccumulator, QueueSourceUniqueOwnerEdits,
+    QueueSourceNamedEffect, QueueSourceOriginalEdits, QueueSourcePredecessor,
+    QueueSourcePublicationContext, QueueSourceRecordEditAccumulator, QueueSourceRecordEdits,
+    QueueSourceRecordTransition, QueueSourceUniqueOwnerAccumulator, QueueSourceUniqueOwnerEdits,
 };
