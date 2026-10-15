@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 // Independent complete inventory from the ordinary planner snapshot: no call to
 // WorkIndex::posting or the delta visitor participates in the reference.
-fn inventory(snapshot: &RecordSnapshot) -> BTreeMap<Vec<u8>, Vec<u8>> {
+pub(in crate::queue_source_index::predecessor) fn inventory(
+    snapshot: &RecordSnapshot,
+) -> BTreeMap<Vec<u8>, Vec<u8>> {
     fn escaped(out: &mut Vec<u8>, value: &str) {
         for byte in value.bytes() {
             if byte == 0 {

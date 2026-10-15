@@ -14,7 +14,7 @@ use std::{
 
 /// One attempted compilation consumes this quota monotonically. A failed
 /// component cannot refund capacity or leave siblings eligible for a seal.
-struct OutputQuota<'a> {
+pub(super) struct OutputQuota<'a> {
     record: &'a OwnedQueueLogRecord,
     cut: QueueSourceCut<'a>,
     state: Mutex<QuotaState>,
@@ -27,7 +27,7 @@ struct QuotaState {
     poisoned: bool,
 }
 impl<'a> OutputQuota<'a> {
-    fn new(
+    pub(super) fn new(
         record: &'a OwnedQueueLogRecord,
         cut: QueueSourceCut<'a>,
         job: &Arc<QueueReservation>,
@@ -116,6 +116,7 @@ pub(super) struct SourceEdits<'a> {
     record: &'a OwnedQueueLogRecord,
     cut: QueueSourceCut<'a>,
     entries: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    retained_charges: Vec<OwnedQueueBufferCharge>,
     quota: Arc<OutputQuota<'a>>,
     label: &'static str,
     // All keys/values and map nodes drop before their retained admission.
@@ -132,7 +133,7 @@ impl<'a> SourceEdits<'a> {
         let quota = OutputQuota::new(record, cut, job, limits)?;
         Self::with_quota(record, cut, job, quota, label)
     }
-    fn with_quota(
+    pub(super) fn with_quota(
         record: &'a OwnedQueueLogRecord,
         cut: QueueSourceCut<'a>,
         job: &Arc<QueueReservation>,
@@ -160,6 +161,7 @@ impl<'a> SourceEdits<'a> {
             record,
             cut,
             entries: BTreeMap::new(),
+            retained_charges: Vec::new(),
             quota,
             label,
             charge,
@@ -181,10 +183,90 @@ impl<'a> SourceEdits<'a> {
         }
         self.quota.check()
     }
-    pub fn edits(&self) -> impl ExactSizeIterator<Item = (&[u8], Option<&[u8]>)> {
+    pub fn edits(&self) -> impl ExactSizeIterator<Item = (&[u8], Option<&[u8]>)> + Clone {
         self.entries
             .iter()
             .map(|(key, value)| (key.as_slice(), value.as_deref()))
+    }
+    pub(super) fn record(&self) -> &'a OwnedQueueLogRecord {
+        self.record
+    }
+    /// Consume both maps. No raw or partial output can manufacture a seal.
+    pub(super) fn merge(mut self, mut other: Self) -> QueueResult<Self> {
+        let quota = Arc::clone(&self.quota);
+        let mut attempt = OutputAttempt {
+            quota: &quota,
+            armed: true,
+        };
+        self.verify(self.record, &self.cut, self.charge.reservation())?;
+        other.verify(self.record, &self.cut, self.charge.reservation())?;
+        if !Arc::ptr_eq(&self.quota, &other.quota) {
+            other.quota.poison();
+            return Err(QueueError::OutcomeUnknown(
+                "source merge belongs to another compilation attempt".into(),
+            ));
+        }
+        if other
+            .entries
+            .keys()
+            .any(|key| self.entries.contains_key(key))
+        {
+            return Err(QueueError::OutcomeUnknown(
+                "duplicate complete source edit".into(),
+            ));
+        }
+        let guards = other
+            .retained_charges
+            .len()
+            .checked_add(1)
+            .ok_or(QueueError::TooLarge)?;
+        let guard_bytes = (guards as u64)
+            .checked_mul(std::mem::size_of::<OwnedQueueBufferCharge>() as u64)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(QueueError::TooLarge)?;
+        let extra = (other.entries.len() as u64)
+            .checked_mul(1024)
+            .and_then(|n| n.checked_add(guard_bytes))
+            .and_then(|n| n.checked_add(1024))
+            .ok_or(QueueError::TooLarge)?;
+        self.charge.grow(extra).map_err(|error| match error {
+            QueueError::OutcomeUnknown(message) => {
+                QueueError::OutcomeUnknown(format!("source merge output admission: {message}"))
+            }
+            other => other,
+        })?;
+        self.retained_charges
+            .try_reserve_exact(guards)
+            .map_err(|_| QueueError::TooLarge)?;
+        for (key, value) in std::mem::take(&mut other.entries) {
+            self.entries.insert(key, value);
+        }
+        self.retained_charges.append(&mut other.retained_charges);
+        self.retained_charges.push(other.charge);
+        attempt.armed = false;
+        Ok(self)
+    }
+    /// A missing populated component cannot disappear behind its nonrefunded
+    /// quota debit. Typed completion proofs additionally cover empty components.
+    pub(super) fn verify_complete(&self) -> QueueResult<()> {
+        self.quota.check()?;
+        let bytes = self.entries.iter().try_fold(0u64, |sum, (key, value)| {
+            sum.checked_add(key.len() as u64)
+                .and_then(|n| n.checked_add(value.as_ref().map_or(0, |value| value.len() as u64)))
+                .ok_or(QueueError::TooLarge)
+        })?;
+        let state =
+            self.quota.state.lock().map_err(|_| {
+                QueueError::OutcomeUnknown("source output quota lock poisoned".into())
+            })?;
+        if state.edits != self.entries.len() as u64 || state.bytes != bytes {
+            drop(state);
+            self.quota.poison();
+            return Err(QueueError::OutcomeUnknown(
+                "complete source output differs from compilation debits".into(),
+            ));
+        }
+        Ok(())
     }
     fn admit<T: Serialize>(&mut self, key_bytes: usize, value: Option<&T>) -> QueueResult<()> {
         let bytes = (key_bytes as u64)

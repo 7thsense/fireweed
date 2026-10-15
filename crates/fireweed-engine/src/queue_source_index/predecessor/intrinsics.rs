@@ -5,7 +5,7 @@ use crate::queue_source_index::{
 };
 
 pub struct QueueSourceIntrinsicEdits<'a> {
-    output: SourceEdits<'a>,
+    pub(super) output: SourceEdits<'a>,
 }
 impl QueueSourceIntrinsicEdits<'_> {
     pub fn edits(&self) -> impl ExactSizeIterator<Item = (&[u8], Option<&[u8]>)> {
@@ -35,13 +35,7 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
                 &self._charge,
                 self.publication().summary().commands,
             ),
-            output: SourceEdits::new(
-                self.checked.owner(),
-                self.cut,
-                self.job,
-                limits,
-                "intrinsic",
-            )?,
+            output: self.output(limits, "intrinsic")?,
             _context: self,
         })
     }

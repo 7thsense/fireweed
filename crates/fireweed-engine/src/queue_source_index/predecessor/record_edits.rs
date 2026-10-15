@@ -3,7 +3,7 @@ use super::*;
 use crate::queue_source_index::{QueueSourceCompileLimits, edits::SourceEdits};
 
 pub struct QueueSourceRecordEdits<'a> {
-    output: SourceEdits<'a>,
+    pub(super) output: SourceEdits<'a>,
 }
 impl QueueSourceRecordEdits<'_> {
     pub fn edits(&self) -> impl ExactSizeIterator<Item = (&[u8], Option<&[u8]>)> {
@@ -34,7 +34,7 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
                 &self._charge,
                 self.publication().summary().commands,
             ),
-            output: SourceEdits::new(self.checked.owner(), self.cut, self.job, limits, "record")?,
+            output: self.output(limits, "record")?,
         })
     }
 }

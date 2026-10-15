@@ -7,7 +7,7 @@ use crate::queue_source_index::{
 };
 
 pub struct QueueSourceOriginalEdits<'a> {
-    output: SourceEdits<'a>,
+    pub(super) output: SourceEdits<'a>,
 }
 impl QueueSourceOriginalEdits<'_> {
     pub fn edits(&self) -> impl ExactSizeIterator<Item = (&[u8], Option<&[u8]>)> {
@@ -37,8 +37,7 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
         if expected > limits.edits {
             return Err(unknown("original count exceeds admitted limits"));
         }
-        let mut output =
-            SourceEdits::new(self.checked.owner(), self.cut, self.job, limits, "original")?;
+        let mut output = self.output(limits, "original")?;
         let mut processed = 0u64;
         match self.checked.view().payload() {
             QueueLogPayload::Publication(publication) => {

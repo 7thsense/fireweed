@@ -1,5 +1,8 @@
 //! Bind resolved commands, schema and preimages to one authenticated source cut.
 mod intrinsics;
+mod publication;
+pub(super) use publication::CompleteSourcePublication;
+pub use publication::compile_publication;
 #[cfg(test)]
 mod test_fixture;
 pub use intrinsics::{QueueSourceIntrinsicAccumulator, QueueSourceIntrinsicEdits};
@@ -40,6 +43,7 @@ pub struct QueueSourcePublicationContext<'a, R: QueueSourceReader> {
     job: &'a Arc<QueueReservation>,
     cut: QueueSourceCut<'a>,
     claim_binding: Option<AdmittedClaimBinding<'a>>,
+    output_quota: Option<Arc<super::edits::OutputQuota<'a>>>,
     _charge: OwnedQueueBufferCharge,
 }
 /// Only the validated publication iterator creates this token. Copies of a
@@ -91,6 +95,7 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
             job,
             cut,
             claim_binding,
+            output_quota: None,
             _charge: charge,
         };
         let genesis: QueueSourceGenesis = context
@@ -111,6 +116,28 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
             return Err(unknown("publication initial sequence differs from source"));
         }
         Ok(context)
+    }
+    fn output(
+        &self,
+        limits: super::QueueSourceCompileLimits,
+        label: &'static str,
+    ) -> QueueResult<super::edits::SourceEdits<'a>> {
+        match &self.output_quota {
+            Some(quota) => super::edits::SourceEdits::with_quota(
+                self.checked.owner(),
+                self.cut,
+                self.job,
+                Arc::clone(quota),
+                label,
+            ),
+            None => super::edits::SourceEdits::new(
+                self.checked.owner(),
+                self.cut,
+                self.job,
+                limits,
+                label,
+            ),
+        }
     }
     fn publication(&self) -> &PublicationView<'a> {
         match self.checked.view().payload() {

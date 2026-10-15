@@ -19,8 +19,8 @@ pub(super) struct Fixture {
     pub(super) queue: QueueAddress,
     pub(super) reader: Reader,
     pub(super) snapshot: RecordSnapshot,
-    _genesis: OwnedQueueLogRecord,
-    _seed: OwnedQueueLogRecord,
+    pub(super) _genesis: OwnedQueueLogRecord,
+    pub(super) _seed: OwnedQueueLogRecord,
 }
 pub(super) fn fixture(raw: Lifecycle) -> Fixture {
     let admission = QueueAdmission::new(2, 16 << 20).unwrap();

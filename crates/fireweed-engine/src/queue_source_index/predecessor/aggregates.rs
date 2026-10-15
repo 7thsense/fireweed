@@ -20,7 +20,7 @@ fn lifecycle(fact: Option<QueueSourceRecord>) -> Option<usize> {
     }
 }
 pub struct QueueSourceAggregateEdits<'a> {
-    output: SourceEdits<'a>,
+    pub(super) output: SourceEdits<'a>,
 }
 impl QueueSourceAggregateEdits<'_> {
     pub fn edits(&self) -> impl ExactSizeIterator<Item = (&[u8], Option<&[u8]>)> {
@@ -124,13 +124,7 @@ impl<'a, R: QueueSourceReader> QueueSourceAggregateAccumulator<'_, 'a, R> {
                 "source lifecycle total exceeds insertion authority",
             ));
         }
-        let mut output = SourceEdits::new(
-            self.context.checked.owner(),
-            self.context.cut,
-            self.context.job,
-            self.limits,
-            "aggregate",
-        )?;
+        let mut output = self.context.output(self.limits, "aggregate")?;
         for (index, lifecycle) in LIFECYCLES.into_iter().enumerate() {
             if old[index] != final_counts[index] {
                 output.insert(

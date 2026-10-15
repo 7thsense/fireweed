@@ -38,5 +38,5 @@ pub use predecessor::{
     QueueSourceIntrinsicAccumulator, QueueSourceIntrinsicEdits, QueueSourceNamedEffect,
     QueueSourceOriginalEdits, QueueSourcePredecessor, QueueSourcePublicationContext,
     QueueSourceRecordEditAccumulator, QueueSourceRecordEdits, QueueSourceRecordTransition,
-    QueueSourceUniqueOwnerAccumulator, QueueSourceUniqueOwnerEdits,
+    QueueSourceUniqueOwnerAccumulator, QueueSourceUniqueOwnerEdits, compile_publication,
 };

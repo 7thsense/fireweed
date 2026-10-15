@@ -30,7 +30,7 @@ pub struct QueueSourceUniqueOwnerAccumulator<'c, 'a, R: QueueSourceReader> {
 /// Provisional edits bound to one proposed record, cut, and operation. Only the
 /// complete all-variant compiler may incorporate these into its publication seal.
 pub struct QueueSourceUniqueOwnerEdits<'a> {
-    output: super::super::edits::SourceEdits<'a>,
+    pub(super) output: super::super::edits::SourceEdits<'a>,
 }
 impl QueueSourceUniqueOwnerEdits<'_> {
     pub fn edits(&self) -> impl ExactSizeIterator<Item = (&[u8], Option<&[u8]>)> {
@@ -163,10 +163,7 @@ impl<'c, 'a, R: QueueSourceReader> QueueSourceUniqueOwnerAccumulator<'c, 'a, R> 
         self.coverage.verify()?;
         let context = self.context;
         let mut output = QueueSourceUniqueOwnerEdits {
-            output: super::super::edits::SourceEdits::new(
-                context.checked.owner(),
-                context.cut,
-                context.job,
+            output: context.output(
                 super::super::QueueSourceCompileLimits {
                     edits: u64::MAX,
                     input_bytes: u64::MAX,
