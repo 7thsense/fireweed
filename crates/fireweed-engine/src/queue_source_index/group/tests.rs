@@ -25,9 +25,15 @@ fn fixture() -> Fixture {
     fixture_with_work(vec![work("a", "a"), work("b", "b")])
 }
 fn fixture_with_work(items: Vec<NewWork>) -> Fixture {
+    fixture_with_work_schema(items, |_| {})
+}
+fn fixture_with_work_schema(
+    items: Vec<NewWork>,
+    edit: impl FnOnce(&mut CollectionDefinition),
+) -> Fixture {
     let admission = QueueAdmission::new(2, 32 << 20).unwrap();
     let job = Arc::new(admission.reserve(0).unwrap());
-    let collection = CollectionDefinition {
+    let mut collection = CollectionDefinition {
         fields: BTreeMap::from([
             ("u".into(), FieldType::Text),
             ("n".into(), FieldType::Integer),
@@ -36,6 +42,7 @@ fn fixture_with_work(items: Vec<NewWork>) -> Fixture {
         unique_indexes: BTreeSet::from(["u".into()]),
         additional_field_prefixes: Default::default(),
     };
+    edit(&mut collection);
     let schema = QueueSchema {
         work: collection.clone(),
         state: BTreeMap::from([("s".into(), collection)]),
@@ -610,13 +617,14 @@ fn fields_cannot_recapture_foreign_cut_then_return_to_original_head() {
         };
         assert!(
             matches!(load_group_preimage(&reader, &f.queue, &request, &f.definition, &QueueLimits::default(), &f.job).await,
-            Err(QueueError::OutcomeUnknown(message)) if message.contains("lookup evidence belongs to another cut"))
+            Err(QueueError::OutcomeUnknown(message)) if message == "source fields: reader cut differs from original field authority")
         );
         assert_eq!(
             reader.cuts.load(Ordering::SeqCst),
-            1,
-            "field loading must never recapture"
+            2,
+            "field loading checks reader identity without replacing original authority"
         );
+        assert!(reader.cut().unwrap().same_cut(&f.reader.cut().unwrap()));
     });
 }
 

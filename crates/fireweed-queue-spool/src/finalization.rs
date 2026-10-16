@@ -14,6 +14,17 @@ use std::{path::Path, sync::Arc};
 /// Adapter-owned initial authority and admission remain live through finalization.
 pub trait AdministrativeOrdinaryAuthority: Send + 'static {
     fn snapshot(&self) -> &RecordSnapshot;
+    #[cfg(feature = "test-support")]
+    fn worker_probe(&self) -> Option<Arc<crate::FinalizationProbe>> {
+        None
+    }
+}
+impl AdministrativeOrdinaryAuthority
+    for fireweed_engine::queue_source_index::QueueSourceOrdinaryAuthority
+{
+    fn snapshot(&self) -> &RecordSnapshot {
+        self.snapshot()
+    }
 }
 pub struct FinalizedAdministrativeSemantics<A> {
     pub scratch: SealedAdministrativeScratch,
@@ -61,8 +72,16 @@ pub async fn finalize_administrative_semantics<A: AdministrativeOrdinaryAuthorit
     };
     let run_quota = Arc::clone(&quota);
     let run_job = Arc::clone(reservation);
+    #[cfg(feature = "test-support")]
+    let probe = ordinary.worker_probe();
+    #[cfg(feature = "test-support")]
+    let validation_probe = probe.clone();
     let (mut scratch, ordinary, decision, path) = workers
         .run_or_inline(move || {
+            #[cfg(feature = "test-support")]
+            if let Some(probe) = validation_probe {
+                probe.checkpoint(crate::FinalizationStage::Validate)?;
+            }
             let decision = scratch.validate_before_business(
                 ordinary.snapshot(),
                 path.as_path(),
@@ -93,6 +112,10 @@ pub async fn finalize_administrative_semantics<A: AdministrativeOrdinaryAuthorit
     let run_job = Arc::clone(reservation);
     let (scratch, mut proposal, decision) = workers
         .run_or_inline(move || {
+            #[cfg(feature = "test-support")]
+            if let Some(probe) = probe {
+                probe.checkpoint(crate::FinalizationStage::Reduce)?;
+            }
             let decision = scratch.reduce_with_ordinary_effects(
                 proposal.initial_authority(),
                 proposal.unique_effects(),

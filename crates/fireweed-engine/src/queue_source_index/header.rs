@@ -28,6 +28,14 @@ pub async fn load_source_header<R: QueueSourceReader>(
 ) -> QueueResult<QueueSourceHeader> {
     // Never recapture after the first await, including between header points.
     let cut = reader.cut()?;
+    load_source_header_at(reader, cut, job).await
+}
+/// Same header decoder for callers already holding original metadata authority.
+pub(super) async fn load_source_header_at<R: QueueSourceReader>(
+    reader: &R,
+    cut: super::QueueSourceCut<'_>,
+    job: &Arc<QueueReservation>,
+) -> QueueResult<QueueSourceHeader> {
     let genesis = load_source_genesis_at(reader, cut, job).await?;
     let key = QueueSourceKey::Sequence;
     let _charge = job.owned_buffer(key.encoded_len()? as u64)?;

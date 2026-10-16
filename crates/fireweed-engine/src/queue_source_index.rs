@@ -13,7 +13,8 @@ pub use intrinsic::{
 
 mod key;
 pub use key::{
-    QueueSourceKey, live_keys_prefix, live_keys_prefix_len, prefix_successor, record_fields_prefix,
+    QueueSourceKey, live_keys_prefix, live_keys_prefix_len, prefix_successor,
+    record_field_name_prefix, record_field_name_prefix_len, record_fields_prefix,
     record_fields_prefix_len,
 };
 
@@ -45,7 +46,10 @@ pub use body::{
 };
 
 mod fields;
-pub use fields::{QueueSourceFields, load_command_fields, source_field_value};
+pub use fields::{
+    QueueSourceFieldSelection, QueueSourceFields, load_command_fields, load_selected_fields,
+    source_field_value,
+};
 
 mod predecessor;
 pub use predecessor::{
@@ -58,7 +62,11 @@ pub use predecessor::{
 
 mod group;
 pub use group::{
-    QueueSourceBatchPlan, QueueSourceBatchPreimage, QueueSourceBatchPublication,
-    QueueSourceGroupEncodingLimits, QueueSourceGroupPlan, QueueSourceGroupPreimage,
-    QueueSourceGroupPublication, load_batch_preimage, load_group_preimage,
+    QueueSourceAdministrativeAdmission, QueueSourceAdministrativeRead,
+    QueueSourceAdministrativeReader, QueueSourceAdministrativeRow, QueueSourceBatchPlan,
+    QueueSourceBatchPreimage, QueueSourceBatchPublication, QueueSourceGroupEncodingLimits,
+    QueueSourceGroupPlan, QueueSourceGroupPreimage, QueueSourceGroupPublication,
+    QueueSourceOrdinaryAuthority, QueueSourceOrdinaryBinding, admit_administrative_group,
+    load_administrative_ordinary_authority, load_batch_preimage, load_group_preimage,
+    open_administrative_source,
 };

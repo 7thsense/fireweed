@@ -211,6 +211,42 @@ pub fn record_fields_prefix(collection: Option<&str>, key: &str) -> QueueResult<
     sink.literal(key.as_bytes())?;
     Ok(out)
 }
+/// Lower bound for fields whose literal names start with `field_prefix`.
+/// Unlike a complete field key this omits the field terminator. Together with
+/// `prefix_successor` it selects exactly that prefix within one record.
+/// Call the length function and admit both bounds before allocating them.
+pub fn record_field_name_prefix_len(
+    collection: Option<&str>,
+    key: &str,
+    field_prefix: &str,
+) -> QueueResult<usize> {
+    record_fields_prefix_len(collection, key)?
+        .checked_add(field_prefix.len())
+        .and_then(|n| n.checked_add(field_prefix.bytes().filter(|b| *b == 0).count()))
+        .ok_or(QueueError::TooLarge)
+}
+pub fn record_field_name_prefix(
+    collection: Option<&str>,
+    key: &str,
+    field_prefix: &str,
+) -> QueueResult<Vec<u8>> {
+    let mut out = Vec::with_capacity(record_field_name_prefix_len(collection, key, field_prefix)?);
+    let mut sink = Sink {
+        out: Some(&mut out),
+        len: 0,
+    };
+    sink.raw(&[VERSION, 3])?;
+    sink.collection(collection)?;
+    sink.literal(key.as_bytes())?;
+    for byte in field_prefix.bytes() {
+        if byte == 0 {
+            sink.raw(&[0, 255])?;
+        } else {
+            sink.raw(&[byte])?;
+        }
+    }
+    Ok(out)
+}
 /// Complete live-key namespace, including State collection identity.
 pub fn live_keys_prefix_len(collection: Option<&str>) -> QueueResult<usize> {
     let mut sink = Sink { out: None, len: 0 };
@@ -326,6 +362,43 @@ mod tests {
             key: &long,
         };
         assert_eq!(key.encode().unwrap().len(), key.encoded_len().unwrap());
+    }
+    #[test]
+    fn field_name_prefix_ranges_match_literal_oracle() {
+        let names = ["", "a", "ab", "a\0", "a\0b", "a\0\0", "b", "é", "éx", "🦊"];
+        for collection in [None, Some(""), Some("state\0é")] {
+            for record in ["", "item", "item\0"] {
+                for prefix in names {
+                    let lower = record_field_name_prefix(collection, record, prefix).unwrap();
+                    assert_eq!(
+                        lower.len(),
+                        record_field_name_prefix_len(collection, record, prefix).unwrap()
+                    );
+                    let mut upper = lower.clone();
+                    assert!(prefix_successor(&mut upper));
+                    for other_collection in [None, Some(""), Some("state\0é")] {
+                        for other_record in ["", "item", "item\0", "itemx"] {
+                            for name in names {
+                                let encoded = QueueSourceKey::Field {
+                                    collection: other_collection,
+                                    key: other_record,
+                                    field: name,
+                                }
+                                .encode()
+                                .unwrap();
+                                assert_eq!(
+                                    encoded >= lower && encoded < upper,
+                                    collection == other_collection
+                                        && record == other_record
+                                        && name.starts_with(prefix),
+                                    "{collection:?}/{record:?}/{prefix:?} vs {other_collection:?}/{other_record:?}/{name:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn full_prefix_intervals_and_scalar_tuple_order_preserve_shared_semantics() {

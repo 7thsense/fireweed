@@ -1,4 +1,5 @@
 //! Admitted selective field preimages for the resolved-command compiler.
+mod selection;
 use super::{
     QueueSourceKey, QueueSourceReader, prefix_successor, record_fields_prefix,
     record_fields_prefix_len,
@@ -11,6 +12,7 @@ use crate::{
 use fireweed_core::queue_contract::{
     CollectionDefinition, FieldValue, Fields, QueueError, QueueResult,
 };
+pub use selection::{QueueSourceFieldSelection, load_selected_fields};
 use serde::Deserialize;
 use std::{collections::BTreeSet, sync::Arc};
 fn unknown(message: &str) -> QueueError {
@@ -221,6 +223,21 @@ pub(super) async fn load_group_fields<R: QueueSourceReader>(
     if !cut.belongs_to(job) {
         return Err(unknown("reader operation differs"));
     }
+    if let Some(names) = names {
+        return load_selected_fields(
+            reader,
+            cut,
+            identity,
+            expected_count,
+            definition,
+            QueueSourceFieldSelection {
+                names,
+                prefixes: &BTreeSet::new(),
+            },
+            job,
+        )
+        .await;
+    }
     let charge = job.owned_buffer((std::mem::size_of::<QueueSourceFields>() + 1024) as u64)?;
     let mut output = QueueSourceFields {
         fields: Fields::new(),
@@ -230,23 +247,16 @@ pub(super) async fn load_group_fields<R: QueueSourceReader>(
         },
         _charge: charge,
     };
-    if let Some(names) = names {
-        for name in names {
-            output.name(name, job)?;
-        }
-        fill_selected(reader, cut, identity, definition, job, &mut output).await?;
-    } else {
-        fill_complete(
-            reader,
-            cut,
-            identity,
-            expected_count,
-            definition,
-            job,
-            &mut output,
-        )
-        .await?;
-    }
+    fill_complete(
+        reader,
+        cut,
+        identity,
+        expected_count,
+        definition,
+        job,
+        &mut output,
+    )
+    .await?;
     if output.present_count() as u64 > expected_count {
         return Err(unknown(
             "selected fields exceed authenticated membership count",
@@ -367,409 +377,4 @@ pub fn source_field_value(bytes: &[u8]) -> QueueResult<ValueRef<'_>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        queue_admission::QueueAdmission,
-        queue_namespace::AddressRef,
-        queue_planner::{RecordSnapshot, plan_commit_group},
-        queue_publication::{
-            BodyCommandRef, IdentityRef, PublicationReceipt, WorkMetadataRef, encode_publication,
-            view_publication,
-        },
-        queue_schema_codec::encode_definition,
-        queue_storage_layout,
-    };
-    use fireweed_core::queue_contract::*;
-    use std::{
-        collections::BTreeMap,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
-    struct Reader {
-        identity: Arc<OwnedQueueBufferCharge>,
-        rows: Vec<(Vec<u8>, Vec<u8>)>,
-        lookups: AtomicUsize,
-        ranges: AtomicUsize,
-        fail_range: bool,
-    }
-    impl QueueSourceReader for Reader {
-        type Point = (Vec<u8>, Option<usize>);
-        type Range = (Vec<u8>, Vec<u8>);
-        fn cut(&self) -> QueueResult<super::super::QueueSourceCut<'_>> {
-            super::super::QueueSourceCut::from_captured(
-                &self.identity,
-                AddressRef {
-                    tenant: "t",
-                    queue: "q",
-                },
-                1,
-                1,
-                self.identity.reservation(),
-            )
-        }
-        async fn lookup(&self, full_key: &[u8]) -> QueueResult<Self::Point> {
-            self.lookups.fetch_add(1, Ordering::Relaxed);
-            Ok((
-                full_key.to_vec(),
-                self.rows.iter().position(|(key, _)| key == full_key),
-            ))
-        }
-        fn point<'a>(
-            &'a self,
-            owner: &'a Self::Point,
-        ) -> QueueResult<super::super::QueueSourcePoint<'a>> {
-            Ok(self
-                .cut()?
-                .point_from_source(&owner.0, owner.1.map(|i| self.rows[i].1.as_slice())))
-        }
-        async fn complete_range(&self, lower: &[u8], upper: &[u8]) -> QueueResult<Self::Range> {
-            self.ranges.fetch_add(1, Ordering::Relaxed);
-            if self.fail_range {
-                return Err(unknown("injected incomplete range"));
-            }
-            Ok((lower.to_vec(), upper.to_vec()))
-        }
-        fn visit_range(
-            &self,
-            owner: &Self::Range,
-            lower: &[u8],
-            upper: &[u8],
-            visitor: &mut dyn for<'a> FnMut(super::super::QueueSourcePoint<'a>) -> QueueResult<()>,
-        ) -> QueueResult<()> {
-            assert_eq!((&owner.0[..], &owner.1[..]), (lower, upper));
-            for (key, value) in &self.rows {
-                if key.as_slice() >= lower && key.as_slice() < upper {
-                    visitor(self.cut()?.point_from_source(key, Some(value)))?;
-                }
-            }
-            Ok(())
-        }
-    }
-    fn definition() -> CollectionDefinition {
-        CollectionDefinition {
-            fields: BTreeMap::from([
-                ("a".into(), FieldType::Integer),
-                ("b".into(), FieldType::Text),
-                ("untouched".into(), FieldType::Bytes),
-            ]),
-            indexes: BTreeMap::from([
-                ("ab".into(), vec!["a".into(), "b".into()]),
-                ("bc".into(), vec!["b".into(), "untouched".into()]),
-            ]),
-            unique_indexes: Default::default(),
-            additional_field_prefixes: Default::default(),
-        }
-    }
-    fn group(id: &str) -> CommitGroup {
-        CommitGroup {
-            request_id: id.into(),
-            administration: None,
-            claimed_updates: vec![],
-            state_updates: vec![],
-            work_updates: vec![],
-            work_inserts: vec![],
-        }
-    }
-    fn preserve() -> CommandRef<'static> {
-        CommandRef {
-            identity: IdentityRef {
-                collection: None,
-                key: "record\0α",
-            },
-            expected_version: Some(1),
-            prior_highwater: 1,
-            output_highwater: 2,
-            effect: EffectRef::WorkPut {
-                metadata: WorkMetadataRef {
-                    priority: 0,
-                    available_at: 0,
-                    insertion_sequence: 1,
-                    lifecycle: Lifecycle::Pending,
-                    eligible_since: 0,
-                    attempts: 0,
-                    lease_expires_at: None,
-                    lease_hash: None,
-                },
-                fields: FieldsCommandRef::Preserve,
-                body: BodyCommandRef::Preserve,
-            },
-        }
-    }
-    #[test]
-    fn field_codec_borrows_every_owned_scalar_without_changing_representation() {
-        for owned in [
-            FieldValue::Integer(i64::MIN),
-            FieldValue::Float(-0.0),
-            FieldValue::Boolean(true),
-            FieldValue::Text("\0α".into()),
-            FieldValue::Bytes(vec![0, 255]),
-        ] {
-            let encoded = queue_storage_layout::encode(&owned).unwrap();
-            assert_eq!(value(&encoded).unwrap().owned(), owned);
-            if let (FieldValue::Float(before), Value::Float(after)) =
-                (&owned, value(&encoded).unwrap())
-            {
-                assert_eq!(before.to_bits(), after.to_bits());
-            }
-            assert_eq!(
-                crate::queue_index::ordered_key_ref(&[Some(source_field_value(&encoded).unwrap())])
-                    .unwrap(),
-                crate::queue_index::ordered_key(&[Some(&owned)]).unwrap()
-            );
-            let mut trailing = encoded;
-            trailing.push(0);
-            assert!(source_field_value(&trailing).is_err());
-        }
-        for encoded in [
-            vec![],
-            vec![3, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1],
-            vec![4, 100, 1],
-            vec![2, 2],
-        ] {
-            assert!(source_field_value(&encoded).is_err());
-        }
-    }
-    #[test]
-    fn membership_names_require_complete_canonical_literals() {
-        assert_eq!(field_name(b"a\0\xff\xce\xb1\0\0").unwrap(), "a\0α");
-        for suffix in [
-            b"a".as_slice(),
-            b"a\0",
-            b"a\0\x01",
-            b"a\0\0tail",
-            b"\xff\0\0",
-        ] {
-            assert!(field_name(suffix).is_err());
-        }
-    }
-    #[test]
-    fn output_credit_boundary_and_drop_cover_the_actual_retained_field() {
-        let admission = QueueAdmission::new(1, 1 << 20).unwrap();
-        let job = Arc::new(admission.reserve(0).unwrap());
-        let make = || QueueSourceFields {
-            fields: Fields::new(),
-            coverage: FieldCoverage::Complete,
-            _charge: job
-                .owned_buffer((std::mem::size_of::<QueueSourceFields>() + 1024) as u64)
-                .unwrap(),
-        };
-        let encoded = queue_storage_layout::encode(&FieldValue::Bytes(vec![7; 8192])).unwrap();
-        let base = admission.usage().unwrap();
-        let mut measured = make();
-        let before = admission.usage().unwrap().1;
-        measured
-            .retain("untouched", &encoded, &definition(), &job)
-            .unwrap();
-        let needed = admission.usage().unwrap().1 - before;
-        assert!(needed > encoded.len() as u64);
-        drop(measured);
-        assert_eq!(admission.usage().unwrap(), base);
-        for spare in [needed - 1, needed] {
-            let mut output = make();
-            let padding = job
-                .owned_buffer((1 << 20) - admission.usage().unwrap().1 - spare)
-                .unwrap();
-            let result = output.retain("untouched", &encoded, &definition(), &job);
-            assert_eq!(result.is_ok(), spare == needed);
-            assert_eq!(output.present_count(), usize::from(spare == needed));
-            drop(output);
-            drop(padding);
-            assert_eq!(admission.usage().unwrap(), base);
-        }
-    }
-    #[test]
-    fn selective_preimages_follow_existing_index_closure_and_complete_membership() {
-        futures::executor::block_on(async {
-            let admission = QueueAdmission::new(2, 4 << 20).unwrap();
-            let job = Arc::new(admission.reserve(0).unwrap());
-            let foreign = Arc::new(admission.reserve(0).unwrap());
-            let fields = Fields::from([
-                ("a".into(), FieldValue::Integer(7)),
-                ("b".into(), FieldValue::Text("old\0α".into())),
-                ("untouched".into(), FieldValue::Bytes(vec![9; 8192])),
-            ]);
-            let mut reader = Reader {
-                identity: Arc::new(job.owned_buffer(128).unwrap()),
-                rows: fields
-                    .iter()
-                    .map(|(name, value)| {
-                        (
-                            QueueSourceKey::Field {
-                                collection: None,
-                                key: "record\0α",
-                                field: name,
-                            }
-                            .encode()
-                            .unwrap(),
-                            queue_storage_layout::encode(value).unwrap(),
-                        )
-                    })
-                    .collect(),
-                lookups: AtomicUsize::new(0),
-                ranges: AtomicUsize::new(0),
-                fail_range: false,
-            };
-            reader.rows.sort();
-            let schema = QueueSchema {
-                work: definition(),
-                state: Default::default(),
-                progress_bound_nanos: 1,
-                max_attempts: 3,
-            };
-            let mut seed = group("seed");
-            seed.work_inserts.push(NewWork {
-                key: "record\0α".into(),
-                priority: 0,
-                available_at: 0,
-                fields: fields.clone(),
-                body: Default::default(),
-            });
-            let mut snapshot = RecordSnapshot::default();
-            plan_commit_group(&seed, &mut snapshot, 0, &schema).unwrap();
-            let mut patch = group("patch");
-            patch.work_updates.push(UnclaimedUpdate {
-                key: "record\0α".into(),
-                expect: StateExpect::Version(1),
-                change: UnclaimedChange::Patch(WorkPatch {
-                    fields: BTreeMap::from([("a".into(), Some(FieldValue::Integer(8)))]),
-                    ..Default::default()
-                }),
-            });
-            let mut after = snapshot.clone();
-            let delta = plan_commit_group(&patch, &mut after, 0, &schema).unwrap();
-            let queue = QueueAddress {
-                tenant: "t".into(),
-                queue: "q".into(),
-            };
-            let receipt = PublicationReceipt::commit(&queue, &patch, &delta.receipt).unwrap();
-            let frame = encode_publication(
-                &queue,
-                &encode_definition(&schema).unwrap(),
-                &snapshot,
-                &delta,
-                &[receipt],
-                1 << 20,
-                &job,
-            )
-            .unwrap();
-            let view = view_publication(frame.as_bytes()).unwrap();
-            let command = view.commands().next().unwrap().unwrap();
-            let baseline = admission.usage().unwrap();
-            let selected = load_command_fields(&reader, command, 3, &schema.work, &job)
-                .await
-                .unwrap();
-            assert_eq!(selected.present_count(), 2);
-            assert_eq!(
-                selected.checked().unwrap().get("a").unwrap(),
-                fields.get("a")
-            );
-            assert_eq!(
-                selected.checked().unwrap().get("b").unwrap(),
-                fields.get("b")
-            );
-            assert!(selected.checked().unwrap().get("untouched").is_err());
-            assert_eq!(reader.lookups.load(Ordering::Relaxed), 2);
-            assert_eq!(reader.ranges.load(Ordering::Relaxed), 0);
-            drop(selected);
-            assert_eq!(admission.usage().unwrap(), baseline);
-            let preserved = load_command_fields(&reader, preserve(), 3, &schema.work, &job)
-                .await
-                .unwrap();
-            assert_eq!(preserved.present_count(), 0);
-            assert_eq!(reader.lookups.load(Ordering::Relaxed), 2);
-            assert_eq!(reader.ranges.load(Ordering::Relaxed), 0);
-            drop(preserved);
-            let deleted = CommandRef {
-                effect: EffectRef::Delete,
-                ..preserve()
-            };
-            let complete = load_command_fields(&reader, deleted, 3, &schema.work, &job)
-                .await
-                .unwrap();
-            assert_eq!(complete.present_count(), 3);
-            assert_eq!(
-                complete.checked().unwrap().get("untouched").unwrap(),
-                fields.get("untouched")
-            );
-            assert_eq!(complete.checked().unwrap().get("missing").unwrap(), None);
-            drop(complete);
-            assert_eq!(admission.usage().unwrap(), baseline);
-            assert!(
-                load_command_fields(&reader, deleted, 2, &schema.work, &job)
-                    .await
-                    .is_err()
-            );
-            assert!(
-                load_command_fields(&reader, deleted, 3, &schema.work, &foreign)
-                    .await
-                    .is_err()
-            );
-            assert!(
-                load_command_fields(&reader, deleted, 4, &schema.work, &job)
-                    .await
-                    .is_err()
-            );
-            let original_rows = reader.rows.clone();
-            reader.rows.push(reader.rows[0].clone());
-            reader.rows.sort();
-            assert!(
-                load_command_fields(&reader, deleted, 3, &schema.work, &job)
-                    .await
-                    .is_err()
-            );
-            reader.rows = original_rows.clone();
-            reader.rows[0].1 = queue_storage_layout::encode(&FieldValue::Boolean(false)).unwrap();
-            assert!(
-                load_command_fields(&reader, deleted, 3, &schema.work, &job)
-                    .await
-                    .is_err()
-            );
-            reader.rows = original_rows.clone();
-            reader.rows.push((
-                QueueSourceKey::Field {
-                    collection: None,
-                    key: "record\0α",
-                    field: "rogue",
-                }
-                .encode()
-                .unwrap(),
-                queue_storage_layout::encode(&FieldValue::Integer(0)).unwrap(),
-            ));
-            reader.rows.sort();
-            assert!(
-                load_command_fields(&reader, deleted, 4, &schema.work, &job)
-                    .await
-                    .is_err()
-            );
-            reader.rows = original_rows;
-            assert_eq!(admission.usage().unwrap(), baseline);
-            // Sparse composite columns are authenticated absence, while an
-            // unrelated large field remains outside selected coverage.
-            let b_key = QueueSourceKey::Field {
-                collection: None,
-                key: "record\0α",
-                field: "b",
-            }
-            .encode()
-            .unwrap();
-            reader.rows.retain(|(key, _)| key != &b_key);
-            let sparse = load_command_fields(&reader, command, 2, &schema.work, &job)
-                .await
-                .unwrap();
-            assert_eq!(sparse.present_count(), 1);
-            assert_eq!(sparse.checked().unwrap().get("b").unwrap(), None);
-            assert!(sparse.checked().unwrap().get("untouched").is_err());
-            drop(sparse);
-            let complete_sparse = load_command_fields(&reader, deleted, 2, &schema.work, &job)
-                .await
-                .unwrap();
-            drop(complete_sparse);
-            reader.fail_range = true;
-            let failure = load_command_fields(&reader, deleted, 2, &schema.work, &job).await;
-            assert!(
-                matches!(failure, Err(QueueError::OutcomeUnknown(ref message)) if message.contains("injected incomplete range"))
-            );
-            assert_eq!(admission.usage().unwrap(), baseline);
-        });
-    }
-}
+mod tests;

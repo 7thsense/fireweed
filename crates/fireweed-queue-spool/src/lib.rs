@@ -858,3 +858,8 @@ pub use finalization::{
 
 mod root;
 pub use root::ScratchRoot;
+
+#[cfg(feature = "test-support")]
+mod finalization_probe;
+#[cfg(feature = "test-support")]
+pub use finalization_probe::{FinalizationProbe, FinalizationRelease, FinalizationStage};

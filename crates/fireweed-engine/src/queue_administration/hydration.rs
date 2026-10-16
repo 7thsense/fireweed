@@ -4,6 +4,17 @@ use super::*;
 use crate::queue_planner::RecordSnapshot;
 
 pub fn administrative_hydration_group(key: &str, action: &AdministrativeAction) -> CommitGroup {
+    hydration_group(key, action, true)
+}
+/// Field-only read proxy for prospective unique tuples. Old-body comparison is
+/// a separate hydration capability; tuple discovery never clones request bodies.
+pub fn administrative_unique_hydration_group(
+    key: &str,
+    action: &AdministrativeAction,
+) -> CommitGroup {
+    hydration_group(key, action, false)
+}
+fn hydration_group(key: &str, action: &AdministrativeAction, include_body: bool) -> CommitGroup {
     CommitGroup {
         administration: None,
         request_id: String::new(),
@@ -21,7 +32,16 @@ pub fn administrative_hydration_group(key: &str, action: &AdministrativeAction) 
                     lease_guard,
                     ..
                 } => UnclaimedChange::Administrative {
-                    patch: patch.clone(),
+                    patch: WorkPatch {
+                        priority: patch.priority,
+                        available_at: patch.available_at,
+                        fields: patch.fields.clone(),
+                        body: if include_body {
+                            patch.body.clone()
+                        } else {
+                            None
+                        },
+                    },
                     lifecycle: *lifecycle,
                     lease_guard: *lease_guard,
                 },

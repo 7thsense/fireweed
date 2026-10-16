@@ -1,22 +1,33 @@
 //! Addressed ordinary-group preimages from one authenticated source cut.
 //! No projection transaction, source replay or alternate business planner lives here.
+mod administrative;
 mod admission;
+pub use administrative::{
+    QueueSourceAdministrativeRead, QueueSourceAdministrativeReader, QueueSourceAdministrativeRow,
+    open_administrative_source,
+};
 mod batch;
 mod body;
+mod work;
 pub use batch::{
     QueueSourceBatchPlan, QueueSourceBatchPreimage, QueueSourceBatchPublication,
     load_batch_preimage,
 };
+mod ordinary_authority;
 mod publication;
 use super::*;
 use crate::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
     queue_planner::{self, CommitDelta, RecordIdentity, RecordSnapshot, StoredWork},
     queue_publication::IdentityRef,
-    queue_schema_codec::AdmittedQueueDefinition,
+    queue_schema_codec::{AdmittedQueueDefinition, DefinitionPin},
 };
 use admission::request_scratch;
 use fireweed_core::queue_contract::*;
+pub use ordinary_authority::{
+    QueueSourceAdministrativeAdmission, QueueSourceOrdinaryAuthority, QueueSourceOrdinaryBinding,
+    admit_administrative_group, load_administrative_ordinary_authority,
+};
 pub use publication::{QueueSourceGroupEncodingLimits, QueueSourceGroupPublication};
 use serde::de::DeserializeOwned;
 use std::{
@@ -169,19 +180,19 @@ fn validate_ordinary_group(
 }
 struct SourceImage<'a> {
     cut: QueueSourceCut<'a>,
+    pin: DefinitionPin,
     snapshot: RecordSnapshot,
     retained_charges: Vec<OwnedQueueBufferCharge>,
     charge: OwnedQueueBufferCharge,
 }
-async fn load_image<'a, R: QueueSourceRecordReader>(
+async fn load_image_header<'a, R: QueueSourceRecordReader>(
     reader: &'a R,
+    cut: QueueSourceCut<'a>,
     queue: &QueueAddress,
-    group: &CommitGroup,
     definition: &AdmittedQueueDefinition,
     job: &Arc<QueueReservation>,
     charge: OwnedQueueBufferCharge,
 ) -> QueueResult<SourceImage<'a>> {
-    let cut = reader.cut()?;
     if !cut.belongs_to(job)
         || !definition.belongs_to(job)
         || cut.address().tenant != queue.tenant
@@ -192,25 +203,56 @@ async fn load_image<'a, R: QueueSourceRecordReader>(
             "queue, definition, operation or nonempty cut differs",
         ));
     }
-    let genesis = super::genesis::load_source_genesis_at(reader, cut, job).await?;
+    let header = super::header::load_source_header_at(reader, cut, job).await?;
+    let genesis = header.genesis();
     if genesis.definition_pin != definition.pin()
         || genesis.source.log_offset() != 0
         || genesis.source.byte_length() == 0
     {
         return Err(unknown("genesis definition differs"));
     }
-    let next_sequence = fixed(reader, cut, QueueSourceKey::Sequence, job)
-        .await?
-        .ok_or_else(|| unknown("missing sequence"))?;
-    let mut output = SourceImage {
+    let next_sequence = header.sequence();
+    Ok(SourceImage {
         cut,
+        pin: definition.pin(),
         snapshot: RecordSnapshot {
             next_sequence,
             ..Default::default()
         },
         retained_charges: Vec::new(),
         charge,
-    };
+    })
+}
+async fn load_image<'a, R: QueueSourceRecordReader>(
+    reader: &'a R,
+    queue: &QueueAddress,
+    group: &CommitGroup,
+    definition: &AdmittedQueueDefinition,
+    job: &Arc<QueueReservation>,
+    charge: OwnedQueueBufferCharge,
+) -> QueueResult<SourceImage<'a>> {
+    load_image_at(reader, reader.cut()?, queue, group, definition, job, charge).await
+}
+async fn load_image_at<'a, R: QueueSourceRecordReader>(
+    reader: &'a R,
+    cut: QueueSourceCut<'a>,
+    queue: &QueueAddress,
+    group: &CommitGroup,
+    definition: &AdmittedQueueDefinition,
+    job: &Arc<QueueReservation>,
+    charge: OwnedQueueBufferCharge,
+) -> QueueResult<SourceImage<'a>> {
+    let output = load_image_header(reader, cut, queue, definition, job, charge).await?;
+    load_image_contents(reader, group, definition, job, output).await
+}
+async fn load_image_contents<'a, R: QueueSourceRecordReader>(
+    reader: &'a R,
+    group: &CommitGroup,
+    definition: &AdmittedQueueDefinition,
+    job: &Arc<QueueReservation>,
+    mut output: SourceImage<'a>,
+) -> QueueResult<SourceImage<'a>> {
+    let cut = output.cut;
     let names_by_key = queue_planner::required_work_fields_by_key(group, definition.schema())?;
     let no_fields = BTreeSet::new();
     let mut keys = BTreeMap::<&str, bool>::new();
@@ -230,72 +272,28 @@ async fn load_image<'a, R: QueueSourceRecordReader>(
             .then_some(update.key.as_str())).collect::<BTreeSet<_>>();
     let mut body_needs = Vec::new();
     for (key, needs_fields) in keys {
-        let (fact, body) = body::work_fact(reader, cut, key, body_keys.contains(key), job).await?;
-        if let Some(body) = body {
-            body_needs.push(body);
-        }
-        let Some(fact) = fact else { continue };
-        fact.validate(None)?;
-        output.snapshot.versions.insert(
-            RecordIdentity {
-                collection: None,
-                key: key.into(),
-            },
-            fact.highwater,
-        );
-        if let Some(QueueSourceLive::Work { metadata, body }) = fact.live {
-            if metadata.insertion_sequence > next_sequence
-                || body.span().log_offset() >= cut.through()
-            {
-                return Err(unknown(
-                    "work sequence or body lies outside captured source",
-                ));
-            }
-            let names = if needs_fields {
-                names_by_key
-                    .get(key)
-                    .ok_or_else(|| unknown("missing addressed work field declaration"))?
-            } else {
-                &no_fields
-            };
-            let (fields, coverage, guard) = super::fields::load_group_fields(
+        let names = if needs_fields {
+            names_by_key
+                .get(key)
+                .ok_or_else(|| unknown("missing addressed work field declaration"))?
+        } else {
+            &no_fields
+        };
+        if let Some(body) = output
+            .load_work(
                 reader,
-                cut,
-                IdentityRef {
-                    collection: None,
-                    key,
+                key,
+                body_keys.contains(key),
+                QueueSourceFieldSelection {
+                    names,
+                    prefixes: &no_fields,
                 },
-                fact.field_count,
-                &definition.schema().work,
-                Some(names),
+                definition,
                 job,
             )
             .await?
-            .into_parts();
-            output.retained_charges.push(guard);
-            output.snapshot.work.insert(
-                key.into(),
-                StoredWork {
-                    record: WorkRecord {
-                        work: NewWork {
-                            key: key.into(),
-                            priority: metadata.priority,
-                            available_at: metadata.available_at,
-                            fields,
-                            body: Default::default(),
-                        },
-                        version: metadata.version,
-                        insertion_sequence: metadata.insertion_sequence,
-                        lifecycle: metadata.lifecycle,
-                        eligible_since: metadata.eligible_since,
-                        attempts: metadata.attempts,
-                        lease_expires_at: metadata.lease_expires_at,
-                    },
-                    lease_hash: metadata.lease_hash,
-                    field_coverage: coverage,
-                    body_loaded: false,
-                },
-            );
+        {
+            body_needs.push(body);
         }
     }
     let mut states = BTreeMap::new();

@@ -90,6 +90,68 @@ impl<'a> QueueSourceCut<'a> {
         }
     }
 }
+/// Admitted identity binding for an owned worker snapshot. This retains the
+/// original capability identity, not the backend's physical source carriers;
+/// the coordinator must keep those actual carriers alive separately.
+pub(super) struct OwnedSourceCutBinding {
+    address: fireweed_core::queue_contract::QueueAddress,
+    identity: Arc<OwnedQueueBufferCharge>,
+    epoch: u64,
+    through: u64,
+    _charge: OwnedQueueBufferCharge,
+}
+impl OwnedSourceCutBinding {
+    pub(super) fn capture(
+        cut: QueueSourceCut<'_>,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Self> {
+        if !cut.belongs_to(job) {
+            return Err(unknown("owned binding operation differs"));
+        }
+        let bytes = cut
+            .address
+            .tenant
+            .len()
+            .checked_add(cut.address.queue.len())
+            .and_then(|n| n.checked_add(std::mem::size_of::<Self>()))
+            .and_then(|n| n.checked_add(512))
+            .ok_or(QueueError::TooLarge)?;
+        let charge = job.owned_buffer(bytes as u64)?;
+        Ok(Self {
+            address: fireweed_core::queue_contract::QueueAddress {
+                tenant: cut.address.tenant.into(),
+                queue: cut.address.queue.into(),
+            },
+            identity: Arc::clone(cut.identity),
+            epoch: cut.epoch,
+            through: cut.through,
+            _charge: charge,
+        })
+    }
+    pub(super) fn cut(&self) -> QueueSourceCut<'_> {
+        QueueSourceCut {
+            identity: &self.identity,
+            address: AddressRef {
+                tenant: &self.address.tenant,
+                queue: &self.address.queue,
+            },
+            epoch: self.epoch,
+            through: self.through,
+        }
+    }
+    pub(super) fn validate(
+        &self,
+        original: QueueSourceCut<'_>,
+        job: &QueueReservation,
+    ) -> QueueResult<()> {
+        if !self.cut().belongs_to(job) || !self.cut().same_cut(&original) {
+            return Err(unknown(
+                "owned snapshot differs from original cut or operation",
+            ));
+        }
+        Ok(())
+    }
+}
 /// Borrowed exact-key source evidence. The producing adapter retains payload
 /// and admission owners for the entire borrow, including authoritative absence.
 pub struct QueueSourcePoint<'a> {

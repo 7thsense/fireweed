@@ -1,4 +1,6 @@
 //! Exact body correspondence is stronger than a checksum-valid byte interval.
+mod administrative;
+mod ordinary_authority;
 use super::*;
 use crate::queue_publication::{BodyCommandRef, EffectRef};
 use crate::queue_source_index::{QueueSourceWorkBodyEvidence, verify_source_work_bodies};
@@ -423,6 +425,8 @@ fn source_work_body_second_alias_cannot_replace_complete_fact() {
 struct BodyReader<'a> {
     fixture: &'a Fixture,
     reads: AtomicUsize,
+    header_reads: AtomicUsize,
+    lookups: AtomicUsize,
     fail_at: usize,
 }
 impl QueueSourceReader for BodyReader<'_> {
@@ -432,6 +436,12 @@ impl QueueSourceReader for BodyReader<'_> {
         self.fixture.reader.cut()
     }
     async fn lookup(&self, key: &[u8]) -> QueueResult<Self::Point> {
+        if key == QueueSourceKey::Genesis.encode()?.as_slice()
+            || key == QueueSourceKey::Sequence.encode()?.as_slice()
+        {
+            self.header_reads.fetch_add(1, Ordering::SeqCst);
+        }
+        self.lookups.fetch_add(1, Ordering::SeqCst);
         self.fixture.reader.lookup(key).await
     }
     fn point<'a>(&'a self, owner: &'a Self::Point) -> QueueResult<QueueSourcePoint<'a>> {
@@ -520,6 +530,8 @@ fn source_work_body_materialization_matches_baseline_equal_changed_and_empty() {
             let reader = BodyReader {
                 fixture: &f,
                 reads: AtomicUsize::new(0),
+                header_reads: AtomicUsize::new(0),
+                lookups: AtomicUsize::new(0),
                 fail_at: 0,
             };
             let baseline = f.admission.usage().unwrap();
@@ -571,6 +583,8 @@ fn source_work_body_batch_reads_shared_frame_once_and_preserves_evolving_overlay
         let reader = BodyReader {
             fixture: &f,
             reads: AtomicUsize::new(0),
+            header_reads: AtomicUsize::new(0),
+            lookups: AtomicUsize::new(0),
             fail_at: 0,
         };
         let batch = CommitBatch {
@@ -623,6 +637,8 @@ fn source_work_body_late_record_failure_retires_partial_copies_without_refunding
         let reader = BodyReader {
             fixture: &f,
             reads: AtomicUsize::new(0),
+            header_reads: AtomicUsize::new(0),
+            lookups: AtomicUsize::new(0),
             fail_at: 2,
         };
         let batch = CommitBatch {
@@ -669,6 +685,8 @@ fn source_work_body_metadata_only_update_does_not_hydrate() {
         let reader = BodyReader {
             fixture: &f,
             reads: AtomicUsize::new(0),
+            header_reads: AtomicUsize::new(0),
+            lookups: AtomicUsize::new(0),
             fail_at: 1,
         };
         let mut request = group("metadata-only");
