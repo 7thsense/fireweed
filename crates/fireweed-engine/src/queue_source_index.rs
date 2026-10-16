@@ -80,4 +80,7 @@ pub use group::{
 };
 
 mod selection;
-pub use selection::{QueueSourceScalarRange, QueueSourceScalarRanges, plan_source_scalar_ranges};
+pub use selection::{
+    QueueSourceScalarRange, QueueSourceScalarRanges, QueueSourceSelectionBudget,
+    QueueSourceSelectionWork, plan_source_scalar_ranges,
+};
