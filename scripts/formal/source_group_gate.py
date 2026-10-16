@@ -28,7 +28,8 @@ for alias, module_name in (('original_model','source_original_models'),('origina
                           ('original_batch_model','source_original_batch_models'),
                           ('original_batch_gate','source_original_batch_gate'),
                           ('coordinator_model','coordinator_models'),('coordinator_gate','coordinator_gate'),
-                          ('body_model','source_body_models'),('body_gate','source_body_gate')):
+                          ('body_model','source_body_models'),('body_gate','source_body_gate'),
+                          ('state_read_model','source_state_read_models'),('state_read_gate','source_state_read_gate')):
     source_path=helper_path.with_name(module_name+'.py')
     source_bytes=source_path.read_bytes()
     module=types.ModuleType(module_name)
@@ -43,6 +44,7 @@ for alias, module_name in (('original_model','source_original_models'),('origina
 original_batch_model.PREFIX_ORACLE=original_batch_gate.prefix_violation
 coordinator_model.PREFIX_ORACLE=coordinator_gate.prefix_violation
 body_model.PREFIX_ORACLE=body_gate.prefix_violation
+state_read_model.PREFIX_ORACLE=state_read_gate.prefix_violation
 
 WITNESSES = {
     'mixed_check_corruption_ignored': ('mixed_check_corrupt','same','absent',False,'none',False),
@@ -163,7 +165,7 @@ def completed_header_witness(s,c):
 
 def run(max_states=100000):
     fault_sets=[set(faults) for faults in (model.FAULTS,model.PUBLICATION_FAULTS,model.READ_FAULTS,
-        model.PROVISION_FAULTS,model.HEADER_FAULTS,original_model.ORIGINAL_FAULTS,batch_model.BATCH_FAULTS,original_batch_model.FAULTS,coordinator_model.FAULTS,body_model.FAULTS)]
+        model.PROVISION_FAULTS,model.HEADER_FAULTS,original_model.ORIGINAL_FAULTS,batch_model.BATCH_FAULTS,original_batch_model.FAULTS,coordinator_model.FAULTS,body_model.FAULTS,state_read_model.FAULTS)]
     if sum(map(len,fault_sets))!=len(set.union(*fault_sets)):
         raise AssertionError('source campaign mutant names must be disjoint')
     specification = model.SourceGroup()
@@ -284,12 +286,27 @@ def run(max_states=100000):
         raise AssertionError('all body mutant controls required')
     baselines.append(body_report)
     controls.extend(body_controls)
+    state_report,state_controls=state_read_gate.run_campaign(helper,state_read_model,max_states)
+    if state_report['name']!='api007-source-state-read' or state_report.get('status')!='PASS' or state_report.get('complete') is not True:
+        raise AssertionError('eleventh complete source-state-read campaign required')
+    if set(state_report.get('completed_witnesses',{}))!=set(state_read_model.CASES):
+        raise AssertionError('all state read witnesses required')
+    if len(state_controls)!=len(state_read_model.FAULTS) or {row['fault'] for row in state_controls}!=set(state_read_model.FAULTS):
+        raise AssertionError('all state read mutant controls required')
+    baselines.append(state_report)
+    controls.extend(state_controls)
     return {'schema':'fireweed-api007-source-group-formal-v1', 'status':'PASS',
         'baseline':baselines, 'negative_controls':controls,
         'qualification':{'finite_abstract_safety':'recorded bounds only', 'production_mapping':'documentary_unexecuted',
             'excluded':['Rust refinement','exact allocation arithmetic','canonical decoding and hashes',
                         'publication/CAS','provider durability','performance','public QueueStore activation']},
-        'production_mappings':[{'symbols':['load_group_preimage','QueueSourceGroupPreimage::plan','load_group_fields',
+        'production_mappings':[{'symbols':['QueueSourceStateValueEvidence::from_source','verify_source_state_values','load_source_state_records'],
+            'tests':['source_state_values_validate_second_alias_and_reject_zero_offset_at_entry',
+                     'source_state_values_reject_equal_bytes_old_version_and_literal_aliases',
+                     'source_state_read_preserves_order_duplicates_exact_cap_and_owned_retirement',
+                     'source_state_read_late_copy_admission_returns_no_prefix_and_restores_owners',
+                     'source_state_hydration_matches_complete_image_local','source_state_hydration_matches_complete_image_real_s3'],
+            'status':'documentary_unexecuted'},{'symbols':['load_group_preimage','QueueSourceGroupPreimage::plan','load_group_fields',
                 'QueueSourceGroupPlan::encode','QueueSourceGroupPublication::record_for',
                 'QueueNativeAcquired::prepare_group_publication'],
             'tests':['fields_cannot_recapture_foreign_cut_then_return_to_original_head',

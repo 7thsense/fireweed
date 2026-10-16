@@ -62,14 +62,17 @@ impl QueueSourceFields {
     pub fn checked(&self) -> QueueResult<CheckedFields<'_>> {
         CheckedFields::new(&self.fields, &self.coverage)
     }
-    pub(super) fn complete_entries(
-        &self,
-    ) -> QueueResult<impl Iterator<Item = (&str, &FieldValue)>> {
+    pub(super) fn complete_fields(&self) -> QueueResult<&Fields> {
         if !matches!(self.coverage, FieldCoverage::Complete) {
             return Err(unknown("complete enumeration outside loaded authority"));
         }
+        Ok(&self.fields)
+    }
+    pub(super) fn complete_entries(
+        &self,
+    ) -> QueueResult<impl Iterator<Item = (&str, &FieldValue)>> {
         Ok(self
-            .fields
+            .complete_fields()?
             .iter()
             .map(|(name, value)| (name.as_str(), value)))
     }

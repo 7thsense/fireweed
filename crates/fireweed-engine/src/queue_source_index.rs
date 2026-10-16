@@ -45,6 +45,13 @@ pub use body::{
     QueueSourceVerifiedWorkBodies, QueueSourceWorkBodyEvidence, verify_source_work_bodies,
 };
 
+mod state_read;
+pub use state_read::load_source_state_records;
+mod state_value;
+pub use state_value::{
+    QueueSourceStateValueEvidence, QueueSourceVerifiedStateValues, verify_source_state_values,
+};
+
 mod fields;
 pub use fields::{
     QueueSourceFieldSelection, QueueSourceFields, load_command_fields, load_selected_fields,
