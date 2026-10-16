@@ -35,7 +35,7 @@ impl QueueSourceWorkIndex {
     pub(super) fn tag(self) -> u8 {
         self as u8
     }
-    fn width(self) -> usize {
+    pub(super) fn width(self) -> usize {
         match self {
             Self::RawLifecycle => 1,
             Self::Attempts => 4,

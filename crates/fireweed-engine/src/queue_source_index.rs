@@ -13,9 +13,10 @@ pub use intrinsic::{
 
 mod key;
 pub use key::{
-    QueueSourceKey, live_keys_prefix, live_keys_prefix_len, prefix_successor,
-    record_field_name_prefix, record_field_name_prefix_len, record_fields_prefix,
-    record_fields_prefix_len,
+    QueueSourceDecodedIdentity, QueueSourceDecodedPosting, QueueSourceDecodedWorkPosting,
+    QueueSourceKey, QueueSourcePostingFamily, decode_live_key, live_keys_prefix,
+    live_keys_prefix_len, prefix_successor, record_field_name_prefix, record_field_name_prefix_len,
+    record_fields_prefix, record_fields_prefix_len,
 };
 
 mod cell;

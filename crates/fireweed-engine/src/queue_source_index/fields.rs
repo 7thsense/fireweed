@@ -346,26 +346,8 @@ async fn fill_complete<R: QueueSourceReader>(
     output.coverage = FieldCoverage::Complete;
     Ok(())
 }
-fn field_name(mut suffix: &[u8]) -> QueueResult<String> {
-    let mut bytes = Vec::with_capacity(suffix.len());
-    while let Some((&byte, rest)) = suffix.split_first() {
-        suffix = rest;
-        if byte != 0 {
-            bytes.push(byte);
-            continue;
-        }
-        match suffix.split_first() {
-            Some((&255, rest)) => {
-                bytes.push(0);
-                suffix = rest;
-            }
-            Some((&0, [])) => {
-                return String::from_utf8(bytes).map_err(|_| unknown("invalid field name UTF-8"));
-            }
-            _ => return Err(unknown("noncanonical field name terminator")),
-        }
-    }
-    Err(unknown("unterminated field name"))
+fn field_name(suffix: &[u8]) -> QueueResult<String> {
+    super::key::text_literal(suffix)
 }
 
 /// Borrow the source scalar without a second allocation when compiling postings.

@@ -3,6 +3,14 @@
 use crate::queue_index;
 use fireweed_core::queue_contract::{Lifecycle, QueueError, QueueResult};
 
+mod literal;
+mod membership;
+pub use membership::{QueueSourceDecodedIdentity, QueueSourceDecodedWorkPosting, decode_live_key};
+mod ordered;
+mod posting;
+pub(super) use literal::text as text_literal;
+pub use posting::{QueueSourceDecodedPosting, QueueSourcePostingFamily};
+
 pub(super) const VERSION: u8 = 1;
 #[derive(Clone, Copy)]
 pub enum QueueSourceKey<'a> {
