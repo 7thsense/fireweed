@@ -37,7 +37,12 @@ mod edits;
 pub use compile::{QueueSourceCompileLimits, QueueSourceCompiled, compile_genesis};
 
 mod read;
-pub use read::QueueSourceReader;
+pub use read::{QueueSourceReader, QueueSourceRecordReader};
+
+mod body;
+pub use body::{
+    QueueSourceVerifiedWorkBodies, QueueSourceWorkBodyEvidence, verify_source_work_bodies,
+};
 
 mod fields;
 pub use fields::{QueueSourceFields, load_command_fields, source_field_value};

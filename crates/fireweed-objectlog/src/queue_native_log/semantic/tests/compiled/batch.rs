@@ -108,6 +108,8 @@ async fn batch_contract(log: QueueNativeLog) {
         ledger.clone(),
         limits().read,
     )
+    .unwrap()
+    .with_records(super::super::record::record_limits())
     .unwrap();
     let publication = load_batch_preimage(
         &reader,

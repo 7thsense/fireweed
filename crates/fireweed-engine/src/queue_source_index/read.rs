@@ -36,3 +36,25 @@ pub trait QueueSourceReader: Sync {
         visitor: &mut dyn for<'a> FnMut(QueueSourcePoint<'a>) -> QueueResult<()>,
     ) -> QueueResult<()>;
 }
+
+/// Explicit record-reading capability for addressed payload materialization.
+/// Metadata-only compilation does not require or implicitly enable this port.
+pub trait QueueSourceRecordReader: QueueSourceReader {
+    /// Owns checked storage and the actual original cut/job/offset binding.
+    type Record: Send + Sync;
+    /// Validate the supplied original cut before dispatch; use explicit finite
+    /// record limits and the SAME nonrefunding request ledger as semantic reads.
+    fn read_record(
+        &self,
+        cut: &QueueSourceCut<'_>,
+        offset: u64,
+    ) -> impl std::future::Future<Output = QueueResult<Self::Record>> + Send;
+    /// Reject foreign carriers even when numeric heads and bytes are equal.
+    /// The returned borrow remains protected by its actual retained carrier.
+    fn checked_record<'a>(
+        &'a self,
+        owner: &'a Self::Record,
+        cut: &QueueSourceCut<'_>,
+        offset: u64,
+    ) -> QueueResult<crate::queue_log_record::CheckedQueueLogRecord<'a>>;
+}

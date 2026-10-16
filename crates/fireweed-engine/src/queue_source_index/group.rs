@@ -2,6 +2,7 @@
 //! No projection transaction, source replay or alternate business planner lives here.
 mod admission;
 mod batch;
+mod body;
 pub use batch::{
     QueueSourceBatchPlan, QueueSourceBatchPreimage, QueueSourceBatchPublication,
     load_batch_preimage,
@@ -36,7 +37,7 @@ pub struct QueueSourceGroupPreimage<'a> {
     snapshot: RecordSnapshot,
     job: &'a Arc<QueueReservation>,
     // All retained maps/strings and their guards are destroyed before this owner.
-    _field_charges: Vec<OwnedQueueBufferCharge>,
+    _retained_charges: Vec<OwnedQueueBufferCharge>,
     _charge: OwnedQueueBufferCharge,
 }
 /// A speculative result, with the authenticated before-image retained privately
@@ -129,7 +130,7 @@ async fn fixed<T: DeserializeOwned + Copy, R: QueueSourceReader>(
 /// Resolve original commit identity before calling this fresh-planning component;
 /// previews deliberately skip original resolution. This component is inactive
 /// until the facade also supplies the bound original and publication paths.
-pub async fn load_group_preimage<'a, R: QueueSourceReader>(
+pub async fn load_group_preimage<'a, R: QueueSourceRecordReader>(
     reader: &'a R,
     queue: &'a QueueAddress,
     group: &'a CommitGroup,
@@ -148,7 +149,7 @@ pub async fn load_group_preimage<'a, R: QueueSourceReader>(
         definition,
         job,
         snapshot: image.snapshot,
-        _field_charges: image.field_charges,
+        _retained_charges: image.retained_charges,
         _charge: image.charge,
     })
 }
@@ -159,19 +160,20 @@ fn validate_ordinary_group(
     limits: &QueueLimits,
 ) -> QueueResult<()> {
     group.preflight_for(queue, limits)?;
-    if group.administration.is_some() || group.work_updates.iter().any(|u|
-        matches!(&u.change, UnclaimedChange::Administrative { patch, .. } if patch.body.is_some())) {
-        return Err(unknown("administrative body source resolver is not available"));
+    if group.administration.is_some() {
+        return Err(unknown(
+            "fresh administrative source resolver is not available",
+        ));
     }
     group.validate_for(queue, definition.schema(), limits)
 }
 struct SourceImage<'a> {
     cut: QueueSourceCut<'a>,
     snapshot: RecordSnapshot,
-    field_charges: Vec<OwnedQueueBufferCharge>,
+    retained_charges: Vec<OwnedQueueBufferCharge>,
     charge: OwnedQueueBufferCharge,
 }
-async fn load_image<'a, R: QueueSourceReader>(
+async fn load_image<'a, R: QueueSourceRecordReader>(
     reader: &'a R,
     queue: &QueueAddress,
     group: &CommitGroup,
@@ -206,7 +208,7 @@ async fn load_image<'a, R: QueueSourceReader>(
             next_sequence,
             ..Default::default()
         },
-        field_charges: Vec::new(),
+        retained_charges: Vec::new(),
         charge,
     };
     let names_by_key = queue_planner::required_work_fields_by_key(group, definition.schema())?;
@@ -223,17 +225,15 @@ async fn load_image<'a, R: QueueSourceReader>(
     {
         keys.insert(key, true);
     }
+    let body_keys = group.work_updates.iter().filter_map(|update|
+        matches!(&update.change, UnclaimedChange::Administrative { patch, .. } if patch.body.is_some())
+            .then_some(update.key.as_str())).collect::<BTreeSet<_>>();
+    let mut body_needs = Vec::new();
     for (key, needs_fields) in keys {
-        let fact: Option<QueueSourceRecord> = fixed(
-            reader,
-            cut,
-            QueueSourceKey::Record {
-                collection: None,
-                key,
-            },
-            job,
-        )
-        .await?;
+        let (fact, body) = body::work_fact(reader, cut, key, body_keys.contains(key), job).await?;
+        if let Some(body) = body {
+            body_needs.push(body);
+        }
         let Some(fact) = fact else { continue };
         fact.validate(None)?;
         output.snapshot.versions.insert(
@@ -272,7 +272,7 @@ async fn load_image<'a, R: QueueSourceReader>(
             )
             .await?
             .into_parts();
-            output.field_charges.push(guard);
+            output.retained_charges.push(guard);
             output.snapshot.work.insert(
                 key.into(),
                 StoredWork {
@@ -350,7 +350,7 @@ async fn load_image<'a, R: QueueSourceReader>(
                 )
                 .await?
                 .into_parts();
-                output.field_charges.push(guard);
+                output.retained_charges.push(guard);
                 fields
             };
             output.snapshot.state.insert(
@@ -365,6 +365,9 @@ async fn load_image<'a, R: QueueSourceReader>(
             );
         }
     }
+    output
+        .load_bodies(reader, &body_needs, definition, job)
+        .await?;
     if !reader.cut()?.same_cut(&cut) {
         return Err(unknown("reader changed captured cut"));
     }

@@ -1,4 +1,5 @@
 mod batch;
+mod body;
 use super::*;
 use crate::{
     queue_admission::QueueAdmission,
@@ -516,6 +517,24 @@ struct AlternatingFields<'a> {
     foreign: Arc<OwnedQueueBufferCharge>,
     cuts: AtomicUsize,
     field: Vec<u8>,
+}
+impl QueueSourceRecordReader for AlternatingFields<'_> {
+    type Record = OwnedQueueLogRecord;
+    async fn read_record(
+        &self,
+        cut: &QueueSourceCut<'_>,
+        offset: u64,
+    ) -> QueueResult<Self::Record> {
+        self.inner.read_record(cut, offset).await
+    }
+    fn checked_record<'a>(
+        &'a self,
+        owner: &'a Self::Record,
+        cut: &QueueSourceCut<'_>,
+        offset: u64,
+    ) -> QueueResult<crate::queue_log_record::CheckedQueueLogRecord<'a>> {
+        self.inner.checked_record(owner, cut, offset)
+    }
 }
 impl QueueSourceReader for AlternatingFields<'_> {
     type Point = Vec<u8>;

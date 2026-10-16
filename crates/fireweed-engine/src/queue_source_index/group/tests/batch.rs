@@ -286,6 +286,22 @@ fn source_batch_physical_overflow_retains_fitting_prefix_without_resampling() {
 }
 
 struct UnreadSource(AtomicUsize);
+impl QueueSourceRecordReader for UnreadSource {
+    type Record = OwnedQueueLogRecord;
+    async fn read_record(&self, _: &QueueSourceCut<'_>, _: u64) -> QueueResult<Self::Record> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(unknown("validation reached record source"))
+    }
+    fn checked_record<'a>(
+        &'a self,
+        _: &'a Self::Record,
+        _: &QueueSourceCut<'_>,
+        _: u64,
+    ) -> QueueResult<crate::queue_log_record::CheckedQueueLogRecord<'a>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(unknown("validation reached record source"))
+    }
+}
 impl QueueSourceReader for UnreadSource {
     type Point = ();
     type Range = ();
@@ -377,6 +393,24 @@ struct TrackedSource<'a> {
     clock: &'a Clock,
     forbidden: BTreeSet<Vec<u8>>,
     points: std::sync::Mutex<Vec<(Vec<u8>, usize)>>,
+}
+impl QueueSourceRecordReader for TrackedSource<'_> {
+    type Record = OwnedQueueLogRecord;
+    async fn read_record(
+        &self,
+        cut: &QueueSourceCut<'_>,
+        offset: u64,
+    ) -> QueueResult<Self::Record> {
+        self.inner.read_record(cut, offset).await
+    }
+    fn checked_record<'a>(
+        &'a self,
+        owner: &'a Self::Record,
+        cut: &QueueSourceCut<'_>,
+        offset: u64,
+    ) -> QueueResult<crate::queue_log_record::CheckedQueueLogRecord<'a>> {
+        self.inner.checked_record(owner, cut, offset)
+    }
 }
 impl QueueSourceReader for TrackedSource<'_> {
     type Point = Vec<u8>;

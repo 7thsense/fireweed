@@ -692,3 +692,113 @@ async fn source_record_and_semantic_reads_share_one_nonrefunding_request_ledger(
     drop((log, job));
     assert_eq!(admission.usage().unwrap(), (0, 0));
 }
+
+#[tokio::test]
+async fn source_record_reader_carrier_is_bound_to_actual_cut_job_and_offset() {
+    use fireweed_engine::queue_source_index::{QueueSourceReader, QueueSourceRecordReader};
+    let directory = tempfile::tempdir().unwrap();
+    let log = QueueNativeLog::local(
+        directory.path(),
+        "bound-record-reader".into(),
+        options(1 << 20),
+    )
+    .unwrap();
+    let admission = QueueAdmission::new(2, 64 << 20).unwrap();
+    let job = Arc::new(admission.reserve(0).unwrap());
+    let (source, expected, req) = seeded(&log, &job, "queue").await;
+    let budget = ledger(&job, 1, req.hydration_reads(), req.hydration_bytes());
+    let reader = QueueNativeSourceReader::new(
+        &source,
+        &log,
+        &job,
+        budget.clone(),
+        QueueNativeSourceReadLimits {
+            page: scan_limit(),
+            range_pages: 16,
+        },
+    )
+    .unwrap()
+    .with_records(record_limits())
+    .unwrap();
+    let original = reader.cut().unwrap();
+    let before = admission.usage().unwrap();
+    let record = reader.read_record(&original, 0).await.unwrap();
+    assert_eq!(
+        reader
+            .checked_record(&record, &original, 0)
+            .unwrap()
+            .owner()
+            .bytes(),
+        expected.bytes()
+    );
+    assert!(reader.checked_record(&record, &original, 1).is_err());
+    // A second actual capture can have identical numeric heads and bytes while
+    // owning a different opaque source identity.
+    let namespace = source
+        .retained_namespace(
+            &QueueAddress {
+                tenant: "tenant".into(),
+                queue: "queue".into(),
+            },
+            &job,
+        )
+        .unwrap();
+    let other = log.capture_source(namespace, &job).await.unwrap();
+    assert_eq!(other.head(), source.head());
+    let other_reader = QueueNativeSourceReader::new(
+        &other,
+        &log,
+        &job,
+        budget.clone(),
+        QueueNativeSourceReadLimits {
+            page: scan_limit(),
+            range_pages: 16,
+        },
+    )
+    .unwrap()
+    .with_records(record_limits())
+    .unwrap();
+    let other_cut = other_reader.cut().unwrap();
+    let remaining = budget.remaining_work();
+    assert!(reader.read_record(&other_cut, 0).await.is_err());
+    assert!(reader.checked_record(&record, &other_cut, 0).is_err());
+    assert!(other_reader.checked_record(&record, &other_cut, 0).is_err());
+    assert_eq!(
+        budget.remaining_work().record_attempts,
+        remaining.record_attempts
+    );
+    assert_eq!(
+        budget.remaining_work().hydration_reads,
+        remaining.hydration_reads
+    );
+    drop(other_reader);
+    drop(other);
+    // An actual dispatched read spends its ticket permanently, even after the
+    // returned carrier is dropped. A same-ledger retry cannot recreate capacity.
+    drop(record);
+    assert_eq!(admission.usage().unwrap(), before);
+    assert_eq!(budget.remaining_work().record_attempts, 0);
+    assert!(reader.read_record(&original, 0).await.is_err());
+    assert_eq!(admission.usage().unwrap(), before);
+    let foreign = Arc::new(admission.reserve(0).unwrap());
+    assert!(
+        QueueNativeSourceReader::new(
+            &source,
+            &log,
+            &foreign,
+            budget.clone(),
+            QueueNativeSourceReadLimits {
+                page: scan_limit(),
+                range_pages: 16
+            }
+        )
+        .is_err()
+    );
+    drop(foreign);
+    drop(reader);
+    drop(budget);
+    drop(source);
+    drop(expected);
+    drop(job);
+    assert_eq!(admission.usage().unwrap(), (0, 0));
+}

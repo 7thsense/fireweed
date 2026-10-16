@@ -308,7 +308,8 @@ pub(super) mod tests {
         queue_publication::{BodyCommandRef, EffectRef, PublicationReceipt, encode_publication},
         queue_schema_codec::encode_definition,
         queue_source_index::{
-            QueueSourceGenesis, QueueSourcePayload, QueueSourcePoint, QueueSourceSpan,
+            QueueSourceGenesis, QueueSourcePayload, QueueSourcePoint, QueueSourceRecordReader,
+            QueueSourceSpan,
         },
     };
     use fireweed_core::queue_contract::*;
@@ -317,6 +318,24 @@ pub(super) mod tests {
         pub(in crate::queue_source_index) through: u64,
         pub(in crate::queue_source_index) identity: Arc<OwnedQueueBufferCharge>,
         pub(in crate::queue_source_index) facts: BTreeMap<Vec<u8>, Vec<u8>>,
+    }
+    impl QueueSourceRecordReader for Reader {
+        type Record = OwnedQueueLogRecord;
+        async fn read_record(&self, _: &QueueSourceCut<'_>, _: u64) -> QueueResult<Self::Record> {
+            Err(unknown(
+                "unexpected record read by metadata-only test fixture",
+            ))
+        }
+        fn checked_record<'a>(
+            &'a self,
+            _: &'a Self::Record,
+            _: &QueueSourceCut<'_>,
+            _: u64,
+        ) -> QueueResult<CheckedQueueLogRecord<'a>> {
+            Err(unknown(
+                "unexpected record interpretation by metadata-only test fixture",
+            ))
+        }
     }
     impl QueueSourceReader for Reader {
         type Point = Vec<u8>;

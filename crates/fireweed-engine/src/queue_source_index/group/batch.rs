@@ -31,7 +31,7 @@ pub struct QueueSourceBatchPublication<'a> {
     job: &'a QueueReservation,
     _declarations: OwnedQueueBufferCharge,
 }
-pub async fn load_batch_preimage<'a, R: QueueSourceReader>(
+pub async fn load_batch_preimage<'a, R: QueueSourceRecordReader>(
     reader: &'a R,
     batch: &'a CommitBatch,
     positions: &[usize],

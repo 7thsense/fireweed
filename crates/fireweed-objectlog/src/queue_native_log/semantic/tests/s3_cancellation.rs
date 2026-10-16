@@ -232,6 +232,14 @@ impl Proxy {
 
 #[tokio::test]
 async fn pending_s3_source_record_cancellation_retains_frame_credit_and_spent_work() {
+    source_record_cancellation(false).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_s3_bound_record_reader_cancellation_retires_wrapper_but_keeps_physical_credit() {
+    source_record_cancellation(true).await;
+}
+async fn source_record_cancellation(bound: bool) {
+    use fireweed_engine::queue_source_index::{QueueSourceReader, QueueSourceRecordReader};
     use object_log::BlobStore;
     for disabled in [false, true] {
         let env = crate::shared_s3_test_env();
@@ -293,9 +301,28 @@ async fn pending_s3_source_record_cancellation_retains_frame_credit_and_spent_wo
             let (source, log, budget, job) =
                 (source.clone(), log.clone(), budget.clone(), job.clone());
             tokio::spawn(async move {
-                source
-                    .read_source_record(&log, 0, super::record::record_limits(), &budget, &job)
-                    .await
+                if bound {
+                    let reader = QueueNativeSourceReader::new(
+                        &source,
+                        &log,
+                        &job,
+                        budget,
+                        QueueNativeSourceReadLimits {
+                            page: scan_limit(),
+                            range_pages: 16,
+                        },
+                    )
+                    .unwrap()
+                    .with_records(super::record::record_limits())
+                    .unwrap();
+                    let cut = reader.cut().unwrap();
+                    let _record = reader.read_record(&cut, 0).await.unwrap();
+                } else {
+                    let _record = source
+                        .read_source_record(&log, 0, super::record::record_limits(), &budget, &job)
+                        .await
+                        .unwrap();
+                }
             })
         };
         let request = tokio::time::timeout(Duration::from_secs(10), started)
@@ -320,7 +347,12 @@ async fn pending_s3_source_record_cancellation_retains_frame_credit_and_spent_wo
             digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
             "{line}"
         );
-        assert_eq!(admission.usage().unwrap(), pending);
+        let wrapper = if bound {
+            std::mem::size_of::<QueueNativeBoundSourceRecord>() as u64
+        } else {
+            0
+        };
+        assert_eq!(admission.usage().unwrap(), (pending.0, pending.1 + wrapper));
         let left = budget.remaining_work();
         assert_eq!(
             (

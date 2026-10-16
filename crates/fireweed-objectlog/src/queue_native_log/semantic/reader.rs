@@ -2,6 +2,8 @@
 use super::*;
 use fireweed_engine::queue_source_index::{QueueSourceCut, QueueSourcePoint, QueueSourceReader};
 use std::sync::Mutex;
+mod payload;
+pub use payload::{QueueNativeBoundSourceRecord, QueueNativeRecordReader};
 
 /// One non-reusable ledger for an entire compilation request, including retries.
 /// Keep and share this owner when constructing readers for that request.

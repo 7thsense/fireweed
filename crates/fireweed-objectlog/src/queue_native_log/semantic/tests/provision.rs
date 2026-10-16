@@ -692,6 +692,8 @@ pub(super) async fn append_work_group(
     let limits = provision_limits().preparation;
     let reader =
         QueueNativeSourceReader::new(acquired.as_source(), log, job, budget.clone(), limits.read)
+            .unwrap()
+            .with_records(provision_limits().record)
             .unwrap();
     let group = fireweed_core::queue_contract::CommitGroup {
         request_id: request_id.into(),

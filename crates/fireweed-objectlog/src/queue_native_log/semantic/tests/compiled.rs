@@ -151,6 +151,8 @@ async fn check_source_group(
         Arc::clone(&ledger),
         limits().read,
     )
+    .unwrap()
+    .with_records(super::record::record_limits())
     .unwrap();
     let queue = QueueAddress {
         tenant: "tenant".into(),
@@ -483,6 +485,8 @@ async fn accept_source_group(
         ledger.clone(),
         limits().read,
     )
+    .unwrap()
+    .with_records(super::record::record_limits())
     .unwrap();
     let queue = QueueAddress {
         tenant: "tenant".into(),
@@ -1338,3 +1342,5 @@ fn fp4_record(
 mod batch;
 
 mod original_batch;
+
+mod body;

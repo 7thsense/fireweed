@@ -348,8 +348,9 @@ impl QueueNativeSourcePoint {
 }
 mod reader;
 pub use reader::{
-    QueueNativeSourceBudget, QueueNativeSourceRange, QueueNativeSourceReadLimits,
-    QueueNativeSourceReader, QueueNativeSourceWork,
+    QueueNativeBoundSourceRecord, QueueNativeRecordReader, QueueNativeSourceBudget,
+    QueueNativeSourceRange, QueueNativeSourceReadLimits, QueueNativeSourceReader,
+    QueueNativeSourceWork,
 };
 mod record;
 pub use record::QueueNativeSourceRecordLimits;
