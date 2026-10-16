@@ -1,7 +1,7 @@
-//! Same-cut live metadata shared by scalar and universe leaves.
+//! Same-cut metadata points; postings require a live fact, explicit Keys may not.
 use super::*;
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn live_record<R: QueueSourceStreamingReader>(
+pub(super) async fn record_at<R: QueueSourceStreamingReader>(
     reader: &R,
     original: QueueSourceCut<'_>,
     header: &QueueSourceHeader,
@@ -9,7 +9,7 @@ pub(super) async fn live_record<R: QueueSourceStreamingReader>(
     record_key: &str,
     job: &Arc<QueueReservation>,
     budget: &QueueSourceSelectionBudget,
-) -> QueueResult<QueueSourceRecord> {
+) -> QueueResult<Option<QueueSourceRecord>> {
     scope(reader, original, job)?;
     let key = QueueSourceKey::Record {
         collection,
@@ -27,9 +27,9 @@ pub(super) async fn live_record<R: QueueSourceStreamingReader>(
     let key = key.encode()?;
     let owner = reader.lookup(&key).await?;
     let point = reader.point(&owner)?;
-    let bytes = point
-        .value_for(&original, &key)?
-        .ok_or_else(|| unknown("posting has no record fact"))?;
+    let Some(bytes) = point.value_for(&original, &key)? else {
+        return Ok(None);
+    };
     budget.grant(
         job,
         QueueSourceSelectionWork {
@@ -47,7 +47,9 @@ pub(super) async fn live_record<R: QueueSourceStreamingReader>(
             body.span()
         }
         Some(QueueSourceLive::State { value }) => value.span(),
-        None => return Err(unknown("posting refers to a tombstone")),
+        // Authenticate and validate the tombstone before classifying it. Its
+        // highwater remains meaningful even though there is no live payload.
+        None => return Ok(Some(record)),
     };
     if span.log_offset() == 0 || span.log_offset() >= original.through() {
         return Err(unknown(
@@ -55,5 +57,26 @@ pub(super) async fn live_record<R: QueueSourceStreamingReader>(
         ));
     }
     drop(owner);
+    Ok(Some(record))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn live_record<R: QueueSourceStreamingReader>(
+    reader: &R,
+    original: QueueSourceCut<'_>,
+    header: &QueueSourceHeader,
+    collection: Option<&str>,
+    record_key: &str,
+    job: &Arc<QueueReservation>,
+    budget: &QueueSourceSelectionBudget,
+) -> QueueResult<QueueSourceRecord> {
+    let record = record_at(
+        reader, original, header, collection, record_key, job, budget,
+    )
+    .await?
+    .ok_or_else(|| unknown("posting has no record fact"))?;
+    if record.live.is_none() {
+        return Err(unknown("posting refers to a tombstone"));
+    }
     Ok(record)
 }

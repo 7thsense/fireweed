@@ -82,7 +82,7 @@ pub use group::{
 mod selection;
 pub use selection::{
     QueueSourceBooleanClause, QueueSourceCandidateProducer, QueueSourceCandidateScratch,
-    QueueSourcePresenceLeaf, QueueSourceScalarLeaf, QueueSourceScalarRange,
+    QueueSourceKeysLeaf, QueueSourcePresenceLeaf, QueueSourceScalarLeaf, QueueSourceScalarRange,
     QueueSourceScalarRanges, QueueSourceSelectionBudget, QueueSourceSelectionRequest,
     QueueSourceSelectionWork, QueueSourceUniverseLeaf, plan_source_scalar_ranges,
 };

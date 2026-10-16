@@ -170,9 +170,25 @@ pub struct QueueSourcePresenceLeaf<'a, C, Set> {
     present: bool,
     _memory: OwnedQueueBufferCharge,
 }
+/// Every requested point is authenticated by this producer before construction,
+/// including absent and tombstoned keys. No range/universe scan is needed.
+pub struct QueueSourceKeysLeaf<'a, Set> {
+    observations: Vec<KeyObservation<'a>>,
+    set: Set,
+    identity: Arc<Identity>,
+    clause: usize,
+    node: usize,
+    _memory: OwnedQueueBufferCharge,
+}
+struct KeyObservation<'a> {
+    key: &'a str,
+    highwater: Option<u64>,
+    live: bool,
+}
 enum CandidateOperand<Set> {
     Value(usize),
     Presence(usize),
+    Keys(usize),
     Universe,
     Empty,
     Owned(Set),
@@ -184,6 +200,7 @@ pub struct QueueSourceBooleanClause<'a, C, Set> {
     result: CandidateOperand<Set>,
     values: Vec<QueueSourceScalarLeaf<'a, C, Set>>,
     presence: Vec<QueueSourcePresenceLeaf<'a, C, Set>>,
+    keys: Vec<QueueSourceKeysLeaf<'a, Set>>,
     universe: Option<QueueSourceUniverseLeaf<'a, C, Set>>,
     empty: Option<Set>,
     identity: Arc<Identity>,
@@ -223,6 +240,13 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
         job: Arc<QueueReservation>,
         budget: Arc<QueueSourceSelectionBudget>,
     ) -> QueueResult<Self> {
+        if let QueueSourceSelectionRequest::Administration { intent, .. } = request
+            && evaluated_at != intent.evaluated_at
+        {
+            return Err(unknown(
+                "evaluation time differs from actual administrative intent",
+            ));
+        }
         let cut = reader.cut()?;
         let queue = request.queue();
         if !definition.belongs_to(&job)
@@ -598,3 +622,4 @@ mod universe;
 mod presence;
 
 mod boolean;
+mod keys;

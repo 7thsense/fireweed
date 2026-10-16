@@ -32,6 +32,7 @@ class Case:
     clause: int = 0
     capacity: tuple = (100,100,100)
     root: int = 64
+    point_fault: tuple = ()
 
 A=('work','a'); B=('work','b'); C=('work','c'); O=('other','a')
 CASES={
@@ -70,7 +71,26 @@ CASES={
     'late_write_failure':Case(PRESENT,(),mode='write_failure',outcome='unknown'),
     'direct_cancel':Case(PRESENT,(),mode='cancel',outcome='unknown'),
     'accepted_caller_abort':Case(PRESENT,(A,C),mode='caller_abort'),
-    'unsupported_keys':Case(('keys',(('work','missing'),)),(),outcome='unknown'),
+    'unsupported_intrinsic':Case(('attempts',1),(),outcome='unknown'),
+    'keys_mixed':Case(('keys',(A,B,C,('work','missing'))),(A,B,C)),
+    'keys_empty':Case(('keys',()),()),
+    'keys_empty_other_clause':Case(('keys',()),(),clause=1),
+    'keys_tombstone':Case(('keys',(A,B)),(B,),records=((A,False,False,()),)+RECORDS[1:]),
+    'keys_state_only':Case(('keys',(('work','state-only'),)),(),records=((('other','state-only'),True,False,()),)),
+    'keys_not':Case(('not',('keys',(A,('work','missing')))),(B,C)),
+    'keys_identical':Case(('all',('keys',(A,)),('keys',(A,))),(A,)),
+    'keys_bad_tomb_hwm':Case(('keys',(A,B)),(),records=(RECORDS[0],(B,False,False,())),point_fault=(B,'hwm'),outcome='unknown'),
+    'keys_bad_tomb_fields':Case(('keys',(A,B)),(),records=(RECORDS[0],(B,False,False,())),point_fault=(B,'fields'),outcome='unknown'),
+    'keys_foreign_absence':Case(('keys',(A,('work','missing'))),(),point_fault=(('work','missing'),'cut'),outcome='unknown'),
+    'keys_late_point_failure':Case(('keys',(A,B)),(),mode='key_point_failure',outcome='unknown'),
+    'keys_late_cancel':Case(('keys',(A,B)),(),mode='key_cancel',outcome='unknown'),
+    'keys_caller_abort':Case(('keys',(A,B)),(A,B),mode='key_caller_abort'),
+    'keys_decisive_failure':Case(('all',('any',),('keys',(A,B))),(),mode='key_point_failure',outcome='unknown'),
+    'keys_work_exact':Case(('keys',(A,B)),(A,B),capacity=(4,2,2)),
+    'keys_work_short':Case(('keys',(A,B)),(),capacity=(4,2,1),outcome='unknown'),
+    'keys_root_exact':Case(('keys',(A,B)),(A,B),root=4),
+    'keys_root_short':Case(('keys',(A,B)),(),root=3,outcome='unknown'),
+    'keys_manifest_short':Case(('keys',(A,B)),(),root=2,outcome='unknown'),
     'late_algebra_failure':Case(('all',('not',EQ),PRESENT),(),mode='algebra_failure',outcome='unknown'),
     'late_algebra_cancel':Case(('all',('not',EQ),PRESENT),(),mode='algebra_cancel',outcome='unknown'),
     'early_algebra_failure':Case(('all',('not',EQ),PRESENT),(),mode='early_algebra_failure',outcome='unknown'),
@@ -96,7 +116,7 @@ FAULTS={
     'sel_wrong_result':'SEL-MEMBERS',
     'sel_unknown_prefix':'SEL-RETURN',
     'sel_abort_drops_operation':'SEL-OWNER',
-    'sel_raw_nonexistent_keys':'SEL-SUPPORT',
+    'sel_raw_nonexistent_keys':'SEL-KEY-AUTH',
     'sel_omit_empty_builder':'SEL-COMPLETE',
     'sel_same_kind_certificate':'SEL-SCOPE',
     'sel_foreign_leaf_proof':'SEL-SCOPE',
@@ -107,6 +127,16 @@ FAULTS={
     'sel_omit_algebra_debit':'SEL-WORK',
     'sel_partial_denial':'SEL-WORK',
     'sel_spent_grant_denial':'SEL-RETURN',
+    'key_skip_point_verify':'SEL-KEY-AUTH',
+    'key_omit_nonmember':'SEL-COMPLETE',
+    'key_foreign_certificate':'SEL-SCOPE',
+    'key_exchange_occurrence':'SEL-SCOPE',
+    'key_seal_pending':'SEL-WRITE',
+    'key_skip_manifest_fund':'SEL-ROOT',
+    'key_refund_failure':'SEL-WORK',
+    'key_early_capsule_drop':'SEL-OWNER',
+    'key_success_after_port_error':'SEL-KEY-AUTH',
+    'key_forged_live_version':'SEL-KEY-AUTH',
 }
 
 def compile_program(expression):
@@ -162,15 +192,66 @@ def scan_leaf(c,fault,leaf_id,leaf):
     yield ('seal',(context(c),proof_id,value))
     return value
 
+def point_fact(c,key):
+    record=next((r for r in c.records if r[0]==key),None)
+    if record is None:fact=(c.cut,key,'absent',0,0,'none',0)
+    elif record[1]:fact=(c.cut,key,'live',1,len(record[3]),'work',1)
+    else:fact=(c.cut,key,'tombstone',2,0,'none',0)
+    if c.point_fault and c.point_fault[0]==key:
+        damage=c.point_fault[1]
+        if damage=='hwm':fact=(*fact[:3],0,*fact[4:])
+        elif damage=='fields':fact=(*fact[:4],1,*fact[5:])
+        elif damage=='cut':fact=('foreign',*fact[1:])
+    return fact
+
+def valid_point(c,key,fact):
+    cut,identity,status,hwm,count,kind,version=fact
+    if cut!=c.cut or identity!=key:return False
+    if status=='absent':return (hwm,count,kind,version)==(0,0,'none',0)
+    if status=='tombstone':return hwm>0 and (count,kind,version)==(0,'none',0)
+    return status=='live' and hwm>0 and count>=0 and kind=='work' and version==hwm
+
+def key_leaf(c,fault,leaf_id,keys):
+    if fault!='key_skip_manifest_fund':yield ('fund_keys',len(keys))
+    yield ('key_manifest',(context(c),leaf_id,keys))
+    observations=[];members=[]
+    for key in keys:
+        if fault=='sel_raw_nonexistent_keys' and not any(r[0]==key for r in c.records):
+            yield ('key_write_pending',key);return
+        yield ('key_grant',('point',(1,1,0)))
+        yield ('fund_copy',1)
+        yield ('key_lookup',(context(c),leaf_id,key))
+        if c.mode=='key_point_failure' and key==B and fault!='key_success_after_port_error':
+            yield ('unknown','key_point_failure');yield ('retire',None);yield ('coordinator_drop',None);return
+        fact=point_fact(c,key)
+        yield ('key_point',fact)
+        if c.mode=='key_cancel' and key==B:
+            yield ('unknown','key_cancel');yield ('retire',None);yield ('coordinator_drop',None);return
+        if not valid_point(c,key,fact):
+            yield ('unknown','key_metadata');yield ('retire',None);yield ('coordinator_drop',None);return
+        observation=(key,fact[2],fact[3])
+        if fault!='key_skip_point_verify':yield ('key_verified',observation)
+        if fact[2]=='live':
+            yield ('key_grant',('write',(1,0,1)))
+            yield ('key_write_pending',key)
+            if c.mode=='key_caller_abort':yield ('caller_abort',None)
+            if fault=='key_seal_pending':yield ('key_seal',(context(c),leaf_id,tuple(observations),tuple(members)));return
+            yield ('key_write_done',key);members.append(key)
+        yield ('key_complete',(context(c),leaf_id,observation))
+        if fault!='key_omit_nonmember' or fact[2]=='live':observations.append(observation)
+    scope=context(c);proof_id=leaf_id
+    if fault=='key_foreign_certificate':scope=(scope[0],'foreign',*scope[2:])
+    if fault=='key_exchange_occurrence':proof_id+=1
+    yield ('key_seal',(scope,proof_id,tuple(observations),tuple(members)))
+    return tuple(members)
+
 def raw_protocol(c,fault=None):
     """Producer-side finite event driver. Outputs are computed from postings."""
     code=compile_program(c.expression)
     yield ('bind',context(c))
-    supported=all(node[0] in ('eq','in','present','all','any','not') for node in code)
-    if not supported and fault!='sel_unsupported_shortcut' and not (fault=='sel_raw_nonexistent_keys' and c.expression[0]=='keys'):
+    supported=all(node[0] in ('eq','in','present','keys','all','any','not') for node in code)
+    if not supported and fault!='sel_unsupported_shortcut':
         yield ('unknown','unsupported');yield ('retire',None);yield ('coordinator_drop',None);return
-    if fault=='sel_raw_nonexistent_keys' and c.expression[0]=='keys':
-        yield ('return',c.expression[1]);return
     if fault!='sel_unfunded_manifest':yield ('fund_manifest',len(code))
     yield ('admit',len(code))
     needs_u=any(node[0]=='not' or node==('all',0) or (node[0]=='present' and not node[2]) for node in code)
@@ -190,6 +271,10 @@ def raw_protocol(c,fault=None):
             if tag=='present' and not node[2]:
                 value=tuple(sorted(set(sets['U'])-set(value)))
                 yield ('algebra',('difference',sets['U'],sets[node_index],value))
+            stack.append(value)
+        elif tag=='keys':
+            value=yield from key_leaf(c,fault,node_index,node[1])
+            if value is None:return
             stack.append(value)
         elif tag=='not':
             right=stack.pop();value=tuple(sorted(set(sets['U'])-set(right)))
@@ -216,15 +301,16 @@ def protocol(c,fault=None):
     for word,arg in raw_protocol(c,fault):
         demands=[('algebra_grant',(1,0,1)),(word,arg)] if word=='algebra' else [(word,arg)]
         for event,value in demands:
-            if event in ('grant','algebra_grant'):
-                if any(a<b for a,b in zip(work,value)):
-                    yield ('unknown',('budget',value));yield ('retire',None);yield ('coordinator_drop',None);return
-                work=[a-b for a,b in zip(work,value)]
-            elif event in ('fund_manifest','fund_copy'):
+            if event in ('grant','algebra_grant','key_grant'):
+                debit=value[1] if event=='key_grant' else value
+                if any(a<b for a,b in zip(work,debit)):
+                    yield ('unknown',('budget',debit));yield ('retire',None);yield ('coordinator_drop',None);return
+                work=[a-b for a,b in zip(work,debit)]
+            elif event in ('fund_manifest','fund_copy','fund_keys'):
                 if root<value:
                     yield ('unknown',('root',event,value));yield ('retire',None);yield ('coordinator_drop',None);return
                 root-=value;funded+=value
-            elif event=='write_done':root+=1;funded-=1
+            elif event in ('write_done','key_complete'):root+=1;funded-=1
             elif event=='retire':root+=funded;funded=0
             yield (event,value)
 
@@ -237,6 +323,8 @@ class State:
     builders: tuple = ()
     copies: tuple = ()
     pending: tuple = ()
+    point: tuple = ()
+    key_observations: tuple = ()
     sets: tuple = ()
     work: tuple = (100,100,100)
     root: int = 64
@@ -250,13 +338,14 @@ class SourceSelection(Model):
     name='api007-source-selection'
     initial=State()
     properties=['SEL-SCOPE','SEL-SUPPORT','SEL-WORK','SEL-WRITE','SEL-COMPLETE',
-                'SEL-MEMBERS','SEL-ALGEBRA','SEL-OWNER','SEL-RETURN','SEL-ROOT']
+                'SEL-MEMBERS','SEL-ALGEBRA','SEL-OWNER','SEL-RETURN','SEL-ROOT','SEL-KEY-AUTH']
     bounds={'records_per_fixture':4,'collections':2,'field_types':5,'cuts':2,
-            'numeric_head':7,'original_programs':len(CASES),'schedule':'finite named event schedules'}
+            'numeric_head':7,'requested_keys_per_occurrence':4,'original_programs':len(CASES),'schedule':'finite named event schedules'}
     assumptions=['canonical codecs and authentic source ports',
                  'coupled producer index faithfulness to immutable records',
                  'immutable scratch set operations return exact full-identity algebra',
-                 'abstract costs, not allocator/RSS, SDK retirement or Rust refinement']
+                 'abstract costs, not allocator/RSS, SDK retirement or Rust refinement',
+                 'symbolic key metadata only; historical payload verification, full selector ordering and final freshness remain later obligations']
     def __init__(self,fault=None):self.fault=fault
     def transitions(self,s):
         if not s.case:
@@ -277,17 +366,26 @@ class SourceSelection(Model):
         if self.fault=='sel_wrong_empty_clause' and word=='empty_seal':
             scope,leaf,value=arg;arg=(scope[:-1]+(scope[-1]+1,),leaf,value)
         if self.fault=='sel_spent_grant_denial' and s.case=='algebra_work_exact' and word=='algebra':word,arg='unknown',('budget',(1,0,1))
+        if self.fault=='key_forged_live_version' and word=='key_point' and arg[2]=='live':arg=(*arg[:3],2,*arg[4:6],2)
         if self.fault=='sel_bad_algebra_input' and word=='algebra':
             op,left,right,output=arg;arg=(op,(),right,output)
         if self.fault=='sel_wrong_result' and word=='return':arg=(('work','nonexistent'),)
         changes={'events':s.events+((word,arg),)}
         if word=='bind':changes.update(owner=True,capsule=True)
-        elif word in ('grant','algebra_grant'):
-            debit=(arg[0],0,0) if self.fault=='sel_partial_grant' else ((0,0,0) if self.fault=='sel_omit_algebra_debit' and word=='algebra_grant' else arg)
+        elif word in ('grant','algebra_grant','key_grant'):
+            arg_cost=arg[1] if word=='key_grant' else arg
+            debit=(arg_cost[0],0,0) if self.fault=='sel_partial_grant' else ((0,0,0) if self.fault=='sel_omit_algebra_debit' and word=='algebra_grant' else arg_cost)
             changes['work']=tuple(a-b for a,b in zip(s.work,debit))
-        elif word in ('fund_manifest','fund_copy'):changes.update(root=s.root-arg,funded=s.funded+arg)
+        elif word in ('fund_manifest','fund_copy','fund_keys'):changes.update(root=s.root-arg,funded=s.funded+arg)
         elif word=='empty_builder':changes['builders']=('empty',)
         elif word=='empty_seal':changes.update(builders=(),sets=s.sets+(arg,))
+        elif word=='key_manifest':changes.update(builders=('keys',arg[1]),key_observations=())
+        elif word=='key_lookup':changes['copies']=(arg[2],)
+        elif word=='key_point':changes['point']=arg
+        elif word=='key_write_pending':changes['pending']=(arg,)
+        elif word=='key_write_done':changes['pending']=()
+        elif word=='key_complete':changes.update(point=(),copies=(),key_observations=s.key_observations+(arg[2],),root=s.root+1,funded=s.funded-1)
+        elif word=='key_seal':changes.update(builders=(),key_observations=(),sets=s.sets+(arg,))
         elif word=='copy':changes['copies']=s.copies+(arg,)
         elif word=='write_pending':changes['pending']=(arg,)
         elif word=='write_done':changes.update(pending=(),copies=(),root=s.root+1,funded=s.funded-1)
@@ -295,12 +393,13 @@ class SourceSelection(Model):
         elif word=='return':changes.update(output=arg,result='ok')
         elif word=='unknown':
             changes.update(result='unknown',output=())
-            if self.fault=='sel_refund_failure':changes['work']=CASES[s.case].capacity
+            if self.fault=='sel_refund_failure' or (self.fault=='key_refund_failure' and str(arg).startswith('key_')):changes['work']=CASES[s.case].capacity
             if self.fault=='sel_partial_denial' and isinstance(arg,tuple) and arg[0]=='budget':changes['work']=(s.work[0]-1,*s.work[1:])
             if self.fault=='sel_unknown_prefix':changes['output']=(A,)
-        elif word=='retire':changes.update(owner=False,builders=(),copies=(),pending=(),sets=(),output=(),root=s.root+s.funded,funded=0)
+        elif word=='retire':changes.update(owner=False,builders=(),copies=(),pending=(),point=(),key_observations=(),sets=(),output=(),root=s.root+s.funded,funded=0)
         elif word=='coordinator_drop':changes.update(capsule=False,done=True)
         if self.fault=='sel_early_owner_release' and word=='copy':changes['capsule']=False
+        if self.fault=='key_early_capsule_drop' and word=='key_point':changes['capsule']=False
         if self.fault=='sel_abort_drops_operation' and word=='caller_abort':changes['owner']=False
         yield word,replace(s,**changes)
     def violation(self,before,action,after):

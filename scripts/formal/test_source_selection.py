@@ -85,12 +85,16 @@ class SourceSelectionTests(unittest.TestCase):
         self.assertEqual(oracle.prefix_violation(forged,c),'SEL-ALGEBRA')
         pending=next(s for s in states if s.pending)
         self.assertEqual(oracle.prefix_violation(replace(pending,copies=()),c),'SEL-WRITE')
-    def test_unsupported_and_nonexistent_keys_never_produce_authority(self):
-        for name in ('unsupported_decisive','unsupported_keys'):
+    def test_unsupported_nodes_and_raw_key_bypass_never_produce_membership(self):
+        for name in ('unsupported_decisive','unsupported_intrinsic'):
             terminal=list(self.path(name))[-1]
             self.assertFalse(any(word in ('admit','open','copy','seal','return') for word,arg in terminal.events))
         control=next(row for row in self.controls if row['fault']=='sel_raw_nonexistent_keys')
-        self.assertEqual(control['trace'][-1]['state']['events'][-1],('return',(('work','missing'),)))
+        state=control['trace'][-1]['state'];word,key=state['events'][-1]
+        self.assertEqual(word,'key_write_pending')
+        c=model.CASES[state['case']]
+        self.assertNotIn(key,{record[0] for record in c.records})
+        self.assertIn(key,c.expression[1])
     def test_forged_initial_selection_and_interleaved_algebra_prefixes(self):
         spec=model.SourceSelection()
         for forged in (replace(spec.initial,output=(model.A,),owner=True,done=True),
@@ -167,6 +171,104 @@ class SourceSelectionTests(unittest.TestCase):
             ('union',(model.B,model.C),(model.A,),(model.A,model.B,model.C)),
         ])
         self.assertEqual(oracle.reference(model.CASES['three_distinct_fold_children']),(model.A,model.B,model.C))
+    def test_key_oracle_does_not_use_producer_point_or_compiler_helpers(self):
+        c=model.CASES['keys_mixed']
+        with patch.object(model,'point_fact',side_effect=RuntimeError('producer unavailable')):
+            with patch.object(model,'valid_point',side_effect=RuntimeError('producer unavailable')):
+                with patch.object(model,'compile_program',side_effect=RuntimeError('compiler unavailable')):
+                    self.assertEqual(oracle.reference(c),(model.A,model.B,model.C))
+                    self.assertEqual(oracle.source_key_fact(c,('work','missing'))[2],'absent')
+                    self.assertEqual(oracle.original_manifest(c)[0][0][3],(model.A,model.B,model.C))
+    def test_every_key_nonmember_is_observed_and_empty_keys_seal_without_ranges(self):
+        terminal=list(self.path('keys_mixed'))[-1]
+        observations=[arg[2] for word,arg in terminal.events if word=='key_complete']
+        self.assertEqual(observations,[(model.A,'live',1),(model.B,'live',1),(model.C,'live',1),(('work','missing'),'absent',0)])
+        proof=next(arg for word,arg in terminal.events if word=='key_seal')
+        self.assertEqual(proof[2],tuple(observations))
+        self.assertEqual(proof[3],(model.A,model.B,model.C))
+        tomb=list(self.path('keys_tombstone'))[-1]
+        self.assertIn((model.A,'tombstone',2),next(arg[2] for word,arg in tomb.events if word=='key_seal'))
+        state_only=list(self.path('keys_state_only'))[-1]
+        self.assertEqual(next(arg[3] for word,arg in state_only.events if word=='key_seal'),())
+        for name in ('keys_empty','keys_empty_other_clause'):
+            terminal=list(self.path(name))[-1]
+            self.assertFalse(any(word in ('open','key_lookup','key_point') for word,arg in terminal.events))
+            proof=next(arg for word,arg in terminal.events if word=='key_seal')
+            self.assertEqual(proof[2:],((),()))
+    def test_bad_points_and_decisive_branches_never_seal_a_partial_key_leaf(self):
+        for name in ('keys_bad_tomb_hwm','keys_bad_tomb_fields','keys_foreign_absence','keys_late_point_failure','keys_late_cancel','keys_decisive_failure'):
+            states=list(self.path(name));terminal=states[-1]
+            self.assertTrue(any(word=='key_write_done' for word,arg in terminal.events),name)
+            self.assertFalse(any(word in ('key_seal','return') for word,arg in terminal.events),name)
+            self.assertEqual(terminal.result,'unknown')
+            self.assertFalse(terminal.point or terminal.key_observations or terminal.builders or terminal.copies or terminal.pending or terminal.sets)
+            self.assertEqual(terminal.root,model.CASES[name].root)
+        terminal=list(self.path('keys_not'))[-1]
+        self.assertEqual(next(arg for word,arg in terminal.events if word=='return'),(model.B,model.C))
+    def test_key_work_denial_is_atomic_and_manifest_funding_precedes_dispatch(self):
+        for name in ('keys_work_exact','keys_root_exact'):
+            self.assertEqual(list(self.path(name))[-1].result,'ok')
+        for name in ('keys_work_short','keys_root_short','keys_manifest_short'):
+            states=list(self.path(name));refused=next(s for s in states if s.events and s.events[-1][0]=='unknown')
+            before=states[states.index(refused)-1]
+            self.assertEqual(refused.work,before.work)
+            self.assertEqual((refused.root,refused.funded),(before.root,before.funded))
+            self.assertEqual(states[-1].work,refused.work)
+        terminal=list(self.path('keys_work_short'))[-1]
+        self.assertEqual(terminal.work,(1,0,0))
+        self.assertEqual(sum(word=='key_write_done' for word,arg in terminal.events),1)
+        for name in ('keys_root_short','keys_manifest_short'):
+            self.assertFalse(any(word=='key_lookup' for word,arg in list(self.path(name))[-1].events))
+    def test_forged_key_certificates_cannot_erase_nonmembers_or_exchange_occurrences(self):
+        state=next(s for s in self.path('keys_mixed') if s.events and s.events[-1][0]=='key_seal')
+        scope,leaf,observations,members=state.events[-1][1]
+        damaged=(scope,leaf,observations[:-1],members)
+        forged=replace(state,events=state.events[:-1]+(('key_seal',damaged),),sets=state.sets[:-1]+(damaged,))
+        self.assertEqual(oracle.prefix_violation(forged,model.CASES['keys_mixed']),'SEL-COMPLETE')
+        states=[s for s in self.path('keys_identical') if s.events and s.events[-1][0]=='key_seal']
+        first,second=states;foreign=first.events[-1][1]
+        forged=replace(second,events=second.events[:-1]+(('key_seal',foreign),),sets=second.sets[:-1]+(foreign,))
+        self.assertEqual(oracle.prefix_violation(forged,model.CASES['keys_identical']),'SEL-SCOPE')
+        completed=next(s for s in self.path('keys_mixed') if s.events and s.events[-1][0]=='key_complete')
+        context,leaf,observation=completed.events[-1][1]
+        for index in range(len(context)):
+            change=context[index]+1 if isinstance(context[index],int) else 'foreign-'+context[index]
+            scope=context[:index]+(change,)+context[index+1:]
+            forged=replace(completed,events=completed.events[:-1]+(('key_complete',(scope,leaf,observation)),))
+            self.assertEqual(oracle.prefix_violation(forged,model.CASES['keys_mixed']),'SEL-SCOPE')
+    def test_key_caller_abort_keeps_operation_and_late_unknown_cannot_hide_state(self):
+        states=list(self.path('keys_caller_abort'))
+        abandoned=next(s for s in states if s.events and s.events[-1][0]=='caller_abort')
+        self.assertTrue(abandoned.owner and abandoned.capsule and abandoned.pending and abandoned.point)
+        self.assertEqual(states[-1].result,'ok')
+        for name in ('keys_late_point_failure','keys_late_cancel'):
+            states=list(self.path(name));terminal=states[-1];c=model.CASES[name]
+            reply=next(s for s in states if s.point)
+            self.assertEqual(oracle.prefix_violation(replace(terminal,point=reply.point),c),'SEL-KEY-AUTH')
+            self.assertEqual(oracle.prefix_violation(replace(terminal,work=c.capacity),c),'SEL-WORK')
+            self.assertEqual(oracle.prefix_violation(replace(terminal,key_observations=((model.A,'live',1),)),c),'SEL-KEY-AUTH')
+    def test_declared_point_error_cannot_turn_into_a_successful_reply_prefix(self):
+        c=model.CASES['keys_late_point_failure']
+        before=next(s for s in self.path('keys_late_point_failure') if s.events and s.events[-1][0]=='key_lookup' and s.events[-1][1][2]==model.B)
+        reply=oracle.source_key_fact(c,model.B)
+        self.assertTrue(oracle.key_fact_valid(c,model.B,reply))
+        forged=replace(before,events=before.events+(('key_point',reply),),point=reply)
+        self.assertEqual(oracle.prefix_violation(forged,c),'SEL-KEY-AUTH')
+        self.assertEqual(model.SourceSelection().violation(before,'ForgedReply',forged),'SEL-KEY-AUTH')
+        self.assertEqual(next(row['property'] for row in self.controls if row['fault']=='key_success_after_port_error'),'SEL-KEY-AUTH')
+    def test_valid_metadata_shape_cannot_replace_immutable_live_reply_version(self):
+        c=model.CASES['keys_mixed']
+        original=next(s for s in self.path('keys_mixed') if s.events and s.events[-1][0]=='key_point')
+        fact=original.point;forged_fact=(*fact[:3],2,*fact[4:6],2)
+        self.assertTrue(oracle.key_fact_valid(c,model.A,forged_fact))
+        forged=replace(original,events=original.events[:-1]+(('key_point',forged_fact),),point=forged_fact)
+        self.assertEqual(oracle.prefix_violation(forged,c),'SEL-KEY-AUTH')
+        self.assertEqual(next(row['property'] for row in self.controls if row['fault']=='key_forged_live_version'),'SEL-KEY-AUTH')
+    def test_key_fixtures_are_admitted_canonical_work_requests(self):
+        for expression in [('keys',(model.A,model.A)),('keys',(model.O,)),('keys',tuple(('work',str(n)) for n in range(5)))]:
+            cases=dict(model.CASES);cases['keys_mixed']=replace(cases['keys_mixed'],expression=expression)
+            with patch.object(model,'CASES',cases):
+                with self.assertRaisesRegex(AssertionError,'canonical Work Keys'):oracle.run_campaign(gate.helper,model,100000)
     def test_missing_or_incomplete_campaign_blocks_aggregate(self):
         for result in [({**self.report,'name':'other'},self.controls),
                        ({**self.report,'complete':False},self.controls),

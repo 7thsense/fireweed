@@ -249,6 +249,7 @@ fn same_job_cut_and_budget_do_not_authorize_a_leaf_from_another_producer() {
                 identity: source.identity.clone(),
                 facts: source.facts.clone(),
             },
+            foreign_absent: None,
             signals: f.signals.clone(),
             _alive: Arc::new(()),
             job: f.job.clone(),

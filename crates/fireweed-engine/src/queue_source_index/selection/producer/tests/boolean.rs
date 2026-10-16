@@ -2,7 +2,7 @@ use super::*;
 use fireweed_core::queue_administration::{
     AdministrativeAction, AdministrativeClause, WorkSelector,
 };
-fn intent(selectors: Vec<WorkSelector>) -> AdministrativeIntent {
+pub(super) fn intent(selectors: Vec<WorkSelector>) -> AdministrativeIntent {
     AdministrativeIntent {
         evaluated_at: 0,
         before_fields: None,
@@ -53,12 +53,13 @@ fn present(field: &str, value: bool) -> WorkSelector {
         present: value,
     })
 }
-fn rows<'a>(
+pub(super) fn rows<'a>(
     proof: &'a QueueSourceBooleanClause<'_, Completion, Set>,
 ) -> &'a BTreeSet<(Option<String>, String)> {
     let set = match &proof.result {
         CandidateOperand::Value(index) => &proof.values[*index].set,
         CandidateOperand::Presence(index) => &proof.presence[*index].set,
+        CandidateOperand::Keys(index) => &proof.keys[*index].set,
         CandidateOperand::Universe => &proof.universe.as_ref().unwrap().set,
         CandidateOperand::Empty => proof.empty.as_ref().unwrap(),
         CandidateOperand::Owned(set) => set,
@@ -142,7 +143,10 @@ fn unsupported_nodes_fail_whole_program_preflight_even_in_decisive_branches() {
         for selector in [
             WorkSelector::all(vec![
                 WorkSelector::any(vec![]),
-                WorkSelector::leaf(SelectorNode::Keys(BTreeSet::new())),
+                WorkSelector::leaf(SelectorNode::Attempts {
+                    comparison: fireweed_core::queue_administration::Comparison::Equal,
+                    value: 1,
+                }),
             ]),
             WorkSelector::any(vec![
                 WorkSelector::all(vec![]),
@@ -204,5 +208,37 @@ fn identical_empty_programs_still_bind_the_outer_clause() {
         assert!(producer.validate_boolean_clause(&first, 1).is_err());
         assert!(producer.validate_boolean_clause(&second, 0).is_err());
         assert_eq!(f.budget.remaining(&f.job).unwrap(), before);
+    });
+}
+
+#[test]
+fn administrative_time_is_bound_before_any_source_or_selection_work() {
+    futures::executor::block_on(async {
+        let mut f = fixture_contents(Signals::default(), false, FieldType::Integer, false, true);
+        let mut intent = intent(vec![eq("n", 1)]);
+        intent.evaluated_at = 1;
+        let before = f.budget.remaining(&f.job).unwrap();
+        let result = QueueSourceCandidateProducer::begin(
+            f.reader.take().unwrap(),
+            f.scratch.take().unwrap(),
+            &f.definition,
+            QueueSourceSelectionRequest::Administration {
+                queue: &f.queue,
+                intent: &intent,
+            },
+            0,
+            &QueueLimits::default(),
+            f.job.clone(),
+            f.budget.clone(),
+        )
+        .await;
+        assert!(matches!(result, Err(QueueError::OutcomeUnknown(reason))
+            if reason == "source candidate producer: evaluation time differs from actual administrative intent"));
+        assert_eq!(f.budget.remaining(&f.job).unwrap(), before);
+        assert_eq!(f.signals.lookups.load(Ordering::SeqCst), 0);
+        assert_eq!(f.signals.opens.load(Ordering::SeqCst), 0);
+        assert_eq!(f.signals.writes.load(Ordering::SeqCst), 0);
+        assert!(f.reader_alive.upgrade().is_none());
+        assert!(f.scratch_alive.upgrade().is_none());
     });
 }

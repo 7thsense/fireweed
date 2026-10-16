@@ -35,10 +35,12 @@ struct Signals {
     pause_source: bool,
     pause_scratch: bool,
     fail_write: usize,
+    fail_lookup: usize,
     foreign_completion: bool,
 }
 struct Stream {
     inner: Reader,
+    foreign_absent: Option<Arc<OwnedQueueBufferCharge>>,
     signals: Arc<Signals>,
     _alive: Arc<()>,
     job: Arc<QueueReservation>,
@@ -69,10 +71,28 @@ impl QueueSourceReader for Stream {
         self.inner.cut()
     }
     async fn lookup(&self, key: &[u8]) -> QueueResult<Self::Point> {
-        self.signals.lookups.fetch_add(1, Ordering::SeqCst);
+        let attempt = self.signals.lookups.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.signals.fail_lookup == attempt {
+            return Err(QueueError::OutcomeUnknown(
+                "injected metadata point failure".into(),
+            ));
+        }
         self.inner.lookup(key).await
     }
     fn point<'a>(&'a self, owner: &'a Self::Point) -> QueueResult<QueueSourcePoint<'a>> {
+        if !self.inner.facts.contains_key(owner)
+            && let Some(identity) = &self.foreign_absent
+        {
+            let actual = self.inner.cut()?;
+            let foreign = QueueSourceCut::from_captured(
+                identity,
+                actual.address(),
+                actual.epoch(),
+                actual.through(),
+                &self.job,
+            )?;
+            return Ok(foreign.point_from_source(owner, None));
+        }
         self.inner.point(owner)
     }
     async fn complete_range(&self, lo: &[u8], hi: &[u8]) -> QueueResult<Self::Range> {
@@ -546,6 +566,7 @@ fn fixture_contents(
                 identity: Arc::new(job.owned_buffer(128).unwrap()),
                 facts,
             },
+            foreign_absent: None,
             signals: signals.clone(),
             _alive: reader_alive,
             job: job.clone(),
@@ -1112,3 +1133,5 @@ mod universe;
 mod presence;
 
 mod boolean;
+
+mod keys;

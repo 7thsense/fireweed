@@ -3,7 +3,7 @@ use super::*;
 use fireweed_core::queue_administration::WorkSelector;
 
 impl<'a> QueueSourceSelectionRequest<'a> {
-    fn boolean_program(self, clause: usize) -> QueueResult<(&'a WorkSelector, usize)> {
+    pub(super) fn boolean_program(self, clause: usize) -> QueueResult<(&'a WorkSelector, usize)> {
         let Self::Administration { intent, .. } = self else {
             return Err(unknown("Boolean clause differs from actual request"));
         };
@@ -26,14 +26,16 @@ fn requirements(program: &WorkSelector) -> QueueResult<(bool, bool)> {
     let (mut universe, mut empty) = (false, false);
     for node in &program.nodes {
         match node {
-            SelectorNode::Field { .. } | SelectorNode::Present { present: true, .. } => {}
+            SelectorNode::Field { .. }
+            | SelectorNode::Keys(_)
+            | SelectorNode::Present { present: true, .. } => {}
             SelectorNode::Present { present: false, .. }
             | SelectorNode::Not
             | SelectorNode::All(0) => universe = true,
             SelectorNode::Any(0) => empty = true,
             SelectorNode::All(_) | SelectorNode::Any(_) => {}
             // The whole-program preflight must precede ALL leaf dispatch. The
-            // remaining exact Keys/intrinsic/time leaves are separate work; an
+            // remaining exact intrinsic/time leaves are separate work; an
             // unsupported node can never stand in for an empty completed set.
             _ => return Err(unknown("Boolean clause contains an unsupported leaf")),
         }
@@ -47,6 +49,7 @@ fn resolved<'b, C, Set>(
     match operand {
         CandidateOperand::Value(index) => clause.values.get(*index).map(|leaf| &leaf.set),
         CandidateOperand::Presence(index) => clause.presence.get(*index).map(|leaf| &leaf.set),
+        CandidateOperand::Keys(index) => clause.keys.get(*index).map(|leaf| &leaf.set),
         CandidateOperand::Universe => clause.universe.as_ref().map(|leaf| &leaf.set),
         CandidateOperand::Empty => clause.empty.as_ref(),
         CandidateOperand::Owned(set) => Some(set),
@@ -75,6 +78,7 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
                     QueueSourcePresenceLeaf<'a, R::Completion, S::Set>,
                 >())
             })
+            .and_then(|n| n.checked_add(std::mem::size_of::<QueueSourceKeysLeaf<'a, S::Set>>()))
             .ok_or(QueueError::TooLarge)?;
         let temporary_capacity = std::mem::size_of::<CandidateOperand<S::Set>>()
             .checked_mul(4)
@@ -102,6 +106,7 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
             result: CandidateOperand::Empty,
             values: Vec::with_capacity(count),
             presence: Vec::with_capacity(count),
+            keys: Vec::with_capacity(count),
             universe: None,
             empty: None,
             identity: self.identity.clone(),
@@ -128,6 +133,13 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
                     let index = proof.values.len();
                     proof.values.push(leaf);
                     CandidateOperand::Value(index)
+                }
+                SelectorNode::Keys(_) => {
+                    let (producer, leaf) = self.keys(clause, node_index).await?;
+                    self = producer;
+                    let index = proof.keys.len();
+                    proof.keys.push(leaf);
+                    CandidateOperand::Keys(index)
                 }
                 SelectorNode::Present { present, .. } => {
                     let (producer, leaf) = self.presence(clause, node_index).await?;
@@ -220,7 +232,7 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
         if let Some(universe) = &proof.universe {
             self.validate_universe(universe)?;
         }
-        let (mut values, mut presence) = (0, 0);
+        let (mut values, mut presence, mut keys) = (0, 0, 0);
         for (node, declaration) in program.nodes.iter().enumerate() {
             match declaration {
                 SelectorNode::Field { .. } => {
@@ -233,6 +245,17 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
                     )?;
                     values += 1;
                     occurrence += 1;
+                }
+                SelectorNode::Keys(_) => {
+                    self.validate_keys(
+                        proof
+                            .keys
+                            .get(keys)
+                            .ok_or_else(|| unknown("Boolean key proof missing"))?,
+                        clause,
+                        node,
+                    )?;
+                    keys += 1;
                 }
                 SelectorNode::Present { .. } => {
                     self.validate_presence(
@@ -248,7 +271,10 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
                 _ => {}
             }
         }
-        if values != proof.values.len() || presence != proof.presence.len() {
+        if values != proof.values.len()
+            || presence != proof.presence.len()
+            || keys != proof.keys.len()
+        {
             return Err(unknown("Boolean manifest has extra occurrences"));
         }
         self.scratch.count(resolved(&proof.result, proof)?)?;

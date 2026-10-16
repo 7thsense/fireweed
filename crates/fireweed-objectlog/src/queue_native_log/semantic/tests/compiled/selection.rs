@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[derive(Default)]
 struct Trace {
     pages: AtomicUsize,
+    lookups: AtomicUsize,
     empty: AtomicUsize,
     rows: AtomicUsize,
     finishes: AtomicUsize,
@@ -30,6 +31,7 @@ impl<R: QueueSourceReader> QueueSourceReader for Observed<R> {
         self.inner.cut()
     }
     async fn lookup(&self, key: &[u8]) -> QueueResult<Self::Point> {
+        self.trace.lookups.fetch_add(1, Ordering::SeqCst);
         self.inner.lookup(key).await
     }
     fn point<'a>(&'a self, owner: &'a Self::Point) -> QueueResult<QueueSourcePoint<'a>> {
@@ -99,6 +101,7 @@ enum Fault {
     PauseSecondWrite,
     CorruptCorrespondence,
     DenyTerminalPage,
+    DenyKeyPoint,
     HoldSecondWrite,
     FailAlgebra,
     PauseAlgebra,
@@ -143,6 +146,7 @@ impl fireweed_engine::queue_source_index::QueueSourceCandidateScratch for Physic
                 Fault::None
                 | Fault::CorruptCorrespondence
                 | Fault::DenyTerminalPage
+                | Fault::DenyKeyPoint
                 | Fault::FailAlgebra
                 | Fault::PauseAlgebra => {}
                 Fault::FailSecondWrite => {
@@ -229,7 +233,15 @@ async fn contract(log: QueueNativeLog) {
             unique_indexes: Default::default(),
             additional_field_prefixes: Default::default(),
         },
-        state: Default::default(),
+        state: BTreeMap::from([(
+            "workflow".into(),
+            CollectionDefinition {
+                fields: Default::default(),
+                indexes: Default::default(),
+                unique_indexes: Default::default(),
+                additional_field_prefixes: Default::default(),
+            },
+        )]),
         progress_bound_nanos: 1,
         max_attempts: 3,
     };
@@ -271,6 +283,22 @@ async fn contract(log: QueueNativeLog) {
         fields: Default::default(),
         body: vec![4].into(),
     });
+    seed.work_inserts.push(NewWork {
+        key: "deleted".into(),
+        priority: 1,
+        available_at: 0,
+        fields: Default::default(),
+        body: vec![5].into(),
+    });
+    seed.state_updates.push(StateUpdate {
+        collection: "workflow".into(),
+        key: "state-only".into(),
+        expect: StateExpect::Absent,
+        change: StateChange::Put {
+            fields: Default::default(),
+            value: vec![9].into(),
+        },
+    });
     let (record, before) = ordinary(&acquired, &definition, &before, &[seed], &job);
     let acquired = accept(
         &log,
@@ -297,10 +325,17 @@ async fn contract(log: QueueNativeLog) {
             },
         });
     }
+    terminal.work_updates.push(UnclaimedUpdate {
+        key: "deleted".into(),
+        expect: StateExpect::Version(1),
+        change: UnclaimedChange::Delete,
+    });
     let (record, before) = ordinary(&acquired, &definition, &before, &[terminal], &job);
     assert_eq!(before.work["c"].record.lifecycle, Lifecycle::Completed);
     assert_eq!(before.work["zero"].record.lifecycle, Lifecycle::Failed);
     assert!(before.work["zero"].record.work.fields.is_empty());
+    assert!(!before.work.contains_key("deleted"));
+    assert_eq!(before.state.len(), 1);
     let acquired = accept(
         &log,
         acquired,
@@ -755,7 +790,56 @@ impl BooleanContext<'_> {
                 present: false,
             })
         };
+        let keys = |names: &[&str]| {
+            WorkSelector::leaf(SelectorNode::Keys(
+                names.iter().map(|name| (*name).into()).collect(),
+            ))
+        };
         for (selector, count, visits, finishes, fault) in [
+            (keys(&["a", "c", "zero", "missing"]), 3, 0, 0, Fault::None),
+            (keys(&[]), 0, 0, 0, Fault::None),
+            (
+                keys(&["deleted", "state-only", "missing"]),
+                0,
+                0,
+                0,
+                Fault::None,
+            ),
+            (
+                keys(&["a", "c", "zero", "missing"]),
+                3,
+                0,
+                0,
+                Fault::DenyKeyPoint,
+            ),
+            (
+                WorkSelector::negate(keys(&["a", "c", "missing"])),
+                2,
+                4,
+                1,
+                Fault::None,
+            ),
+            (
+                WorkSelector::all(vec![WorkSelector::any(vec![]), keys(&["a", "missing"])]),
+                0,
+                0,
+                0,
+                Fault::None,
+            ),
+            (
+                keys(&["a", "c", "zero", "missing"]),
+                3,
+                0,
+                0,
+                Fault::FailSecondWrite,
+            ),
+            (
+                keys(&["a", "c", "zero", "missing"]),
+                3,
+                0,
+                0,
+                Fault::PauseSecondWrite,
+            ),
             (WorkSelector::negate(equal()), 2, 6, 2, Fault::None),
             (missing(), 1, 7, 2, Fault::None),
             (WorkSelector::all(vec![]), 4, 4, 1, Fault::None),
@@ -795,6 +879,27 @@ impl BooleanContext<'_> {
                 Fault::PauseAlgebra,
             ),
         ] {
+            let key_points = match selector.nodes.as_slice() {
+                [SelectorNode::Keys(keys)] if keys.is_empty() => Some(2),
+                [SelectorNode::Keys(keys)] if keys.len() == 3 => Some(5),
+                [SelectorNode::Keys(_)] => Some(
+                    if fault == Fault::FailSecondWrite
+                        || fault == Fault::PauseSecondWrite
+                        || fault == Fault::DenyKeyPoint
+                    {
+                        4
+                    } else {
+                        6
+                    },
+                ),
+                [SelectorNode::Keys(_), SelectorNode::Not] => Some(9),
+                [
+                    SelectorNode::Any(0),
+                    SelectorNode::Keys(_),
+                    SelectorNode::All(2),
+                ] => Some(4),
+                _ => None,
+            };
             let intent = AdministrativeIntent {
                 evaluated_at: 0,
                 before_fields: None,
@@ -812,12 +917,19 @@ impl BooleanContext<'_> {
                 queue: "producer".into(),
             };
             let trace = Arc::new(Trace::default());
+            // A separate admitted request gets its own denial fixture ledger;
+            // no running producer's cumulative ledger is replaced or reset.
+            let read_ledger = if fault == Fault::DenyKeyPoint {
+                budget(self.job, 3)
+            } else {
+                self.ledger.clone()
+            };
             let reader = Observed {
                 inner: QueueNativeSourceReader::new(
                     self.source,
                     self.log,
                     self.job,
-                    self.ledger.clone(),
+                    read_ledger.clone(),
                     self.read,
                 )
                 .unwrap(),
@@ -843,9 +955,10 @@ impl BooleanContext<'_> {
             .await
             .unwrap();
             let entered = Arc::new(tokio::sync::Notify::new());
+            let writes = Arc::new(AtomicUsize::new(0));
             let scratch = PhysicalScratch {
                 inner: scratch,
-                writes: Arc::new(AtomicUsize::new(0)),
+                writes: writes.clone(),
                 fault,
                 quota: self.quota.clone(),
                 entered: entered.clone(),
@@ -868,9 +981,9 @@ impl BooleanContext<'_> {
             .await
             .unwrap();
             let before = selection.remaining(self.job).unwrap();
-            let source_before = self.ledger.remaining_work();
+            let source_before = read_ledger.remaining_work();
             let mut pending = Box::pin(producer.boolean_clause(0));
-            if fault == Fault::PauseAlgebra {
+            if fault == Fault::PauseAlgebra || fault == Fault::PauseSecondWrite {
                 tokio::time::timeout(std::time::Duration::from_secs(30), async {
                     tokio::select! {
                         _ = entered.notified() => {},
@@ -881,15 +994,18 @@ impl BooleanContext<'_> {
                 .unwrap();
                 assert_eq!(trace.rows.load(Ordering::SeqCst), visits);
                 assert_eq!(trace.finishes.load(Ordering::SeqCst), finishes);
+                if let Some(points) = key_points {
+                    assert_eq!(trace.lookups.load(Ordering::SeqCst), points);
+                }
                 assert!(self.quota.usage().unwrap() > 0);
                 let spent = selection.remaining(self.job).unwrap();
-                let source_spent = self.ledger.remaining_work();
+                let source_spent = read_ledger.remaining_work();
                 assert!(spent.rows < before.rows && spent.scratch_steps < before.scratch_steps);
                 assert!(source_spent.semantic.pages < source_before.semantic.pages);
                 drop(pending);
                 assert_eq!(self.quota.usage().unwrap(), 0);
                 assert_eq!(selection.remaining(self.job).unwrap(), spent);
-                let after = self.ledger.remaining_work();
+                let after = read_ledger.remaining_work();
                 assert_eq!(
                     (
                         after.semantic.pages,
@@ -909,20 +1025,44 @@ impl BooleanContext<'_> {
                 continue;
             }
             let result = pending.await;
-            if fault == Fault::FailAlgebra {
+            if fault == Fault::DenyKeyPoint {
                 assert!(
-                    matches!(result, Err(QueueError::OutcomeUnknown(reason)) if reason == "injected after physical algebra")
+                    matches!(result,Err(QueueError::OutcomeUnknown(reason)) if reason=="native queue log: request source work admission exhausted")
                 );
+                assert_eq!(writes.load(Ordering::SeqCst), 1);
+                assert_eq!(trace.lookups.load(Ordering::SeqCst), 4);
+                assert_eq!(trace.rows.load(Ordering::SeqCst), 0);
+                assert_eq!(trace.finishes.load(Ordering::SeqCst), 0);
+                assert_eq!(read_ledger.remaining_work().semantic.pages, 0);
+                assert!(selection.remaining(self.job).unwrap().rows < before.rows);
+                assert_eq!(self.quota.usage().unwrap(), 0);
+                continue;
+            }
+            if fault == Fault::FailAlgebra || fault == Fault::FailSecondWrite {
+                let expected = if fault == Fault::FailAlgebra {
+                    "injected after physical algebra"
+                } else {
+                    "injected after second physical write"
+                };
+                assert!(
+                    matches!(result, Err(QueueError::OutcomeUnknown(reason)) if reason == expected)
+                );
+                if let Some(points) = key_points {
+                    assert_eq!(trace.lookups.load(Ordering::SeqCst), points);
+                }
                 assert_eq!(trace.rows.load(Ordering::SeqCst), visits);
                 assert_eq!(trace.finishes.load(Ordering::SeqCst), finishes);
                 let spent = selection.remaining(self.job).unwrap();
                 assert!(spent.rows < before.rows && spent.scratch_steps < before.scratch_steps);
-                assert!(self.ledger.remaining_work().semantic.pages < source_before.semantic.pages);
+                assert!(read_ledger.remaining_work().semantic.pages < source_before.semantic.pages);
                 assert_eq!(self.quota.usage().unwrap(), 0);
                 continue;
             }
             let (producer, proof) = result.unwrap();
             assert_eq!(producer.boolean_clause_len(&proof, 0).unwrap(), count);
+            if let Some(points) = key_points {
+                assert_eq!(trace.lookups.load(Ordering::SeqCst), points);
+            }
             assert_eq!(trace.rows.load(Ordering::SeqCst), visits);
             assert_eq!(trace.finishes.load(Ordering::SeqCst), finishes);
             assert_eq!(trace.empty.load(Ordering::SeqCst), finishes);

@@ -10,6 +10,7 @@ pub use scratch::QueueSourceCandidateScratch;
 
 mod producer;
 pub use producer::{
-    QueueSourceBooleanClause, QueueSourceCandidateProducer, QueueSourcePresenceLeaf,
-    QueueSourceScalarLeaf, QueueSourceSelectionRequest, QueueSourceUniverseLeaf,
+    QueueSourceBooleanClause, QueueSourceCandidateProducer, QueueSourceKeysLeaf,
+    QueueSourcePresenceLeaf, QueueSourceScalarLeaf, QueueSourceSelectionRequest,
+    QueueSourceUniverseLeaf,
 };
