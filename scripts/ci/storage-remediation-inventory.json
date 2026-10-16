@@ -97831,6 +97831,251 @@
         "--features",
         "default,local",
         "--lib",
+        "queue_scratch::source::tests::cancellation_after_actual_partial_sql_write_retires_owner_without_refund",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "local"
+      ],
+      "harness_id": "queue_scratch::source::tests::cancellation_after_actual_partial_sql_write_retires_owner_without_refund",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_scratch::source::tests::cancellation_after_actual_partial_sql_write_retires_owner_without_refund",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--no-default-features",
+        "--features",
+        "default,local",
+        "--lib",
+        "queue_scratch::source::tests::exact_insert_work_and_each_one_less_fail_without_partial_output",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "local"
+      ],
+      "harness_id": "queue_scratch::source::tests::exact_insert_work_and_each_one_less_fail_without_partial_output",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_scratch::source::tests::exact_insert_work_and_each_one_less_fail_without_partial_output",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--no-default-features",
+        "--features",
+        "default,local",
+        "--lib",
+        "queue_scratch::source::tests::foreign_handles_and_job_are_refused_without_spending_or_sql",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "local"
+      ],
+      "harness_id": "queue_scratch::source::tests::foreign_handles_and_job_are_refused_without_spending_or_sql",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_scratch::source::tests::foreign_handles_and_job_are_refused_without_spending_or_sql",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--no-default-features",
+        "--features",
+        "default,local",
+        "--lib",
+        "queue_scratch::source::tests::full_identity_dedup_and_immutable_algebra_match_literal_sets",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "local"
+      ],
+      "harness_id": "queue_scratch::source::tests::full_identity_dedup_and_immutable_algebra_match_literal_sets",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_scratch::source::tests::full_identity_dedup_and_immutable_algebra_match_literal_sets",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--no-default-features",
+        "--features",
+        "default,local",
+        "--lib",
+        "queue_scratch::source::tests::physical_owner_and_handles_can_move_into_owned_workers",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "local"
+      ],
+      "harness_id": "queue_scratch::source::tests::physical_owner_and_handles_can_move_into_owned_workers",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_scratch::source::tests::physical_owner_and_handles_can_move_into_owned_workers",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--no-default-features",
+        "--features",
+        "default,local",
+        "--lib",
+        "queue_scratch::source::tests::source_only_schema_and_fixed_statements_avoid_hidden_materialization",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "local"
+      ],
+      "harness_id": "queue_scratch::source::tests::source_only_schema_and_fixed_statements_avoid_hidden_materialization",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_scratch::source::tests::source_only_schema_and_fixed_statements_avoid_hidden_materialization",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--no-default-features",
+        "--features",
+        "default,local",
+        "--lib",
+        "queue_scratch::source::tests::tiny_disk_and_exact_setup_memory_fail_closed_and_release_capacity",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "local"
+      ],
+      "harness_id": "queue_scratch::source::tests::tiny_disk_and_exact_setup_memory_fail_closed_and_release_capacity",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_scratch::source::tests::tiny_disk_and_exact_setup_memory_fail_closed_and_release_capacity",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--no-default-features",
+        "--features",
+        "default,local",
+        "--lib",
         "queue_scratch::tests::cancelled_and_panicking_sdk_owners_close_files_before_final_reservation",
         "--",
         "--exact"
@@ -117949,7 +118194,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "9c9b223f4afd64d8f762e580fdc37eb51d53df791a234c3a6119473a146bb3d6",
+  "source_inventory_sha256": "1e72198f4cd98d85377c18e7b7ba287f1b2896ce4fe35b518fc09e4eb3a54409",
   "workspaces": [
     {
       "listing_error_sha256": "",

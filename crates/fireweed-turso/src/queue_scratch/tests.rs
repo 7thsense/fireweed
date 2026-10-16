@@ -2,7 +2,7 @@ use super::*;
 use fireweed_engine::queue_admission::QueueAdmission;
 use fireweed_queue_spool::ScratchWorkers;
 
-fn forbidden(opcode: &str) -> bool {
+pub(super) fn forbidden(opcode: &str) -> bool {
     opcode.starts_with("RowSet")
         || opcode.starts_with("Sorter")
         || opcode.starts_with("Hash")
@@ -11,7 +11,7 @@ fn forbidden(opcode: &str) -> bool {
             "OpenEphemeral" | "OpenAutoindex" | "Filter" | "FilterAdd"
         )
 }
-async fn opcodes(
+pub(super) async fn opcodes(
     connection: &Connection,
     sql: &str,
     params: Vec<Value>,

@@ -1,16 +1,29 @@
 //! Linux physical qualifier for disposable native set storage. This is not a
 //! QueueStore or a public backend qualification. No authority is attached.
 mod io;
+mod source;
 use fireweed_core::queue_contract::{QueueError, QueueResult};
 use fireweed_engine::queue_admission::{OwnedQueueBufferCharge, QueueReservation};
 use fireweed_queue_spool::{ScratchDiskQuota, ScratchRoot};
 use io::ScratchIo;
+pub use source::{
+    SourceCandidateIdentity, SourceCandidateScratch, SourceCandidateSet, SourceSetBuilder,
+};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use turso::{Builder, Connection, Database, Value, params_from_iter};
 
+const PROJECTION_SCHEMA: &[&str] = &[
+    "CREATE TABLE records(id INTEGER PRIMARY KEY,key BLOB NOT NULL,version BLOB NOT NULL)",
+    "CREATE UNIQUE INDEX records_key ON records(key)",
+    "CREATE TABLE sets(node INTEGER NOT NULL,record INTEGER NOT NULL,PRIMARY KEY(node,record))",
+    "CREATE TABLE accumulator(node INTEGER NOT NULL,record INTEGER NOT NULL,PRIMARY KEY(node,record))",
+    "CREATE TABLE edges(parent INTEGER NOT NULL,child INTEGER NOT NULL,PRIMARY KEY(parent,child))",
+    "CREATE TABLE owners(record INTEGER PRIMARY KEY,clause INTEGER NOT NULL,key BLOB NOT NULL,version BLOB NOT NULL)",
+    "CREATE UNIQUE INDEX owners_key ON owners(key)",
+];
 const INSERT_RECORD: &str = "INSERT OR IGNORE INTO records(id,key,version) VALUES(?1,?2,?3)";
 const CHECK_RECORD: &str = "SELECT key=?2 AND version=?3 FROM records WHERE id=?1";
 const FIND_RECORD: &str = "SELECT 1 FROM records WHERE id=?1";
@@ -76,6 +89,16 @@ impl NativeScratchDatabase {
         quota: Arc<ScratchDiskQuota>,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<Self> {
+        Self::open_with_schema(root, quota, job, PROJECTION_SCHEMA).await
+    }
+    // Share only the physical owner and quota/SDK setup. Source candidate sets
+    // never provision or use the projection-ID tables.
+    async fn open_with_schema(
+        root: Arc<ScratchRoot>,
+        quota: Arc<ScratchDiskQuota>,
+        job: &Arc<QueueReservation>,
+        schema: &'static [&'static str],
+    ) -> QueueResult<Self> {
         let path_bytes = (root.path().as_os_str().len() as u64)
             .checked_mul(16)
             .and_then(|n| n.checked_add(8 << 20))
@@ -124,14 +147,10 @@ impl NativeScratchDatabase {
             "PRAGMA synchronous=OFF",
             "PRAGMA cache_size=-1024",
             "PRAGMA cache_spill=ON",
-            "CREATE TABLE records(id INTEGER PRIMARY KEY,key BLOB NOT NULL,version BLOB NOT NULL)",
-            "CREATE UNIQUE INDEX records_key ON records(key)",
-            "CREATE TABLE sets(node INTEGER NOT NULL,record INTEGER NOT NULL,PRIMARY KEY(node,record))",
-            "CREATE TABLE accumulator(node INTEGER NOT NULL,record INTEGER NOT NULL,PRIMARY KEY(node,record))",
-            "CREATE TABLE edges(parent INTEGER NOT NULL,child INTEGER NOT NULL,PRIMARY KEY(parent,child))",
-            "CREATE TABLE owners(record INTEGER PRIMARY KEY,clause INTEGER NOT NULL,key BLOB NOT NULL,version BLOB NOT NULL)",
-            "CREATE UNIQUE INDEX owners_key ON owners(key)",
-        ] {
+        ]
+        .into_iter()
+        .chain(schema.iter().copied())
+        {
             owner.execute(sql, vec![]).await?;
         }
         let cache = owner.one("PRAGMA cache_size", vec![]).await?;
