@@ -6,6 +6,8 @@ use std::time::Duration;
 pub enum FinalizationStage {
     Validate,
     Reduce,
+    AssembleFrame,
+    EncodeRecord,
 }
 pub struct FinalizationProbe {
     stage: FinalizationStage,

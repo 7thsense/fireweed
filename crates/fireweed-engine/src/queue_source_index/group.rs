@@ -4,6 +4,7 @@ mod administrative;
 mod admission;
 pub use administrative::{
     QueueSourceAdministrativeRead, QueueSourceAdministrativeReader, QueueSourceAdministrativeRow,
+    QueueSourceAdministrativeScan, QueueSourceAdministrativeScanContext,
     open_administrative_source,
 };
 mod batch;

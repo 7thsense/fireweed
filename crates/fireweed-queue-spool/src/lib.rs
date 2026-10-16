@@ -863,3 +863,10 @@ pub use root::ScratchRoot;
 mod finalization_probe;
 #[cfg(feature = "test-support")]
 pub use finalization_probe::{FinalizationProbe, FinalizationRelease, FinalizationStage};
+
+mod source_administration;
+pub use source_administration::{
+    SourceAdministrativeAuthority, SourceAdministrativeFinalization, SourceAdministrativePreview,
+    SourceAdministrativePublication, SourceAdministrativeResolution,
+    finalize_source_administration, source_administrative_publication_limit,
+};

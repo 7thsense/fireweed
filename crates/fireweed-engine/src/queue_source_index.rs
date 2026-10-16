@@ -63,10 +63,10 @@ pub use predecessor::{
 mod group;
 pub use group::{
     QueueSourceAdministrativeAdmission, QueueSourceAdministrativeRead,
-    QueueSourceAdministrativeReader, QueueSourceAdministrativeRow, QueueSourceBatchPlan,
-    QueueSourceBatchPreimage, QueueSourceBatchPublication, QueueSourceGroupEncodingLimits,
-    QueueSourceGroupPlan, QueueSourceGroupPreimage, QueueSourceGroupPublication,
-    QueueSourceOrdinaryAuthority, QueueSourceOrdinaryBinding, admit_administrative_group,
-    load_administrative_ordinary_authority, load_batch_preimage, load_group_preimage,
-    open_administrative_source,
+    QueueSourceAdministrativeReader, QueueSourceAdministrativeRow, QueueSourceAdministrativeScan,
+    QueueSourceAdministrativeScanContext, QueueSourceBatchPlan, QueueSourceBatchPreimage,
+    QueueSourceBatchPublication, QueueSourceGroupEncodingLimits, QueueSourceGroupPlan,
+    QueueSourceGroupPreimage, QueueSourceGroupPublication, QueueSourceOrdinaryAuthority,
+    QueueSourceOrdinaryBinding, admit_administrative_group, load_administrative_ordinary_authority,
+    load_batch_preimage, load_group_preimage, open_administrative_source,
 };

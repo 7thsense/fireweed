@@ -1,8 +1,10 @@
 //! Addressed administrative authority from the same row loader as ordinary work.
 use super::*;
+mod scan;
 use fireweed_core::queue_administration::{
     AdministrativeAction, AdministrativeEntry, SelectorNode, WorkSelector,
 };
+pub use scan::{QueueSourceAdministrativeScan, QueueSourceAdministrativeScanContext};
 
 /// Borrowed, prevalidated declarations from the enclosing administrative intent.
 /// Selectors include every predicate whose field knowledge this row must supply.

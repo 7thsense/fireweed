@@ -52,3 +52,34 @@ impl QueueNativeAcquired {
         .await
     }
 }
+
+/// One source-proven FP4 group is a physical publication barrier in a batch.
+pub struct QueueNativeAdministrativePreparation<'a> {
+    pub queue: &'a fireweed_core::queue_contract::QueueAddress,
+    pub group: &'a fireweed_core::queue_contract::CommitGroup,
+    pub definition: &'a AdmittedQueueDefinition,
+    pub budget: Arc<QueueNativeSourceBudget>,
+    pub limits: QueueNativeSourcePreparationLimits,
+}
+impl QueueNativeAcquired {
+    pub async fn prepare_administrative_publication(
+        &self,
+        log: &QueueNativeLog,
+        publication: &fireweed_queue_spool::SourceAdministrativePublication,
+        input: QueueNativeAdministrativePreparation<'_>,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<QueueNativePublication> {
+        let cut = self.as_source().source_cut(log, job)?;
+        let record =
+            publication.record_for(&cut, input.queue, input.group, input.definition, job)?;
+        self.compile_and_prepare(
+            log,
+            record,
+            input.definition,
+            input.budget,
+            input.limits,
+            job,
+        )
+        .await
+    }
+}

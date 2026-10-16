@@ -47505,6 +47505,156 @@
         "fireweed-engine",
         "--no-default-features",
         "--lib",
+        "queue_source_index::group::tests::body::source_scan::abandoned_source_scan_retires_provisional_context_and_row_owners",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "queue_source_index::group::tests::body::source_scan::abandoned_source_scan_retires_provisional_context_and_row_owners",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_source_index::group::tests::body::source_scan::abandoned_source_scan_retires_provisional_context_and_row_owners",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--no-default-features",
+        "--lib",
+        "queue_source_index::group::tests::body::source_scan::empty_source_scan_still_binds_foreign_scope_and_admission_failure_does_not_dispatch",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "queue_source_index::group::tests::body::source_scan::empty_source_scan_still_binds_foreign_scope_and_admission_failure_does_not_dispatch",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_source_index::group::tests::body::source_scan::empty_source_scan_still_binds_foreign_scope_and_admission_failure_does_not_dispatch",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--no-default-features",
+        "--lib",
+        "queue_source_index::group::tests::body::source_scan::source_scan_binds_actual_intent_budget_and_group_before_row_dispatch",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "queue_source_index::group::tests::body::source_scan::source_scan_binds_actual_intent_budget_and_group_before_row_dispatch",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_source_index::group::tests::body::source_scan::source_scan_binds_actual_intent_budget_and_group_before_row_dispatch",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--no-default-features",
+        "--lib",
+        "queue_source_index::group::tests::body::source_scan::source_scan_late_read_and_sink_failure_never_mint_context_or_retain_credit",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "queue_source_index::group::tests::body::source_scan::source_scan_late_read_and_sink_failure_never_mint_context_or_retain_credit",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_source_index::group::tests::body::source_scan::source_scan_late_read_and_sink_failure_never_mint_context_or_retain_credit",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--no-default-features",
+        "--lib",
+        "queue_source_index::group::tests::body::source_scan::source_scan_rejects_same_shape_summary_foreign_cut_job_definition_and_request",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "queue_source_index::group::tests::body::source_scan::source_scan_rejects_same_shape_summary_foreign_cut_job_definition_and_request",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_source_index::group::tests::body::source_scan::source_scan_rejects_same_shape_summary_foreign_cut_job_definition_and_request",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--no-default-features",
+        "--lib",
         "queue_source_index::group::tests::body::source_work_bodies_preserve_positions_aliases_empty_and_frame_ownership",
         "--",
         "--exact"
@@ -57801,6 +57951,66 @@
       "features": [],
       "harness_id": "queue_native_log::semantic::tests::captured_source_scope_and_exact_root_admission_precede_closed_sdk_dispatch",
       "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::queue_native_log::semantic::tests::captured_source_scope_and_exact_root_admission_precede_closed_sdk_dispatch",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--no-default-features",
+        "--lib",
+        "queue_native_log::semantic::tests::compiled::administrative::source_administrative_handoff_matches_cold_oracle_local",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "queue_native_log::semantic::tests::compiled::administrative::source_administrative_handoff_matches_cold_oracle_local",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::queue_native_log::semantic::tests::compiled::administrative::source_administrative_handoff_matches_cold_oracle_local",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--no-default-features",
+        "--lib",
+        "queue_native_log::semantic::tests::compiled::administrative::source_administrative_handoff_matches_cold_oracle_real_s3",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "queue_native_log::semantic::tests::compiled::administrative::source_administrative_handoff_matches_cold_oracle_real_s3",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::queue_native_log::semantic::tests::compiled::administrative::source_administrative_handoff_matches_cold_oracle_real_s3",
       "listed_kind": "test",
       "package": "fireweed-objectlog",
       "target": "fireweed_objectlog",
@@ -72592,7 +72802,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::bound_union_allows_ordinary_reuse_of_admin_release_and_local_equal_ordinals",
         "--",
@@ -72600,7 +72810,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::bound_union_allows_ordinary_reuse_of_admin_release_and_local_equal_ordinals",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::bound_union_allows_ordinary_reuse_of_admin_release_and_local_equal_ordinals",
@@ -72626,7 +72837,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::command_capture_limits_are_exact_and_overflow_continues_all_evidence",
         "--",
@@ -72634,7 +72845,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::command_capture_limits_are_exact_and_overflow_continues_all_evidence",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::command_capture_limits_are_exact_and_overflow_continues_all_evidence",
@@ -72660,7 +72872,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::final_union_requires_predecision_and_same_operation_job_and_sequence",
         "--",
@@ -72668,7 +72880,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::final_union_requires_predecision_and_same_operation_job_and_sequence",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::final_union_requires_predecision_and_same_operation_job_and_sequence",
@@ -72694,7 +72907,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::foreign_scan_job_summary_and_context_poison_the_operation",
         "--",
@@ -72702,7 +72915,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::foreign_scan_job_summary_and_context_poison_the_operation",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::foreign_scan_job_summary_and_context_poison_the_operation",
@@ -72728,7 +72942,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::legitimate_empty_and_noop_scans_seal_without_packets",
         "--",
@@ -72736,7 +72950,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::legitimate_empty_and_noop_scans_seal_without_packets",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::legitimate_empty_and_noop_scans_seal_without_packets",
@@ -72762,7 +72977,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::malformed_identity_envelope_fragment_and_late_file_damage_fail_closed",
         "--",
@@ -72770,7 +72985,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::malformed_identity_envelope_fragment_and_late_file_damage_fail_closed",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::malformed_identity_envelope_fragment_and_late_file_damage_fail_closed",
@@ -72796,7 +73012,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::oversized_body_group_does_not_fill_disk_after_command_overflow",
         "--",
@@ -72804,7 +73020,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::oversized_body_group_does_not_fill_disk_after_command_overflow",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::oversized_body_group_does_not_fill_disk_after_command_overflow",
@@ -72830,7 +73047,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::packet_ordinals_and_eof_count_reject_skipped_and_split_delivery",
         "--",
@@ -72838,7 +73055,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::packet_ordinals_and_eof_count_reject_skipped_and_split_delivery",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::packet_ordinals_and_eof_count_reject_skipped_and_split_delivery",
@@ -72864,7 +73082,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::partial_command_append_after_evidence_permanently_invalidates_both_streams",
         "--",
@@ -72872,7 +73090,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::partial_command_append_after_evidence_permanently_invalidates_both_streams",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::partial_command_append_after_evidence_permanently_invalidates_both_streams",
@@ -72898,7 +73117,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::physical_command_sink_drains_5001_changes_and_replays_exact_metadata",
         "--",
@@ -72906,7 +73125,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::physical_command_sink_drains_5001_changes_and_replays_exact_metadata",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::physical_command_sink_drains_5001_changes_and_replays_exact_metadata",
@@ -72932,7 +73152,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::predecision_validates_commands_and_cross_source_authority_before_business",
         "--",
@@ -72940,7 +73160,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::predecision_validates_commands_and_cross_source_authority_before_business",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::predecision_validates_commands_and_cross_source_authority_before_business",
@@ -72966,7 +73187,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::rejected_row_observations_override_provisional_sibling_collision",
         "--",
@@ -72974,7 +73195,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::rejected_row_observations_override_provisional_sibling_collision",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::rejected_row_observations_override_provisional_sibling_collision",
@@ -73000,7 +73222,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::shared_fragment_codec_rejects_wrong_shape_view_noop_and_every_truncation",
         "--",
@@ -73008,7 +73230,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::shared_fragment_codec_rejects_wrong_shape_view_noop_and_every_truncation",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::shared_fragment_codec_rejects_wrong_shape_view_noop_and_every_truncation",
@@ -73034,7 +73257,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::shared_publication_assembly_checks_late_source_corruption_and_poisons",
         "--",
@@ -73042,7 +73265,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::shared_publication_assembly_checks_late_source_corruption_and_poisons",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::shared_publication_assembly_checks_late_source_corruption_and_poisons",
@@ -73068,7 +73292,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::unchanged_one_mib_composite_dependency_and_body_are_absent_from_command",
         "--",
@@ -73076,7 +73300,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::unchanged_one_mib_composite_dependency_and_body_are_absent_from_command",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::unchanged_one_mib_composite_dependency_and_body_are_absent_from_command",
@@ -73102,7 +73327,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "administrative::tests::valid_foreign_file_images_cannot_cross_operation_integrity_binding",
         "--",
@@ -73110,7 +73335,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "administrative::tests::valid_foreign_file_images_cannot_cross_operation_integrity_binding",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::administrative::tests::valid_foreign_file_images_cannot_cross_operation_integrity_binding",
@@ -73136,7 +73362,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "evidence::tests::actual_spilled_combined_reduction_matches_complete_oracle_including_late_release",
         "--",
@@ -73144,7 +73370,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "evidence::tests::actual_spilled_combined_reduction_matches_complete_oracle_including_late_release",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::evidence::tests::actual_spilled_combined_reduction_matches_complete_oracle_including_late_release",
@@ -73170,7 +73397,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "evidence::tests::authority_only_observations_do_not_release_claim_and_late_conflicts_poison",
         "--",
@@ -73178,7 +73405,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "evidence::tests::authority_only_observations_do_not_release_claim_and_late_conflicts_poison",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::evidence::tests::authority_only_observations_do_not_release_claim_and_late_conflicts_poison",
@@ -73204,7 +73432,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "evidence::tests::complete_reduction_rewinds_partial_cursor_and_replays_without_explicit_rewind",
         "--",
@@ -73212,7 +73440,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "evidence::tests::complete_reduction_rewinds_partial_cursor_and_replays_without_explicit_rewind",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::evidence::tests::complete_reduction_rewinds_partial_cursor_and_replays_without_explicit_rewind",
@@ -73238,7 +73467,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "evidence::tests::composite_edit_authority_exceeds_ram_but_spilled_reduction_succeeds",
         "--",
@@ -73246,7 +73475,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "evidence::tests::composite_edit_authority_exceeds_ram_but_spilled_reduction_succeeds",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::evidence::tests::composite_edit_authority_exceeds_ram_but_spilled_reduction_succeeds",
@@ -73272,7 +73502,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "evidence::tests::decoder_capacity_failure_keeps_spool_ownership_and_discards_temporaries",
         "--",
@@ -73280,7 +73510,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "evidence::tests::decoder_capacity_failure_keeps_spool_ownership_and_discards_temporaries",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::evidence::tests::decoder_capacity_failure_keeps_spool_ownership_and_discards_temporaries",
@@ -73306,7 +73537,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "evidence::tests::evidence_ordinal_binding_and_strict_order_reject_valid_record_replacement",
         "--",
@@ -73314,7 +73545,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "evidence::tests::evidence_ordinal_binding_and_strict_order_reject_valid_record_replacement",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::evidence::tests::evidence_ordinal_binding_and_strict_order_reject_valid_record_replacement",
@@ -73340,7 +73572,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "evidence::tests::late_checksum_serde_and_read_failures_override_provisional_business_conflict",
         "--",
@@ -73348,7 +73580,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "evidence::tests::late_checksum_serde_and_read_failures_override_provisional_business_conflict",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::evidence::tests::late_checksum_serde_and_read_failures_override_provisional_business_conflict",
@@ -73374,7 +73607,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "evidence::tests::late_contradictory_initial_authority_and_unaccepted_admin_claim_fail_closed",
         "--",
@@ -73382,7 +73615,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "evidence::tests::late_contradictory_initial_authority_and_unaccepted_admin_claim_fail_closed",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::evidence::tests::late_contradictory_initial_authority_and_unaccepted_admin_claim_fail_closed",
@@ -73408,7 +73642,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "evidence::tests::unknown_evidence_version_and_invalid_key_utf8_fail_closed",
         "--",
@@ -73416,7 +73650,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "evidence::tests::unknown_evidence_version_and_invalid_key_utf8_fail_closed",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::evidence::tests::unknown_evidence_version_and_invalid_key_utf8_fail_closed",
@@ -73442,7 +73677,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "operation_runtime::tests::cancellation_and_multiple_drainers_wait_for_final_owned_child",
         "--",
@@ -73450,7 +73685,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "operation_runtime::tests::cancellation_and_multiple_drainers_wait_for_final_owned_child",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::operation_runtime::tests::cancellation_and_multiple_drainers_wait_for_final_owned_child",
@@ -73476,7 +73712,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "operation_runtime::tests::configured_capacity_and_shared_close_apply_to_every_clone",
         "--",
@@ -73484,7 +73720,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "operation_runtime::tests::configured_capacity_and_shared_close_apply_to_every_clone",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::operation_runtime::tests::configured_capacity_and_shared_close_apply_to_every_clone",
@@ -73510,7 +73747,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "owned_administrative::tests::dispatched_append_outlives_caller_and_closes_files_before_final_reservation",
         "--",
@@ -73518,7 +73755,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "owned_administrative::tests::dispatched_append_outlives_caller_and_closes_files_before_final_reservation",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::owned_administrative::tests::dispatched_append_outlives_caller_and_closes_files_before_final_reservation",
@@ -73544,7 +73782,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "owned_administrative::tests::owned_database_stage_uses_one_worker_for_complete_scratch_delivery",
         "--",
@@ -73552,7 +73790,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "owned_administrative::tests::owned_database_stage_uses_one_worker_for_complete_scratch_delivery",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::owned_administrative::tests::owned_database_stage_uses_one_worker_for_complete_scratch_delivery",
@@ -73578,7 +73817,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "owned_administrative::tests::queued_append_cancel_and_concurrent_use_poison_and_release_taken_owner",
         "--",
@@ -73586,7 +73825,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "owned_administrative::tests::queued_append_cancel_and_concurrent_use_poison_and_release_taken_owner",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::owned_administrative::tests::queued_append_cancel_and_concurrent_use_poison_and_release_taken_owner",
@@ -73612,7 +73852,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "quota::tests::arithmetic_failure_does_not_release_partial_file_capacity",
         "--",
@@ -73620,7 +73860,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "quota::tests::arithmetic_failure_does_not_release_partial_file_capacity",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::quota::tests::arithmetic_failure_does_not_release_partial_file_capacity",
@@ -73646,7 +73887,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "quota::tests::file_owners_share_exact_capacity_and_failed_growth_preserves_it",
         "--",
@@ -73654,7 +73895,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "quota::tests::file_owners_share_exact_capacity_and_failed_growth_preserves_it",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::quota::tests::file_owners_share_exact_capacity_and_failed_growth_preserves_it",
@@ -73680,7 +73922,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "root::tests::configured_root_is_canonical_shared_and_preserves_host_contents",
         "--",
@@ -73688,7 +73930,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "root::tests::configured_root_is_canonical_shared_and_preserves_host_contents",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::root::tests::configured_root_is_canonical_shared_and_preserves_host_contents",
@@ -73714,7 +73957,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "root::tests::invalid_roots_fail_with_sanitized_errors",
         "--",
@@ -73722,7 +73965,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "root::tests::invalid_roots_fail_with_sanitized_errors",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::root::tests::invalid_roots_fail_with_sanitized_errors",
@@ -73748,7 +73992,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "tests::blocking_owner_keeps_scratch_and_job_alive_after_caller_drop",
         "--",
@@ -73756,7 +74000,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "tests::blocking_owner_keeps_scratch_and_job_alive_after_caller_drop",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::tests::blocking_owner_keeps_scratch_and_job_alive_after_caller_drop",
@@ -73782,7 +74027,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "tests::both_index_file_peak_is_reserved_and_quota_failure_is_not_semantic_overflow",
         "--",
@@ -73790,7 +74035,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "tests::both_index_file_peak_is_reserved_and_quota_failure_is_not_semantic_overflow",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::tests::both_index_file_peak_is_reserved_and_quota_failure_is_not_semantic_overflow",
@@ -73816,7 +74062,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "tests::duplicate_tuple_tie_order_is_producer_order_not_payload_order",
         "--",
@@ -73824,7 +74070,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "tests::duplicate_tuple_tie_order_is_producer_order_not_payload_order",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::tests::duplicate_tuple_tie_order_is_producer_order_not_payload_order",
@@ -73850,7 +74097,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "tests::empty_singleton_and_non_power_of_two_exact_sort_replay_with_flat_memory",
         "--",
@@ -73858,7 +74105,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "tests::empty_singleton_and_non_power_of_two_exact_sort_replay_with_flat_memory",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::tests::empty_singleton_and_non_power_of_two_exact_sort_replay_with_flat_memory",
@@ -73884,7 +74132,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "tests::full_key_prefixes_and_payloads_larger_than_window_are_exact_and_stable",
         "--",
@@ -73892,7 +74140,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "tests::full_key_prefixes_and_payloads_larger_than_window_are_exact_and_stable",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::tests::full_key_prefixes_and_payloads_larger_than_window_are_exact_and_stable",
@@ -73918,7 +74167,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "tests::malformed_or_truncated_append_image_never_seals",
         "--",
@@ -73926,7 +74175,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "tests::malformed_or_truncated_append_image_never_seals",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::tests::malformed_or_truncated_append_image_never_seals",
@@ -73952,7 +74202,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "tests::memory_admission_failure_creates_no_files_or_disk_charge",
         "--",
@@ -73960,7 +74210,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "tests::memory_admission_failure_creates_no_files_or_disk_charge",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::tests::memory_admission_failure_creates_no_files_or_disk_charge",
@@ -73986,7 +74237,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "tests::partial_append_remains_charged_and_poisoned_until_owner_drop",
         "--",
@@ -73994,7 +74245,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "tests::partial_append_remains_charged_and_poisoned_until_owner_drop",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::tests::partial_append_remains_charged_and_poisoned_until_owner_drop",
@@ -74020,7 +74272,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "tests::partial_merge_failure_exposes_no_sealed_handle_and_cleans_guards",
         "--",
@@ -74028,7 +74280,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "tests::partial_merge_failure_exposes_no_sealed_handle_and_cleans_guards",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::tests::partial_merge_failure_exposes_no_sealed_handle_and_cleans_guards",
@@ -74054,7 +74307,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "tests::reader_failure_and_foreign_entry_permanently_poison_eof",
         "--",
@@ -74062,7 +74315,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "tests::reader_failure_and_foreign_entry_permanently_poison_eof",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::tests::reader_failure_and_foreign_entry_permanently_poison_eof",
@@ -74088,7 +74342,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "tests::shared_disk_quota_competes_atomically_across_owners",
         "--",
@@ -74096,7 +74350,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "tests::shared_disk_quota_competes_atomically_across_owners",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::tests::shared_disk_quota_competes_atomically_across_owners",
@@ -74122,7 +74377,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::runtime_tests::owned_runtime_caller_abort_retains_future_resources_until_physical_drain",
         "--",
@@ -74130,7 +74385,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::runtime_tests::owned_runtime_caller_abort_retains_future_resources_until_physical_drain",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::runtime_tests::owned_runtime_caller_abort_retains_future_resources_until_physical_drain",
@@ -74156,7 +74412,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::runtime_tests::owned_runtime_cancelled_permit_waiter_never_constructs_future_and_releases_inputs",
         "--",
@@ -74164,7 +74420,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::runtime_tests::owned_runtime_cancelled_permit_waiter_never_constructs_future_and_releases_inputs",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::runtime_tests::owned_runtime_cancelled_permit_waiter_never_constructs_future_and_releases_inputs",
@@ -74190,7 +74447,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::runtime_tests::owned_runtime_entry_accepts_current_thread_caller",
         "--",
@@ -74198,7 +74455,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::runtime_tests::owned_runtime_entry_accepts_current_thread_caller",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::runtime_tests::owned_runtime_entry_accepts_current_thread_caller",
@@ -74224,7 +74482,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::runtime_tests::owned_runtime_entry_accepts_multi_thread_caller",
         "--",
@@ -74232,7 +74490,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::runtime_tests::owned_runtime_entry_accepts_multi_thread_caller",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::runtime_tests::owned_runtime_entry_accepts_multi_thread_caller",
@@ -74258,7 +74517,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::runtime_tests::owned_runtime_entry_rejects_current_thread_target_before_registration_and_factory",
         "--",
@@ -74266,7 +74525,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::runtime_tests::owned_runtime_entry_rejects_current_thread_target_before_registration_and_factory",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::runtime_tests::owned_runtime_entry_rejects_current_thread_target_before_registration_and_factory",
@@ -74292,7 +74552,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::runtime_tests::owned_runtime_entry_rejects_same_pool_recursion_before_factory",
         "--",
@@ -74300,7 +74560,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::runtime_tests::owned_runtime_entry_rejects_same_pool_recursion_before_factory",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::runtime_tests::owned_runtime_entry_rejects_same_pool_recursion_before_factory",
@@ -74326,7 +74587,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::runtime_tests::owned_runtime_factory_and_poll_panics_release_resources_and_preserve_error_policy",
         "--",
@@ -74334,7 +74595,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::runtime_tests::owned_runtime_factory_and_poll_panics_release_resources_and_preserve_error_policy",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::runtime_tests::owned_runtime_factory_and_poll_panics_release_resources_and_preserve_error_policy",
@@ -74360,7 +74622,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::another_pool_retains_its_registration_capacity",
         "--",
@@ -74368,7 +74630,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::another_pool_retains_its_registration_capacity",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::another_pool_retains_its_registration_capacity",
@@ -74394,7 +74657,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::blocked_worker_does_not_stop_another_execution_slot",
         "--",
@@ -74402,7 +74665,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::blocked_worker_does_not_stop_another_execution_slot",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::blocked_worker_does_not_stop_another_execution_slot",
@@ -74428,7 +74692,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::bounds_and_registered_capacity_fail_as_unknown_before_execution",
         "--",
@@ -74436,7 +74700,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::bounds_and_registered_capacity_fail_as_unknown_before_execution",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::bounds_and_registered_capacity_fail_as_unknown_before_execution",
@@ -74462,7 +74727,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::cancelled_running_spool_finishes_and_final_reservation_signals_cleanup",
         "--",
@@ -74470,7 +74735,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::cancelled_running_spool_finishes_and_final_reservation_signals_cleanup",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::cancelled_running_spool_finishes_and_final_reservation_signals_cleanup",
@@ -74496,7 +74762,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::close_preserves_registered_waiters_and_cancelled_close_is_repeatable",
         "--",
@@ -74504,7 +74770,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::close_preserves_registered_waiters_and_cancelled_close_is_repeatable",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::close_preserves_registered_waiters_and_cancelled_close_is_repeatable",
@@ -74530,7 +74797,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::close_registration_and_final_completion_race_is_linearized",
         "--",
@@ -74538,7 +74805,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::close_registration_and_final_completion_race_is_linearized",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::close_registration_and_final_completion_race_is_linearized",
@@ -74564,7 +74832,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::dispatch_panic_after_start_waits_for_io_and_drops_result_before_error",
         "--",
@@ -74572,7 +74840,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::dispatch_panic_after_start_waits_for_io_and_drops_result_before_error",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::dispatch_panic_after_start_waits_for_io_and_drops_result_before_error",
@@ -74598,7 +74867,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::dispatch_poison_rejects_inline_continuation_of_active_parent",
         "--",
@@ -74606,7 +74875,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::dispatch_poison_rejects_inline_continuation_of_active_parent",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::dispatch_poison_rejects_inline_continuation_of_active_parent",
@@ -74632,7 +74902,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::enqueued_dispatch_panic_cancels_unstarted_io_and_poison_blocks_more_stubs",
         "--",
@@ -74640,7 +74910,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::enqueued_dispatch_panic_cancels_unstarted_io_and_poison_blocks_more_stubs",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::enqueued_dispatch_panic_cancels_unstarted_io_and_poison_blocks_more_stubs",
@@ -74666,7 +74937,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::immediate_next_job_does_not_observe_previous_completion_capacity",
         "--",
@@ -74674,7 +74945,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::immediate_next_job_does_not_observe_previous_completion_capacity",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::immediate_next_job_does_not_observe_previous_completion_capacity",
@@ -74700,7 +74972,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::inline_scope_preserves_error_policy_and_rejects_self_drain",
         "--",
@@ -74708,7 +74980,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::inline_scope_preserves_error_policy_and_rejects_self_drain",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::inline_scope_preserves_error_policy_and_rejects_self_drain",
@@ -74734,7 +75007,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::inline_stage_preserves_parent_drain_through_caller_cancellation",
         "--",
@@ -74742,7 +75015,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::inline_stage_preserves_parent_drain_through_caller_cancellation",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::inline_stage_preserves_parent_drain_through_caller_cancellation",
@@ -74768,7 +75042,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::physical_panic_and_other_error_are_unknown_and_release_execution",
         "--",
@@ -74776,7 +75050,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::physical_panic_and_other_error_are_unknown_and_release_execution",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::physical_panic_and_other_error_are_unknown_and_release_execution",
@@ -74802,7 +75077,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::physical_panic_restores_scope_before_later_closed_admission",
         "--",
@@ -74810,7 +75085,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::physical_panic_restores_scope_before_later_closed_admission",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::physical_panic_restores_scope_before_later_closed_admission",
@@ -74836,7 +75112,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::queued_cancellation_drops_resources_before_registration_completion",
         "--",
@@ -74844,7 +75120,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::queued_cancellation_drops_resources_before_registration_completion",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::queued_cancellation_drops_resources_before_registration_completion",
@@ -74870,7 +75147,7 @@
         "fireweed-queue-spool",
         "--no-default-features",
         "--features",
-        "default",
+        "default,test-support",
         "--lib",
         "worker::tests::runtime_dropped_unstarted_task_releases_cell_and_reply_ownership",
         "--",
@@ -74878,7 +75155,8 @@
       ],
       "expected_ran": 1,
       "features": [
-        "default"
+        "default",
+        "test-support"
       ],
       "harness_id": "worker::tests::runtime_dropped_unstarted_task_releases_cell_and_reply_ownership",
       "id": "Cargo.toml::fireweed-queue-spool::fireweed_queue_spool::test::worker::tests::runtime_dropped_unstarted_task_releases_cell_and_reply_ownership",
@@ -116561,7 +116839,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "7aca3fedd1b6f466ffa5bb8bc205cd9726b006a72dc0392ab643c2f9da4c3bcd",
+  "source_inventory_sha256": "d2e3ddb78ad59c23e2c94fbcaf48cce365714214a031c0a2e06c70144d31466e",
   "workspaces": [
     {
       "listing_error_sha256": "",
