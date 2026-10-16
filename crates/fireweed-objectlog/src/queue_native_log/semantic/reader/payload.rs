@@ -109,3 +109,37 @@ impl QueueSourceRecordReader for QueueNativeRecordReader<'_> {
         owner.record.checked()
     }
 }
+
+impl fireweed_engine::queue_source_index::QueueSourceStreamingReader
+    for QueueNativeRecordReader<'_>
+{
+    type Cursor = QueueNativeSourceCursor;
+    type Page = QueueNativeSourceStreamPage;
+    type Completion = QueueNativeSourceCompletion;
+    fn open_stream(&self, lower: &[u8], upper: &[u8]) -> QueueResult<Self::Cursor> {
+        self.inner.open_stream(lower, upper)
+    }
+    async fn next_stream_page(&self, cursor: &mut Self::Cursor) -> QueueResult<Option<Self::Page>> {
+        self.inner.next_stream_page(cursor).await
+    }
+    fn visit_stream_page(
+        &self,
+        cursor: &mut Self::Cursor,
+        page: Self::Page,
+        visitor: &mut dyn for<'a> FnMut(QueueSourcePoint<'a>) -> QueueResult<()>,
+    ) -> QueueResult<()> {
+        self.inner.visit_stream_page(cursor, page, visitor)
+    }
+    fn finish_stream(&self, cursor: Self::Cursor) -> QueueResult<Self::Completion> {
+        self.inner.finish_stream(cursor)
+    }
+    fn validate_stream_completion(
+        &self,
+        completion: &Self::Completion,
+        lower: &[u8],
+        upper: &[u8],
+    ) -> QueueResult<()> {
+        self.inner
+            .validate_stream_completion(completion, lower, upper)
+    }
+}

@@ -37,7 +37,7 @@ mod edits;
 pub use compile::{QueueSourceCompileLimits, QueueSourceCompiled, compile_genesis};
 
 mod read;
-pub use read::{QueueSourceReader, QueueSourceRecordReader};
+pub use read::{QueueSourceReader, QueueSourceRecordReader, QueueSourceStreamingReader};
 
 mod body;
 pub use body::{

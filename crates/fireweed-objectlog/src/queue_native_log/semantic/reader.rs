@@ -3,7 +3,11 @@ use super::*;
 use fireweed_engine::queue_source_index::{QueueSourceCut, QueueSourcePoint, QueueSourceReader};
 use std::sync::Mutex;
 mod payload;
+mod stream;
 pub use payload::{QueueNativeBoundSourceRecord, QueueNativeRecordReader};
+pub use stream::{
+    QueueNativeSourceCompletion, QueueNativeSourceCursor, QueueNativeSourceStreamPage,
+};
 
 /// One non-reusable ledger for an entire compilation request, including retries.
 /// Keep and share this owner when constructing readers for that request.
@@ -500,4 +504,5 @@ pub(super) async fn reader_contract(
         (0, 0)
     );
     assert!(reader.lookup(b"a").await.is_err());
+    stream::tests::contract(source, log, job, other, admission).await;
 }
