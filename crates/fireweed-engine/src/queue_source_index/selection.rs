@@ -4,3 +4,11 @@ pub use scalar::{QueueSourceScalarRange, QueueSourceScalarRanges, plan_source_sc
 
 mod work;
 pub use work::{QueueSourceSelectionBudget, QueueSourceSelectionWork};
+
+mod scratch;
+pub use scratch::QueueSourceCandidateScratch;
+
+mod producer;
+pub use producer::{
+    QueueSourceCandidateProducer, QueueSourceScalarLeaf, QueueSourceSelectionRequest,
+};

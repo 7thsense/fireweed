@@ -1498,6 +1498,7 @@ dependencies = [
  "fireweed-engine",
  "fireweed-projection",
  "fireweed-queue-spool",
+ "fireweed-turso",
  "futures",
  "object-log",
  "serde",

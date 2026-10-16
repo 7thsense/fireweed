@@ -29,6 +29,7 @@ bytes = "1"
 sha2 = "0.11"
 
 [dev-dependencies]
+fireweed-turso = { path = "../fireweed-turso", features = ["local"] }
 fireweed-queue-spool = { path = "../fireweed-queue-spool", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "test-util"] }

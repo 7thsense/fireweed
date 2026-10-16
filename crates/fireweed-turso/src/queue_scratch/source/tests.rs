@@ -359,3 +359,65 @@ async fn source_only_schema_and_fixed_statements_avoid_hidden_materialization() 
     })
     .await;
 }
+
+#[tokio::test]
+async fn engine_port_preserves_identity_and_refuses_same_job_replacement_ledger() {
+    use fireweed_engine::queue_source_index::QueueSourceCandidateScratch as Port;
+    async fn through_port<S: Port>(
+        store: &mut S,
+        job: &QueueReservation,
+        budget: &Arc<QueueSourceSelectionBudget>,
+    ) -> QueueResult<()> {
+        store.validate_operation(job, budget)?;
+        let mut builder = store.begin_set()?;
+        store.insert(&mut builder, None, "same").await?;
+        store.insert(&mut builder, Some("c"), "same").await?;
+        let set = store.seal(builder)?;
+        assert_eq!(store.count(&set)?, 2);
+        let mut encoded = BTreeSet::new();
+        let mut after = None;
+        while let Some(row) = store.next(&set, after.as_ref()).await? {
+            assert!(encoded.insert(store.encoded_identity(&row)?.to_vec()));
+            after = Some(row);
+        }
+        assert_eq!(encoded.len(), 2);
+        let mut right_builder = store.begin_set()?;
+        store.insert(&mut right_builder, None, "same").await?;
+        store.insert(&mut right_builder, Some("d"), "other").await?;
+        let right = store.seal(right_builder)?;
+        let union = store.union(&set, &right).await?;
+        let intersection = store.intersection(&set, &right).await?;
+        let left_difference = store.difference(&set, &right).await?;
+        let right_difference = store.difference(&right, &set).await?;
+        assert_eq!(store.count(&union)?, 3);
+        assert_eq!(store.count(&intersection)?, 1);
+        assert_eq!(store.count(&left_difference)?, 1);
+        assert_eq!(store.count(&right_difference)?, 1);
+        for (output, collection, key) in [
+            (&intersection, None, "same"),
+            (&left_difference, Some("c"), "same"),
+            (&right_difference, Some("d"), "other"),
+        ] {
+            let row = store.next(output, None).await?.unwrap();
+            assert_eq!(
+                store.encoded_identity(&row)?,
+                QueueSourceKey::Record { collection, key }.encode()?
+            );
+            assert!(store.next(output, Some(&row)).await?.is_none());
+        }
+        Ok(())
+    }
+    fixture(|root, quota, job, budget| async move {
+        let mut store =
+            SourceCandidateScratch::open(root, quota, job.clone(), budget.clone()).await?;
+        let before = budget.remaining(&job)?;
+        let replacement = QueueSourceSelectionBudget::new(before, &job)?;
+        let replacement_before = replacement.remaining(&job)?;
+        assert_eq!(replacement_before, before);
+        assert!(Port::validate_operation(&store, &job, &replacement).is_err());
+        assert_eq!(budget.remaining(&job)?, before);
+        assert_eq!(replacement.remaining(&job)?, replacement_before);
+        through_port(&mut store, &job, &budget).await
+    })
+    .await;
+}

@@ -51,6 +51,29 @@ impl QueueSourceScalarRanges<'_> {
         std::ptr::eq(self._charge.reservation(), job)
     }
 }
+/// Conservative allocation/copy ceiling shared with the driven producer.
+/// The producer spends work before this planner allocates any range buffers.
+pub(super) fn scalar_plan_capacity(
+    family: QueueSourcePostingFamily<'_>,
+    predicate: &Predicate,
+) -> QueueResult<u64> {
+    let count = match predicate {
+        Predicate::In(values) => values.len(),
+        _ => 1,
+    };
+    encoded_len(predicate)?
+        .checked_mul(32)
+        .and_then(|n| {
+            (family.prefix_len().ok()? as u64)
+                .checked_mul(2)
+                .and_then(|prefix| prefix.checked_add(512))
+                .and_then(|per| per.checked_mul(count as u64))
+                .and_then(|extra| n.checked_add(extra))
+        })
+        .and_then(|n| n.checked_add(4096))
+        .ok_or(QueueError::TooLarge)
+}
+
 /// Use the admitted persisted definition and common predicate validation. The
 /// selection driver must additionally bind this plan to its original header,
 /// request, evaluation time, scratch producer and complete range manifest.
@@ -80,17 +103,7 @@ pub fn plan_source_scalar_ranges<'a>(
     };
     // Ordered values can expand twice (nested zero escaping), then both bounds
     // and a temporary encoding coexist. Include full vector/header capacity.
-    let capacity = encoded_len(predicate)?
-        .checked_mul(32)
-        .and_then(|n| {
-            (family.prefix_len().ok()? as u64)
-                .checked_mul(2)
-                .and_then(|prefix| prefix.checked_add(512))
-                .and_then(|per| per.checked_mul(count as u64))
-                .and_then(|extra| n.checked_add(extra))
-        })
-        .and_then(|n| n.checked_add(4096))
-        .ok_or(QueueError::TooLarge)?;
+    let capacity = scalar_plan_capacity(family, predicate)?;
     let charge = job.owned_buffer(capacity)?;
     let mut ranges = Vec::with_capacity(count);
     match predicate {

@@ -354,3 +354,69 @@ enum Operation {
 
 #[cfg(test)]
 mod tests;
+
+impl fireweed_engine::queue_source_index::QueueSourceCandidateScratch for SourceCandidateScratch {
+    type Builder = SourceSetBuilder;
+    type Set = SourceCandidateSet;
+    type Row = SourceCandidateIdentity;
+    fn validate_operation(
+        &self,
+        job: &QueueReservation,
+        budget: &Arc<QueueSourceSelectionBudget>,
+    ) -> QueueResult<()> {
+        if !std::ptr::eq(self.job.as_ref(), job) || !Arc::ptr_eq(&self.budget, budget) {
+            return Err(unknown());
+        }
+        self.ready()
+    }
+    fn begin_set(&mut self) -> QueueResult<Self::Builder> {
+        SourceCandidateScratch::begin_set(self)
+    }
+    fn insert(
+        &mut self,
+        builder: &mut Self::Builder,
+        collection: Option<&str>,
+        key: &str,
+    ) -> impl std::future::Future<Output = QueueResult<()>> + Send {
+        SourceCandidateScratch::insert(self, builder, collection, key)
+    }
+    fn seal(&self, builder: Self::Builder) -> QueueResult<Self::Set> {
+        SourceCandidateScratch::seal(self, builder)
+    }
+    fn union(
+        &mut self,
+        left: &Self::Set,
+        right: &Self::Set,
+    ) -> impl std::future::Future<Output = QueueResult<Self::Set>> + Send {
+        SourceCandidateScratch::union(self, left, right)
+    }
+    fn intersection(
+        &mut self,
+        left: &Self::Set,
+        right: &Self::Set,
+    ) -> impl std::future::Future<Output = QueueResult<Self::Set>> + Send {
+        SourceCandidateScratch::intersection(self, left, right)
+    }
+    fn difference(
+        &mut self,
+        left: &Self::Set,
+        right: &Self::Set,
+    ) -> impl std::future::Future<Output = QueueResult<Self::Set>> + Send {
+        SourceCandidateScratch::difference(self, left, right)
+    }
+    fn next(
+        &mut self,
+        set: &Self::Set,
+        after: Option<&Self::Row>,
+    ) -> impl std::future::Future<Output = QueueResult<Option<Self::Row>>> + Send {
+        SourceCandidateScratch::next(self, set, after)
+    }
+    fn encoded_identity<'a>(&self, row: &'a Self::Row) -> QueueResult<&'a [u8]> {
+        self.check(&row.scope)?;
+        Ok(row.encoded_identity())
+    }
+    fn count(&self, set: &Self::Set) -> QueueResult<u64> {
+        self.check(&set.0.scope)?;
+        Ok(set.len())
+    }
+}
