@@ -27,7 +27,8 @@ for alias, module_name in (('original_model','source_original_models'),('origina
                           ('batch_model','source_batch_models'),('batch_gate','source_batch_gate'),
                           ('original_batch_model','source_original_batch_models'),
                           ('original_batch_gate','source_original_batch_gate'),
-                          ('coordinator_model','coordinator_models'),('coordinator_gate','coordinator_gate')):
+                          ('coordinator_model','coordinator_models'),('coordinator_gate','coordinator_gate'),
+                          ('body_model','source_body_models'),('body_gate','source_body_gate')):
     source_path=helper_path.with_name(module_name+'.py')
     source_bytes=source_path.read_bytes()
     module=types.ModuleType(module_name)
@@ -41,6 +42,7 @@ for alias, module_name in (('original_model','source_original_models'),('origina
 # the invariant through a deferred import (including import-failure controls).
 original_batch_model.PREFIX_ORACLE=original_batch_gate.prefix_violation
 coordinator_model.PREFIX_ORACLE=coordinator_gate.prefix_violation
+body_model.PREFIX_ORACLE=body_gate.prefix_violation
 
 WITNESSES = {
     'mixed_check_corruption_ignored': ('mixed_check_corrupt','same','absent',False,'none',False),
@@ -161,7 +163,7 @@ def completed_header_witness(s,c):
 
 def run(max_states=100000):
     fault_sets=[set(faults) for faults in (model.FAULTS,model.PUBLICATION_FAULTS,model.READ_FAULTS,
-        model.PROVISION_FAULTS,model.HEADER_FAULTS,original_model.ORIGINAL_FAULTS,batch_model.BATCH_FAULTS,original_batch_model.FAULTS,coordinator_model.FAULTS)]
+        model.PROVISION_FAULTS,model.HEADER_FAULTS,original_model.ORIGINAL_FAULTS,batch_model.BATCH_FAULTS,original_batch_model.FAULTS,coordinator_model.FAULTS,body_model.FAULTS)]
     if sum(map(len,fault_sets))!=len(set.union(*fault_sets)):
         raise AssertionError('source campaign mutant names must be disjoint')
     specification = model.SourceGroup()
@@ -271,6 +273,17 @@ def run(max_states=100000):
         raise AssertionError('ninth exact source coordinator identity required')
     baselines.append(coordinator_report)
     controls.extend(coordinator_controls)
+    body_report,body_controls=body_gate.run_campaign(helper,body_model,max_states)
+    if body_report['name']!='api007-addressed-body-materialization':
+        raise AssertionError('tenth exact source body identity required')
+    if body_report.get('status')!='PASS' or body_report.get('complete') is not True:
+        raise AssertionError('complete passing body campaign required')
+    if set(body_report.get('completed_witnesses',{}))!=set(body_model.CASES):
+        raise AssertionError('all body completion witnesses required')
+    if len(body_controls)!=len(body_model.FAULTS) or {row['fault'] for row in body_controls}!=set(body_model.FAULTS):
+        raise AssertionError('all body mutant controls required')
+    baselines.append(body_report)
+    controls.extend(body_controls)
     return {'schema':'fireweed-api007-source-group-formal-v1', 'status':'PASS',
         'baseline':baselines, 'negative_controls':controls,
         'qualification':{'finite_abstract_safety':'recorded bounds only', 'production_mapping':'documentary_unexecuted',
@@ -314,6 +327,13 @@ def run(max_states=100000):
              'tests':['original_batch_verifies_reversed_positions_and_rejects_one_wrong_equal_span',
                 'original_batch_reads_shared_frames_once_and_streams_distinct_offsets_real_s3',
                 'cancelled_converted_original_batch_retires_containers_but_retains_physical_owners_real_s3'],
+             'status':'documentary_unexecuted'},
+            {'symbols':['QueueSourceWorkBodyEvidence::from_source','verify_source_work_bodies',
+                'SourceImage::load_bodies','QueueNativeRecordReader::read_record'],
+             'tests':['source_work_body_rejects_independently_valid_same_job_mixed_cuts',
+                'source_work_body_materialization_matches_baseline_equal_changed_and_empty',
+                'native_body_preimage_streams_two_frames_and_enforces_late_exact_cap_local',
+                'native_body_preimage_second_frame_cancellation_real_s3'],
              'status':'documentary_unexecuted'}]}
 
 def main(max_states, path, root):
