@@ -26,7 +26,8 @@ helper.LOADED_SOURCES[str(model_path)] = hashlib.sha256(model_bytes).hexdigest()
 for alias, module_name in (('original_model','source_original_models'),('original_gate','source_original_gate'),
                           ('batch_model','source_batch_models'),('batch_gate','source_batch_gate'),
                           ('original_batch_model','source_original_batch_models'),
-                          ('original_batch_gate','source_original_batch_gate')):
+                          ('original_batch_gate','source_original_batch_gate'),
+                          ('coordinator_model','coordinator_models'),('coordinator_gate','coordinator_gate')):
     source_path=helper_path.with_name(module_name+'.py')
     source_bytes=source_path.read_bytes()
     module=types.ModuleType(module_name)
@@ -39,6 +40,7 @@ for alias, module_name in (('original_model','source_original_models'),('origina
 # Bind the exact captured function; later sys.modules mutation cannot replace
 # the invariant through a deferred import (including import-failure controls).
 original_batch_model.PREFIX_ORACLE=original_batch_gate.prefix_violation
+coordinator_model.PREFIX_ORACLE=coordinator_gate.prefix_violation
 
 WITNESSES = {
     'mixed_check_corruption_ignored': ('mixed_check_corrupt','same','absent',False,'none',False),
@@ -159,7 +161,7 @@ def completed_header_witness(s,c):
 
 def run(max_states=100000):
     fault_sets=[set(faults) for faults in (model.FAULTS,model.PUBLICATION_FAULTS,model.READ_FAULTS,
-        model.PROVISION_FAULTS,model.HEADER_FAULTS,original_model.ORIGINAL_FAULTS,batch_model.BATCH_FAULTS,original_batch_model.FAULTS)]
+        model.PROVISION_FAULTS,model.HEADER_FAULTS,original_model.ORIGINAL_FAULTS,batch_model.BATCH_FAULTS,original_batch_model.FAULTS,coordinator_model.FAULTS)]
     if sum(map(len,fault_sets))!=len(set.union(*fault_sets)):
         raise AssertionError('source campaign mutant names must be disjoint')
     specification = model.SourceGroup()
@@ -264,6 +266,11 @@ def run(max_states=100000):
         'api007-source-header-recovery','api007-source-original-resolution',
         'api007-source-batch-composition','api007-source-original-batch-resolution']:
         raise AssertionError('eight exact source campaign identities required')
+    coordinator_report,coordinator_controls=coordinator_gate.run_campaign(helper,coordinator_model,max_states)
+    if coordinator_report['name']!='api007-native-commit-coordinator':
+        raise AssertionError('ninth exact source coordinator identity required')
+    baselines.append(coordinator_report)
+    controls.extend(coordinator_controls)
     return {'schema':'fireweed-api007-source-group-formal-v1', 'status':'PASS',
         'baseline':baselines, 'negative_controls':controls,
         'qualification':{'finite_abstract_safety':'recorded bounds only', 'production_mapping':'documentary_unexecuted',
