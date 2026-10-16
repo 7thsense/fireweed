@@ -91,7 +91,7 @@ impl<R: QueueSourceStreamingReader> QueueSourceStreamingReader for Observed<R> {
     }
 }
 
-// Faults occur only AFTER the underlying physical insertion succeeds.
+// Faults occur only AFTER the underlying physical insertion or algebra succeeds.
 #[derive(Clone, Copy, PartialEq)]
 enum Fault {
     None,
@@ -100,6 +100,8 @@ enum Fault {
     CorruptCorrespondence,
     DenyTerminalPage,
     HoldSecondWrite,
+    FailAlgebra,
+    PauseAlgebra,
 }
 struct PhysicalScratch {
     inner: SourceCandidateScratch,
@@ -138,7 +140,11 @@ impl fireweed_engine::queue_source_index::QueueSourceCandidateScratch for Physic
         if self.writes.fetch_add(1, Ordering::SeqCst) == 1 {
             assert!(self.quota.usage()? > 0);
             match self.fault {
-                Fault::None | Fault::CorruptCorrespondence | Fault::DenyTerminalPage => {}
+                Fault::None
+                | Fault::CorruptCorrespondence
+                | Fault::DenyTerminalPage
+                | Fault::FailAlgebra
+                | Fault::PauseAlgebra => {}
                 Fault::FailSecondWrite => {
                     return Err(QueueError::OutcomeUnknown(
                         "injected after second physical write".into(),
@@ -174,7 +180,22 @@ impl fireweed_engine::queue_source_index::QueueSourceCandidateScratch for Physic
         left: &Self::Set,
         right: &Self::Set,
     ) -> QueueResult<Self::Set> {
-        self.inner.intersection(left, right).await
+        let result = self.inner.intersection(left, right).await?;
+        match self.fault {
+            Fault::FailAlgebra => {
+                assert!(self.quota.usage()? > 0);
+                return Err(QueueError::OutcomeUnknown(
+                    "injected after physical algebra".into(),
+                ));
+            }
+            Fault::PauseAlgebra => {
+                assert!(self.quota.usage()? > 0);
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            _ => {}
+        }
+        Ok(result)
     }
     async fn difference(&mut self, left: &Self::Set, right: &Self::Set) -> QueueResult<Self::Set> {
         self.inner.difference(left, right).await
@@ -243,7 +264,43 @@ async fn contract(log: QueueNativeLog) {
             body: vec![1, 2, 3].into(),
         });
     }
+    seed.work_inserts.push(NewWork {
+        key: "zero".into(),
+        priority: 1,
+        available_at: 0,
+        fields: Default::default(),
+        body: vec![4].into(),
+    });
     let (record, before) = ordinary(&acquired, &definition, &before, &[seed], &job);
+    let acquired = accept(
+        &log,
+        acquired,
+        record,
+        &definition,
+        (&mut history, &before),
+        ledger.clone(),
+        &job,
+    )
+    .await;
+    let mut terminal = group("selection-terminal");
+    for (key, lifecycle) in [
+        ("c", AdministrativeLifecycle::Completed),
+        ("zero", AdministrativeLifecycle::Failed),
+    ] {
+        terminal.work_updates.push(UnclaimedUpdate {
+            key: key.into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Administrative {
+                patch: WorkPatch::default(),
+                lifecycle,
+                lease_guard: AdministrativeLeaseGuard::RejectActive,
+            },
+        });
+    }
+    let (record, before) = ordinary(&acquired, &definition, &before, &[terminal], &job);
+    assert_eq!(before.work["c"].record.lifecycle, Lifecycle::Completed);
+    assert_eq!(before.work["zero"].record.lifecycle, Lifecycle::Failed);
+    assert!(before.work["zero"].record.work.fields.is_empty());
     let acquired = accept(
         &log,
         acquired,
@@ -384,6 +441,18 @@ async fn contract(log: QueueNativeLog) {
                         )
                         .await
                         .unwrap();
+                        let (producer, universe) = if fault == Fault::None && expected == 2 {
+                            let (producer, universe) = producer.universe().await.unwrap();
+                            assert_eq!(producer.universe_len(&universe).unwrap(), 4);
+                            assert_eq!(trace.rows.load(Ordering::SeqCst), 4);
+                            assert_eq!(trace.pages.load(Ordering::SeqCst), 5);
+                            assert_eq!(trace.empty.load(Ordering::SeqCst), 1);
+                            assert_eq!(trace.finishes.load(Ordering::SeqCst), 1);
+                            // Reset observations only; neither cumulative ledger is reset.
+                            trace.rows.store(0, Ordering::SeqCst); trace.pages.store(0, Ordering::SeqCst);
+                            trace.empty.store(0, Ordering::SeqCst); trace.finishes.store(0, Ordering::SeqCst);
+                            (producer, Some(universe))
+                        } else { (producer, None) };
                         let before = selection.remaining(&job).unwrap();
                         let source_before = read_ledger.remaining_work();
                         if fault == Fault::PauseSecondWrite {
@@ -445,8 +514,13 @@ async fn contract(log: QueueNativeLog) {
                         assert_eq!(trace.empty.load(Ordering::SeqCst), 1);
                         assert_eq!(trace.pages.load(Ordering::SeqCst), expected as usize + 1);
                         drop(leaf);
+                        drop(universe);
                         drop(producer);
                         assert_eq!(delivery_quota.usage().unwrap(), 0);
+                        if fault == Fault::None && expected == 2 {
+                            BooleanContext { source: acquired.as_source(), log: &log, definition: &definition,
+                                job: &job, ledger: &ledger, read, root: &root, quota: &delivery_quota }.check().await;
+                        }
                         assert!(acquired.as_source().confirms(&log, &job).await.unwrap());
                     }
                     Ok(())
@@ -651,4 +725,210 @@ async fn caller_abandonment(
         )
     );
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+struct BooleanContext<'a> {
+    source: &'a QueueNativeCaptured,
+    log: &'a QueueNativeLog,
+    definition: &'a AdmittedQueueDefinition,
+    job: &'a Arc<QueueReservation>,
+    ledger: &'a Arc<QueueNativeSourceBudget>,
+    read: QueueNativeSourceReadLimits,
+    root: &'a Arc<ScratchRoot>,
+    quota: &'a Arc<ScratchDiskQuota>,
+}
+impl BooleanContext<'_> {
+    async fn check(&self) {
+        use fireweed_core::queue_administration::{
+            AdministrativeAction, AdministrativeClause, AdministrativeIntent,
+            AdministrativeOperation, SelectorNode, WorkSelector,
+        };
+        let equal = || {
+            WorkSelector::leaf(SelectorNode::Field {
+                name: "n".into(),
+                predicate: Predicate::Equal(FieldValue::Integer(1)),
+            })
+        };
+        let missing = || {
+            WorkSelector::leaf(SelectorNode::Present {
+                name: "n".into(),
+                present: false,
+            })
+        };
+        for (selector, count, visits, finishes, fault) in [
+            (WorkSelector::negate(equal()), 2, 6, 2, Fault::None),
+            (missing(), 1, 7, 2, Fault::None),
+            (WorkSelector::all(vec![]), 4, 4, 1, Fault::None),
+            (WorkSelector::any(vec![]), 0, 0, 0, Fault::None),
+            (
+                WorkSelector::any(vec![missing(), equal()]),
+                3,
+                9,
+                3,
+                Fault::None,
+            ),
+            (
+                WorkSelector::negate(WorkSelector::any(vec![equal(), missing()])),
+                1,
+                9,
+                3,
+                Fault::None,
+            ),
+            (
+                WorkSelector::all(vec![
+                    WorkSelector::negate(equal()),
+                    WorkSelector::negate(missing()),
+                ]),
+                1,
+                9,
+                3,
+                Fault::FailAlgebra,
+            ),
+            (
+                WorkSelector::all(vec![
+                    WorkSelector::negate(equal()),
+                    WorkSelector::negate(missing()),
+                ]),
+                1,
+                9,
+                3,
+                Fault::PauseAlgebra,
+            ),
+        ] {
+            let intent = AdministrativeIntent {
+                evaluated_at: 0,
+                before_fields: None,
+                operation: AdministrativeOperation::SelectFirst(vec![AdministrativeClause {
+                    id: "actual-Boolean".into(),
+                    selector,
+                    precondition: WorkSelector::all(vec![]),
+                    action: AdministrativeAction::Delete {
+                        lease_guard: AdministrativeLeaseGuard::RejectActive,
+                    },
+                }]),
+            };
+            let queue = QueueAddress {
+                tenant: "tenant".into(),
+                queue: "producer".into(),
+            };
+            let trace = Arc::new(Trace::default());
+            let reader = Observed {
+                inner: QueueNativeSourceReader::new(
+                    self.source,
+                    self.log,
+                    self.job,
+                    self.ledger.clone(),
+                    self.read,
+                )
+                .unwrap(),
+                trace: trace.clone(),
+            };
+            // Independent request trial: never replace a running producer's
+            // ledger. The actual immutable source and SDK ledger are retained.
+            let selection = QueueSourceSelectionBudget::new(
+                QueueSourceSelectionWork {
+                    rows: 100_000,
+                    copied_bytes: 64 << 20,
+                    scratch_steps: 100_000,
+                },
+                self.job,
+            )
+            .unwrap();
+            let scratch = SourceCandidateScratch::open(
+                self.root.clone(),
+                self.quota.clone(),
+                self.job.clone(),
+                selection.clone(),
+            )
+            .await
+            .unwrap();
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let scratch = PhysicalScratch {
+                inner: scratch,
+                writes: Arc::new(AtomicUsize::new(0)),
+                fault,
+                quota: self.quota.clone(),
+                entered: entered.clone(),
+                release: None,
+                released: None,
+            };
+            let producer = QueueSourceCandidateProducer::begin(
+                reader,
+                scratch,
+                self.definition,
+                QueueSourceSelectionRequest::Administration {
+                    queue: &queue,
+                    intent: &intent,
+                },
+                0,
+                &QueueLimits::default(),
+                self.job.clone(),
+                selection.clone(),
+            )
+            .await
+            .unwrap();
+            let before = selection.remaining(self.job).unwrap();
+            let source_before = self.ledger.remaining_work();
+            let mut pending = Box::pin(producer.boolean_clause(0));
+            if fault == Fault::PauseAlgebra {
+                tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                    tokio::select! {
+                        _ = entered.notified() => {},
+                        _ = &mut pending => panic!("physical algebra did not pause"),
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(trace.rows.load(Ordering::SeqCst), visits);
+                assert_eq!(trace.finishes.load(Ordering::SeqCst), finishes);
+                assert!(self.quota.usage().unwrap() > 0);
+                let spent = selection.remaining(self.job).unwrap();
+                let source_spent = self.ledger.remaining_work();
+                assert!(spent.rows < before.rows && spent.scratch_steps < before.scratch_steps);
+                assert!(source_spent.semantic.pages < source_before.semantic.pages);
+                drop(pending);
+                assert_eq!(self.quota.usage().unwrap(), 0);
+                assert_eq!(selection.remaining(self.job).unwrap(), spent);
+                let after = self.ledger.remaining_work();
+                assert_eq!(
+                    (
+                        after.semantic.pages,
+                        after.semantic.hydrated_bytes,
+                        after.record_attempts,
+                        after.hydration_reads,
+                        after.hydration_body_bytes
+                    ),
+                    (
+                        source_spent.semantic.pages,
+                        source_spent.semantic.hydrated_bytes,
+                        source_spent.record_attempts,
+                        source_spent.hydration_reads,
+                        source_spent.hydration_body_bytes
+                    )
+                );
+                continue;
+            }
+            let result = pending.await;
+            if fault == Fault::FailAlgebra {
+                assert!(
+                    matches!(result, Err(QueueError::OutcomeUnknown(reason)) if reason == "injected after physical algebra")
+                );
+                assert_eq!(trace.rows.load(Ordering::SeqCst), visits);
+                assert_eq!(trace.finishes.load(Ordering::SeqCst), finishes);
+                let spent = selection.remaining(self.job).unwrap();
+                assert!(spent.rows < before.rows && spent.scratch_steps < before.scratch_steps);
+                assert!(self.ledger.remaining_work().semantic.pages < source_before.semantic.pages);
+                assert_eq!(self.quota.usage().unwrap(), 0);
+                continue;
+            }
+            let (producer, proof) = result.unwrap();
+            assert_eq!(producer.boolean_clause_len(&proof, 0).unwrap(), count);
+            assert_eq!(trace.rows.load(Ordering::SeqCst), visits);
+            assert_eq!(trace.finishes.load(Ordering::SeqCst), finishes);
+            assert_eq!(trace.empty.load(Ordering::SeqCst), finishes);
+            drop(proof);
+            drop(producer);
+            assert_eq!(self.quota.usage().unwrap(), 0);
+        }
+    }
 }

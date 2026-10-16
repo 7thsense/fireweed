@@ -202,3 +202,63 @@ fn unknown(reason: &str) -> QueueError {
 }
 #[cfg(test)]
 mod tests;
+
+/// Presence covers one declared type, or every admitted type for an additional
+/// field namespace. A value predicate's range is not a presence substitute.
+pub(super) fn presence_plan_capacity(family: QueueSourcePostingFamily<'_>) -> QueueResult<u64> {
+    (family.prefix_len()? as u64)
+        .checked_add(32)
+        .and_then(|n| n.checked_mul(10))
+        .and_then(|n| n.checked_add(4096))
+        .ok_or(QueueError::TooLarge)
+}
+pub(super) fn plan_source_presence_ranges<'a>(
+    definition: &AdmittedQueueDefinition,
+    collection: Option<&'a str>,
+    field: &'a str,
+    job: &Arc<QueueReservation>,
+) -> QueueResult<QueueSourceScalarRanges<'a>> {
+    if !definition.belongs_to(job) {
+        return Err(unknown("presence definition operation differs"));
+    }
+    let declaration = match collection {
+        None => &definition.schema().work,
+        Some(name) => definition
+            .schema()
+            .state
+            .get(name)
+            .ok_or_else(|| unknown("presence collection differs"))?,
+    };
+    if !declaration.admits_field(field) {
+        return Err(unknown("presence field is undeclared"));
+    }
+    let family = QueueSourcePostingFamily::Scalar { collection, field };
+    let charge = job.owned_buffer(presence_plan_capacity(family)?)?;
+    let mut ranges = Vec::with_capacity(5);
+    for kind in [
+        FieldType::Integer,
+        FieldType::Float,
+        FieldType::Boolean,
+        FieldType::Text,
+        FieldType::Bytes,
+    ] {
+        if declaration
+            .fields
+            .get(field)
+            .is_some_and(|expected| *expected != kind)
+        {
+            continue;
+        }
+        let lower = family.scalar_type_prefix(kind)?;
+        let mut upper = lower.clone();
+        successor(&mut upper)?;
+        ranges.push(QueueSourceScalarRange { lower, upper, kind });
+    }
+    Ok(QueueSourceScalarRanges {
+        collection,
+        field,
+        pin: definition.pin(),
+        ranges,
+        _charge: charge,
+    })
+}

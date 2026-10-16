@@ -15,7 +15,7 @@ class SourceGroupGateTests(unittest.TestCase):
         self.assertTrue(baseline['complete'])
         self.assertGreater(baseline['states'], len(gate.model.CASES))
         self.assertEqual(set(baseline['completed_witnesses']), set(gate.WITNESSES))
-        self.assertEqual({c['fault'] for c in self.report['negative_controls']}, set(gate.model.FAULTS) | set(gate.model.PUBLICATION_FAULTS) | set(gate.model.READ_FAULTS) | set(gate.model.PROVISION_FAULTS) | set(gate.model.HEADER_FAULTS) | set(gate.original_model.ORIGINAL_FAULTS) | set(gate.batch_model.BATCH_FAULTS) | set(gate.original_batch_model.FAULTS) | set(gate.coordinator_model.FAULTS) | set(gate.body_model.FAULTS) | set(gate.state_read_model.FAULTS))
+        self.assertEqual({c['fault'] for c in self.report['negative_controls']}, set(gate.model.FAULTS) | set(gate.model.PUBLICATION_FAULTS) | set(gate.model.READ_FAULTS) | set(gate.model.PROVISION_FAULTS) | set(gate.model.HEADER_FAULTS) | set(gate.original_model.ORIGINAL_FAULTS) | set(gate.batch_model.BATCH_FAULTS) | set(gate.original_batch_model.FAULTS) | set(gate.coordinator_model.FAULTS) | set(gate.body_model.FAULTS) | set(gate.state_read_model.FAULTS) | set(gate.selection_model.FAULTS))
         for control in self.report['negative_controls']:
             spec = (gate.model.SourceGroup if control['fault'] in gate.model.FAULTS else
                     gate.model.SourceGroupPublication if control['fault'] in gate.model.PUBLICATION_FAULTS
@@ -27,7 +27,8 @@ class SourceGroupGateTests(unittest.TestCase):
                     else gate.original_batch_model.SourceOriginalBatch if control['fault'] in gate.original_batch_model.FAULTS
                     else gate.coordinator_model.Coordinator if control['fault'] in gate.coordinator_model.FAULTS
                     else gate.body_model.SourceBodies if control['fault'] in gate.body_model.FAULTS
-                    else gate.state_read_model.SourceStateRead)
+                    else gate.state_read_model.SourceStateRead if control['fault'] in gate.state_read_model.FAULTS
+                    else gate.selection_model.SourceSelection)
             gate.helper.replay(spec(control['fault']), control['trace'], control['property'])
     def test_publication_boundary_witnesses_and_forged_preparation(self):
         from dataclasses import replace

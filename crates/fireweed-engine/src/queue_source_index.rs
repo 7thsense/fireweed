@@ -81,7 +81,8 @@ pub use group::{
 
 mod selection;
 pub use selection::{
-    QueueSourceCandidateProducer, QueueSourceCandidateScratch, QueueSourceScalarLeaf,
-    QueueSourceScalarRange, QueueSourceScalarRanges, QueueSourceSelectionBudget,
-    QueueSourceSelectionRequest, QueueSourceSelectionWork, plan_source_scalar_ranges,
+    QueueSourceBooleanClause, QueueSourceCandidateProducer, QueueSourceCandidateScratch,
+    QueueSourcePresenceLeaf, QueueSourceScalarLeaf, QueueSourceScalarRange,
+    QueueSourceScalarRanges, QueueSourceSelectionBudget, QueueSourceSelectionRequest,
+    QueueSourceSelectionWork, QueueSourceUniverseLeaf, plan_source_scalar_ranges,
 };

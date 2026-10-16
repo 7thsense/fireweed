@@ -275,14 +275,47 @@ impl QueueSourceCandidateScratch for Scratch {
     fn seal(&self, builder: Builder) -> QueueResult<Set> {
         Ok(Set(builder))
     }
-    async fn union(&mut self, _: &Set, _: &Set) -> QueueResult<Set> {
-        Err(unknown("unexpected algebra in scalar model"))
+    async fn union(&mut self, left: &Set, right: &Set) -> QueueResult<Set> {
+        let rows = left
+            .0
+            .rows
+            .union(&right.0.rows)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut builder = self.begin_set()?;
+        for (collection, key) in rows {
+            self.insert(&mut builder, collection.as_deref(), &key)
+                .await?;
+        }
+        self.seal(builder)
     }
-    async fn intersection(&mut self, _: &Set, _: &Set) -> QueueResult<Set> {
-        Err(unknown("unexpected algebra in scalar model"))
+    async fn intersection(&mut self, left: &Set, right: &Set) -> QueueResult<Set> {
+        let rows = left
+            .0
+            .rows
+            .intersection(&right.0.rows)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut builder = self.begin_set()?;
+        for (collection, key) in rows {
+            self.insert(&mut builder, collection.as_deref(), &key)
+                .await?;
+        }
+        self.seal(builder)
     }
-    async fn difference(&mut self, _: &Set, _: &Set) -> QueueResult<Set> {
-        Err(unknown("unexpected algebra in scalar model"))
+    async fn difference(&mut self, left: &Set, right: &Set) -> QueueResult<Set> {
+        let rows = left
+            .0
+            .rows
+            .difference(&right.0.rows)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut builder = self.begin_set()?;
+        for (collection, key) in rows {
+            self.insert(&mut builder, collection.as_deref(), &key)
+                .await?;
+        }
+        self.seal(builder)
     }
     async fn next(&mut self, _: &Set, _: Option<&IdentityRow>) -> QueueResult<Option<IdentityRow>> {
         Err(unknown("unexpected physical iteration in scalar model"))
@@ -321,6 +354,15 @@ fn fixture_indexed(
     kind: FieldType,
     indexed: bool,
 ) -> Fixture {
+    fixture_contents(signals, corrupt_last, kind, indexed, false)
+}
+fn fixture_contents(
+    signals: Signals,
+    corrupt_last: bool,
+    kind: FieldType,
+    indexed: bool,
+    universe: bool,
+) -> Fixture {
     let admission = QueueAdmission::new(2, 32 << 20).unwrap();
     let job = Arc::new(admission.reserve(0).unwrap());
     let budget = QueueSourceSelectionBudget::new(
@@ -332,7 +374,7 @@ fn fixture_indexed(
         &job,
     )
     .unwrap();
-    let schema = QueueSchema {
+    let mut schema = QueueSchema {
         work: CollectionDefinition {
             fields: BTreeMap::from([("n".into(), kind)]),
             indexes: if indexed {
@@ -341,12 +383,20 @@ fn fixture_indexed(
                 BTreeMap::new()
             },
             unique_indexes: BTreeSet::new(),
-            additional_field_prefixes: BTreeSet::new(),
+            additional_field_prefixes: if universe {
+                BTreeSet::from(["meta/".into()])
+            } else {
+                BTreeSet::new()
+            },
         },
         state: BTreeMap::new(),
         progress_bound_nanos: 1,
         max_attempts: 3,
     };
+    if universe {
+        schema.state.insert("state".into(), schema.work.clone());
+        schema.state.insert("other".into(), schema.work.clone());
+    }
     let definition =
         AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), &job).unwrap();
     let queue = QueueAddress {
@@ -355,25 +405,122 @@ fn fixture_indexed(
     };
     let genesis = encode_checked_genesis(1, &queue, &definition, &[7; 32], 1 << 20, &job).unwrap();
     let mut seed = group("seed");
-    for key in ["a", "b", "c"] {
+    if universe {
+        seed.state_updates = [
+            ("state", "a"),
+            ("state", "z"),
+            ("other", "a"),
+            ("other", "y"),
+        ]
+        .into_iter()
+        .map(|(collection, key)| StateUpdate {
+            collection: collection.into(),
+            key: key.into(),
+            expect: StateExpect::Absent,
+            change: StateChange::Put {
+                fields: Fields::new(),
+                value: vec![1].into(),
+            },
+        })
+        .collect();
+    }
+    let keys: &[&str] = if universe {
+        &["a", "b", "c", "d"]
+    } else {
+        &["a", "b", "c"]
+    };
+    for &key in keys {
         seed.work_inserts.push(NewWork {
             key: key.into(),
             priority: 0,
             available_at: 0,
-            fields: Fields::from([(
-                "n".into(),
-                if kind == FieldType::Float {
-                    FieldValue::Float(if key == "c" { 2.0 } else { 1.0 })
-                } else {
-                    FieldValue::Integer(if key == "c" { 2 } else { 1 })
-                },
-            )]),
+            fields: if universe && key == "b" {
+                Fields::new()
+            } else {
+                let value = match kind {
+                    FieldType::Integer => FieldValue::Integer(if key == "c" { 2 } else { 1 }),
+                    FieldType::Float => FieldValue::Float(if key == "c" { 2.0 } else { 1.0 }),
+                    FieldType::Boolean => FieldValue::Boolean(key != "c"),
+                    FieldType::Text => FieldValue::Text(if key == "c" { "2" } else { "1" }.into()),
+                    FieldType::Bytes => FieldValue::Bytes(vec![if key == "c" { 2 } else { 1 }]),
+                };
+                let mut fields = Fields::from([("n".into(), value.clone())]);
+                if universe {
+                    fields.insert(
+                        "meta/any".into(),
+                        match key {
+                            "a" => value,
+                            "c" => FieldValue::Text("present-but-different".into()),
+                            _ => FieldValue::Boolean(true),
+                        },
+                    );
+                }
+                fields
+            },
             body: vec![1].into(),
         });
     }
-    let (publication, snapshot) = record(&queue, &schema, &RecordSnapshot::default(), &seed, &job);
-    let history = vec![genesis, publication];
+    let (publication, mut snapshot) =
+        record(&queue, &schema, &RecordSnapshot::default(), &seed, &job);
+    let mut history = vec![genesis, publication];
+    if universe {
+        let mut terminal = group("terminal-universe");
+        for (key, lifecycle) in [
+            ("c", AdministrativeLifecycle::Completed),
+            ("d", AdministrativeLifecycle::Failed),
+        ] {
+            terminal.work_updates.push(UnclaimedUpdate {
+                key: key.into(),
+                expect: StateExpect::Version(1),
+                change: UnclaimedChange::Administrative {
+                    patch: WorkPatch::default(),
+                    lifecycle,
+                    lease_guard: AdministrativeLeaseGuard::RejectActive,
+                },
+            });
+        }
+        let (publication, after) = record(&queue, &schema, &snapshot, &terminal, &job);
+        {
+            let checked = publication.checked().unwrap();
+            let crate::queue_log_record::QueueLogPayload::Publication(view) =
+                checked.view().payload()
+            else {
+                panic!()
+            };
+            let receipt = view.receipts().next().unwrap().unwrap();
+            assert!(matches!(
+                receipt.outcome,
+                crate::queue_publication::ReceiptOutcomeRef::Commit(
+                    crate::queue_publication::CommitOutcomeRef::Committed(_)
+                )
+            ));
+        }
+        snapshot = after;
+        history.push(publication);
+    }
     let mut facts = oracle::fold(&history, &snapshot, &schema);
+    if universe {
+        for (key, expected) in [("c", Lifecycle::Completed), ("d", Lifecycle::Failed)] {
+            let key = QueueSourceKey::Record {
+                collection: None,
+                key,
+            }
+            .encode()
+            .unwrap();
+            let record: QueueSourceRecord = queue_storage_layout::decode(&facts[&key]).unwrap();
+            assert!(
+                matches!(record.live, Some(QueueSourceLive::Work { metadata, .. }) if metadata.lifecycle == expected)
+            );
+        }
+        let key = QueueSourceKey::Record {
+            collection: None,
+            key: "b",
+        }
+        .encode()
+        .unwrap();
+        let record: QueueSourceRecord = queue_storage_layout::decode(&facts[&key]).unwrap();
+        assert_eq!(record.field_count, 0);
+    }
     if corrupt_last {
         facts.insert(
             QueueSourceKey::Field {
@@ -395,7 +542,7 @@ fn fixture_indexed(
         scratch_alive: Arc::downgrade(&scratch_alive),
         reader: Some(Stream {
             inner: Reader {
-                through: 2,
+                through: history.len() as u64,
                 identity: Arc::new(job.owned_buffer(128).unwrap()),
                 facts,
             },
@@ -959,3 +1106,9 @@ fn late_batch_copy_admission_exact_limit_and_one_less_release_every_owned_charge
         assert!(!late_batch_trial(lower - 1, true).await);
     });
 }
+
+mod universe;
+
+mod presence;
+
+mod boolean;

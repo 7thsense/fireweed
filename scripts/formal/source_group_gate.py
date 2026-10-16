@@ -29,7 +29,8 @@ for alias, module_name in (('original_model','source_original_models'),('origina
                           ('original_batch_gate','source_original_batch_gate'),
                           ('coordinator_model','coordinator_models'),('coordinator_gate','coordinator_gate'),
                           ('body_model','source_body_models'),('body_gate','source_body_gate'),
-                          ('state_read_model','source_state_read_models'),('state_read_gate','source_state_read_gate')):
+                          ('state_read_model','source_state_read_models'),('state_read_gate','source_state_read_gate'),
+                          ('selection_model','source_selection_models'),('selection_gate','source_selection_gate')):
     source_path=helper_path.with_name(module_name+'.py')
     source_bytes=source_path.read_bytes()
     module=types.ModuleType(module_name)
@@ -45,6 +46,7 @@ original_batch_model.PREFIX_ORACLE=original_batch_gate.prefix_violation
 coordinator_model.PREFIX_ORACLE=coordinator_gate.prefix_violation
 body_model.PREFIX_ORACLE=body_gate.prefix_violation
 state_read_model.PREFIX_ORACLE=state_read_gate.prefix_violation
+selection_model.PREFIX_ORACLE=selection_gate.prefix_violation
 
 WITNESSES = {
     'mixed_check_corruption_ignored': ('mixed_check_corrupt','same','absent',False,'none',False),
@@ -295,12 +297,28 @@ def run(max_states=100000):
         raise AssertionError('all state read mutant controls required')
     baselines.append(state_report)
     controls.extend(state_controls)
+    selection_report,selection_controls=selection_gate.run_campaign(helper,selection_model,max_states)
+    if selection_report.get('name')!='api007-source-selection' or selection_report.get('status')!='PASS' or selection_report.get('complete') is not True:
+        raise AssertionError('twelfth complete source-selection campaign required')
+    if set(selection_report.get('completed_witnesses',{}))!=set(selection_model.CASES):
+        raise AssertionError('all source selection witnesses required')
+    if len(selection_controls)!=len(selection_model.FAULTS) or {row['fault'] for row in selection_controls}!=set(selection_model.FAULTS):
+        raise AssertionError('all source selection mutant controls required')
+    baselines.append(selection_report)
+    controls.extend(selection_controls)
     return {'schema':'fireweed-api007-source-group-formal-v1', 'status':'PASS',
         'baseline':baselines, 'negative_controls':controls,
         'qualification':{'finite_abstract_safety':'recorded bounds only', 'production_mapping':'documentary_unexecuted',
             'excluded':['Rust refinement','exact allocation arithmetic','canonical decoding and hashes',
                         'publication/CAS','provider durability','performance','public QueueStore activation']},
-        'production_mappings':[{'symbols':['QueueSourceStateValueEvidence::from_source','verify_source_state_values','load_source_state_records'],
+        'production_mappings':[{'symbols':['QueueSourceCandidateProducer::universe',
+                'QueueSourceCandidateProducer::presence','QueueSourceCandidateProducer::boolean_clause'],
+            'tests':['actual_boolean_programs_distinguish_missing_nonmatching_and_syntactic_empty',
+                     'boolean_operands_are_bound_to_actual_occurrences_and_all_manifests_are_retained',
+                     'identical_empty_programs_still_bind_the_outer_clause',
+                     'source_scalar_candidates_compose_with_actual_turso_local',
+                     'source_scalar_candidates_compose_with_actual_turso_real_s3'],
+            'status':'documentary_unexecuted'},{'symbols':['QueueSourceStateValueEvidence::from_source','verify_source_state_values','load_source_state_records'],
             'tests':['source_state_values_validate_second_alias_and_reject_zero_offset_at_entry',
                      'source_state_values_reject_equal_bytes_old_version_and_literal_aliases',
                      'source_state_read_preserves_order_duplicates_exact_cap_and_owned_retirement',

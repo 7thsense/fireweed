@@ -151,6 +151,45 @@ pub struct QueueSourceScalarLeaf<'a, C, Set> {
     validated_empty: bool,
     _memory: OwnedQueueBufferCharge,
 }
+pub struct QueueSourceUniverseLeaf<'a, C, Set> {
+    collection: Option<&'a str>,
+    lower: Vec<u8>,
+    upper: Vec<u8>,
+    completion: C,
+    set: Set,
+    identity: Arc<Identity>,
+    _memory: OwnedQueueBufferCharge,
+}
+pub struct QueueSourcePresenceLeaf<'a, C, Set> {
+    plan: QueueSourceScalarRanges<'a>,
+    completions: Vec<C>,
+    set: Set,
+    identity: Arc<Identity>,
+    clause: usize,
+    node: usize,
+    present: bool,
+    _memory: OwnedQueueBufferCharge,
+}
+enum CandidateOperand<Set> {
+    Value(usize),
+    Presence(usize),
+    Universe,
+    Empty,
+    Owned(Set),
+}
+/// Exact candidates for one supported actual administrative Boolean clause.
+/// This does not seal first-clause ownership, preconditions, materialization,
+/// freshness, Claim eligibility or ordering.
+pub struct QueueSourceBooleanClause<'a, C, Set> {
+    result: CandidateOperand<Set>,
+    values: Vec<QueueSourceScalarLeaf<'a, C, Set>>,
+    presence: Vec<QueueSourcePresenceLeaf<'a, C, Set>>,
+    universe: Option<QueueSourceUniverseLeaf<'a, C, Set>>,
+    empty: Option<Set>,
+    identity: Arc<Identity>,
+    clause: usize,
+    _memory: OwnedQueueBufferCharge,
+}
 struct Row {
     key: String,
     tuple: Vec<u8>,
@@ -316,6 +355,31 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
             .and_then(|n| n.checked_add(2048))
             .ok_or(QueueError::TooLarge)?;
         let memory = self.job.owned_buffer(slots as u64)?;
+        let (completions, set) = self.scan_ranges(&plan).await?;
+        let validated_empty = plan.ranges().is_empty();
+        let leaf = QueueSourceScalarLeaf {
+            plan,
+            completions,
+            set,
+            identity: self.identity.clone(),
+            occurrence,
+            validated_empty,
+            _memory: memory,
+        };
+        self.validate_scalar(&leaf, occurrence)?;
+        Ok((self, leaf))
+    }
+    // Caller admits the leaf and complete manifest slots before dispatch.
+    // Only actual-request-derived plans enter this private helper.
+    async fn scan_ranges(
+        &mut self,
+        plan: &QueueSourceScalarRanges<'a>,
+    ) -> QueueResult<(Vec<R::Completion>, S::Set)> {
+        let crate::queue_source_index::QueueSourcePostingFamily::Scalar { collection, .. } =
+            plan.family()
+        else {
+            return Err(unknown("scalar scan family differs"));
+        };
         let mut completions = Vec::with_capacity(plan.ranges().len());
         let mut builder = self.scratch.begin_set()?;
         let original = self.original.cut();
@@ -386,7 +450,7 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
                         &self.reader,
                         original,
                         &self.header,
-                        declaration,
+                        plan.family(),
                         range.field_type(),
                         row,
                         &self.job,
@@ -394,7 +458,7 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
                     )
                     .await?;
                     self.scratch
-                        .insert(&mut builder, declaration.collection, &row.key)
+                        .insert(&mut builder, collection, &row.key)
                         .await?;
                 }
             }
@@ -412,19 +476,8 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
             )?;
             completions.push(completion);
         }
-        let validated_empty = plan.ranges().is_empty();
         let set = self.scratch.seal(builder)?;
-        let leaf = QueueSourceScalarLeaf {
-            plan,
-            completions,
-            set,
-            identity: self.identity.clone(),
-            occurrence,
-            validated_empty,
-            _memory: memory,
-        };
-        self.validate_scalar(&leaf, occurrence)?;
-        Ok((self, leaf))
+        Ok((completions, set))
     }
     fn validate(&self) -> QueueResult<()> {
         self.original.validate(self.reader.cut()?, &self.job)?;
@@ -478,63 +531,28 @@ async fn correspondence<R: QueueSourceStreamingReader>(
     reader: &R,
     original: QueueSourceCut<'_>,
     header: &QueueSourceHeader,
-    declaration: Declaration<'_>,
+    family: crate::queue_source_index::QueueSourcePostingFamily<'_>,
     kind: fireweed_core::queue_contract::FieldType,
     row: &Row,
     job: &Arc<QueueReservation>,
     budget: &QueueSourceSelectionBudget,
 ) -> QueueResult<()> {
-    scope(reader, original, job)?;
-    let key = QueueSourceKey::Record {
-        collection: declaration.collection,
-        key: &row.key,
+    let crate::queue_source_index::QueueSourcePostingFamily::Scalar { collection, field } = family
+    else {
+        return Err(unknown("scalar correspondence family differs"));
     };
-    let _key_memory = job.owned_buffer(key.encoded_len()? as u64)?;
-    budget.grant(
-        job,
-        QueueSourceSelectionWork {
-            rows: 1,
-            copied_bytes: key.encoded_len()? as u64,
-            scratch_steps: 0,
-        },
-    )?;
-    let key = key.encode()?;
-    let owner = reader.lookup(&key).await?;
-    let point = reader.point(&owner)?;
-    let bytes = point
-        .value_for(&original, &key)?
-        .ok_or_else(|| unknown("posting has no record fact"))?;
-    budget.grant(
-        job,
-        QueueSourceSelectionWork {
-            copied_bytes: std::mem::size_of::<QueueSourceRecord>() as u64,
-            ..Default::default()
-        },
-    )?;
-    let record: QueueSourceRecord = queue_storage_layout::decode(bytes)?;
-    record.validate(declaration.collection)?;
-    let span = match record.live {
-        Some(QueueSourceLive::Work { metadata, body }) => {
-            if metadata.insertion_sequence > header.sequence() {
-                return Err(unknown("posting has future insertion sequence"));
-            }
-            body.span()
-        }
-        Some(QueueSourceLive::State { value }) => value.span(),
-        None => return Err(unknown("posting refers to a tombstone")),
-    };
-    if record.field_count == 0 || span.log_offset() == 0 || span.log_offset() >= original.through()
-    {
-        return Err(unknown(
-            "posting record field count or history offset differs",
-        ));
+    let record =
+        record::live_record(reader, original, header, collection, &row.key, job, budget).await?;
+    // Scalar membership requires an actual field. The complete live-key
+    // universe also contains valid records with no fields.
+    if record.field_count == 0 {
+        return Err(unknown("posting record has no fields"));
     }
-    drop(owner);
     scope(reader, original, job)?;
     let key = QueueSourceKey::Field {
-        collection: declaration.collection,
+        collection,
         key: &row.key,
-        field: declaration.field,
+        field,
     };
     let _field_key_memory = job.owned_buffer(key.encoded_len()? as u64)?;
     budget.grant(
@@ -573,3 +591,10 @@ async fn correspondence<R: QueueSourceStreamingReader>(
 
 #[cfg(test)]
 mod tests;
+
+mod record;
+mod universe;
+
+mod presence;
+
+mod boolean;
