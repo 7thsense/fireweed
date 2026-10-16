@@ -4,6 +4,10 @@
 use fireweed_core::queue_contract::{FieldType, FieldValue, QueueError, QueueResult};
 
 pub(crate) fn escaped(out: &mut Vec<u8>, bytes: &[u8]) {
+    escaped_prefix(out, bytes);
+    out.extend_from_slice(&[0, 0]);
+}
+pub(crate) fn escaped_prefix(out: &mut Vec<u8>, bytes: &[u8]) {
     for byte in bytes {
         if *byte == 0 {
             out.extend_from_slice(&[0, 255]);
@@ -11,7 +15,6 @@ pub(crate) fn escaped(out: &mut Vec<u8>, bytes: &[u8]) {
             out.push(*byte);
         }
     }
-    out.extend_from_slice(&[0, 0]);
 }
 /// Inclusive lower prefix for exactly one present scalar type. The next tag is
 /// its exclusive upper prefix, allowing mixed typed property-bag range probes.

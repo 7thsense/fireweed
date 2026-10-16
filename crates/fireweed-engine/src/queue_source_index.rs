@@ -78,3 +78,6 @@ pub use group::{
     QueueSourceOrdinaryBinding, admit_administrative_group, load_administrative_ordinary_authority,
     load_batch_preimage, load_group_preimage, open_administrative_source,
 };
+
+mod selection;
+pub use selection::{QueueSourceScalarRange, QueueSourceScalarRanges, plan_source_scalar_ranges};

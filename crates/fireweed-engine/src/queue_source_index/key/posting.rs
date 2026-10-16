@@ -101,6 +101,31 @@ impl<'a> QueueSourcePostingFamily<'a> {
     pub fn prefix(self) -> QueueResult<Vec<u8>> {
         self.encode(None)
     }
+    /// Partial outer literal for one present scalar type, not a complete value.
+    /// Its successor excludes the whole type. Admit both bounds before allocation.
+    pub fn scalar_type_prefix_len(self, kind: FieldType) -> QueueResult<usize> {
+        let mut sink = Sink { out: None, len: 0 };
+        self.write_type(&mut sink, kind)?;
+        Ok(sink.len)
+    }
+    pub fn scalar_type_prefix(self, kind: FieldType) -> QueueResult<Vec<u8>> {
+        let mut out = Vec::with_capacity(self.scalar_type_prefix_len(kind)?);
+        self.write_type(
+            &mut Sink {
+                out: Some(&mut out),
+                len: 0,
+            },
+            kind,
+        )?;
+        Ok(out)
+    }
+    fn write_type(self, sink: &mut Sink<'_>, kind: FieldType) -> QueueResult<()> {
+        if !matches!(self, Self::Scalar { .. }) {
+            return Err(unknown("scalar type bound requested for named index"));
+        }
+        self.write(sink, None)?;
+        sink.literal_prefix(&crate::queue_index::scalar_type_prefix(kind))
+    }
     /// Prefix of the entire equal-value tie group, without a literal record key.
     /// Its successor excludes every key at this value. Do not append a synthetic
     /// record key or use unescaped `ordered_key` bytes as persisted bounds.

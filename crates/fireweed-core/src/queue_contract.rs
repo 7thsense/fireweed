@@ -616,6 +616,10 @@ impl CollectionDefinition {
                 .iter()
                 .any(|prefix| key.starts_with(prefix))
     }
+    /// Validate a storage-side scalar probe using the same rules as Filter.
+    pub fn validate_predicate(&self, key: &str, predicate: &Predicate) -> QueueResult<()> {
+        validate_field_predicate(self, key, predicate)
+    }
     pub fn validate_value(&self, key: &str, value: &FieldValue) -> QueueResult<()> {
         name(key)?;
         if let Some(expected) = self.fields.get(key) {
@@ -685,7 +689,7 @@ impl Filter {
             }
         }
         for (key, predicate) in &self.fields {
-            validate_field_predicate(definition, key, predicate)?;
+            definition.validate_predicate(key, predicate)?;
         }
         Ok(())
     }

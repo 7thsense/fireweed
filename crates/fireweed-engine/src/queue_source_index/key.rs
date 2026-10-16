@@ -72,14 +72,17 @@ impl Sink<'_> {
         Ok(())
     }
     fn literal(&mut self, bytes: &[u8]) -> QueueResult<()> {
+        self.literal_prefix(bytes)?;
+        self.raw(&[0, 0])
+    }
+    fn literal_prefix(&mut self, bytes: &[u8]) -> QueueResult<()> {
         let len = bytes
             .len()
             .checked_add(bytes.iter().filter(|byte| **byte == 0).count())
-            .and_then(|n| n.checked_add(2))
             .ok_or(QueueError::TooLarge)?;
         self.len = self.len.checked_add(len).ok_or(QueueError::TooLarge)?;
         if let Some(out) = &mut self.out {
-            queue_index::escaped(out, bytes);
+            queue_index::escaped_prefix(out, bytes);
         }
         Ok(())
     }
@@ -246,13 +249,7 @@ pub fn record_field_name_prefix(
     sink.raw(&[VERSION, 3])?;
     sink.collection(collection)?;
     sink.literal(key.as_bytes())?;
-    for byte in field_prefix.bytes() {
-        if byte == 0 {
-            sink.raw(&[0, 255])?;
-        } else {
-            sink.raw(&[byte])?;
-        }
-    }
+    sink.literal_prefix(field_prefix.as_bytes())?;
     Ok(out)
 }
 /// Complete live-key namespace, including State collection identity.
