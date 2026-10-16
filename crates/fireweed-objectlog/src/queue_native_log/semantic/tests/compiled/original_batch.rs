@@ -134,6 +134,106 @@ async fn contract(log: QueueNativeLog) {
     };
     let fp = groups[0].fingerprint(&queue).unwrap();
     let baseline = admission.usage().unwrap();
+    // Observer notifications are per declaration (including aliases), ordered,
+    // and classify fingerprint conflicts without granting payload authority.
+    let notification_charge = job.owned_buffer(8192).unwrap();
+    let mut notifications = Vec::with_capacity(4);
+    let declarations = [
+        QueueNativeOriginalRequest::Lookup {
+            domain: 2,
+            request_id: "b",
+        },
+        QueueNativeOriginalRequest::Replay {
+            domain: 2,
+            request_id: "b",
+            fingerprint_format: 3,
+            fingerprint: &[0; 32],
+        },
+        QueueNativeOriginalRequest::Lookup {
+            domain: 2,
+            request_id: "absent",
+        },
+        QueueNativeOriginalRequest::Lookup {
+            domain: 2,
+            request_id: "b",
+        },
+    ];
+    let notification_count = AtomicUsize::new(0);
+    let before = ledger.remaining_work();
+    let converted = recovered
+        .convert_original_batch_observing(
+            &log,
+            &declarations,
+            recovery_limits(),
+            &job,
+            |identity| {
+                assert!(std::ptr::eq(identity.recovered(), &recovered));
+                notifications.push((
+                    identity.domain(),
+                    identity.request_id().to_owned(),
+                    identity.status(),
+                    identity.observation(),
+                ));
+                notification_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |view| {
+                assert_eq!(
+                    notification_count.load(Ordering::SeqCst),
+                    4,
+                    "all fixed facts precede conversion"
+                );
+                Ok(view.status())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        notifications
+            .iter()
+            .map(|n| (n.0, n.1.as_str(), n.2))
+            .collect::<Vec<_>>(),
+        [
+            (2, "b", QueueNativeOriginalStatus::Present),
+            (2, "b", QueueNativeOriginalStatus::Conflict),
+            (2, "absent", QueueNativeOriginalStatus::Absent),
+            (2, "b", QueueNativeOriginalStatus::Present),
+        ]
+    );
+    assert_eq!(notifications[0].3, notifications[1].3);
+    assert_eq!(notifications[0].3, notifications[3].3);
+    assert!(notifications[0].3.is_some());
+    assert!(notifications[2].3.is_none());
+    assert_eq!(
+        before.record_attempts - ledger.remaining_work().record_attempts,
+        1
+    );
+    drop(converted);
+    let before = ledger.remaining_work();
+    let sentinel = recovered
+        .convert_original_batch_observing(
+            &log,
+            &declarations,
+            recovery_limits(),
+            &job,
+            |_| Err(QueueError::RequestConflict),
+            |_| -> QueueResult<()> { panic!("observer sentinel must stop before conversion") },
+        )
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(sentinel, QueueError::RequestConflict);
+    assert_eq!(
+        before.record_attempts,
+        ledger.remaining_work().record_attempts
+    );
+    assert_eq!(
+        before.semantic.pages - ledger.remaining_work().semantic.pages,
+        recovery_limits().read.page.work.pages
+    );
+    drop(notifications);
+    drop(notification_charge);
+    assert_eq!(admission.usage().unwrap(), baseline);
     let work_before = ledger.remaining_work();
     let batch = recovered
         .resolve_original_batch(
@@ -347,6 +447,148 @@ async fn contract(log: QueueNativeLog) {
     }
     let (values, container_charge) = converted.into_parts();
     drop(starver);
+    // Observation state is independently funded and survives resolver failure.
+    let observation_charge = job.owned_buffer(4096).unwrap();
+    let observer_baseline = admission.usage().unwrap();
+    let mut observed = Vec::with_capacity(2);
+    let before = ledger.remaining_work();
+    let error = recovered
+        .convert_original_batch_observing(
+            &log,
+            &requests,
+            recovery_limits(),
+            &job,
+            |identity| {
+                assert!(std::ptr::eq(identity.recovered(), &recovered));
+                observed.push((
+                    identity.domain(),
+                    identity.request_id().to_owned(),
+                    identity.observation(),
+                ));
+                Err(unknown("stop at first observed original"))
+            },
+            |_| -> QueueResult<usize> { panic!("observer error must precede C/conversion") },
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(error,QueueError::OutcomeUnknown(m) if m.contains("stop at first")));
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].1, "d");
+    assert!(observed[0].2.is_some());
+    assert_eq!(
+        before.record_attempts,
+        ledger.remaining_work().record_attempts
+    );
+    assert_eq!(
+        before.semantic.pages - ledger.remaining_work().semantic.pages,
+        recovery_limits().read.page.work.pages
+    );
+    assert_eq!(admission.usage().unwrap(), observer_baseline);
+    observed.clear();
+    let mut tiny = recovery_limits();
+    tiny.record.frame_bytes = 1;
+    let before = ledger.remaining_work();
+    assert!(
+        recovered
+            .convert_original_batch_observing(
+                &log,
+                &requests,
+                tiny,
+                &job,
+                |identity| {
+                    observed.push((
+                        identity.domain(),
+                        identity.request_id().to_owned(),
+                        identity.observation(),
+                    ));
+                    Ok(())
+                },
+                |_| -> QueueResult<usize> { panic!("bounded C refusal must precede conversion") },
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0].1, "d");
+    assert_eq!(observed[1].1, groups[0].request_id);
+    assert!(observed.iter().all(|o| o.2.is_some()));
+    assert_eq!(
+        before.record_attempts - ledger.remaining_work().record_attempts,
+        1
+    );
+    assert_eq!(admission.usage().unwrap(), observer_baseline);
+    observed.clear();
+    let before = ledger.remaining_work();
+    let mut converted_callbacks = 0;
+    let error = recovered
+        .convert_original_batch_observing(
+            &log,
+            &requests,
+            recovery_limits(),
+            &job,
+            |identity| {
+                observed.push((
+                    identity.domain(),
+                    identity.request_id().to_owned(),
+                    identity.observation(),
+                ));
+                Ok(())
+            },
+            |_| -> QueueResult<usize> {
+                converted_callbacks += 1;
+                Err(unknown("late observed conversion failure"))
+            },
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(error,QueueError::OutcomeUnknown(m) if m.contains("late observed conversion failure"))
+    );
+    assert_eq!(observed.len(), 2);
+    assert_eq!(converted_callbacks, 1);
+    assert_eq!(
+        before.record_attempts - ledger.remaining_work().record_attempts,
+        1
+    );
+    assert_eq!(admission.usage().unwrap(), observer_baseline);
+    observed.clear();
+    let before = ledger.remaining_work();
+    let error = recovered
+        .convert_original_batch_observing(
+            &log,
+            &requests,
+            recovery_limits(),
+            &job,
+            |identity| {
+                observed.push((
+                    identity.domain(),
+                    identity.request_id().to_owned(),
+                    identity.observation(),
+                ));
+                ledger.grant(ledger.remaining_work().semantic)?;
+                Ok(())
+            },
+            |_| -> QueueResult<usize> { panic!("second F refusal must precede C/conversion") },
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(error,QueueError::OutcomeUnknown(m) if m.contains("request source work admission exhausted"))
+    );
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].1, "d");
+    assert!(observed[0].2.is_some());
+    assert_eq!(
+        before.record_attempts,
+        ledger.remaining_work().record_attempts
+    );
+    assert_eq!(ledger.remaining_work().semantic.pages, 0);
+    assert_eq!(admission.usage().unwrap(), observer_baseline);
+    drop(observed);
+    drop(observation_charge);
     drop((
         recovered,
         ledger,

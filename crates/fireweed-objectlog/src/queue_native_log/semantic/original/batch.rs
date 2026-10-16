@@ -135,12 +135,16 @@ pub(super) fn request_parts(
     }
     Ok((domain, id, expected))
 }
-async fn classify<'a>(
+async fn classify<'a, O>(
     reader: &'a QueueNativeSourceReader<'_>,
     requests: &[QueueNativeOriginalRequest<'_>],
     job: &Arc<QueueReservation>,
     conversion_containers: u64,
-) -> QueueResult<Classified<'a>> {
+    mut observe: O,
+) -> QueueResult<Classified<'a>>
+where
+    O: for<'v> FnMut(&'v Entry) -> QueueResult<()> + Send,
+{
     let mut bytes = (requests.len() as u64)
         .checked_mul(2048)
         .and_then(|n| n.checked_add(8192))
@@ -179,12 +183,16 @@ async fn classify<'a>(
                 }
             }
         };
-        entries.push(Entry {
+        let entry = Entry {
             request_id: member.request_id().to_owned(),
             domain: member.domain(),
             observation: member.observation(),
             state,
-        });
+        };
+        // Report validated fixed metadata before the next F read. This cannot
+        // expose an outcome or claim membership in a physical C receipt.
+        observe(&entry)?;
+        entries.push(entry);
         evidence.push(member);
     }
     Ok(Classified {
@@ -218,7 +226,7 @@ impl QueueNativeRecovered {
         )?;
         // Keep the struct intact across fallible awaits: its guard is last,
         // so every charged allocation retires before admission is released.
-        let mut classified = classify(&reader, requests, job, 0).await?;
+        let mut classified = classify(&reader, requests, job, 0, |_| Ok(())).await?;
         let mut records = Vec::with_capacity(classified.groups.len());
         for (offset, positions) in &classified.groups {
             let record = self
@@ -350,9 +358,35 @@ impl QueueNativeRecovered {
         requests: &[QueueNativeOriginalRequest<'_>],
         limits: QueueNativeRecoveryLimits,
         job: &Arc<QueueReservation>,
+        convert: F,
+    ) -> QueueResult<QueueNativeConvertedOriginals<'a, T>>
+    where
+        F: for<'v> FnMut(QueueNativeOriginalView<'v>) -> QueueResult<T> + Send,
+    {
+        self.convert_original_batch_observing(log, requests, limits, job, |_| Ok(()), convert)
+            .await
+    }
+
+    /// Preserve fixed-fact continuity even if a later F/C read or conversion
+    /// fails. The synchronous observer runs once per declaration in caller order
+    /// after its fixed fact and fingerprint status validate, before the next F.
+    /// Identity borrows cannot escape. Present here means fixed F presence ONLY;
+    /// no outcome, freshness, publication or ACK authority is exposed.
+    /// Observers may update preadmitted continuity state; their errors propagate
+    /// directly and callers must never retry away a continuity contradiction.
+    /// All declarations validate before I/O, and ALL F reads finish before any
+    /// C read or conversion. Failure does not roll back earlier observations.
+    pub async fn convert_original_batch_observing<'a, T: Send, O, F>(
+        &'a self,
+        log: &QueueNativeLog,
+        requests: &[QueueNativeOriginalRequest<'_>],
+        limits: QueueNativeRecoveryLimits,
+        job: &Arc<QueueReservation>,
+        mut observe: O,
         mut convert: F,
     ) -> QueueResult<QueueNativeConvertedOriginals<'a, T>>
     where
+        O: for<'v> FnMut(QueueNativeOriginalIdentity<'v>) -> QueueResult<()> + Send,
         F: for<'v> FnMut(QueueNativeOriginalView<'v>) -> QueueResult<T> + Send,
     {
         self.as_source().semantic_scope(log, job)?;
@@ -372,7 +406,13 @@ impl QueueNativeRecovered {
         )?;
         // Keep the struct intact across fallible awaits: its guard is last,
         // so every charged allocation retires before admission is released.
-        let mut classified = classify(&reader, requests, job, containers).await?;
+        let mut classified = classify(&reader, requests, job, containers, |entry| {
+            observe(QueueNativeOriginalIdentity {
+                entry,
+                recovered: self,
+            })
+        })
+        .await?;
         let mut values: Vec<Option<T>> = (0..requests.len()).map(|_| None).collect();
         for (position, entry) in classified.entries.iter().enumerate() {
             if !matches!(entry.state, State::Present { .. }) {

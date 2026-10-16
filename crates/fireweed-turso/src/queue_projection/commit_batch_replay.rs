@@ -2,11 +2,7 @@
 //! native snapshot. Fresh execution begins only after covered orchestration.
 use super::*;
 use fireweed_engine::{
-    queue_memory::incoming_headers,
-    queue_publication::{
-        CommitReceiptProjection, ReceiptOutcomeRef, receipt_outcome_heap_bound,
-        validate_original_commit_receipt, view_receipt_outcome,
-    },
+    queue_memory::incoming_headers, queue_publication::decode_original_commit_outcome,
 };
 
 pub struct CommitBatchReplayInput {
@@ -183,33 +179,9 @@ pub(super) async fn classify_originals(
             }),
             Err(error) => return Err(error),
             Ok(Some((format, Some(raw)))) => {
-                let outcome = view_receipt_outcome(2, format, &raw).map_err(publication_error)?;
-                let ReceiptOutcomeRef::Commit(commit) = outcome else {
-                    return Err(unknown("batch receipt has wrong domain"));
-                };
-                charges.push(
-                    job.owned_buffer(
-                        receipt_outcome_heap_bound(outcome, raw.len() as u64)
-                            .map_err(publication_error)?,
-                    )?,
-                );
-                let projection = CommitReceiptProjection {
-                    request_id: &group.request_id,
-                    outcome: commit,
-                };
-                let bytes = encoded_len(&projection)?;
-                charges.push(
-                    job.owned_buffer(
-                        bytes
-                            .checked_mul(4)
-                            .and_then(|n| n.checked_add(4096))
-                            .ok_or(QueueError::TooLarge)?,
-                    )?,
-                );
-                let encoded = encode(&projection)?;
-                let receipt: CommitReceipt = decode(&encoded)?;
-                validate_original_commit_receipt(&input.request.queue, group, &receipt, job)
-                    .map_err(publication_error)?;
+                let (receipt, owner) =
+                    decode_original_commit_outcome(&input.request.queue, group, format, &raw, job)?;
+                charges.push(owner);
                 Some(receipt)
             }
         };

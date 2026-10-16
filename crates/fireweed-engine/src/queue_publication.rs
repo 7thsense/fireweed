@@ -25,6 +25,8 @@ mod measurement;
 pub use administrative_result::*;
 mod work_fragment;
 pub use work_fragment::*;
+mod owned_receipt;
+pub use owned_receipt::decode_original_commit_outcome;
 mod receipt_projection;
 pub use receipt_projection::{
     CommitReceiptProjection, FieldsFingerprint, ReceiptLookupProjection,

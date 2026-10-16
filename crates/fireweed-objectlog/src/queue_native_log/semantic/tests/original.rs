@@ -1178,3 +1178,176 @@ async fn original_adapter_rejects_authenticated_valid_subspan_after_hydration_th
     drop((log, job));
     assert_eq!(admission.usage().unwrap(), (0, 0));
 }
+
+#[tokio::test]
+async fn cancelled_observed_original_batch_keeps_first_fact_while_next_f_read_retires_real_s3() {
+    use fireweed_engine::queue_source_index::QueueSourceOriginalObservation;
+    use std::time::Duration;
+    let env = crate::shared_s3_test_env();
+    for disabled in [false, true] {
+        let proxy = Arc::new(super::s3_cancellation::Proxy::new(&env.endpoint));
+        let prefix = format!(
+            "observed-original-cancel/{}/{disabled}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut opts = options(1 << 20);
+        opts.operations = 1;
+        let log = Arc::new(
+            QueueNativeLog::s3(
+                QueueNativeS3Connection {
+                    endpoint: proxy.endpoint(),
+                    region: &env.region,
+                    bucket: &env.bucket,
+                    access_key: &env.access_key,
+                    secret_key: &env.secret_key,
+                },
+                prefix.clone(),
+                opts,
+                QueueNativeS3TransportOptions {
+                    disable_payload_signing: disabled,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let (recovered, fp) = seeded(&log, &job, false).await;
+        let recovered = Arc::new(recovered);
+        // Data precedes its guard; this operation-owned continuity state survives
+        // cancellation of the resolver future and never authorizes an outcome.
+        let observation_charge = job.owned_buffer(4096).unwrap();
+        let observations = Arc::new(std::sync::Mutex::new((
+            Vec::<(u8, String, Option<QueueSourceOriginalObservation>)>::with_capacity(2),
+            observation_charge,
+        )));
+        let baseline = admission.usage().unwrap();
+        let before = recovered.budget().remaining_work();
+        let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+        let caller = {
+            let (log, recovered, job, proxy, observations) = (
+                log.clone(),
+                recovered.clone(),
+                job.clone(),
+                proxy.clone(),
+                observations.clone(),
+            );
+            tokio::spawn(async move {
+                let requests = [
+                    QueueNativeOriginalRequest::Replay {
+                        domain: 2,
+                        request_id: ID,
+                        fingerprint_format: 3,
+                        fingerprint: &fp,
+                    },
+                    QueueNativeOriginalRequest::Lookup {
+                        domain: 2,
+                        request_id: ID,
+                    },
+                ];
+                let mut armed = Some(armed_tx);
+                recovered
+                    .convert_original_batch_observing(
+                        &log,
+                        &requests,
+                        limits(),
+                        &job,
+                        |identity| {
+                            assert!(std::ptr::eq(identity.recovered(), recovered.as_ref()));
+                            assert_eq!(identity.status(), QueueNativeOriginalStatus::Present);
+                            observations.lock().unwrap().0.push((
+                                identity.domain(),
+                                identity.request_id().to_owned(),
+                                identity.observation(),
+                            ));
+                            if let Some(sender) = armed.take() {
+                                sender.send(proxy.arm_matching(Some(b"/pages/"))).unwrap();
+                            }
+                            Ok(())
+                        },
+                        |_| -> QueueResult<usize> {
+                            panic!("second F read is gated before any C/conversion")
+                        },
+                    )
+                    .await
+                    .err()
+            })
+        };
+        let (started, release) = tokio::time::timeout(Duration::from_secs(10), armed_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let request = tokio::time::timeout(Duration::from_secs(10), started)
+            .await
+            .unwrap()
+            .unwrap();
+        let line = std::str::from_utf8(&request).unwrap();
+        assert!(line.contains("/pages/"));
+        assert_eq!(observations.lock().unwrap().0.len(), 1);
+        assert!(observations.lock().unwrap().0[0].2.is_some());
+        caller.abort();
+        assert!(matches!(caller.await,Err(e) if e.is_cancelled()));
+        assert_eq!(
+            observations.lock().unwrap().0.len(),
+            1,
+            "validated prefix knowledge survives cancelled next F"
+        );
+        assert!(
+            admission.usage().unwrap().1 > baseline.1,
+            "pending SDK F read retains physical owners"
+        );
+        let spent = recovered.budget().remaining_work();
+        assert_eq!(
+            before.record_attempts, spent.record_attempts,
+            "F barrier prevents any C dispatch"
+        );
+        assert_eq!(
+            before.semantic.pages - spent.semantic.pages,
+            2 * limits().read.page.work.pages
+        );
+        assert_eq!(
+            before.semantic.hydrated_bytes - spent.semantic.hydrated_bytes,
+            2 * limits().read.page.work.hydrated_bytes
+        );
+        release.send(()).unwrap();
+        log.capture(&recovered.as_source().namespace).await.unwrap();
+        assert_eq!(admission.usage().unwrap(), baseline);
+        same_work(spent, recovered.budget().remaining_work());
+        let stamp = observations.lock().unwrap().0[0].2;
+        let requests = [QueueNativeOriginalRequest::Lookup {
+            domain: 2,
+            request_id: ID,
+        }; 2];
+        let retried = recovered
+            .convert_original_batch_observing(
+                &log,
+                &requests,
+                limits(),
+                &job,
+                |identity| {
+                    assert_eq!(identity.observation(), stamp);
+                    Ok(())
+                },
+                |view| Ok(view.outcome_bytes()?.unwrap().len()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retried.values().len(), 2);
+        assert_eq!(retried.values()[0], retried.values()[1]);
+        drop(retried);
+        assert_eq!(
+            spent.record_attempts - recovered.budget().remaining_work().record_attempts,
+            1
+        );
+        assert_eq!(admission.usage().unwrap(), baseline);
+        drop((observations, recovered));
+        log.shutdown().await.unwrap();
+        drop((log, job));
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        drop(proxy);
+        cleanup(env, &prefix).await;
+    }
+}
