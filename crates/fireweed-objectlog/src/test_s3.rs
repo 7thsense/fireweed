@@ -10,14 +10,13 @@
 use crate::S3CreateOnlyPut;
 use fireweed_engine::EngineResult;
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const DEFAULT_PORT: u16 = 19_100;
 const ACCESS_KEY: &str = "fireweed";
 const SECRET_KEY: &str = "fireweed-test-rustfs";
 const BUCKET: &str = "fireweed-test";
@@ -73,27 +72,13 @@ fn init_s3_test_env() -> S3TestEnv {
                     env.endpoint
                 );
             }
-            if !is_rustfs(&env.endpoint) {
-                panic!(
-                    "FIREWEED_S3_TEST_ENDPOINT={} is a foreign listener, not RustFS. \
-                     Refusing a generic S3 dispatch failure.",
-                    env.endpoint
-                );
-            }
-            wait_ready_or_panic(&env.endpoint);
-            ensure_bucket_or_explain(&env);
+            // Explicit endpoint configuration opts into the actual S3 service.
+            // Do not require RustFS's private health endpoint or create buckets;
+            // the product's native conditional-write probe validates the
+            // configured bucket and required write semantics.
             env
         }
-        None => {
-            let local = format!("http://127.0.0.1:{DEFAULT_PORT}");
-            if endpoint_live(&local) && !is_rustfs(&local) {
-                panic!(
-                    "FIREWEED_S3_TEST_ENDPOINT is unset and port {DEFAULT_PORT} is a foreign listener, \
-                     not the expected RustFS. Refusing a generic S3 dispatch failure."
-                );
-            }
-            spawn_local_rustfs()
-        }
+        None => spawn_local_rustfs(),
     }
 }
 
@@ -199,7 +184,12 @@ fn endpoint_live(endpoint: &str) -> bool {
 }
 
 fn spawn_local_rustfs() -> S3TestEnv {
-    let endpoint = format!("http://127.0.0.1:{DEFAULT_PORT}");
+    let port = TcpListener::bind(("127.0.0.1", 0))
+        .expect("reserve an available local RustFS port")
+        .local_addr()
+        .expect("read the reserved local RustFS port")
+        .port();
+    let endpoint = format!("http://127.0.0.1:{port}");
     let env = S3TestEnv {
         endpoint: endpoint.clone(),
         bucket: BUCKET.to_owned(),
@@ -230,7 +220,7 @@ fn spawn_local_rustfs() -> S3TestEnv {
         .arg("server")
         .arg(&data)
         .arg("--address")
-        .arg(format!("127.0.0.1:{DEFAULT_PORT}"))
+        .arg(format!("127.0.0.1:{port}"))
         .env("RUSTFS_ACCESS_KEY", ACCESS_KEY)
         .env("RUSTFS_SECRET_KEY", SECRET_KEY)
         // The web console otherwise listens on every interface.
@@ -252,7 +242,7 @@ fn spawn_local_rustfs() -> S3TestEnv {
         if endpoint_live(&endpoint) {
             if !is_rustfs(&endpoint) {
                 panic!(
-                    "FIREWEED_S3_TEST_ENDPOINT is unset and port {DEFAULT_PORT} did not become RustFS. \
+                    "FIREWEED_S3_TEST_ENDPOINT is unset and port {port} did not become RustFS. \
                      Refusing a generic S3 dispatch failure."
                 );
             }
