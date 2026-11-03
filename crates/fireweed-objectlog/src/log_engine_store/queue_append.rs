@@ -666,6 +666,57 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn packed_append_epoch_lookup_obeys_pre_position_deadline() {
+        with_wall_watchdog(async {
+            let (root, blob, store, _release_on_failure) = paused_local_store().await;
+            let shard = fireweed_engine::QueueKey::new(
+                fireweed_core::TenantId::new("deadline").unwrap(),
+                fireweed_core::QueueId::new("packed-epoch").unwrap(),
+            );
+            let epoch = store.acquire_epoch(shard.clone()).await.unwrap();
+            store.epochs.lock().unwrap().clear();
+            store.pre_position_timeout_ms.store(100, Ordering::SeqCst);
+            blob.phase.store(1, Ordering::SeqCst);
+            let appender = store.clone();
+            let append_shard = shard.clone();
+            let append = tokio::spawn(async move {
+                appender
+                    .packed_append_force_seal(
+                        append_shard,
+                        vec![super::super::tests::pause_env("epoch-deadline")],
+                        epoch,
+                        None,
+                    )
+                    .await
+            });
+            blob.entered.notified().await;
+            tokio::time::advance(Duration::from_millis(101)).await;
+            let error = tokio::time::timeout(Duration::from_secs(1), append)
+                .await
+                .expect("epoch lookup must not wait outside the pre-position budget")
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(
+                error,
+                PackedAppendError::BeforePosition(EngineError::Backpressure {
+                    resource: "object-log-append-pre-position",
+                }),
+            );
+            assert!(
+                store
+                    .engine
+                    .plan_fetch(&partition_key(&shard), 0, 1, 65536, 1)
+                    .unwrap()
+                    .entries()
+                    .is_empty()
+            );
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn controlled_deadlines_classify_actual_timeout_before_owned_drain() {
         // Phase 4 drains a late head rejection after the caller deadline.
         for phase in [1, 2, 3, 4] {

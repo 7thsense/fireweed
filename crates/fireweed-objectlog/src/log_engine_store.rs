@@ -1462,7 +1462,10 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             .await
     }
 
-    /// Force-seal only this shard/epoch/lane group, charging exact envelope bytes.
+    /// Append this caller's command vector as one apply batch.
+    ///
+    /// The engine controls physical sealing through its flush configuration.
+    /// This compatibility entry point does not force a separate object PUT.
     pub async fn packed_append_force_seal(
         &self,
         shard: QueueKey,
@@ -1474,7 +1477,10 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             .await
     }
 
-    /// Packed append that carries a reservation id so co-sealed followers transfer to the leader.
+    /// Append one caller-owned command vector. Physical engine seals may contain
+    /// several callers, but each caller retains its own apply batch and debt.
+    /// Reservation and force-seal arguments are retained for compatibility with
+    /// the retired application-level packer; no follower reservations transfer.
     pub async fn packed_append_owned(
         &self,
         shard: QueueKey,
@@ -1490,13 +1496,9 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 apply_published: ApplyPublish::already_done(),
             });
         }
-        let epoch = self
-            .load_epoch(&shard)
-            .await
-            .map_err(PackedAppendError::BeforePosition)?;
-        if epoch != expected_epoch {
-            return Err(PackedAppendError::BeforePosition(EngineError::EpochFenced));
-        }
+        // produce_immediate validates the epoch under the metadata permit and
+        // the pre-position deadline. An eager load here would duplicate that
+        // I/O outside the budget and could hang before the timed path starts.
         let _ = (reservation_id, force_seal);
         let positions = self
             .produce_immediate(&shard, &commands, expected_epoch)
@@ -3251,7 +3253,7 @@ mod tests {
         }
     }
 
-    fn pause_env(id: &str) -> CommandEnvelope {
+    pub(super) fn pause_env(id: &str) -> CommandEnvelope {
         CommandEnvelope {
             command_id: CommandId::new(id),
             request_id: None,
@@ -3847,6 +3849,7 @@ mod tests {
             .unwrap(),
         );
         let coordinator = test_coordinator().await;
+        coordinator.pause();
         let own = qdef_named("own");
         let other = qdef_named("other");
         let own_shard = QueueKey::new(own.tenant_id.clone(), own.queue_id.clone());
@@ -3860,6 +3863,8 @@ mod tests {
 
         let follower_cmds = vec![pause_env("follower")];
         let driver_cmds = vec![pause_env("driver-a"), pause_env("driver-b")];
+        let expected_debt = super::exact_envelope_bytes(&follower_cmds).unwrap()
+            + super::exact_envelope_bytes(&driver_cmds).unwrap();
         let follower_res = coordinator
             .reserve(own_shard.clone(), &follower_cmds)
             .await
@@ -3930,6 +3935,36 @@ mod tests {
             .apply_batch
             .expect("follower publishes its commands");
         assert_eq!(follower_batch.commands.len(), 1);
+        assert!(driver_batch.transferred_reservation_ids.is_empty());
+        assert!(follower_batch.transferred_reservation_ids.is_empty());
+        assert_eq!(driver_batch.positions, driver_outcome.positions);
+        assert_eq!(follower_batch.positions, follower_outcome.positions);
+        assert!(driver_batch.positions.iter().all(|p| p.queue == own_shard));
+        assert!(
+            follower_batch
+                .positions
+                .iter()
+                .all(|p| p.queue == own_shard)
+        );
+        assert!(
+            driver_batch
+                .positions
+                .iter()
+                .all(|p| !follower_batch.positions.contains(p))
+        );
+        // Publishing one caller must never release another caller's apply wait.
+        driver_outcome.apply_published.notify();
+        driver_outcome.apply_published.wait().await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                follower_outcome.apply_published.wait(),
+            )
+            .await
+            .is_err()
+        );
+        follower_outcome.apply_published.notify();
+        follower_outcome.apply_published.wait().await;
         assert_eq!(other_outcome.positions.len(), 1);
         coordinator
             .enqueue_reserved(driver_res, driver_batch.positions, driver_batch.commands)
@@ -3946,6 +3981,83 @@ mod tests {
         let snap = coordinator.snapshot(&own_shard).await;
         assert_eq!(snap.apply_queue_depth, 2);
         assert_eq!(snap.apply_lag_commands, 3);
+        assert_eq!(snap.apply_debt_bytes, expected_debt);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn before_position_rejection_releases_debt_and_allows_retry() {
+        let log = ObjectLogEngineStore::open_memory(zero_linger())
+            .await
+            .unwrap();
+        let coordinator = test_coordinator().await;
+        coordinator.pause();
+        let definition = qdef_named("pre-position-retry");
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        log.create_or_read_definition(definition).await.unwrap();
+        log.ensure_shard(shard.clone()).await.unwrap();
+        let stale_epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+        let epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+        let commands = vec![pause_env("retry-a"), pause_env("retry-b")];
+        let expected_debt = super::exact_envelope_bytes(&commands).unwrap();
+        let reservation = coordinator.reserve(shard.clone(), &commands).await.unwrap();
+        let error = log
+            .packed_append_force_seal(
+                shard.clone(),
+                commands.clone(),
+                stale_epoch,
+                Some(reservation.id()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            PackedAppendError::BeforePosition(EngineError::EpochFenced)
+        );
+        assert_eq!(
+            AsyncProjectionApplyCoordinator::dispose_packed_append_error(
+                Some(&coordinator),
+                Some(reservation),
+                error,
+            )
+            .await,
+            EngineError::EpochFenced,
+        );
+        let snapshot = coordinator.snapshot(&shard).await;
+        assert_eq!(snapshot.apply_lag_commands, 0);
+        assert_eq!(snapshot.apply_debt_bytes, 0);
+        assert_eq!(snapshot.apply_queue_depth, 0);
+        assert!(snapshot.poison_reason.is_none());
+        assert!(
+            log.read_from(shard.clone(), None, 16)
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+
+        let reservation = coordinator.reserve(shard.clone(), &commands).await.unwrap();
+        let outcome = log
+            .packed_append_force_seal(shard.clone(), commands, epoch, Some(reservation.id()))
+            .await
+            .unwrap();
+        let batch = outcome.apply_batch.unwrap();
+        assert_eq!(batch.positions, outcome.positions);
+        assert_eq!(batch.positions.len(), 2);
+        assert_eq!(batch.positions[1].sequence, batch.positions[0].sequence + 1);
+        assert!(batch.transferred_reservation_ids.is_empty());
+        coordinator
+            .enqueue_reserved(reservation, batch.positions, batch.commands)
+            .await
+            .unwrap();
+        let snapshot = coordinator.snapshot(&shard).await;
+        assert_eq!(snapshot.apply_lag_commands, 2);
+        assert_eq!(snapshot.apply_debt_bytes, expected_debt);
+        assert_eq!(snapshot.apply_queue_depth, 1);
+        assert!(snapshot.poison_reason.is_none());
+        assert_eq!(
+            log.read_from(shard, None, 16).await.unwrap().entries.len(),
+            2
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3983,10 +4095,14 @@ mod tests {
             coordinator.reservation_outstanding(&reservation).await,
             "post-position failure must not cancel the reservation"
         );
-        coordinator
-            .latch_poison(shard.clone(), "high-water put_json failure".into())
-            .await;
+        AsyncProjectionApplyCoordinator::dispose_packed_append_error(
+            Some(&coordinator),
+            Some(reservation),
+            error,
+        )
+        .await;
         assert!(coordinator.snapshot(&shard).await.poison_reason.is_some());
+        assert_eq!(coordinator.snapshot(&shard).await.apply_lag_commands, 1);
         assert!(
             coordinator
                 .reserve(shard.clone(), &[pause_env("next")])
