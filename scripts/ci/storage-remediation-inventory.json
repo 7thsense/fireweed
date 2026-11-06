@@ -2142,9 +2142,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "b57d32773ae4eecd5ea1",
+        "id": "7e9a18fa7bf3254c5d93",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 228,
+        "line": 234,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/tests/claim_pool_cohort_scale.rs",
         "status": "discovery_negative"
@@ -2156,9 +2156,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "8bd48835cefcae842198",
+        "id": "7f5f1c1a3024b13e300b",
         "identity": ".expect(\"FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\");",
-        "line": 278,
+        "line": 284,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/tests/claim_pool_cohort_scale.rs",
         "status": "discovery_negative"
@@ -3108,9 +3108,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "d45a9007fc90e0b81919",
+        "id": "57d25c2e40c0750d8a1e",
         "identity": "let missing = Fixture::new();",
-        "line": 374,
+        "line": 380,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
         "status": "discovery_negative"
@@ -4709,6 +4709,20 @@
         "line": 50,
         "owner": "P10px",
         "path": "scripts/release/verify-release-artifacts.sh",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "loud_skip",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "early_success=false",
+        "id": "7d00b10250f7868b58c6",
+        "identity": "/// comment referencing upstream sqlite3's dbstat.c, no registered vtab).",
+        "line": 164,
+        "owner": "P3-P9/P15",
+        "path": "spikes/claim-scale/src/main.rs",
         "status": "discovery_negative"
       }
     ],
@@ -6601,36 +6615,8 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "69c619e22869cc5db87d",
+        "id": "e09e8010d0d6b0ede2ef",
         "identity": "fn rejects_source_revision_mismatch() {",
-        "line": 668,
-        "owner": "P3-P9/P15",
-        "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
-        "status": "discovery_negative"
-      },
-      {
-        "category": "source_guard",
-        "dependency_chain": [
-          "P3-P9/P15",
-          "P2f"
-        ],
-        "detail": "intentional_source_binding",
-        "id": "66a59618a95007b2fcf5",
-        "identity": "value[\"source_revision\"] = serde_json::json!(\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\");",
-        "line": 671,
-        "owner": "P3-P9/P15",
-        "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
-        "status": "discovery_negative"
-      },
-      {
-        "category": "source_guard",
-        "dependency_chain": [
-          "P3-P9/P15",
-          "P2f"
-        ],
-        "detail": "intentional_source_binding",
-        "id": "d85df0a74b1250a1ca4c",
-        "identity": "assert!(errors.contains(\"requires source_revision\"));",
         "line": 674,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
@@ -6643,9 +6629,37 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "9ad5708635ee06a472db",
+        "id": "a58b62cb6fa531d854a2",
+        "identity": "value[\"source_revision\"] = serde_json::json!(\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\");",
+        "line": 677,
+        "owner": "P3-P9/P15",
+        "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "intentional_source_binding",
+        "id": "63e5df6a0062eb509dc3",
+        "identity": "assert!(errors.contains(\"requires source_revision\"));",
+        "line": 680,
+        "owner": "P3-P9/P15",
+        "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
+        "status": "discovery_negative"
+      },
+      {
+        "category": "source_guard",
+        "dependency_chain": [
+          "P3-P9/P15",
+          "P2f"
+        ],
+        "detail": "intentional_source_binding",
+        "id": "4d25fd0868d1a850630f",
         "identity": "fn rejects_wrong_expected_revision() {",
-        "line": 679,
+        "line": 685,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
         "status": "discovery_negative"
@@ -6657,9 +6671,9 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "236e3ea03063bf5cf7d1",
+        "id": "117d473ce922e46b2990",
         "identity": "source_revision: REVISION.into(),",
-        "line": 915,
+        "line": 921,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
         "status": "discovery_negative"
@@ -6671,9 +6685,9 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "c56ad46e1bb7d16ffcb8",
+        "id": "02a190cf1419d1bdcf11",
         "identity": "assert_eq!(row.source_revision.as_deref(), Some(REVISION));",
-        "line": 926,
+        "line": 932,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
         "status": "discovery_negative"
@@ -6685,9 +6699,9 @@
           "P2f"
         ],
         "detail": "intentional_source_binding",
-        "id": "2e4e2d3a0163f752a1a0",
+        "id": "58635286904b34bd721c",
         "identity": "source_revision: \"fixture\".into(),",
-        "line": 949,
+        "line": 955,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
         "status": "discovery_negative"
@@ -16102,7 +16116,7 @@
     "cargo_status": "listed",
     "errors": [],
     "generated_by": "scripts/ci/fireweed_test_placement.py",
-    "input_sha256": "83ad663659cf87825e5564c1eb161e47f6bdc8d41a7521b5e226060eba07f07d",
+    "input_sha256": "3123c60b0c13f3f816fba8856aa790030b4686d08bbcf459bcfc4b00b4f889b2",
     "private_surface": [
       {
         "declaration_kind": "fn",
@@ -58813,6 +58827,36 @@
         "fireweed-objectlog",
         "--no-default-features",
         "--lib",
+        "log_engine_store::queue_append::tests::packed_append_epoch_lookup_obeys_pre_position_deadline",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "log_engine_store::queue_append::tests::packed_append_epoch_lookup_obeys_pre_position_deadline",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::log_engine_store::queue_append::tests::packed_append_epoch_lookup_obeys_pre_position_deadline",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--no-default-features",
+        "--lib",
         "log_engine_store::queue_append::tests::persistent_memory_alias_authority_is_rejected_before_append",
         "--",
         "--exact"
@@ -59301,6 +59345,36 @@
       "features": [],
       "harness_id": "log_engine_store::tests::api007_transport_isolates_delimiter_addresses_and_replays_oversized_first_batch",
       "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::log_engine_store::tests::api007_transport_isolates_delimiter_addresses_and_replays_oversized_first_batch",
+      "listed_kind": "test",
+      "package": "fireweed-objectlog",
+      "target": "fireweed_objectlog",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-objectlog",
+        "--no-default-features",
+        "--lib",
+        "log_engine_store::tests::before_position_rejection_releases_debt_and_allows_retry",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "log_engine_store::tests::before_position_rejection_releases_debt_and_allows_retry",
+      "id": "Cargo.toml::fireweed-objectlog::fireweed_objectlog::test::log_engine_store::tests::before_position_rejection_releases_debt_and_allows_retry",
       "listed_kind": "test",
       "package": "fireweed-objectlog",
       "target": "fireweed_objectlog",
@@ -118761,14 +118835,14 @@
         "fireweed-bench",
         "--no-default-features",
         "--lib",
-        "performance_matrix_lifecycle::tests::filesystem_turso_recovery_reopens_exact_population",
+        "performance_matrix_lifecycle::tests::maintenance_rejects_retired_memory_before_population",
         "--",
         "--exact"
       ],
       "expected_ran": 1,
       "features": [],
-      "harness_id": "performance_matrix_lifecycle::tests::filesystem_turso_recovery_reopens_exact_population",
-      "id": "crates/fireweed-bench/Cargo.toml::fireweed-bench::fireweed_bench::test::performance_matrix_lifecycle::tests::filesystem_turso_recovery_reopens_exact_population",
+      "harness_id": "performance_matrix_lifecycle::tests::maintenance_rejects_retired_memory_before_population",
+      "id": "crates/fireweed-bench/Cargo.toml::fireweed-bench::fireweed_bench::test::performance_matrix_lifecycle::tests::maintenance_rejects_retired_memory_before_population",
       "listed_kind": "test",
       "package": "fireweed-bench",
       "target": "fireweed_bench",
@@ -118791,14 +118865,14 @@
         "fireweed-bench",
         "--no-default-features",
         "--lib",
-        "performance_matrix_lifecycle::tests::maintenance_rejects_memory_before_population",
+        "performance_matrix_lifecycle::tests::s3_turso_recovery_reopens_exact_population",
         "--",
         "--exact"
       ],
       "expected_ran": 1,
       "features": [],
-      "harness_id": "performance_matrix_lifecycle::tests::maintenance_rejects_memory_before_population",
-      "id": "crates/fireweed-bench/Cargo.toml::fireweed-bench::fireweed_bench::test::performance_matrix_lifecycle::tests::maintenance_rejects_memory_before_population",
+      "harness_id": "performance_matrix_lifecycle::tests::s3_turso_recovery_reopens_exact_population",
+      "id": "crates/fireweed-bench/Cargo.toml::fireweed-bench::fireweed_bench::test::performance_matrix_lifecycle::tests::s3_turso_recovery_reopens_exact_population",
       "listed_kind": "test",
       "package": "fireweed-bench",
       "target": "fireweed_bench",
@@ -118821,14 +118895,14 @@
         "fireweed-bench",
         "--no-default-features",
         "--lib",
-        "performance_matrix_million_cycle::tests::probe_cycle_on_memory_memory",
+        "performance_matrix_million_cycle::tests::probe_cycle_on_s3_turso",
         "--",
         "--exact"
       ],
       "expected_ran": 1,
       "features": [],
-      "harness_id": "performance_matrix_million_cycle::tests::probe_cycle_on_memory_memory",
-      "id": "crates/fireweed-bench/Cargo.toml::fireweed-bench::fireweed_bench::test::performance_matrix_million_cycle::tests::probe_cycle_on_memory_memory",
+      "harness_id": "performance_matrix_million_cycle::tests::probe_cycle_on_s3_turso",
+      "id": "crates/fireweed-bench/Cargo.toml::fireweed-bench::fireweed_bench::test::performance_matrix_million_cycle::tests::probe_cycle_on_s3_turso",
       "listed_kind": "test",
       "package": "fireweed-bench",
       "target": "fireweed_bench",
@@ -119489,7 +119563,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "a903859d61f1d246596f199504454c760df0c4a851aa888729982488d0fab3d6",
+  "source_inventory_sha256": "422b1d4a55f94ff7bc99323294725d4b83dea555339be44158a749d19b678c81",
   "workspaces": [
     {
       "listing_error_sha256": "",
