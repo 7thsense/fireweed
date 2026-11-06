@@ -1214,6 +1214,11 @@ async fn visit_aggregate_fields(
     .await
 }
 
+const SPARSE_FIELDS_SQL: &str = "SELECT i.index_fields,i.entity_document,i.lifecycle_state FROM fireweed_items i \
+        WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.superseded=0 \
+        AND NOT EXISTS (SELECT 1 FROM fireweed_item_index idx INDEXED BY sqlite_autoindex_fireweed_item_index_1 WHERE idx.tenant_id=i.tenant_id \
+            AND idx.queue_id=i.queue_id AND idx.index_name=?3 AND idx.item_id=i.item_id)";
+
 async fn visit_sparse_fields(
     connection: &Connection,
     shard: &QueueKey,
@@ -1233,13 +1238,7 @@ async fn visit_sparse_fields(
     let mut params = queue_params(shard);
     params.push(spec.name.clone().into());
     let mut rows = connection
-        .query(
-            "SELECT i.index_fields,i.entity_document,i.lifecycle_state FROM fireweed_items i \
-        WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.superseded=0 \
-        AND NOT EXISTS (SELECT 1 FROM fireweed_item_index idx WHERE idx.tenant_id=i.tenant_id \
-            AND idx.queue_id=i.queue_id AND idx.index_name=?3 AND idx.item_id=i.item_id)",
-            params,
-        )
+        .query(SPARSE_FIELDS_SQL, params)
         .await
         .map_err(storage)?;
     while let Some(row) = rows.next().await.map_err(storage)? {
