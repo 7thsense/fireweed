@@ -213,7 +213,7 @@ async fn purge_tombstone_survives_log_replay_and_expires_on_its_original_clock()
     let fireweed = fixture.open().await;
     fireweed.create_queue(definition()).await.unwrap();
     let id = complete_one(&fireweed, "done").await;
-    let live = fireweed.push(&queue(), item("live")).await.unwrap();
+    fireweed.push(&queue(), item("live")).await.unwrap();
 
     assert_eq!(fireweed.purge(&queue(), vec![id], false).await.unwrap(), 1);
     assert_eq!(retained_keys(&retained(&fireweed).await), ["live"]);
