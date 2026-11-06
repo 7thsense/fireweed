@@ -4722,6 +4722,19 @@ impl<B: LibBackend> RuntimeCore<B> {
         self.note(queue, r)
     }
 
+    /// Positional point reads; larger public requests are bounded into backend chunks.
+    pub async fn side_records(&self, queue: &QueueKey, keys: &[Vec<u8>]) -> EngineResult<Vec<Option<Bytes>>> {
+        let mut output = Vec::with_capacity(keys.len());
+        for chunk in keys.chunks(fireweed_engine::SIDE_RECORD_BATCH_MAX_KEYS) {
+            let values = self.note(queue, self.backend.side_records(queue, chunk).await)?;
+            if values.len() != chunk.len() {
+                return Err(EngineError::Storage("side-record batch length mismatch".into()));
+            }
+            output.extend(values);
+        }
+        Ok(output)
+    }
+
     /// Paged, key-ascending scan of opaque side records whose key starts with `prefix` (bead
     /// fireweed-e47e9287; see [`SideRecordPage`]). A pure read: no epoch/fence check. `cursor` resumes
     /// from a prior page's `next_cursor` (`None` starts at `prefix` itself). `Unavailable` on a backend

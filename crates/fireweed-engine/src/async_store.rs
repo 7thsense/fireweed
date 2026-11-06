@@ -1454,6 +1454,24 @@ pub trait AsyncProjectionStore: Send + Sync {
         std::future::ready(Err(EngineError::Unavailable))
     }
 
+    fn side_records(
+        &self,
+        shard: QueueKey,
+        keys: Vec<Vec<u8>>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<Option<bytes::Bytes>>>> + Send {
+        async move {
+            if keys.len() > crate::SIDE_RECORD_BATCH_MAX_KEYS {
+                return Err(EngineError::Invalid("side-record batch exceeds key bound"));
+            }
+            let mut output = Vec::with_capacity(keys.len());
+            for chunk in keys.chunks(64) {
+                let results = futures::future::join_all(chunk.iter().map(|key| self.side_record(shard.clone(), key.clone()))).await;
+                for result in results { output.push(result?); }
+            }
+            Ok(output)
+        }
+    }
+
     /// Paged, key-ascending scan of opaque side records whose key starts with `prefix` (bead
     /// fireweed-e47e9287; see [`SideRecordPage`]).
     fn side_records_by_prefix(
@@ -1976,6 +1994,18 @@ where
         self.run_with_store(move |store| store.side_record(&shard, &key))
     }
 
+    fn side_records(
+        &self,
+        shard: QueueKey,
+        keys: Vec<Vec<u8>>,
+    ) -> impl Future<Output = EngineResult<Vec<Option<bytes::Bytes>>>> + Send {
+        let valid = keys.len() <= crate::SIDE_RECORD_BATCH_MAX_KEYS;
+        self.run_with_store(move |store| {
+            if !valid { return Err(EngineError::Invalid("side-record batch exceeds key bound")); }
+            keys.iter().map(|key| store.side_record(&shard, key)).collect()
+        })
+    }
+
     fn side_records_by_prefix(
         &self,
         shard: QueueKey,
@@ -2461,6 +2491,18 @@ where
         key: Vec<u8>,
     ) -> impl Future<Output = EngineResult<Option<bytes::Bytes>>> + Send {
         self.run_sync(move |store: &mut S| store.side_record(&shard, &key))
+    }
+
+    fn side_records(
+        &self,
+        shard: QueueKey,
+        keys: Vec<Vec<u8>>,
+    ) -> impl Future<Output = EngineResult<Vec<Option<bytes::Bytes>>>> + Send {
+        let valid = keys.len() <= crate::SIDE_RECORD_BATCH_MAX_KEYS;
+        self.run_sync(move |store: &mut S| {
+            if !valid { return Err(EngineError::Invalid("side-record batch exceeds key bound")); }
+            keys.iter().map(|key| store.side_record(&shard, key)).collect()
+        })
     }
 
     fn side_records_by_prefix(

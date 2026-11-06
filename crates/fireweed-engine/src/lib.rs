@@ -224,6 +224,7 @@ pub use finalize_validation::{
     validate_rearm,
 };
 pub use port::{
+    SIDE_RECORD_BATCH_MAX_KEYS,
     AddressedMutation, AsOfProjectionStore, Backend, BatchUpdateEntry, BatchUpdateItemRef,
     BatchUpdateOutcome, BatchUpdatePort, BatchUpdateRequest, BatchUpdateResponse, BatchUpdateValue,
     BoundedMutationContext, ChangeRecordSink, ClaimByItemIdsResponse, ClaimByQueryContext,
