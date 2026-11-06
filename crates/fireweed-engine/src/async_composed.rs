@@ -1556,7 +1556,21 @@ async fn planned_push<U: AsyncPushPlanner>(
     mut request: AsyncPushRequest,
 ) -> Result<PreparedPush, PushExecutionError> {
     let queue = request.shard.clone();
-    let original_items = request.items.clone();
+    // Only legacy noncanonical gate bodies need a separate serialization.
+    // The ordinary empty/already-sorted gate path needs no original JSON copy.
+    let legacy_body_hash = if request.request_id.is_some()
+        && request
+            .items
+            .iter()
+            .any(|item| item.gate_keys.windows(2).any(|pair| pair[0] >= pair[1]))
+    {
+        Some(
+            crate::compose::push_body_hash(&request.items)
+                .map_err(PushExecutionError::BeforeCommit)?,
+        )
+    } else {
+        None
+    };
     canonicalize_push_gate_keys(&mut request.items);
     let definition = planner
         .queue_definition(queue.clone())
@@ -1568,10 +1582,14 @@ async fn planned_push<U: AsyncPushPlanner>(
         .request_id
         .as_ref()
         .map(|_| {
-            Ok(PushFingerprint {
-                canonical_sha256: crate::push_specs_fingerprint_sha256(&request.items)?,
-                legacy_body_hash: crate::compose::push_body_hash(&original_items)?,
-            })
+            if let Some(legacy_body_hash) = legacy_body_hash {
+                Ok(PushFingerprint {
+                    canonical_sha256: crate::push_specs_fingerprint_sha256(&request.items)?,
+                    legacy_body_hash,
+                })
+            } else {
+                crate::compose::push_specs_fingerprint(&request.items)
+            }
         })
         .transpose()
         .map_err(PushExecutionError::BeforeCommit)?;

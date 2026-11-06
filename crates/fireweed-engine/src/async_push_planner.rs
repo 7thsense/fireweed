@@ -62,7 +62,7 @@ where
 
     fn plan_push(
         &self,
-        request: AsyncPushRequest,
+        mut request: AsyncPushRequest,
         definition: QueueDefinition,
         fingerprint: Option<PushFingerprint>,
     ) -> OwnedTask<EngineResult<AsyncPushPlan>> {
@@ -87,18 +87,20 @@ where
             }
 
             projection.admit_mutation(request.shard.clone()).await?;
-            let (epoch, items, item_ids) = allocate_push_epoch_blob_and_counters(
+            let owned_items = std::mem::take(&mut request.items);
+            let (epoch, items, item_ids) = allocate_push_epoch_blob_and_counters_owned(
                 log.as_ref(),
                 counters.as_ref(),
                 &definition,
                 &request,
+                owned_items,
                 node_id,
             )
             .await?;
             validate_push_driver_snapshot(
                 projection.as_ref(),
                 request.shard.clone(),
-                items.clone(),
+                &items,
                 request.now,
             )
             .await?;
@@ -166,13 +168,32 @@ pub async fn allocate_push_epoch_blob_and_counters<L: AsyncLogStore>(
     request: &AsyncPushRequest,
     node_id: u8,
 ) -> EngineResult<(u64, Vec<PushItem>, Vec<ItemId>)> {
+    allocate_push_epoch_blob_and_counters_owned(
+        log,
+        counters,
+        definition,
+        request,
+        request.items.clone(),
+        node_id,
+    )
+    .await
+}
+
+async fn allocate_push_epoch_blob_and_counters_owned<L: AsyncLogStore>(
+    log: &L,
+    counters: &QueueCounters,
+    definition: &QueueDefinition,
+    request: &AsyncPushRequest,
+    owned_items: Vec<crate::PushSpec>,
+    node_id: u8,
+) -> EngineResult<(u64, Vec<PushItem>, Vec<ItemId>)> {
     let epoch = crate::resolve_write_epoch_async(request.expected_epoch, || {
         log.current_epoch(request.shard.clone())
     })
     .await?;
-    let base = counters.reserve(&request.shard, epoch, request.items.len() as u32);
+    let base = counters.reserve(&request.shard, epoch, owned_items.len() as u32);
     let (mut items, item_ids) = build_push_items(
-        request.items.clone(),
+        owned_items,
         epoch,
         node_id,
         base,
@@ -186,10 +207,17 @@ pub async fn allocate_push_epoch_blob_and_counters<L: AsyncLogStore>(
 async fn validate_push_driver_snapshot<P: AsyncProjectionStore>(
     projection: &P,
     shard: QueueKey,
-    items: Vec<PushItem>,
+    items: &[PushItem],
     now: UtcTimestamp,
 ) -> EngineResult<()> {
-    projection.validate_push(shard.clone(), items, now).await?;
+    match projection.validate_push_borrowed(&shard, items) {
+        Some(result) => result?,
+        None => {
+            projection
+                .validate_push(shard.clone(), items.to_vec(), now)
+                .await?
+        }
+    }
     if projection.pause_blocks_intake(shard).await? {
         return Err(EngineError::Paused { drain_intake: true });
     }

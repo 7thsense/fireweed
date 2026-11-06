@@ -1361,6 +1361,16 @@ pub trait AsyncProjectionStore: Send + Sync {
 
     /// Validate every projection-owned pre-append push constraint (client keys, cohorts/groups, and
     /// typed-index uniqueness) against one owned candidate batch. Unsupported projections fail closed.
+    /// Optional allocation-free validation for an entirely in-process projection.
+    /// Blocking/offloaded adapters retain the owned asynchronous path.
+    fn validate_push_borrowed(
+        &self,
+        _shard: &QueueKey,
+        _items: &[PushItem],
+    ) -> Option<EngineResult<()>> {
+        None
+    }
+
     fn validate_push(
         &self,
         _shard: QueueKey,
@@ -1864,6 +1874,17 @@ where
 
     fn admit_mutation(&self, shard: QueueKey) -> impl Future<Output = EngineResult<()>> + Send {
         self.run_with_store_mut(move |store| store.admit_mutation(&shard))
+    }
+
+    fn validate_push_borrowed(
+        &self,
+        shard: &QueueKey,
+        items: &[PushItem],
+    ) -> Option<EngineResult<()>> {
+        if self.executor.is_some() {
+            return None;
+        }
+        Some(self.with_store(|store| store.index_validate_push(shard, items)))
     }
 
     fn validate_push(
