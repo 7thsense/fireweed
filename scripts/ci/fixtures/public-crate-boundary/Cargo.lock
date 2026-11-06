@@ -1198,7 +1198,7 @@ checksum = "ef25905e51abafe4dcea6c15fec58c57b601cdbd0ee53d22ea1d3016c587d39b"
 
 [[package]]
 name = "fireweed"
-version = "0.31.32"
+version = "0.31.33"
 dependencies = [
  "bytes",
  "fireweed-core",
@@ -1217,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-core"
-version = "0.31.32"
+version = "0.31.33"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1229,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-engine"
-version = "0.31.32"
+version = "0.31.33"
 dependencies = [
  "async-trait",
  "axon-esf",
@@ -1247,7 +1247,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-memory"
-version = "0.31.32"
+version = "0.31.33"
 dependencies = [
  "bytes",
  "fireweed-core",
@@ -1257,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-objectlog"
-version = "0.31.32"
+version = "0.31.33"
 dependencies = [
  "async-trait",
  "aws-sdk-s3",
@@ -1276,7 +1276,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-postgres"
-version = "0.31.32"
+version = "0.31.33"
 dependencies = [
  "async-trait",
  "axon-esf",
@@ -1298,7 +1298,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-projection"
-version = "0.31.32"
+version = "0.31.33"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-queue-spool"
-version = "0.31.32"
+version = "0.31.33"
 dependencies = [
  "fireweed-core",
  "fireweed-engine",
@@ -1331,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-relational"
-version = "0.31.32"
+version = "0.31.33"
 dependencies = [
  "bytes",
  "fireweed-core",
@@ -1343,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "fireweed-turso"
-version = "0.31.32"
+version = "0.31.33"
 dependencies = [
  "bytes",
  "fireweed-core",

@@ -413,6 +413,9 @@ def verify_private_visibility(root: Path, rows: list[dict[str, object]]) -> None
             "[workspace]\n[dependencies]\n"
             f"fireweed={{path={dependency_path},default-features=false,features={features}}}\n"
         )
+        # Keep negative controls on the measured workspace dependency graph. An
+        # unseeded fixture resolves newer registry versions and Git tags offline.
+        (fixture_root / "Cargo.lock").write_bytes((root / "Cargo.lock").read_bytes())
         chunks = [rows[index : index + 32] for index in range(0, len(rows), 32)]
         for chunk in chunks:
             line_to_row: dict[int, dict[str, object]] = {}
