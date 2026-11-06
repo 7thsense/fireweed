@@ -651,8 +651,8 @@ pub async fn lifecycle(
     })
 }
 
-/// Open the current local durable profile through the public facade.
-/// The caller owns `root` and removes it after dropping the returned handle.
+/// Open the current S3/Turso profile through the public facade.
+/// The caller owns the local projection at `root`; S3 comes from the test fixture.
 pub fn open_log_turso(
     root: &std::path::Path,
     clock: std::sync::Arc<dyn Clock>,
