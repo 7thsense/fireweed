@@ -54,6 +54,8 @@ pub mod queue_recovery_pipeline;
 
 mod facade;
 mod operator;
+#[cfg(all(test, feature = "objectlog", feature = "turso"))]
+mod terminal_purge_tests;
 #[cfg(feature = "turso")]
 pub mod turso_compose;
 
@@ -5933,6 +5935,36 @@ fn open_s3_objectlog_memory_projection(
         Arc::new(backend),
         clock,
     )))
+}
+
+/// Disposable on-disk fixture for development and tests. Production uses S3/Turso.
+#[cfg(all(feature = "objectlog", feature = "turso"))]
+pub fn open_ephemeral_disk(clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| EngineError::Storage(error.to_string()))?
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "fireweed-disk-{}-{nonce}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).map_err(|error| EngineError::Storage(error.to_string()))?;
+    fireweed_objectlog::block_on_objectlog(async move {
+        let log =
+            fireweed_objectlog::open_object_log_engine_local(&root, "fixture", 262_144, 0).await?;
+        let backend = turso_compose::assemble_objectlog_turso_async(
+            log,
+            root.join("projection.turso"),
+            Some(AsyncProjectionSpec::default()),
+        )
+        .await?;
+        Ok(Fireweed::from_runtime(RuntimeCore::new(
+            Arc::new(backend),
+            clock,
+        )))
+    })
 }
 
 /// Construct a process-local reference fixture for tests and development.
