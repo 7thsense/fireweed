@@ -295,8 +295,14 @@ fn TestE3ReleaseGatesPassFmtClippyAndOperatorChecks() {
         "go test ./... is operator-required non-applicability because the repo has no Go module"
     );
     assert!(
-        !root.join(".lefthook.yml").exists() && !root.join(".pre-commit-config.yaml").exists(),
+        !root.join(".lefthook.yml").exists(),
         "lefthook run pre-commit is operator-required non-applicability because the repo has no lefthook config"
+    );
+
+    let pre_commit = fs::read_to_string(root.join(".pre-commit-config.yaml")).unwrap();
+    assert!(
+        pre_commit.contains("entry: python3 scripts/ci/check_queue_boundaries.py --controls"),
+        "the configured pre-commit gate must retain queue boundary controls"
     );
 
     let release_note =
