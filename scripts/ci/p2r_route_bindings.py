@@ -365,7 +365,7 @@ def build_overlay_assignments(
             find_route(routes_idx, "rejects_production_one_object_per_command")
         ],
         "AC-TURSO-1": [find_route(routes_idx, "turso_projection_is_accepted")],
-        "AC-TURSO-2": [find_route(routes_idx, "all_four_log_specs_accept_turso")],
+        "AC-TURSO-2": [find_route(routes_idx, "s3_turso_is_the_public_env_cell")],
         "AC-TURSO-3": [find_route(routes_idx, "class_b_memory_turso")],
         "AC-TURSO-4": [find_route(routes_idx, "turso_projection_is_the_public_env_default")],
         "AC-TURSO-5-ENABLED": [find_route(routes_idx, "turso_projection_is_accepted")],

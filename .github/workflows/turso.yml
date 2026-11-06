@@ -182,10 +182,10 @@ jobs:
           env_config::tests::public_projection_help_and_parser_are_bijective
           -- --exact
 
-      - name: all four log specs accept Turso
+      - name: S3 and Turso form the public env cell
         run: >
           cargo +1.99.0 test -p fireweed-server --all-features
-          env_config::tests::all_four_log_specs_accept_turso
+          env_config::tests::s3_turso_is_the_public_env_cell
           -- --exact
 
       - name: Turso startup validation precedes storage I/O

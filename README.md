@@ -18,7 +18,7 @@ Fireweed has two public entry points:
 
 ## Status
 
-Fireweed Queue `v0.22.0` is a public preview. Fireweed names are authoritative
+Fireweed Queue `v0.31.33` is a source preview. Fireweed names are authoritative
 across packages, binaries, configuration, storage identifiers, wire extensions,
 container images, and the Helm chart. The
 [namespace policy](docs/helix/02-design/adr/ADR-023-pre-release-fireweed-namespace-cutover.md)
@@ -58,7 +58,7 @@ FIREWEED_BOOTSTRAP_QUEUES=t1:q1 \
 cargo run -p fireweed-server --bin fireweed-service
 ```
 
-The service prints `fireweed-service 0.22.0 listening on 127.0.0.1:8080` after
+The service prints `fireweed-service 0.31.33 listening on 127.0.0.1:8080` after
 the queue is ready. In a second terminal, push, claim, and complete one item:
 
 ```sh
