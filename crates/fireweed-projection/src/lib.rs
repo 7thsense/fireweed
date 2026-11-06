@@ -4879,9 +4879,9 @@ impl ProjectionData {
         Ok(Some(RangeScanRow { item_id, fields }))
     }
 
-    /// Select claimable item ids for `claim_by_query` by walking the **Pending-only** claim secondary
-    /// index in declared order. Cost is O(claimed + skipped not-yet-due pending), independent of
-    /// leased/terminal corpus size still occupying the full query secondary index (fireweed-cd0e5255).
+    /// Select pending claims without expanding entity JSON or sorting the retained corpus.
+    /// Equality prefixes seek directly into the pending index; semantic ordering is
+    /// applied to borrowed typed values because framed string keys sort by length.
     pub fn select_claim_by_query(
         &self,
         index_name: Option<&str>,
@@ -4901,77 +4901,121 @@ impl ProjectionData {
         {
             return Err(EngineError::Invalid("unindexed-field"));
         }
-        let descending = order_by.direction == fireweed_core::SortDirection::Descending;
+        let mut predicates = Vec::with_capacity(filters.len());
+        for filter in filters {
+            let ty = index_field_type(spec, &filter.field)
+                .ok_or(EngineError::Invalid("unindexed-field"))?;
+            predicates.push((
+                filter.field.as_str(),
+                filter.op,
+                typed_value_from_filter_value(&filter.value, ty)?,
+            ));
+        }
+        let mut prefix = Vec::new();
+        for (field, ty) in &fields {
+            let Some((_, _, value)) = predicates
+                .iter()
+                .find(|(name, op, _)| name == field && *op == FilterOp::Eq)
+            else {
+                break;
+            };
+            prefix.extend(fireweed_engine::index_fields::framed_typed_value(
+                value, ty,
+            )?);
+        }
         let Some(index) = self.claim_indexes.get(&spec.name) else {
             return Ok(Vec::new());
         };
-        let mut selected = Vec::with_capacity(max_items.min(64));
-        let consider = |item_id: ItemId, selected: &mut Vec<ItemId>| -> EngineResult<bool> {
-            let Some(rec) = self.items.get(&item_id) else {
-                return Ok(false);
-            };
-            if rec.state != ItemState::Pending || rec.superseded || rec.fenced {
-                return Ok(false);
-            }
-            if rec.cohort_size.is_some() {
-                return Ok(false);
-            }
-            if rec.not_before.is_some_and(|nb| nb > now) {
-                return Ok(false);
-            }
-            if gate_keys_blocked(&self.blocked_gates, &rec.gate_keys) {
-                return Ok(false);
-            }
-            let echoed = rec.query_entity();
-            let Some(entity) = echoed.as_ref() else {
-                return Ok(false);
-            };
-            let Some(row) = self.range_scan_row(spec, rec.item_id, entity)? else {
-                return Ok(false);
-            };
-            if !self.range_scan_matches(spec, filters, &row)? {
-                return Ok(false);
-            }
-            selected.push(item_id);
-            Ok(selected.len() >= max_items)
+        let ids: Box<dyn Iterator<Item = ItemId> + '_> = match index {
+            SecondaryIndex::Unique(map) => Box::new(
+                map.range(prefix.clone()..)
+                    .take_while(|(key, _)| key.starts_with(&prefix))
+                    .map(|(_, id)| *id),
+            ),
+            SecondaryIndex::NonUnique(map) => Box::new(
+                map.range(prefix.clone()..)
+                    .take_while(|(key, _)| key.starts_with(&prefix))
+                    .flat_map(|(_, ids)| ids.iter().copied()),
+            ),
         };
-        match index {
-            SecondaryIndex::Unique(map) => {
-                if descending {
-                    for item_id in map.values().rev() {
-                        if consider(*item_id, &mut selected)? {
-                            break;
-                        }
-                    }
-                } else {
-                    for item_id in map.values() {
-                        if consider(*item_id, &mut selected)? {
-                            break;
-                        }
-                    }
+        let mut candidates = Vec::new();
+        for item_id in ids {
+            let Some(rec) = self.items.get(&item_id) else {
+                continue;
+            };
+            if rec.state != ItemState::Pending
+                || rec.superseded
+                || rec.fenced
+                || rec.cohort_size.is_some()
+                || rec.not_before.is_some_and(|nb| nb > now)
+                || gate_keys_blocked(&self.blocked_gates, &rec.gate_keys)
+            {
+                continue;
+            }
+            // Compact admissions retain canonical typed values. Old snapshots may
+            // still need their original entity echo; only that fallback allocates.
+            let values = if fields
+                .iter()
+                .all(|(name, _)| rec.index_fields.contains_key(*name))
+            {
+                std::borrow::Cow::Borrowed(&rec.index_fields)
+            } else {
+                let Some(entity) = rec.query_entity() else {
+                    continue;
+                };
+                let Some(row) = self.range_scan_row(spec, item_id, &entity)? else {
+                    continue;
+                };
+                std::borrow::Cow::Owned(row.fields)
+            };
+            let mut matches = true;
+            for (field, op, expected) in &predicates {
+                let Some(value) = values.get(*field) else {
+                    matches = false;
+                    break;
+                };
+                let ordering = typed_value_compare(value, expected)?;
+                if !match op {
+                    FilterOp::Eq => ordering.is_eq(),
+                    FilterOp::Gte => ordering.is_ge(),
+                    FilterOp::Gt => ordering.is_gt(),
+                    FilterOp::Lte => ordering.is_le(),
+                    FilterOp::Lt => ordering.is_lt(),
+                } {
+                    matches = false;
+                    break;
                 }
             }
-            SecondaryIndex::NonUnique(map) => {
-                if descending {
-                    'outer_desc: for ids in map.values().rev() {
-                        for item_id in ids {
-                            if consider(*item_id, &mut selected)? {
-                                break 'outer_desc;
-                            }
-                        }
-                    }
-                } else {
-                    'outer_asc: for ids in map.values() {
-                        for item_id in ids {
-                            if consider(*item_id, &mut selected)? {
-                                break 'outer_asc;
-                            }
-                        }
-                    }
-                }
+            if !matches {
+                continue;
             }
+            let order = match values {
+                std::borrow::Cow::Borrowed(values) => {
+                    std::borrow::Cow::Borrowed(values.get(&order_by.field).expect("indexed order"))
+                }
+                std::borrow::Cow::Owned(mut values) => {
+                    std::borrow::Cow::Owned(values.remove(&order_by.field).expect("indexed order"))
+                }
+            };
+            candidates.push((item_id, order));
         }
-        Ok(selected)
+        let compare = |left: &(ItemId, std::borrow::Cow<'_, TypedValue>),
+                       right: &(ItemId, std::borrow::Cow<'_, TypedValue>)| {
+            let order = typed_value_compare(left.1.as_ref(), right.1.as_ref())
+                .expect("validated typed order");
+            let order = if order_by.direction == fireweed_core::SortDirection::Descending {
+                order.reverse()
+            } else {
+                order
+            };
+            order.then_with(|| left.0.cmp(&right.0))
+        };
+        if candidates.len() > max_items {
+            candidates.select_nth_unstable_by(max_items, compare);
+            candidates.truncate(max_items);
+        }
+        candidates.sort_unstable_by(compare);
+        Ok(candidates.into_iter().map(|(id, _)| id).collect())
     }
 
     /// Ordered scan over a declared typed index with stable cursor pagination.
@@ -6389,6 +6433,127 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(projection.lookup_by_key(&default_key), None);
+    }
+
+    #[test]
+    fn pending_query_selection_matches_semantic_range_order_and_eligibility() {
+        for compound in [false, true] {
+            let declaration = if compound {
+                IndexDeclaration::Compound(fireweed_core::CompoundIndexDef {
+                    fields: vec![
+                        fireweed_core::CompoundIndexField {
+                            field: "kind".into(),
+                            index_type: IndexType::String,
+                        },
+                        fireweed_core::CompoundIndexField {
+                            field: "sku".into(),
+                            index_type: IndexType::String,
+                        },
+                    ],
+                    unique: false,
+                })
+            } else {
+                IndexDeclaration::Single(IndexDef {
+                    field: "sku".into(),
+                    index_type: IndexType::String,
+                    unique: false,
+                })
+            };
+            let spec = QueueIndex {
+                name: "ordered".into(),
+                declaration,
+            };
+            let mut projection = ProjectionData::new(
+                model(),
+                OrderingMode::Strict,
+                0,
+                RecurrencePolicy::default(),
+                &[],
+            )
+            .with_typed_indexes(&[spec]);
+            for (offset, value) in ["z", "aa", "a", "aaaa", "a"].into_iter().enumerate() {
+                let mut item = push_item(&(offset + 1).to_string(), &format!("k{offset}"), 1);
+                item.index_fields
+                    .insert("kind".into(), TypedValue::String("work".into()));
+                item.index_fields
+                    .insert("sku".into(), TypedValue::String(value.into()));
+                item.entity_document =
+                    Some(serde_json::json!({"kind":"work","sku":value,"payload":"x".repeat(8192)}));
+                projection
+                    .apply_command(&QueueCommand::Push(PushCommand { items: vec![item] }))
+                    .unwrap();
+            }
+            let filters = if compound {
+                vec![QueryFilter {
+                    field: "kind".into(),
+                    op: FilterOp::Eq,
+                    value: TypedValue::String("work".into()),
+                }]
+            } else {
+                Vec::new()
+            };
+            for direction in [SortDirection::Ascending, SortDirection::Descending] {
+                let order = OrderField {
+                    field: "sku".into(),
+                    direction,
+                };
+                let rows = projection
+                    .range_scan(RangeScanRequest {
+                        index: Some("ordered".into()),
+                        filters: filters.clone(),
+                        order_by: vec![order.clone()],
+                        page_size: 100,
+                        cursor: None,
+                    })
+                    .unwrap()
+                    .rows;
+                for limit in [1, 3, 10] {
+                    assert_eq!(
+                        projection
+                            .select_claim_by_query(Some("ordered"), &filters, &order, limit, ts(10))
+                            .unwrap(),
+                        rows.iter()
+                            .take(limit)
+                            .map(|row| row.item_id)
+                            .collect::<Vec<_>>()
+                    );
+                }
+                let mut missing = filters.clone();
+                missing.push(QueryFilter {
+                    field: "sku".into(),
+                    op: FilterOp::Eq,
+                    value: TypedValue::String("absent".into()),
+                });
+                assert!(
+                    projection
+                        .select_claim_by_query(Some("ordered"), &missing, &order, 10, ts(10))
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            projection.items.get_mut(&iid("1")).unwrap().not_before = Some(ts(100));
+            projection.items.get_mut(&iid("2")).unwrap().fenced = true;
+            projection.items.get_mut(&iid("3")).unwrap().state = ItemState::Leased;
+            let order = OrderField {
+                field: "sku".into(),
+                direction: SortDirection::Ascending,
+            };
+            assert_eq!(
+                projection
+                    .select_claim_by_query(Some("ordered"), &filters, &order, 10, ts(10))
+                    .unwrap(),
+                vec![iid("5"), iid("4")]
+            );
+            let gate = projection.items.get_mut(&iid("4")).unwrap();
+            gate.gate_keys.push("blocked".to_string());
+            projection.blocked_gates.insert("blocked".to_string());
+            assert_eq!(
+                projection
+                    .select_claim_by_query(Some("ordered"), &filters, &order, 10, ts(10))
+                    .unwrap(),
+                vec![iid("5")]
+            );
+        }
     }
 
     #[test]
