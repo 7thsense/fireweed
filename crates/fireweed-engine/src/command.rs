@@ -374,12 +374,42 @@ pub fn unique_index_keys_for_push_item(
     definition: &QueueDefinition,
     item: &PushItem,
 ) -> EngineResult<Vec<(String, Vec<u8>)>> {
+    unique_index_keys(
+        definition,
+        &item.fields,
+        &item.index_fields,
+        item.entity_document.as_ref(),
+    )
+}
+
+/// Unique secondary/typed index keys a push spec would occupy.
+///
+/// Same keys as [`unique_index_keys_for_push_item`], for admission paths that validate before
+/// item ids are allocated.
+pub fn unique_index_keys_for_push_spec(
+    definition: &QueueDefinition,
+    spec: &crate::PushSpec,
+) -> EngineResult<Vec<(String, Vec<u8>)>> {
+    unique_index_keys(
+        definition,
+        &spec.fields,
+        &spec.index_fields,
+        spec.entity.as_ref(),
+    )
+}
+
+fn unique_index_keys(
+    definition: &QueueDefinition,
+    fields: &BTreeMap<String, Bytes>,
+    index_fields: &BTreeMap<String, TypedValue>,
+    entity: Option<&serde_json::Value>,
+) -> EngineResult<Vec<(String, Vec<u8>)>> {
     let mut out = Vec::new();
     for spec in definition.secondary_indexes.iter().filter(|s| s.unique) {
         let mut field_bytes: Vec<&[u8]> = Vec::with_capacity(spec.fields.len());
         let mut complete = true;
         for field_name in &spec.fields {
-            match item.fields.get(field_name) {
+            match fields.get(field_name) {
                 Some(v) => field_bytes.push(v.as_ref()),
                 None => {
                     complete = false;
@@ -402,8 +432,8 @@ pub fn unique_index_keys_for_push_item(
         .collect();
     out.extend(crate::index_fields::typed_index_keys_for_item(
         &unique_typed,
-        &item.index_fields,
-        item.entity_document.as_ref(),
+        index_fields,
+        entity,
     )?);
     Ok(out)
 }

@@ -379,8 +379,14 @@ fn identity_for_generation(
                     {
                         snapshot.client_keys.insert(key.as_str().to_string());
                     }
-                    for (name, value) in &item.index_fields {
-                        let encoded = format!("{name}={value:?}");
+                    // A key that cannot be derived is rejected by generation validation.
+                    let unique_keys = fireweed_engine::unique_index_keys_for_push_spec(
+                        &snapshot.definition,
+                        item,
+                    )
+                    .unwrap_or_default();
+                    for (name, key) in unique_keys {
+                        let encoded = format!("{name}={key:?}");
                         if existing.unique_index_values.contains(&encoded) {
                             snapshot.unique_index_values.insert(encoded);
                         }
@@ -407,6 +413,118 @@ fn identity_for_generation(
         }
     }
     snapshot
+}
+
+#[cfg(all(test, feature = "objectlog"))]
+mod generation_identity_tests {
+    use std::collections::BTreeMap;
+
+    use fireweed_core::{
+        BodyHash, ClientItemKey, CompoundIndexDef, CompoundIndexField, IndexDeclaration, IndexType,
+        QueueId, QueueIndex, RequestId, TenantId, TypedValue, UtcTimestamp,
+    };
+    use fireweed_engine::{
+        AsyncPushRequest, MutationGenerationMemberOutcome, PushFingerprint, PushSpec,
+        validate_inert_mutation_generation, validate_inert_mutation_generation_folding,
+    };
+
+    use super::*;
+
+    fn definition() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("tenant").unwrap(),
+            queue_id: QueueId::new("queue").unwrap(),
+            priority_model: fireweed_core::PriorityModel {
+                kind: fireweed_core::PriorityModelKind::Int64,
+                direction: fireweed_core::PriorityDirection::Ascending,
+                tie_breaker: fireweed_core::PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: fireweed_core::OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: fireweed_core::EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: fireweed_core::RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: fireweed_core::RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: Vec::new(),
+            entity_schema: None,
+            typed_indexes: vec![QueueIndex {
+                name: "by_run_target".into(),
+                declaration: IndexDeclaration::Compound(CompoundIndexDef {
+                    fields: ["run_id", "target_key"]
+                        .into_iter()
+                        .map(|field| CompoundIndexField {
+                            field: field.into(),
+                            index_type: IndexType::String,
+                        })
+                        .collect(),
+                    unique: true,
+                }),
+            }],
+            emit_change_records: false,
+        }
+    }
+
+    fn push(index: u8, target_key: &str) -> MutationGenerationWork {
+        let shard = QueueKey::new(
+            TenantId::new("tenant").unwrap(),
+            QueueId::new("queue").unwrap(),
+        );
+        let string = |value: &str| TypedValue::String(value.to_string());
+        let item = PushSpec {
+            client_item_key: Some(ClientItemKey::new(format!("key-{index}")).unwrap()),
+            index_fields: BTreeMap::from([
+                ("action_type".to_string(), string("message.send")),
+                ("run_id".to_string(), string("run")),
+                ("target_key".to_string(), string(target_key)),
+            ]),
+            ..PushSpec::default()
+        };
+        MutationGenerationWork::Push {
+            request: AsyncPushRequest {
+                shard,
+                request_id: Some(RequestId::new(format!("req-{index}")).unwrap()),
+                items: vec![item],
+                now: UtcTimestamp::new(1, 0).unwrap(),
+                expected_epoch: Some(1),
+            },
+            fingerprint: Some(PushFingerprint {
+                canonical_sha256: [index; 32],
+                legacy_body_hash: BodyHash(u64::from(index)),
+            }),
+        }
+    }
+
+    #[test]
+    fn unapplied_identity_carries_whole_unique_keys_into_the_next_generation() {
+        let (_, unapplied) = validate_inert_mutation_generation_folding(
+            &identity_base(definition()),
+            &[push(1, "target")],
+        )
+        .unwrap();
+
+        let duplicate = [push(2, "target")];
+        let snapshot = identity_for_generation(&unapplied, definition(), &duplicate);
+        assert!(matches!(
+            validate_inert_mutation_generation(&snapshot, &duplicate).unwrap()[0].outcome,
+            MutationGenerationMemberOutcome::Rejected(EngineError::Conflict)
+        ));
+
+        let distinct = [push(3, "other")];
+        let snapshot = identity_for_generation(&unapplied, definition(), &distinct);
+        assert!(snapshot.unique_index_values.is_empty());
+        assert!(matches!(
+            validate_inert_mutation_generation(&snapshot, &distinct).unwrap()[0].outcome,
+            MutationGenerationMemberOutcome::PushAccepted
+        ));
+    }
 }
 
 fn command_kind(command: &QueueCommand) -> &'static str {
