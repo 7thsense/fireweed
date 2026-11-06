@@ -402,8 +402,9 @@ not a claim this spike investigated further.
    never a single `IN (...)`. Production code already does the former
    everywhere on the Turso-specific path; the contract's new `Select::Keys`
    claim (draft §2.3 C2) needs the same discipline applied to its
-   implementation, and the `fireweed-relational` shared-SQL `IN (...)` path
-   flagged in Finding 0 is worth an explicit, separate check.
+   implementation. The traced `fireweed-relational` IN-list is a legacy replay
+   concern; live BatchUpdate uses the hinted `server_update_snapshot_on` VALUES
+   join described in Finding 0.
 
 ## Recommendation
 
