@@ -317,13 +317,13 @@ mod tests {
     fn smoke_repetition_reconciles_and_retains_samples() {
         let shape = all_shapes()[0];
         let queue = qkey("matrix-unit");
-        let result = futures::executor::block_on(run_repetition(
+        let result = fireweed_objectlog::block_on_objectlog_future(run_repetition(
             &open_product(Arc::new(SystemClock)),
             bench_qdef("bench", "matrix-unit", &shape),
             queue,
             &shape,
             RepetitionSpec {
-                cell: "memory",
+                cell: "s3--turso",
                 repetition: 0,
                 items: 128,
                 batch: 64,

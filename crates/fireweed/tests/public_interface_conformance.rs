@@ -292,10 +292,7 @@ async fn filesystem_turso_async_same_handle_claims_commit_continuation() {
     let claimed = fw.claim(&q, 1, 60_000).await.unwrap();
     assert_eq!(claimed.len(), 1);
     let caps = fw.commit_capabilities(&q).unwrap();
-    assert_eq!(
-        caps.durability_class,
-        fireweed::DurabilityClass::EventualApply
-    );
+    assert_eq!(caps.durability_class, fireweed::DurabilityClass::Atomic);
     let committed = fw
         .commit(
             &q,

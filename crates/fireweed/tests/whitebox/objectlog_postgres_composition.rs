@@ -765,12 +765,12 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
         let fireweed = fireweed::open(turso_durability, clock).unwrap();
         let turso_caps = fireweed.commit_capabilities(&queue()).unwrap();
         // The public s3 × turso cell commits each transition as one object-log batch
-        // and applies Turso afterwards, so it advertises atomic transitions under
-        // eventual apply (as the public conformance suite expects). The composed
+        // and covers the Turso projection before returning transition success, so
+        // commit capabilities report Atomic. Ordinary writes remain eventual. The composed
         // PostgreSQL projection advertises the generic eventual capabilities.
         assert!(!postgres_caps.atomic_transition_commit);
         assert!(turso_caps.atomic_transition_commit);
-        assert_eq!(turso_caps.durability_class, DurabilityClass::EventualApply);
+        assert_eq!(turso_caps.durability_class, DurabilityClass::Atomic);
         assert_eq!(
             postgres_caps.vectorized_commit,
             turso_caps.vectorized_commit
@@ -822,7 +822,7 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
             postgres_caps.durability_class,
             DurabilityClass::EventualApply
         );
-        assert_eq!(turso_caps.durability_class, DurabilityClass::EventualApply);
+        assert_eq!(turso_caps.durability_class, DurabilityClass::Atomic);
     }
 
     drop_schema(&pg_url, &namespace);

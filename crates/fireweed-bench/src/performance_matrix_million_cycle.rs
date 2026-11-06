@@ -254,21 +254,21 @@ pub async fn run_million_cycle_with(
 mod tests {
     use super::*;
     use crate::{SystemClock, bench_qdef, qkey};
-    use fireweed::{StorageConfig, open};
+    use fireweed::open_product;
     use std::sync::Arc;
 
     #[test]
-    fn probe_cycle_on_memory_memory() {
+    fn probe_cycle_on_s3_turso() {
         let shape = crate::all_shapes()[0];
         let mut def = bench_qdef("bench", "mc-probe", &shape);
         def.max_push_batch_size = 1_000;
         def.max_claim_batch_size = 1_000;
-        let fireweed = open(StorageConfig::memory(), Arc::new(SystemClock)).expect("open");
-        let result = futures::executor::block_on(run_million_cycle_with(
+        let fireweed = open_product(Arc::new(SystemClock));
+        let result = fireweed_objectlog::block_on_objectlog_future(run_million_cycle_with(
             &fireweed,
             def,
             qkey("mc-probe"),
-            "memory--memory",
+            "s3--turso",
             WorkSizes::probe(),
         ))
         .expect("probe cycle");

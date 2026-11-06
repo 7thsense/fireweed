@@ -9,7 +9,7 @@ fn resident_terminal_count_tracks_terminal_population_via_metrics() {
     let fireweed = open_product(Arc::new(SystemClock));
     let queue = qkey("terminal-metrics");
 
-    futures::executor::block_on(async {
+    fireweed_objectlog::block_on_objectlog_future(async {
         fireweed
             .create_queue(bench_qdef("bench", "terminal-metrics", &shape))
             .await

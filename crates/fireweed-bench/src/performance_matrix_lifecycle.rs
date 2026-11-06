@@ -538,32 +538,17 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use fireweed::{
-        LogConfig, ObjectLogAuthority, ProjectionStoreConfig, RecoveryAction, RecoveryPolicy,
-        ResponseBarrier, SegmentConfig, StorageConfig, open,
-    };
+    use fireweed::{StorageConfig, open};
 
     use super::*;
     use crate::{SystemClock, all_shapes, bench_qdef, qkey};
 
     #[test]
-    fn maintenance_rejects_memory_before_population() {
-        let shape = all_shapes()[0];
-        let queue = qkey("maintenance-na");
-        let fireweed = open(StorageConfig::memory(), Arc::new(SystemClock)).expect("open");
-        let error = futures::executor::block_on(run_projection_maintenance(
-            &fireweed,
-            bench_qdef("bench", "maintenance-na", &shape),
-            &queue,
-            &shape,
-            "memory--memory",
-            0,
-            128,
-            64,
-        ))
-        .expect_err("memory has no disposable projection");
-        assert!(error.contains("not applicable"));
-        assert!(futures::executor::block_on(fireweed.queue_definition(&queue)).is_err());
+    fn maintenance_rejects_retired_memory_before_population() {
+        let error = open(StorageConfig::memory(), Arc::new(SystemClock))
+            .err()
+            .expect("retired memory cell must reject before population");
+        assert!(error.to_string().contains("other selectors are retired"));
     }
 
     fn filesystem_turso_config(label: &str) -> (PathBuf, StorageConfig) {
@@ -575,30 +560,12 @@ mod tests {
             "fireweed-tp005-lifecycle-{label}-{}-{nonce}",
             std::process::id()
         ));
-        let config = StorageConfig {
-            log: LogConfig::Filesystem {
-                root: base.join("log"),
-            },
-            projection: ProjectionStoreConfig::Turso {
-                path: base.join("projection.db"),
-            },
-            control_plane: None,
-            authority: Some(ObjectLogAuthority::NativeConditionalWrite),
-            response_barrier: ResponseBarrier::AsyncProjection,
-            async_projection: None,
-            segments: SegmentConfig::new(256 * 1024, 20).expect("segments"),
-            namespace: format!("tp005-lifecycle-{label}-{nonce}"),
-            recovery: RecoveryPolicy {
-                incompatible_projection: RecoveryAction::RebuildProjection,
-                verify_checksums: true,
-                max_tail_commands: 1_000_000,
-            },
-        };
+        let config = crate::s3_turso_config(&base);
         (base, config)
     }
 
     #[test]
-    fn filesystem_turso_recovery_reopens_exact_population() {
+    fn s3_turso_recovery_reopens_exact_population() {
         let (base, config) = filesystem_turso_config("recovery");
         let shape = all_shapes()[0];
         let queue = qkey("recovery");
@@ -616,7 +583,7 @@ mod tests {
         drop(fireweed);
 
         let result = fireweed_objectlog::block_on_objectlog_future(reopen_verify_and_drain(
-            "filesystem--turso",
+            "s3--turso",
             0,
             &queue,
             population,

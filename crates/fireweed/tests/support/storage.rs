@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 use fireweed::{Clock, EngineResult, Fireweed, ObjectLogAuthority, ResponseBarrier, StorageConfig};
 use fireweed_objectlog::shared_s3_test_env;
+use sha2::{Digest, Sha256};
 use std::{path::Path, path::PathBuf, sync::Arc};
 
 pub fn unique_namespace(prefix: &str) -> String {
@@ -34,7 +35,12 @@ pub fn product_config(root: &Path, namespace: &str) -> StorageConfig {
 
 fn config(path: &str) -> StorageConfig {
     let root = PathBuf::from(format!("{path}.store"));
-    product_config(&root, path)
+    // Keep the S3 prefix stable across reopen and bounded for file-backed endpoints.
+    let namespace: String = Sha256::digest(path.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    product_config(&root, &namespace)
 }
 
 pub fn open_log_memory(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {

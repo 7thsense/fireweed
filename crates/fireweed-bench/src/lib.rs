@@ -657,13 +657,25 @@ pub fn open_log_turso(
     root: &std::path::Path,
     clock: std::sync::Arc<dyn Clock>,
 ) -> fireweed::EngineResult<Fireweed> {
-    let mut config = fireweed::StorageConfig::memory();
-    config.log = fireweed::LogConfig::Filesystem {
-        root: root.join("log"),
-    };
-    config.projection = fireweed::ProjectionStoreConfig::Turso {
-        path: root.join("projection.db"),
-    };
-    config.authority = Some(fireweed::ObjectLogAuthority::NativeConditionalWrite);
-    fireweed::open(config, clock)
+    fireweed::open(s3_turso_config(root), clock)
+}
+
+/// Configure the current public storage cell with a stable, bounded namespace.
+pub fn s3_turso_config(root: &std::path::Path) -> fireweed::StorageConfig {
+    use sha2::{Digest, Sha256};
+    let s3 = fireweed_objectlog::shared_s3_test_env();
+    let mut config = fireweed::StorageConfig::s3_turso(
+        s3.endpoint.clone(),
+        s3.bucket.clone(),
+        s3.region.clone(),
+        s3.access_key.clone(),
+        s3.secret_key.clone(),
+        s3.allow_insecure_http(),
+        root.join("projection.db"),
+    );
+    config.namespace = Sha256::digest(root.as_os_str().as_encoded_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    config
 }

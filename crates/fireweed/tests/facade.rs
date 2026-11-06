@@ -335,10 +335,7 @@ async fn objectlog_turso_strict_upsert_claim_commit_transition() {
     fireweed.create_queue(qdef()).await.unwrap();
 
     let caps = fireweed.commit_capabilities(&q).unwrap();
-    assert_eq!(
-        caps.durability_class,
-        fireweed::DurabilityClass::EventualApply
-    );
+    assert_eq!(caps.durability_class, fireweed::DurabilityClass::Atomic);
 
     let key = ClientItemKey::new("work-1").unwrap();
     let upserted = fireweed.upsert(&q, key, at(10)).await.unwrap();

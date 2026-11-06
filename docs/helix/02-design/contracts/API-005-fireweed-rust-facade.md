@@ -149,9 +149,10 @@ Correctness and progress requirements for the facade execution path:
    rows. `claim` polls currently selectable applied rows. Empty `claim` is a
    normal poll, never `Conflict` for apply lag and never a command failure.
    Public reads (`side_record`, `live_item`, `metrics`) may wait projection
-   coverage. Ordinary item `claim` must not. The public cell reports
-   `DurabilityClass::EventualApply` with `atomic_transition_commit: true` and
-   still serves `upsert`. Inspect `commit_capabilities` rather than treating
+   coverage. Ordinary item `claim` must not. Ordinary writes retain eventual-apply behavior. Transition commits cover
+   their projection state before returning success, so `commit_capabilities`
+   reports `DurabilityClass::Atomic` with `atomic_transition_commit: true`.
+   The public cell still serves `upsert`. Inspect `commit_capabilities` rather than treating
    construction as a serving snapshot. `ResponseBarrier` has a single value,
    [`ResponseBarrier::AsyncProjection`]. The only public composition is
    `LogConfig::S3` × Turso (ADR-024). Batching and generation packing remain
@@ -261,9 +262,10 @@ barrier, or async spec (`unwrap_or` is not the contract).
 ##### Durability
 
 The public cell is Class A. Success is durable on the S3 object log. Turso
-rebuilds through `projection_control`. The cell reports
-`DurabilityClass::EventualApply` with `atomic_transition_commit: true` and
-still serves `upsert`. There is no public Class B cell and no `Strict` barrier.
+rebuilds through `projection_control`. Ordinary writes retain eventual-apply behavior. Transition commits cover their
+projection state before returning success, so `commit_capabilities` reports
+`DurabilityClass::Atomic` with `atomic_transition_commit: true`. The cell still
+serves `upsert`. There is no public Class B cell and no `Strict` barrier.
 
 ##### Environment variables
 

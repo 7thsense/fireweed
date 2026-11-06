@@ -12,8 +12,8 @@
 use std::sync::Arc;
 
 use fireweed::{
-    ConfigSecret, Fireweed, PostgresMode, PostgresRuntimeConfig, open_objectlog,
-    open_postgres_runtime, open_product,
+    ConfigSecret, Fireweed, PostgresMode, PostgresRuntimeConfig, open_postgres_runtime,
+    open_product,
 };
 use fireweed_bench::open_log_turso;
 use fireweed_bench::{Shape, SystemClock, all_shapes, bench_qdef, lifecycle, qkey};
@@ -85,7 +85,7 @@ fn lifecycle_over_shapes_objectlog() {
     for shape in all_shapes() {
         let dir = tmp(&format!("objectlog-{}", shape.name));
         let _ = std::fs::remove_dir_all(&dir);
-        let fireweed = open_objectlog(&dir, Arc::new(SystemClock)).expect("open objectlog");
+        let fireweed = open_log_turso(&dir, Arc::new(SystemClock)).expect("open objectlog");
         // Exercise the current public batch-update contract on the original rows.
         run_one("objectlog", &fireweed, &shape, true);
         let _ = std::fs::remove_dir_all(&dir);
