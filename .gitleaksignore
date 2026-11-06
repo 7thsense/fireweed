@@ -22,3 +22,50 @@
 # Vendored Turso test_encryption: a constant key creates a fresh temporary local
 # database and exercises wrong-key rejection; it is not a service credential.
 4625e9f5e2844e43cc47b88eead3eeb20ff83535:vendor/turso/tests/integration_tests.rs:generic-api-key:465
+
+# Historical formal/replay evidence stores SHA-256 source-file digests. The keys
+# name auth.rs, credential.rs and api001_batch_update.rs; all 42 reviewed values
+# are 64-character lowercase hex digests, not issued API keys or credentials.
+# Keep exclusions specific to the exact commit, evidence path, rule and line.
+0e098f9515ba930729c4275022a7f87d6e4c594a:docs/helix/04-build/evidence/all-edge-replay/formal.json:generic-api-key:3755
+0e098f9515ba930729c4275022a7f87d6e4c594a:docs/helix/04-build/evidence/all-edge-replay/formal.json:generic-api-key:3859
+0e098f9515ba930729c4275022a7f87d6e4c594a:docs/helix/04-build/evidence/all-edge-replay/formal.json:generic-api-key:3865
+0e098f9515ba930729c4275022a7f87d6e4c594a:docs/helix/04-build/evidence/all-edge-replay/incomplete-prefix-scan-restart.json:generic-api-key:135
+0e098f9515ba930729c4275022a7f87d6e4c594a:docs/helix/04-build/evidence/all-edge-replay/incomplete-prefix-scan-restart.json:generic-api-key:239
+0e098f9515ba930729c4275022a7f87d6e4c594a:docs/helix/04-build/evidence/all-edge-replay/incomplete-prefix-scan-restart.json:generic-api-key:245
+6a6133b6123efe5644db26e0981b9c372aae9b57:docs/helix/04-build/evidence/edge-closure/formal.json:generic-api-key:3755
+6a6133b6123efe5644db26e0981b9c372aae9b57:docs/helix/04-build/evidence/edge-closure/formal.json:generic-api-key:3859
+6a6133b6123efe5644db26e0981b9c372aae9b57:docs/helix/04-build/evidence/edge-closure/formal.json:generic-api-key:3865
+6a6133b6123efe5644db26e0981b9c372aae9b57:docs/helix/04-build/evidence/edge-closure/inode-limit-diagnostic.json:generic-api-key:186
+6a6133b6123efe5644db26e0981b9c372aae9b57:docs/helix/04-build/evidence/edge-closure/inode-limit-diagnostic.json:generic-api-key:192
+6a6133b6123efe5644db26e0981b9c372aae9b57:docs/helix/04-build/evidence/edge-closure/inode-limit-diagnostic.json:generic-api-key:82
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/conformance.json:generic-api-key:139
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/conformance.json:generic-api-key:143
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/conformance.json:generic-api-key:416
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/conformance.json:generic-api-key:488
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/conformance.json:generic-api-key:492
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/conformance.json:generic-api-key:67
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/counterexamples/before-deferred-claim.json:generic-api-key:1078
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/counterexamples/before-deferred-claim.json:generic-api-key:1150
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/counterexamples/before-deferred-claim.json:generic-api-key:1154
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/counterexamples/before-equal-fence.json:generic-api-key:669
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/counterexamples/before-equal-fence.json:generic-api-key:741
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/counterexamples/before-equal-fence.json:generic-api-key:745
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/formal.json:generic-api-key:3750
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/formal.json:generic-api-key:3822
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/formal.json:generic-api-key:3826
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/replay.json:generic-api-key:30069
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/replay.json:generic-api-key:30141
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/replay.json:generic-api-key:30145
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/replay.json:generic-api-key:30418
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/replay.json:generic-api-key:30490
+6b591996f4cec065bfe4ec249767123ef3b2ffd6:docs/helix/04-build/evidence/generated-trace-replay/replay.json:generic-api-key:30494
+70d349cbd05b96937a6060cc64ff177c3b6080eb:docs/helix/04-build/evidence/formal-analysis/conformance.json:generic-api-key:140
+70d349cbd05b96937a6060cc64ff177c3b6080eb:docs/helix/04-build/evidence/formal-analysis/conformance.json:generic-api-key:144
+70d349cbd05b96937a6060cc64ff177c3b6080eb:docs/helix/04-build/evidence/formal-analysis/conformance.json:generic-api-key:410
+70d349cbd05b96937a6060cc64ff177c3b6080eb:docs/helix/04-build/evidence/formal-analysis/conformance.json:generic-api-key:482
+70d349cbd05b96937a6060cc64ff177c3b6080eb:docs/helix/04-build/evidence/formal-analysis/conformance.json:generic-api-key:486
+70d349cbd05b96937a6060cc64ff177c3b6080eb:docs/helix/04-build/evidence/formal-analysis/conformance.json:generic-api-key:68
+70d349cbd05b96937a6060cc64ff177c3b6080eb:docs/helix/04-build/evidence/formal-analysis/formal.json:generic-api-key:3750
+70d349cbd05b96937a6060cc64ff177c3b6080eb:docs/helix/04-build/evidence/formal-analysis/formal.json:generic-api-key:3822
+70d349cbd05b96937a6060cc64ff177c3b6080eb:docs/helix/04-build/evidence/formal-analysis/formal.json:generic-api-key:3826

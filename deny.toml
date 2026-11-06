@@ -1,14 +1,13 @@
 [advisories]
 version = 2
 yanked = "deny"
-# RUSTSEC-2024-0436 (`paste` unmaintained): this is an UNMAINTAINED advisory, not a
-# vulnerability — `paste` is a compile-time-only proc-macro with no runtime code path. It
-# enters solely through heimq's vendored Kafka codec `heimq-protocol` (a bounded fork of
-# kafka-protocol 0.15.1, which uses paste for its macro-generated message types). We do NOT
-# depend on upstream kafka-protocol (see crates/fireweed-server/tests/heimq_protocol_bound_guard.rs,
-# which fails if it reappears). heimq itself ignores this same advisory in its own deny.toml, so
-# this is upstream-aligned; it clears when heimq rebases heimq-protocol onto a paste-free base.
-ignore = ["RUSTSEC-2024-0436"]
+# RUSTSEC-2026-0441 is an informational unmaintained advisory for pin-utils,
+# which the AWS SDK still uses transitively. Fireweed does not use its macros
+# directly. Version 0.1.1 is the final upstream release; there is no maintained
+# compatible replacement until the SDK moves to core::pin or pin-project-lite.
+# Retain this narrowly identified maintenance exception while keeping actual
+# vulnerability and yanked-release checks enabled. Review on each SDK update.
+ignore = ["RUSTSEC-2026-0441"]
 
 [bans]
 multiple-versions = "warn"
