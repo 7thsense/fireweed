@@ -1,0 +1,9 @@
+s3-native-cas-preflight: PASS
+  endpoint=http://127.0.0.1:55191
+  bucket=fireweed-formal
+  region=us-east-1
+  sequential create-only: 200 then 412
+  two-writer race: winner=writer-a losers=[412]
+  conditional update: match=200 stale=412
+Generated 96 traces from 6386 states / 20913 edges
+{"error": null, "status": "PASS", "traces": 96}

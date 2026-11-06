@@ -1,0 +1,46 @@
+   Compiling fireweed-bench v0.3.1 (/home/agent/fireweed/crates/fireweed-bench)
+    Finished `test` profile [optimized] target(s) in 45.08s
+     Running unittests src/lib.rs (crates/fireweed-bench/target/debug/deps/fireweed_bench-ff98c988c1a0bde1)
+
+running 20 tests
+test performance_matrix::tests::smoke_repetition_reconciles_and_retains_samples ... ok
+test performance_matrix_analysis::tests::barrier_classes_are_strict_for_baseline_matrix ... ok
+test performance_matrix_cells::tests::full_register_is_exactly_twelve_canonical_pairs ... ok
+test performance_matrix_cells::tests::maintenance_cells_are_object_log_with_rebuildable_projection ... ok
+test performance_matrix_cells::tests::smoke_is_four_local_cells ... ok
+test performance_matrix_checkpoint::tests::binding_rejects_changed_configuration ... ok
+test performance_matrix_checkpoint::tests::binding_rejects_modified_fragment ... ok
+test performance_matrix_evidence::tests::accepts_exact_smoke_matrix ... ok
+test performance_matrix_evidence::tests::rejects_empty_evidence ... ok
+test performance_matrix_evidence::tests::rejects_mutated_evidence ... ok
+test performance_matrix_evidence::tests::rejects_partial_matrix ... ok
+test performance_matrix_lifecycle::tests::maintenance_rejects_retired_memory_before_population ... ok
+test performance_matrix_lifecycle::tests::s3_turso_recovery_reopens_exact_population ... ok
+test performance_matrix_million_cycle::tests::probe_cycle_on_s3_turso ... ok
+test performance_matrix_provenance::tests::remote_credentials_and_query_are_removed ... ok
+test performance_matrix_services::tests::authorization_requires_exact_namespace_and_canonical_path ... ok
+test performance_matrix_services::tests::derivations_match_facade_contract ... ok
+test performance_matrix_services::tests::redacts_configured_values_and_url_userinfo ... ok
+test performance_matrix_services::tests::weak_password_denylist_is_unique_and_includes_garage ... ok
+test performance_matrix_services::tests::weak_password_denylist_skips_public_vocabulary_secrets ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.35s
+
+     Running tests/e2e_shapes_tests.rs (crates/fireweed-bench/target/debug/deps/e2e_shapes_tests-17863cbd994fce9d)
+
+running 5 tests
+test lifecycle_over_shapes_memory ... ok
+test lifecycle_over_shapes_objectlog ... ok
+test lifecycle_over_shapes_postgres_log ... ok
+test lifecycle_over_shapes_postgres_relational ... ok
+test lifecycle_over_shapes_turso ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 90.24s
+
+     Running tests/terminal_emission_metrics_tests.rs (crates/fireweed-bench/target/debug/deps/terminal_emission_metrics_tests-34aa1509cd97c79e)
+
+running 1 test
+test resident_terminal_count_tracks_terminal_population_via_metrics ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
