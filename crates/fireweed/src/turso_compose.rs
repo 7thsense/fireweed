@@ -3134,7 +3134,6 @@ type ObjectLogEngine = AsyncComposedBackend<
 type GenerationJoins = Arc<Mutex<HashMap<(QueueKey, u64), Arc<GenerationJoin>>>>;
 /// Same-process claim replays keyed by request id: the claim work id and its leased set.
 #[cfg(feature = "objectlog")]
-type ClaimReplays = Arc<Mutex<HashMap<(QueueKey, fireweed_core::RequestId), (u64, Claimed)>>>;
 #[cfg(all(feature = "objectlog", test))]
 type MetricsSnapshotHook = Arc<Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>>;
 
@@ -3171,7 +3170,6 @@ pub struct DerivedObjectLogTursoBackend {
     claim_work_ids: Arc<AtomicU64>,
     /// Same-process API-001 claim replay. Apply may still be in flight when the
     /// caller retries, so the leased set is remembered before Turso publishes it.
-    claim_replays: ClaimReplays,
     /// This process owns the Turso writer. Item Claim SELECT and the FIFO
     /// rowid floor are sequenced here so the next generation can read the
     /// following slice without waiting for apply.
@@ -3284,7 +3282,6 @@ impl DerivedObjectLogTursoBackend {
             fence_admission,
             generation_joins: Arc::new(Mutex::new(HashMap::new())),
             claim_work_ids: Arc::new(AtomicU64::new(1)),
-            claim_replays: Arc::new(Mutex::new(HashMap::new())),
             claim_select: Arc::new(tokio::sync::Mutex::new(())),
             drivers,
         };
@@ -4668,49 +4665,15 @@ impl DerivedObjectLogTursoBackend {
     }
 
     async fn replay_batch_claim(&self, request: &ClaimRequest) -> EngineResult<Option<Claimed>> {
-        let Some(request_id) = &request.request_id else {
+        if request.request_id.is_none() {
             return Ok(None);
-        };
-        let fingerprint = fireweed_engine::batch_claim_body_hash(
-            request.max_items,
-            batch_claim_lease_ms(request.now, request.lease_expires_at),
-            &request.compatibility,
-        );
-        if let Some((stored, claimed)) = self
-            .claim_replays
-            .lock()
-            .expect("claim replay")
-            .get(&(request.shard.clone(), request_id.clone()))
-            .cloned()
-        {
-            if stored != fingerprint {
-                return Err(EngineError::RequestIdConflict);
-            }
-            if claimed
-                .items
-                .iter()
-                .any(|item| item.lease_expires_at <= request.now)
-            {
-                return Err(EngineError::RequestExpired);
-            }
-            return Ok(Some(claimed));
         }
+        // Receipts and current lease state live in the durable projection.
+        // Cover committed commands before reading so an immediate retry cannot
+        // miss its receipt or replay a lease that has already been finalized.
+        self.catch_up_produce(&request.shard).await?;
+        self.wait_request_entry_coverage(&request.shard).await?;
         replay_recorded_batch_claim(self.projection.as_ref(), request).await
-    }
-
-    fn remember_batch_claim(&self, request: &ClaimRequest, claimed: &Claimed) {
-        let Some(request_id) = &request.request_id else {
-            return;
-        };
-        let fingerprint = fireweed_engine::batch_claim_body_hash(
-            request.max_items,
-            batch_claim_lease_ms(request.now, request.lease_expires_at),
-            &request.compatibility,
-        );
-        self.claim_replays.lock().expect("claim replay").insert(
-            (request.shard.clone(), request_id.clone()),
-            (fingerprint, claimed.clone()),
-        );
     }
 
     async fn dispatch_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
@@ -4724,14 +4687,12 @@ impl DerivedObjectLogTursoBackend {
         if request.compatibility != ClaimCompatibility::default() {
             return self.dispatch_grouped_cohort_claim(request).await;
         }
-        let remembered = request.clone();
         let work = MutationGenerationWork::Claim {
             id: self.claim_work_ids.fetch_add(1, Ordering::Relaxed),
             request,
         };
         match self.drive_candidate_mutation(work).await? {
             MutationGenerationMemberOutcome::Claim { claimed, .. } => {
-                self.remember_batch_claim(&remembered, &claimed);
                 Ok(claimed)
             }
             MutationGenerationMemberOutcome::Rejected(error) => Err(error),
@@ -5808,6 +5769,47 @@ mod s3v_after_append {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_claim_replay_consults_current_durable_lease() {
+        let root = std::env::temp_dir().join(format!("fw-claim-replay-{}-{}-{}", std::process::id(), NEXT_DIR.fetch_add(1, Ordering::Relaxed), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let backend = open(&root).await;
+        let definition = qdef();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        let ids = backend.push(&queue, vec![PushSpec {
+            client_item_key: Some(ClientItemKey::new("claim-replay-probe").unwrap()),
+            priority: Some(PriorityValue::Int64(1)),
+            payload: Some(Bytes::from_static(b"bounded-claim-payload")),
+            ..PushSpec::default()
+        }], UtcTimestamp::new(1, 0).unwrap(), None).await.unwrap();
+        let request = ClaimRequest {
+            shard: queue.clone(), worker_id: fireweed_core::WorkerId::new("claim-probe").unwrap(),
+            max_items: 1, lease_token: fireweed_core::LeaseToken::new("claim-probe-token").unwrap(),
+            lease_expires_at: UtcTimestamp::new(62, 0).unwrap(), now: UtcTimestamp::new(2, 0).unwrap(),
+            eligibility_time: None, compatibility: ClaimCompatibility::default(), expected_epoch: None,
+            request_id: Some(fireweed_core::RequestId::new("claim-probe-request").unwrap()),
+        };
+        let claimed = backend.claim(request.clone()).await.unwrap();
+        assert_eq!(claimed.items.iter().map(|item| item.item_id).collect::<Vec<_>>(), ids);
+        let replay = backend.claim(request.clone()).await.unwrap();
+        assert_eq!(replay.items.iter().map(|item| item.item_id).collect::<Vec<_>>(), ids);
+        assert_eq!(replay.items[0].lease_token, claimed.items[0].lease_token);
+        assert_eq!(replay.items[0].lease_expires_at, claimed.items[0].lease_expires_at);
+        assert_eq!(replay.items[0].payload, claimed.items[0].payload);
+        backend.close_and_drain().await.unwrap();
+        drop(backend);
+        let backend = open(&root).await;
+        let cold_replay = backend.claim(request.clone()).await.unwrap();
+        assert_eq!(cold_replay.items.len(), 1);
+        assert_eq!(cold_replay.items[0].item_id, ids[0]);
+        assert_eq!(cold_replay.items[0].payload, claimed.items[0].payload);
+        assert_eq!(cold_replay.items[0].lease_token, claimed.items[0].lease_token);
+        backend.finalize(&queue, vec![fireweed_engine::FinalizeOutcome::new(ids[0], fireweed_engine::FinalizeKind::Complete)], UtcTimestamp::new(3, 0).unwrap(), None).await.unwrap();
+        let replay = backend.claim(request).await;
+        assert!(matches!(replay, Err(EngineError::RequestExpired)), "completed leases must never be replayed from retained record copies");
+        backend.close_and_drain().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
