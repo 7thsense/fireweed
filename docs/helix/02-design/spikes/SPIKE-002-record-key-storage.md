@@ -195,14 +195,34 @@ spike's layout A key index, and 20+ further call sites in
 This spike's harness adopted the identical pattern once its absence made the
 measurement itself infeasible (`main.rs:520-530` comment, `559`).
 
-**Corroborating, out-of-track observation (flagged, not fixed here)**:
-`crates/fireweed-relational/src/apply.rs:5043-5051` runs
-`... WHERE tenant_id=? AND queue_id=? AND client_item_key IN ({placeholders}) AND superseded=0`
-with no `INDEXED BY` — that file is the dialect-neutral relational layer
-shared with the PostgreSQL backend, so it cannot carry SQLite-only
-`INDEXED BY` syntax. Whether the Turso execution path re-hints this
-particular query elsewhere was not traced (out of this spike's scope); it is
-architecturally exposed to the same defect measured here if not.
+**Corroborating observation — traced 2026-09-23**:
+`crates/fireweed-relational/src/apply.rs:5043-5051` contains an unhinted
+`client_item_key IN (...)` lookup. The relational crate is used by Turso only;
+PostgreSQL does not depend on it. It already carries `INDEXED BY` hints and
+`RelTx::prefer_point_updates()` selects the Turso-specific point-update path.
+The earlier dialect-neutral explanation was incorrect.
+
+The IN-list resolves `UpdateFieldsCommand` values with `item_id == 0` and a
+`client_item_key`. Their producer, `plan_batch_update_pipelined`, has had no
+callers since `fc0c5bd7`. Live Turso BatchUpdate resolves keys through
+`server_update_snapshot_on`, using a VALUES CROSS JOIN and
+`INDEXED BY fireweed_items_active_key`. On legacy replay, the API-001 fast
+path also intercepts many such commands with hinted point updates. The IN-list
+and the unhinted lookup in `write_shaped_payloads` remain replay concerns.
+
+The trace and release-build measurements used Turso 0.7.2 and 100-key batches.
+They are historical measurements on the production schema:
+
+| Shape | Bound index columns | Keys/s at 2k rows | Keys/s at 20k rows |
+| --- | --- | ---: | ---: |
+| Original apply.rs IN-list | tenant, queue | 16,953 | 1,643 |
+| Same IN-list with active-key hint | tenant, queue | 19,254 | 1,948 |
+| `server_update_snapshot_on` VALUES join | tenant, queue, key | 364,452 | 300,438 |
+| Hinted per-key lookup | tenant, queue, key | 220,383 | 203,751 |
+| Unhinted per-key lookup | tenant, queue | 974 | 90 |
+
+The results corroborate Finding 1. This reconciliation records the completed
+trace; it does not claim a new measurement on the current Turso release.
 
 ### Finding 1: `IN (...)` against a composite index's second column does not seek either — MEASURED
 
@@ -445,9 +465,9 @@ measured with no bottleneck.
   breakdown.
 - Hash-collision handling (Recommendation point 4) is analytical, not
   measured: no collision was engineered or observed at these row counts.
-- Finding 0's `fireweed-relational/apply.rs:5043-5051` observation is flagged,
-  not traced end-to-end to confirm whether it is actually exposed on the
-  Turso path today.
+- Finding 0's Turso-path exposure was traced on 2026-09-23. The live planner
+  uses the hinted `server_update_snapshot_on` VALUES join; the IN-list is a
+  legacy replay concern. The measurements above use Turso 0.7.2.
 
 ## Source Ledger
 
@@ -461,7 +481,7 @@ measured with no bottleneck.
 | `vendor/turso_core/FIREWEED.md:1-11` | Fireweed's `wal_autocheckpoint` backport on the pinned engine | VERIFIED (read) |
 | `crates/fireweed-turso/Cargo.toml:26,28` | exact vendored path-dependency shape mirrored by the spike | VERIFIED (read) |
 | `crates/fireweed-turso/src/projection.rs:117-146,1421,1536,1570,1627,1749,1924,1931,1937` and `src/query.rs:36-37,254,288,388-389,613,976-977,1613` | production's existing `INDEXED BY` discipline, corroborating Finding 0 | VERIFIED (grep + read) |
-| `crates/fireweed-relational/src/apply.rs:5043-5051` | unhinted `client_item_key IN (...)`, flagged in Finding 0 | VERIFIED (read); Turso-path exposure not traced |
+| `crates/fireweed-relational/src/apply.rs:5043-5051` | unhinted `client_item_key IN (...)`, flagged in Finding 0 | VERIFIED (traced + EXPLAIN/timed on 0.7.2); legacy replay lookup, live planner uses hinted VALUES join |
 | `spikes/key-storage/src/main.rs` (whole file, cited by section above) | this spike's harness, layouts, shapes, config, `INDEXED BY` fix | VERIFIED (own code, own runs) |
 | `spikes/key-storage/results/results.jsonl`, `results/variance.jsonl` | all measured figures in Findings 2–4 | VERIFIED (measured, this run) |
 | Hash-collision birthday bound, choice of production-grade 128-bit hash | Recommendation point 4 requirements | INFERRED (standard hash-collision reasoning; not benchmarked) |
