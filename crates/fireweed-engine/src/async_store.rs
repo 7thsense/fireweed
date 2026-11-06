@@ -1465,8 +1465,15 @@ pub trait AsyncProjectionStore: Send + Sync {
             }
             let mut output = Vec::with_capacity(keys.len());
             for chunk in keys.chunks(64) {
-                let results = futures::future::join_all(chunk.iter().map(|key| self.side_record(shard.clone(), key.clone()))).await;
-                for result in results { output.push(result?); }
+                let results = futures::future::join_all(
+                    chunk
+                        .iter()
+                        .map(|key| self.side_record(shard.clone(), key.clone())),
+                )
+                .await;
+                for result in results {
+                    output.push(result?);
+                }
             }
             Ok(output)
         }
@@ -2001,8 +2008,12 @@ where
     ) -> impl Future<Output = EngineResult<Vec<Option<bytes::Bytes>>>> + Send {
         let valid = keys.len() <= crate::SIDE_RECORD_BATCH_MAX_KEYS;
         self.run_with_store(move |store| {
-            if !valid { return Err(EngineError::Invalid("side-record batch exceeds key bound")); }
-            keys.iter().map(|key| store.side_record(&shard, key)).collect()
+            if !valid {
+                return Err(EngineError::Invalid("side-record batch exceeds key bound"));
+            }
+            keys.iter()
+                .map(|key| store.side_record(&shard, key))
+                .collect()
         })
     }
 
@@ -2500,8 +2511,12 @@ where
     ) -> impl Future<Output = EngineResult<Vec<Option<bytes::Bytes>>>> + Send {
         let valid = keys.len() <= crate::SIDE_RECORD_BATCH_MAX_KEYS;
         self.run_sync(move |store: &mut S| {
-            if !valid { return Err(EngineError::Invalid("side-record batch exceeds key bound")); }
-            keys.iter().map(|key| store.side_record(&shard, key)).collect()
+            if !valid {
+                return Err(EngineError::Invalid("side-record batch exceeds key bound"));
+            }
+            keys.iter()
+                .map(|key| store.side_record(&shard, key))
+                .collect()
         })
     }
 

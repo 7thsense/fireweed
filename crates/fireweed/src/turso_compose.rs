@@ -4810,9 +4810,7 @@ impl DerivedObjectLogTursoBackend {
             request,
         };
         match self.drive_candidate_mutation(work).await? {
-            MutationGenerationMemberOutcome::Claim { claimed, .. } => {
-                Ok(claimed)
-            }
+            MutationGenerationMemberOutcome::Claim { claimed, .. } => Ok(claimed),
             MutationGenerationMemberOutcome::Rejected(error) => Err(error),
             MutationGenerationMemberOutcome::Push(_)
             | MutationGenerationMemberOutcome::PushAccepted
@@ -5891,30 +5889,68 @@ mod s3v_after_append {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn completed_claim_replay_consults_current_durable_lease() {
-        let root = std::env::temp_dir().join(format!("fw-claim-replay-{}-{}-{}", std::process::id(), NEXT_DIR.fetch_add(1, Ordering::Relaxed), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let root = std::env::temp_dir().join(format!(
+            "fw-claim-replay-{}-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let backend = open(&root).await;
         let definition = qdef();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         backend.create_queue(definition).await.unwrap();
-        let ids = backend.push(&queue, vec![PushSpec {
-            client_item_key: Some(ClientItemKey::new("claim-replay-probe").unwrap()),
-            priority: Some(PriorityValue::Int64(1)),
-            payload: Some(Bytes::from_static(b"bounded-claim-payload")),
-            ..PushSpec::default()
-        }], UtcTimestamp::new(1, 0).unwrap(), None).await.unwrap();
+        let ids = backend
+            .push(
+                &queue,
+                vec![PushSpec {
+                    client_item_key: Some(ClientItemKey::new("claim-replay-probe").unwrap()),
+                    priority: Some(PriorityValue::Int64(1)),
+                    payload: Some(Bytes::from_static(b"bounded-claim-payload")),
+                    ..PushSpec::default()
+                }],
+                UtcTimestamp::new(1, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
         let request = ClaimRequest {
-            shard: queue.clone(), worker_id: fireweed_core::WorkerId::new("claim-probe").unwrap(),
-            max_items: 1, lease_token: fireweed_core::LeaseToken::new("claim-probe-token").unwrap(),
-            lease_expires_at: UtcTimestamp::new(62, 0).unwrap(), now: UtcTimestamp::new(2, 0).unwrap(),
-            eligibility_time: None, compatibility: ClaimCompatibility::default(), expected_epoch: None,
+            shard: queue.clone(),
+            worker_id: fireweed_core::WorkerId::new("claim-probe").unwrap(),
+            max_items: 1,
+            lease_token: fireweed_core::LeaseToken::new("claim-probe-token").unwrap(),
+            lease_expires_at: UtcTimestamp::new(62, 0).unwrap(),
+            now: UtcTimestamp::new(2, 0).unwrap(),
+            eligibility_time: None,
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
             request_id: Some(fireweed_core::RequestId::new("claim-probe-request").unwrap()),
         };
         let claimed = backend.claim(request.clone()).await.unwrap();
-        assert_eq!(claimed.items.iter().map(|item| item.item_id).collect::<Vec<_>>(), ids);
+        assert_eq!(
+            claimed
+                .items
+                .iter()
+                .map(|item| item.item_id)
+                .collect::<Vec<_>>(),
+            ids
+        );
         let replay = backend.claim(request.clone()).await.unwrap();
-        assert_eq!(replay.items.iter().map(|item| item.item_id).collect::<Vec<_>>(), ids);
+        assert_eq!(
+            replay
+                .items
+                .iter()
+                .map(|item| item.item_id)
+                .collect::<Vec<_>>(),
+            ids
+        );
         assert_eq!(replay.items[0].lease_token, claimed.items[0].lease_token);
-        assert_eq!(replay.items[0].lease_expires_at, claimed.items[0].lease_expires_at);
+        assert_eq!(
+            replay.items[0].lease_expires_at,
+            claimed.items[0].lease_expires_at
+        );
         assert_eq!(replay.items[0].payload, claimed.items[0].payload);
         backend.close_and_drain().await.unwrap();
         drop(backend);
@@ -5923,10 +5959,27 @@ mod s3v_after_append {
         assert_eq!(cold_replay.items.len(), 1);
         assert_eq!(cold_replay.items[0].item_id, ids[0]);
         assert_eq!(cold_replay.items[0].payload, claimed.items[0].payload);
-        assert_eq!(cold_replay.items[0].lease_token, claimed.items[0].lease_token);
-        backend.finalize(&queue, vec![fireweed_engine::FinalizeOutcome::new(ids[0], fireweed_engine::FinalizeKind::Complete)], UtcTimestamp::new(3, 0).unwrap(), None).await.unwrap();
+        assert_eq!(
+            cold_replay.items[0].lease_token,
+            claimed.items[0].lease_token
+        );
+        backend
+            .finalize(
+                &queue,
+                vec![fireweed_engine::FinalizeOutcome::new(
+                    ids[0],
+                    fireweed_engine::FinalizeKind::Complete,
+                )],
+                UtcTimestamp::new(3, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
         let replay = backend.claim(request).await;
-        assert!(matches!(replay, Err(EngineError::RequestExpired)), "completed leases must never be replayed from retained record copies");
+        assert!(
+            matches!(replay, Err(EngineError::RequestExpired)),
+            "completed leases must never be replayed from retained record copies"
+        );
         backend.close_and_drain().await.unwrap();
     }
 

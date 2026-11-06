@@ -1560,8 +1560,12 @@ pub trait RecoveryReadPort: Send + Sync {
             }
             let mut output = Vec::with_capacity(keys.len());
             for chunk in keys.chunks(64) {
-                let results = futures::future::join_all(chunk.iter().map(|key| self.side_record(shard, key))).await;
-                for result in results { output.push(result?); }
+                let results =
+                    futures::future::join_all(chunk.iter().map(|key| self.side_record(shard, key)))
+                        .await;
+                for result in results {
+                    output.push(result?);
+                }
             }
             Ok(output)
         }

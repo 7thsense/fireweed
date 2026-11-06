@@ -224,7 +224,6 @@ pub use finalize_validation::{
     validate_rearm,
 };
 pub use port::{
-    SIDE_RECORD_BATCH_MAX_KEYS,
     AddressedMutation, AsOfProjectionStore, Backend, BatchUpdateEntry, BatchUpdateItemRef,
     BatchUpdateOutcome, BatchUpdatePort, BatchUpdateRequest, BatchUpdateResponse, BatchUpdateValue,
     BoundedMutationContext, ChangeRecordSink, ClaimByItemIdsResponse, ClaimByQueryContext,
@@ -243,11 +242,11 @@ pub use port::{
     PendingSummary, ProjectionRead, ProjectionSnapshot, PurgePort, PushBatchOutcome,
     PushDisposition, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver,
     ReclaimPort, RecoveryReadPort, RenewLeasePort, RequestIdReplayProbe, ReschedulePort,
-    RetainedItemView, SelectedMutation, SetGatesPort, SideRecordPage, SnapshotRef, SnapshotStore,
-    TerminalEmissionMetrics, TickReport, TimestampComparison, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort, generate_query_lease_token, is_api001_reserved_write_field,
-    validate_api001_reserved_write_fields, validate_distinct_commit_claims,
-    validate_instance_fence,
+    RetainedItemView, SIDE_RECORD_BATCH_MAX_KEYS, SelectedMutation, SetGatesPort, SideRecordPage,
+    SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport, TimestampComparison,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, generate_query_lease_token,
+    is_api001_reserved_write_field, validate_api001_reserved_write_fields,
+    validate_distinct_commit_claims, validate_instance_fence,
 };
 pub use schema_validation::{compile_entity_schema, validate_entity};
 pub use types::{CommandPosition, DurabilityClass, QueueKey};

@@ -143,8 +143,11 @@ trait FireweedDataPlane: Send + Sync {
         queue: &'a QueueKey,
         key: &'a [u8],
     ) -> FacadeFuture<'a, Option<Bytes>>;
-    fn side_records<'a>(&'a self, queue: &'a QueueKey, keys: &'a [Vec<u8>])
-        -> FacadeFuture<'a, Vec<Option<Bytes>>>;
+    fn side_records<'a>(
+        &'a self,
+        queue: &'a QueueKey,
+        keys: &'a [Vec<u8>],
+    ) -> FacadeFuture<'a, Vec<Option<Bytes>>>;
     fn side_records_by_prefix<'a>(
         &'a self,
         queue: &'a QueueKey,
@@ -775,8 +778,11 @@ impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
     ) -> FacadeFuture<'a, Option<Bytes>> {
         Box::pin(RuntimeCore::side_record(self, queue, key))
     }
-    fn side_records<'a>(&'a self, queue: &'a QueueKey, keys: &'a [Vec<u8>])
-        -> FacadeFuture<'a, Vec<Option<Bytes>>> {
+    fn side_records<'a>(
+        &'a self,
+        queue: &'a QueueKey,
+        keys: &'a [Vec<u8>],
+    ) -> FacadeFuture<'a, Vec<Option<Bytes>>> {
         Box::pin(RuntimeCore::side_records(self, queue, keys))
     }
     fn side_records_by_prefix<'a>(

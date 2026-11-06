@@ -1067,6 +1067,7 @@ fn split_group(id: &str, version: u64, priority: i64) -> CommitGroup {
     group
 }
 
+#[cfg(target_os = "linux")]
 async fn packed_original_races(s3: bool, cases: &[&str]) {
     use fireweed_core::queue_administration::*;
     for &kind in cases {
@@ -1307,6 +1308,7 @@ async fn packed_original_races(s3: bool, cases: &[&str]) {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn packed_submission_refreshes_middle_outside_and_fp4_originals_local() {
     packed_original_races(
@@ -1320,6 +1322,7 @@ async fn packed_submission_refreshes_middle_outside_and_fp4_originals_local() {
     )
     .await;
 }
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3() {
     packed_original_races(
@@ -1334,10 +1337,12 @@ async fn packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3() 
     .await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn packed_replay_head_advancement_retains_checked_floor_local() {
     packed_original_races(false, &["post-replay-head"]).await;
 }
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn packed_replay_head_advancement_retains_checked_floor_real_s3() {
     packed_original_races(true, &["post-replay-head"]).await;

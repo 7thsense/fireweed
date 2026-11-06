@@ -215,7 +215,10 @@ impl From<ProjectionImageItem> for ItemRecord {
             fields: Arc::new(item.fields),
             metadata: Arc::new(item.metadata),
             gate_keys: item.gate_keys,
-            entity_document: pack_entity_document(rehydrate_entity_document(item.entity_document, &item.index_fields)),
+            entity_document: pack_entity_document(rehydrate_entity_document(
+                item.entity_document,
+                &item.index_fields,
+            )),
             index_fields: Arc::new(item.index_fields),
             state: item.state,
             item_version: item.item_version,
@@ -265,7 +268,8 @@ impl ProjectionImage {
 }
 
 fn pack_entity_document(entity: Option<Value>) -> Option<Bytes> {
-    entity.map(|value| Bytes::from(serde_json::to_vec(&value).expect("valid entity JSON serializes")))
+    entity
+        .map(|value| Bytes::from(serde_json::to_vec(&value).expect("valid entity JSON serializes")))
 }
 
 impl ItemRecord {
@@ -2002,13 +2006,20 @@ impl ProjectionData {
         }
         let keys = {
             let rec = self.items.get(&item_id).ok_or(EngineError::NotFound)?;
-            self.record_entity_index_keys(&rec)?
+            self.record_entity_index_keys(rec)?
         };
         Ok(self.remember_framed_keys(item_id, keys))
     }
 
-    fn record_entity_index_keys(&self, record: &ItemRecord) -> EngineResult<Vec<(String, Vec<u8>)>> {
-        let entity = record.index_fields.is_empty().then(|| record.entity_value()).flatten();
+    fn record_entity_index_keys(
+        &self,
+        record: &ItemRecord,
+    ) -> EngineResult<Vec<(String, Vec<u8>)>> {
+        let entity = record
+            .index_fields
+            .is_empty()
+            .then(|| record.entity_value())
+            .flatten();
         self.record_index_keys(&record.fields, &record.index_fields, entity.as_ref())
     }
 
@@ -2101,8 +2112,7 @@ impl ProjectionData {
                 .or_default()
                 .insert(rec.item_id);
         }
-        let keys =
-            self.record_entity_index_keys(&rec)?;
+        let keys = self.record_entity_index_keys(&rec)?;
         self.insert_keys_into_both(rec.item_id, &keys);
         self.remember_framed_keys(rec.item_id, keys);
         self.retained_ids.insert(rec.item_id);
@@ -2333,7 +2343,7 @@ impl ProjectionData {
                 || !c.field_ops.is_empty()
                 || c.set_entity_document.is_some();
             let old_keys = if index_inputs_changed {
-                self.record_entity_index_keys(&rec)?
+                self.record_entity_index_keys(rec)?
             } else {
                 Vec::new()
             };
@@ -2346,7 +2356,10 @@ impl ProjectionData {
                 && !gate_keys_blocked(&self.blocked_gates, &rec.gate_keys))
             .then(|| EligibilityIndex::token(rec, &model));
 
-            let mut next_fields = c.set_fields.clone().unwrap_or_else(|| rec.fields.as_ref().clone());
+            let mut next_fields = c
+                .set_fields
+                .clone()
+                .unwrap_or_else(|| rec.fields.as_ref().clone());
             for (k, op) in &c.field_ops {
                 match op {
                     Some(v) => {
@@ -2643,7 +2656,7 @@ impl ProjectionData {
                                 .items
                                 .get(&mutation.item_id)
                                 .ok_or(EngineError::NotFound)?;
-                            let old_index_keys = self.record_entity_index_keys(&old)?;
+                            let old_index_keys = self.record_entity_index_keys(old)?;
                             if old.state == ItemState::Pending
                                 && !old.superseded
                                 && !gate_keys_blocked(&self.blocked_gates, &old.gate_keys)
@@ -2678,7 +2691,11 @@ impl ProjectionData {
                                 }
                             }
 
-                            let new_index_keys = self.record_index_keys(&values.fields, &values.index_fields, values.entity_document.as_ref())?;
+                            let new_index_keys = self.record_index_keys(
+                                &values.fields,
+                                &values.index_fields,
+                                values.entity_document.as_ref(),
+                            )?;
                             self.remember_framed_keys(mutation.item_id, new_index_keys.clone());
                             let record = self
                                 .items
@@ -2696,7 +2713,8 @@ impl ProjectionData {
                             record.metadata = Arc::new(values.metadata.clone());
                             record.gate_keys = values.gate_keys.clone();
                             record.index_fields = Arc::new(values.index_fields.clone());
-                            record.entity_document = pack_entity_document(values.entity_document.clone());
+                            record.entity_document =
+                                pack_entity_document(values.entity_document.clone());
                             if lease_ends {
                                 record.lease_token = None;
                                 record.lease_expires_at = None;
@@ -2864,9 +2882,7 @@ impl ProjectionData {
                 let superseded_keys = self
                     .items
                     .get(&c.superseded_item_id)
-                    .map(|rec| {
-                        self.record_entity_index_keys(&rec)
-                    })
+                    .map(|rec| self.record_entity_index_keys(rec))
                     .transpose()?;
                 let superseded_gate_keys = self
                     .items
@@ -3101,7 +3117,9 @@ fn mutation_predicate_matches(
                 return false;
             }
             let document = record.query_entity();
-            let actual = document.as_ref().and_then(|document| document.pointer(pointer));
+            let actual = document
+                .as_ref()
+                .and_then(|document| document.pointer(pointer));
             match value {
                 EntityPredicateValue::Missing => actual.is_none(),
                 EntityPredicateValue::Value(expected) => actual == Some(expected),
@@ -3471,7 +3489,11 @@ impl ProjectionData {
             let Some(values) = command.action.replacement_values() else {
                 continue;
             };
-            for (name, key) in self.record_index_keys(&values.fields, &values.index_fields, values.entity_document.as_ref())? {
+            for (name, key) in self.record_index_keys(
+                &values.fields,
+                &values.index_fields,
+                values.entity_document.as_ref(),
+            )? {
                 if matches!(self.indexes.get(&name), Some(SecondaryIndex::Unique(_)))
                     && let Some(other) = batch_unique.insert((name, key), command.item_id)
                     && other != command.item_id
@@ -4321,7 +4343,10 @@ impl ProjectionData {
                 }
             }
             let stored_entity = record.entity_value();
-            let entity = command.set_entity_document.as_ref().or(stored_entity.as_ref());
+            let entity = command
+                .set_entity_document
+                .as_ref()
+                .or(stored_entity.as_ref());
             match self.index_validate_with_entity(&command.item_id, &fields, entity, None) {
                 Ok(()) => {}
                 Err(EngineError::Conflict) => {
@@ -4599,7 +4624,11 @@ impl ProjectionData {
     pub fn index_validate_push(&self, items: &[PushItem]) -> EngineResult<()> {
         let mut batch: BTreeMap<(String, Vec<u8>), ItemId> = BTreeMap::new();
         for item in items {
-            for (name, key) in self.record_index_keys(&item.fields, &item.index_fields, item.entity_document.as_ref())? {
+            for (name, key) in self.record_index_keys(
+                &item.fields,
+                &item.index_fields,
+                item.entity_document.as_ref(),
+            )? {
                 let Some(SecondaryIndex::Unique(map)) = self.indexes.get(&name) else {
                     continue;
                 };

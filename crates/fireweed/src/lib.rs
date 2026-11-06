@@ -3374,6 +3374,7 @@ pub enum EntryOutcome {
 }
 
 /// How a [`RuntimeCore`] handle coordinates ownership (ADR-009 / TD-003 In-Process Library Owner-Runtime).
+#[allow(clippy::large_enum_variant)] // One value per handle, held for its lifetime.
 enum Coordination {
     /// Degenerate sole-owner: no control plane, constant ownership, never fences (`expected_epoch = None`).
     /// This is the default and keeps single-instance behaviour byte-identical.
@@ -4723,12 +4724,18 @@ impl<B: LibBackend> RuntimeCore<B> {
     }
 
     /// Positional point reads; larger public requests are bounded into backend chunks.
-    pub async fn side_records(&self, queue: &QueueKey, keys: &[Vec<u8>]) -> EngineResult<Vec<Option<Bytes>>> {
+    pub async fn side_records(
+        &self,
+        queue: &QueueKey,
+        keys: &[Vec<u8>],
+    ) -> EngineResult<Vec<Option<Bytes>>> {
         let mut output = Vec::with_capacity(keys.len());
         for chunk in keys.chunks(fireweed_engine::SIDE_RECORD_BATCH_MAX_KEYS) {
             let values = self.note(queue, self.backend.side_records(queue, chunk).await)?;
             if values.len() != chunk.len() {
-                return Err(EngineError::Storage("side-record batch length mismatch".into()));
+                return Err(EngineError::Storage(
+                    "side-record batch length mismatch".into(),
+                ));
             }
             output.extend(values);
         }
@@ -6368,15 +6375,21 @@ mod tests {
     #[cfg(feature = "memory")]
     mod cold_owner_session_tests {
         use super::*;
-        use crate::{Coordination, OwnedControlPlaneFuture, OwnedControlPlaneRuntime, OwnershipOutcome};
+        use crate::{
+            Coordination, OwnedControlPlaneFuture, OwnedControlPlaneRuntime, OwnershipOutcome,
+        };
 
         struct FirstTouchControl {
             calls: std::sync::Mutex<HashMap<QueueKey, usize>>,
             overlap: Option<Arc<tokio::sync::Barrier>>,
         }
         impl OwnedControlPlaneRuntime for FirstTouchControl {
-            fn establish(&self, queue: QueueKey, owner: OwnerId, _now: UtcTimestamp)
-                -> OwnedControlPlaneFuture<'_, OwnershipOutcome> {
+            fn establish(
+                &self,
+                queue: QueueKey,
+                owner: OwnerId,
+                _now: UtcTimestamp,
+            ) -> OwnedControlPlaneFuture<'_, OwnershipOutcome> {
                 Box::pin(async move {
                     let count = {
                         let mut calls = self.calls.lock().unwrap();
@@ -6385,56 +6398,88 @@ mod tests {
                         *count
                     };
                     if count > 1 {
-                        return Err(EngineError::Forbidden("duplicate acquisition of our live lease"));
+                        return Err(EngineError::Forbidden(
+                            "duplicate acquisition of our live lease",
+                        ));
                     }
                     tokio::task::yield_now().await;
-                    if let Some(barrier) = &self.overlap { barrier.wait().await; }
+                    if let Some(barrier) = &self.overlap {
+                        barrier.wait().await;
+                    }
                     Ok(OwnershipOutcome::Owned(OwnedSession {
-                        owner, queue, lease_epoch: 7, fence_epoch: 11,
+                        owner,
+                        queue,
+                        lease_epoch: 7,
+                        fence_epoch: 11,
                     }))
                 })
             }
-            fn resolve(&self, _queue: QueueKey, _now: UtcTimestamp)
-                -> OwnedControlPlaneFuture<'_, fireweed_engine::OwnerResolution> {
+            fn resolve(
+                &self,
+                _queue: QueueKey,
+                _now: UtcTimestamp,
+            ) -> OwnedControlPlaneFuture<'_, fireweed_engine::OwnerResolution> {
                 Box::pin(async { Err(EngineError::Invalid("unused test resolve")) })
             }
-            fn renew(&self, _owner: OwnerId, _renewals: Vec<fireweed_engine::LeaseRenewal>, _now: UtcTimestamp)
-                -> OwnedControlPlaneFuture<'_, Vec<LeaseRenewalOutcome>> {
+            fn renew(
+                &self,
+                _owner: OwnerId,
+                _renewals: Vec<fireweed_engine::LeaseRenewal>,
+                _now: UtcTimestamp,
+            ) -> OwnedControlPlaneFuture<'_, Vec<LeaseRenewalOutcome>> {
                 Box::pin(async { Ok(Vec::new()) })
             }
         }
         fn core(control: Arc<FirstTouchControl>) -> RuntimeCore<impl crate::LibBackend> {
             let mut runtime = RuntimeCore::with_control_plane_in_process(
-                Arc::new(crate::turso_memory_backend()), Arc::new(SystemClock),
-                OwnerId::new("first-touch-owner").unwrap(), Arc::new(InMemoryControlPlane::default()),
+                Arc::new(crate::turso_memory_backend()),
+                Arc::new(SystemClock),
+                OwnerId::new("first-touch-owner").unwrap(),
+                Arc::new(InMemoryControlPlane::default()),
             );
-            if let Coordination::Owner { control_plane_runtime, .. } = &mut runtime.coordination {
+            if let Coordination::Owner {
+                control_plane_runtime,
+                ..
+            } = &mut runtime.coordination
+            {
                 *control_plane_runtime = Some(control);
             }
             runtime
         }
         fn queue(name: &str) -> QueueKey {
-            QueueKey::new(TenantId::new("first-touch").unwrap(), QueueId::new(name).unwrap())
+            QueueKey::new(
+                TenantId::new("first-touch").unwrap(),
+                QueueId::new(name).unwrap(),
+            )
         }
         #[tokio::test]
         async fn cold_owner_first_touch_acquires_once_for_concurrent_same_queue() {
-            let control = Arc::new(FirstTouchControl { calls: Default::default(), overlap: None });
+            let control = Arc::new(FirstTouchControl {
+                calls: Default::default(),
+                overlap: None,
+            });
             let runtime = core(control.clone());
             let q = queue("q1s1");
-            let results = futures::future::join_all((0..8).map(|_| runtime.session_epoch(&q))).await;
+            let results =
+                futures::future::join_all((0..8).map(|_| runtime.session_epoch(&q))).await;
             assert!(results.into_iter().all(|r| r == Ok(Some(11))));
             assert_eq!(control.calls.lock().unwrap().get(&q), Some(&1));
         }
         #[tokio::test]
         async fn cold_owner_first_touch_keeps_independent_queues_concurrent() {
             let control = Arc::new(FirstTouchControl {
-                calls: Default::default(), overlap: Some(Arc::new(tokio::sync::Barrier::new(2))),
+                calls: Default::default(),
+                overlap: Some(Arc::new(tokio::sync::Barrier::new(2))),
             });
             let runtime = core(control.clone());
-            let a = queue("q1s1"); let b = queue("q1s2");
-            let results = tokio::time::timeout(Duration::from_secs(2),
-                futures::future::join_all([runtime.session_epoch(&a), runtime.session_epoch(&b)]))
-                .await.expect("independent queue acquisitions must overlap");
+            let a = queue("q1s1");
+            let b = queue("q1s2");
+            let results = tokio::time::timeout(
+                Duration::from_secs(2),
+                futures::future::join_all([runtime.session_epoch(&a), runtime.session_epoch(&b)]),
+            )
+            .await
+            .expect("independent queue acquisitions must overlap");
             assert!(results.into_iter().all(|r| r == Ok(Some(11))));
             assert_eq!(control.calls.lock().unwrap().len(), 2);
         }
