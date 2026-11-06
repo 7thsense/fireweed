@@ -4037,12 +4037,33 @@ impl ProjectionData {
 
     /// Filtered lifecycle metrics over the authoritative projection.
     pub fn metrics_by_query(&self, request: MetricsByQueryRequest) -> EngineResult<QueueMetrics> {
-        filtered_lifecycle_metrics(
+        let index = request
+            .index
+            .as_deref()
+            .or_else(|| {
+                self.typed_index_specs
+                    .first()
+                    .map(|spec| spec.name.as_str())
+            })
+            .ok_or(EngineError::Invalid("unknown secondary index"))?;
+        if request.filters.is_empty() {
+            filtered_lifecycle_metrics_by_index_key(
+                &self.typed_index_specs,
+                &request,
+                std::iter::empty(),
+            )?;
+            return Ok(self.metrics());
+        }
+        filtered_lifecycle_metrics_by_index_key(
             &self.typed_index_specs,
             &request,
-            self.items
-                .values()
-                .map(|rec| (rec.state, rec.superseded, rec.entity_document.as_ref())),
+            self.items.iter().filter_map(|(id, record)| {
+                self.framed_index_keys
+                    .get(id)?
+                    .iter()
+                    .find(|(name, _)| name == index)
+                    .map(|(_, key)| (record.state, record.superseded, key.as_slice()))
+            }),
         )
     }
 
@@ -5777,6 +5798,29 @@ mod tests {
             projection.items[&iid("1")].entity_document.is_none(),
             "insert stays compact"
         );
+        let metrics_query = MetricsByQueryRequest {
+            index: Some("by_kind".into()),
+            filters: vec![QueryFilter {
+                field: "kind".into(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("red".into()),
+            }],
+        };
+        assert_eq!(
+            projection
+                .metrics_by_query(metrics_query.clone())
+                .unwrap()
+                .pending,
+            1
+        );
+        let restored = ProjectionData::from_image(&definition, projection.to_image(None)).unwrap();
+        assert_eq!(
+            restored
+                .metrics_by_query(metrics_query.clone())
+                .unwrap()
+                .pending,
+            1
+        );
         let compact_projection = projection.clone();
         for value in ["red", "blue"] {
             let request = ItemMutationRequest {
@@ -5832,6 +5876,10 @@ mod tests {
             Some(serde_json::json!({"kind": "blue"}))
         );
 
+        assert_eq!(
+            projection.metrics_by_query(metrics_query).unwrap().pending,
+            0
+        );
         // Removing either a compact entity or a materialized one must also
         // remove its typed index membership and must remain absent on reads.
         for (mut projection, kind) in [(compact_projection, "red"), (projection, "blue")] {
