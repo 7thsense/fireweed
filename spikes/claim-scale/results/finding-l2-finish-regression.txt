@@ -1,0 +1,106 @@
+Methodology finding: L2 finish throughput collapse at 10M rows, root cause and
+fix (supersedes the "_pending_" L2 @ 10M cells in the doc's original Finding 6).
+
+SYMPTOM (results/l2-10m.jsonl, before the fix, preserved in git history):
+  finish, median finishes/s (3 trials): ~64.5-69.3 (vs 679.3 at 1M, vs L1's
+  577.2 at 10M). p99 latency 103.6-126.2 ms (vs p50 ~2.3-2.9 ms -- a fat
+  right tail, not a uniform slowdown). claim, extend and sweep were NOT
+  affected (claim p99 3.8-7.3 ms, extend and sweep in line with the 1M
+  numbers).
+
+CHECKED, PER THE TASK'S CHECKLIST, ALL RULED OUT:
+
+1. EXPLAIN QUERY PLAN for every statement in L2's finish, captured against
+   the REAL 10M-row db (not the small 2000-row calibration db `spike explain`
+   normally uses -- new `spike diag <layout> <db_path> <n_reps>` subcommand
+   opens an existing, already-ingested db and runs EXPLAIN + instrumented
+   reps against it directly):
+     DELETE FROM claims WHERE claim_id=?1
+       -> "SEARCH claims USING INTEGER PRIMARY KEY (rowid=?)"   -- correct.
+     UPDATE items INDEXED BY sqlite_autoindex_items_1 SET stage=?1,
+       claim_id=NULL, ... WHERE queue_no=?2 AND seq=?3 (the as-shipped,
+       pre-fix per-row form)
+       -> "SEARCH items USING INDEX sqlite_autoindex_items_1 (queue_no=? AND
+          seq=?)"   -- correct, already hinted per Finding 0.
+   Both statements already pick the right index at full scale. Index choice
+   and partial-index eligibility are NOT the cause.
+
+2. Interaction with WAL checkpoints: `spike diag` reports, per rep, the WAL
+   file size immediately before the `maybe_passive_checkpoint` call and
+   whether it actually issued `PRAGMA wal_checkpoint(PASSIVE)`. Across every
+   flagged slow rep in a 300-rep replay, `will_checkpoint=false` and the
+   checkpoint pragma call itself took 2-4 microseconds (it short-circuited on
+   the file-size check). The WAL never approached the 400 MiB
+   LOG_BACKED_CHECKPOINT_TRY_BYTES threshold during these trials -- it grew
+   from 0 to ~50 MB over 300 reps. WAL-checkpoint interaction is NOT the
+   cause.
+
+3. The claims-row delete or decrement: `claims_del_us` (the DELETE FROM
+   claims WHERE claim_id=?1 alone, isolated by instrumentation) was 0-150
+   microseconds in every single rep, including the ones where the SAME
+   transaction's item-row UPDATE was 60-120 ms. The claims table stays
+   near-empty throughout a run (claims are deleted on finish/sweep as fast as
+   they're created), confirmed via `SELECT count(*) FROM claims` returning 0
+   at the end of a full run. The claims delete is NOT the cause.
+
+ROOT CAUSE, CONFIRMED BY A CONTROLLED ABLATION:
+
+`spike diag l2 <l2-10m.db> 300` (replaying claim+finish cycles against the
+persisted, already-10M-row db) showed ~15% of write transactions (44/300)
+hitting a 60-120 ms stall, landing unpredictably on either `do_claim` or the
+finish item-row UPDATE -- both of which insert into the SAME
+~9.5-11M-entry `items_claim_idx` partial index (the claim-order index: "always
+Free" COMPLETED rows are members of it too, per the kernel contract, so at
+10M rows with a 95% COMPLETED split this index is nearly the whole table).
+The SAME replay against `l1-10m.db`, same host, same load window
+(load average 18-22 throughout, back to back with the L2 run), showed only
+2/300 (0.7%) -- a ~20x difference despite both layouts doing structurally
+equivalent `items_claim_idx` maintenance on finish.
+
+Ablation: raising `cache_size` from production's 128 MiB (-131072) to 1 GiB
+(-1048576) for the SAME L2 replay, SAME db, SAME host window, eliminated the
+stalls entirely (0/300). This isolates the mechanism to page-cache pressure,
+not a wrong plan or checkpoint interaction: L2's schema has two MORE B-tree
+structures than L1's (`claims` + `claims_expires_idx`, vs L1's single
+`items_lease_expiry_idx`) competing for the SAME fixed 128 MiB cache_size
+budget as `items_claim_idx` once that index no longer fits in it (at 10M
+rows, items_claim_idx alone needs on the order of 95,000+ leaf pages against
+a ~32,000-page cache budget -- it does not fit in EITHER layout, but L2's
+extra structures evict more of its hot upper-tree pages than L1's do).
+
+IMPLEMENTATION DEFECT FOUND AND FIXED (on top of, not instead of, the cache
+finding above): do_finish's L2 item-row UPDATE looped 100 individual by-PK
+statements (`WHERE queue_no=? AND seq=?`, one exec per claimed row) even
+though every row in one finish() call shares the SAME claim_id -- exactly the
+grouping key do_sweep's OWN clear-by-claim_id UPDATE already uses
+(`UPDATE items INDEXED BY items_claim_id_idx SET claim_id=NULL WHERE
+claim_id=?1 AND claim_id IS NOT NULL`, established in Finding 0). do_finish
+did not mirror this. Fixed to match: a single bulk
+`UPDATE items INDEXED BY items_claim_id_idx SET stage=?1, claim_id=NULL,
+version=version+1 WHERE claim_id=?2 AND claim_id IS NOT NULL` replaces the
+100-statement loop. Ablation (same 300-rep replay, production's real 128 MiB
+cache_size, no cache_size change): 44/300 (14.7%) -> 11/300 (3.7%) write
+transactions affected -- a real, worthwhile reduction, but NOT a full fix:
+residual stalls remain, split between `do_claim` (which still assigns
+lease/claim_id per row -- there is no pre-existing grouping key to bulk by
+before a claim is assigned) and the bulk finish UPDATE itself (a single
+statement can still touch up to 100 scattered leaf pages of the huge
+items_claim_idx to insert the finished rows at their new stage=COMPLETED
+position).
+
+HONEST CONCLUSION: the bulk-by-claim_id fix removes a genuine, self-inflicted
+inefficiency (100 statement executions instead of 1, inconsistent with the
+sweep's own established pattern) and measurably helps, but the deeper cause
+-- L2's extra small B-trees adding page-cache pressure against a
+already-oversized claim-order index under a FIXED, production-mirrored
+128 MiB cache_size -- is a genuine, if now smaller, property of the
+claims-table design at 10M+-row scale. It is reported in the doc as a
+Recommendation caveat, not swept under the fix. It gets MORE relevant, not
+less, at the owner's 100-queue/100M-row target shape (Finding 8), because all
+100 queues share ONE Turso file and hence ONE 128 MiB cache budget.
+
+Tooling added for this diagnosis (kept in spikes/claim-scale/src/main.rs,
+diagnostic-only, not part of the measured trial loop): `spike diag <l1|l2>
+<db_path> <n_reps>` (opens an existing db, no re-ingest, runs instrumented
+claim+finish reps with per-statement timing and WAL/checkpoint visibility;
+`FW_SPIKE_DIAG_CACHE_SIZE` env var overrides cache_size for ablation only).

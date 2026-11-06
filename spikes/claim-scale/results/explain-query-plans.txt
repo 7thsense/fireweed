@@ -1,0 +1,39 @@
+=== L1 explain (small calibration DB, 2000 rows) ===
+-- stage-BOUND claim select: SELECT seq FROM items INDEXED BY items_claim_idx WHERE queue_no=?1 AND stage=?2 AND lease_expires_at IS NULL ORDER BY rank, seq LIMIT 100
+   Text("SEARCH items USING INDEX items_claim_idx (queue_no=? AND stage=?)")
+-- L1 claim lease-set UPDATE (by PK): UPDATE items SET lease_token_hash=?1, lease_expires_at=?2 WHERE queue_no=?3 AND seq=?4
+   Text("SEARCH items USING INDEX sqlite_autoindex_items_1 (queue_no=? AND seq=?)")
+-- L1 finish UPDATE (by PK): UPDATE items SET stage=?1, lease_token_hash=NULL, lease_expires_at=NULL, version=version+1 WHERE queue_no=?2 AND seq=?3
+   Text("SEARCH items USING INDEX items_key_idx (queue_no=?)")
+-- L1 finish UPDATE, INDEXED BY sqlite_autoindex_items_1 forced: UPDATE items INDEXED BY sqlite_autoindex_items_1 SET stage=?1, lease_token_hash=NULL, lease_expires_at=NULL, version=version+1 WHERE queue_no=?2 AND seq=?3
+   Text("SEARCH items USING INDEX sqlite_autoindex_items_1 (queue_no=? AND seq=?)")
+-- stage-BLIND claim select (no stage predicate): SELECT seq FROM items WHERE queue_no=?1 AND lease_expires_at IS NULL ORDER BY rank, seq LIMIT 100
+   Text("SEARCH items USING INDEX items_claim_idx (queue_no=?)")
+   Text("USE SORTER FOR ORDER BY")
+-- stage-BLIND claim select, INDEXED BY forced: SELECT seq FROM items INDEXED BY items_claim_idx WHERE queue_no=?1 AND lease_expires_at IS NULL ORDER BY rank, seq LIMIT 100
+   Text("SEARCH items USING INDEX items_claim_idx (queue_no=?)")
+   Text("USE SORTER FOR ORDER BY")
+-- L1 sweep discovery: SELECT seq FROM items INDEXED BY items_lease_expiry_idx WHERE queue_no=?1 AND lease_expires_at IS NOT NULL AND lease_expires_at < ?2
+   Text("SEARCH items USING INDEX items_lease_expiry_idx (queue_no=? AND lease_expires_at<?)")
+
+=== L2 explain (small calibration DB, 2000 rows) ===
+-- stage-BOUND claim select: SELECT seq FROM items INDEXED BY items_claim_idx WHERE queue_no=?1 AND stage=?2 AND claim_id IS NULL ORDER BY rank, seq LIMIT 100
+   Text("SEARCH items USING INDEX items_claim_idx (queue_no=? AND stage=?)")
+-- L2 claim claim_id-set UPDATE (by PK): UPDATE items SET claim_id=?1 WHERE queue_no=?2 AND seq=?3
+   Text("SEARCH items USING INDEX sqlite_autoindex_items_1 (queue_no=? AND seq=?)")
+-- L2 finish UPDATE (by PK, unhinted) -- historical: Finding 0's original wrong-plan defect, no longer shipped: UPDATE items SET stage=?1, claim_id=NULL, version=version+1 WHERE queue_no=?2 AND seq=?3
+   Text("SEARCH items USING INDEX items_key_idx (queue_no=?)")
+-- L2 finish UPDATE, AS SHIPPED: bulk by claim_id via items_claim_id_idx (fixes the 10M-scale finish regression, mirrors do_sweep's own pattern): UPDATE items INDEXED BY items_claim_id_idx SET stage=?1, claim_id=NULL, version=version+1 WHERE claim_id=?2 AND claim_id IS NOT NULL
+   Text("SEARCH items USING INDEX items_claim_id_idx (claim_id=?)")
+-- L2 sweep clear-by-claim_id UPDATE: UPDATE items SET claim_id=NULL WHERE claim_id=?1
+   Text("SCAN items")
+-- L2 sweep clear-by-claim_id UPDATE, IS NOT NULL made explicit for the partial index: UPDATE items INDEXED BY items_claim_id_idx SET claim_id=NULL WHERE claim_id=?1 AND claim_id IS NOT NULL
+   Text("SEARCH items USING INDEX items_claim_id_idx (claim_id=?)")
+-- stage-BLIND claim select (no stage predicate): SELECT seq FROM items WHERE queue_no=?1 AND claim_id IS NULL ORDER BY rank, seq LIMIT 100
+   Text("SEARCH items USING INDEX items_claim_idx (queue_no=?)")
+   Text("USE SORTER FOR ORDER BY")
+-- stage-BLIND claim select, INDEXED BY forced: SELECT seq FROM items INDEXED BY items_claim_idx WHERE queue_no=?1 AND claim_id IS NULL ORDER BY rank, seq LIMIT 100
+   Text("SEARCH items USING INDEX items_claim_idx (queue_no=?)")
+   Text("USE SORTER FOR ORDER BY")
+-- L2 sweep discovery: SELECT claim_id FROM claims INDEXED BY claims_expires_idx WHERE expires_at < ?1
+   Text("SEARCH claims USING INDEX claims_expires_idx (expires_at<?)")

@@ -1,0 +1,17 @@
+load before large matrix:  13:19:37 up 9 days,  1:33,  8 users,  load average: 8.06, 7.06, 6.74
+== shared N=1 ==
+load:  13:19:37 up 9 days,  1:33,  8 users,  load average: 8.06, 7.06, 6.74
+[multi_claim:L2:shared] n_workers=1 ops_per_worker=100 selected_queues=[26, 33, 50, 88, 20, 100, 6, 78, 84, 24, 10, 69, 76, 93, 23, 98, 77, 45, 25, 58]
+== shared N=8 ==
+load:  13:19:38 up 9 days,  1:33,  8 users,  load average: 8.06, 7.06, 6.74
+[multi_claim:L2:shared] n_workers=8 ops_per_worker=100 selected_queues=[26, 33, 50, 88, 20, 100, 6, 78, 84, 24, 10, 69, 76, 93, 23, 98, 77, 45, 25, 58]
+== shared N=32 ==
+load:  13:19:41 up 9 days,  1:33,  8 users,  load average: 8.38, 7.14, 6.77
+[multi_claim:L2:shared] n_workers=32 ops_per_worker=100 selected_queues=[26, 33, 50, 88, 20, 100, 6, 78, 84, 24, 10, 69, 76, 93, 23, 98, 77, 45, 25, 58]
+== separate N=1 ==
+load:  13:19:58 up 9 days,  1:33,  8 users,  load average: 8.50, 7.23, 6.81
+[multi_claim:L2:separate] n_workers=1 ops_per_worker=100 selected_queues=[26, 33, 50, 88, 20, 100, 6, 78, 84, 24, 10, 69, 76, 93, 23, 98, 77, 45, 25, 58]
+== separate N=8 ==
+load:  13:19:58 up 9 days,  1:33,  8 users,  load average: 8.50, 7.23, 6.81
+[multi_claim:L2:separate] n_workers=8 ops_per_worker=100 selected_queues=[26, 33, 50, 88, 20, 100, 6, 78, 84, 24, 10, 69, 76, 93, 23, 98, 77, 45, 25, 58]
+load after large matrix:  13:20:01 up 9 days,  1:33,  8 users,  load average: 8.38, 7.23, 6.81

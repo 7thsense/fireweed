@@ -1,0 +1,80 @@
+=== variant=inline size=256B ===
+  ingest rep0: 50000 rows in 1.457s (34310 rows/s), 343 B/row
+  ingest rep1: 50000 rows in 0.720s (69489 rows/s), 343 B/row
+  ingest rep2: 50000 rows in 1.116s (44814 rows/s), 343 B/row
+=== variant=inline size=512B ===
+  ingest rep0: 50000 rows in 1.722s (29042 rows/s), 613 B/row
+  ingest rep1: 50000 rows in 1.739s (28747 rows/s), 613 B/row
+  ingest rep2: 50000 rows in 1.067s (46840 rows/s), 613 B/row
+=== variant=inline size=1024B ===
+  ingest rep0: 50000 rows in 3.069s (16293 rows/s), 1395 B/row
+  ingest rep1: 50000 rows in 2.245s (22268 rows/s), 1395 B/row
+  ingest rep2: 50000 rows in 2.331s (21451 rows/s), 1395 B/row
+=== variant=inline size=2048B ===
+  ingest rep0: 50000 rows in 5.476s (9131 rows/s), 4133 B/row
+  ingest rep1: 50000 rows in 8.829s (5663 rows/s), 4133 B/row
+  ingest rep2: 50000 rows in 8.686s (5757 rows/s), 4133 B/row
+=== variant=inline size=3072B ===
+  ingest rep0: 50000 rows in 8.674s (5765 rows/s), 4133 B/row
+  ingest rep1: 50000 rows in 6.445s (7758 rows/s), 4133 B/row
+  ingest rep2: 50000 rows in 6.562s (7620 rows/s), 4133 B/row
+=== variant=inline size=4096B ===
+  ingest rep0: 50000 rows in 7.285s (6863 rows/s), 4636 B/row
+  ingest rep1: 50000 rows in 7.560s (6613 rows/s), 4636 B/row
+  ingest rep2: 50000 rows in 7.444s (6717 rows/s), 4636 B/row
+=== variant=inline size=8192B ===
+  ingest rep0: 50000 rows in 13.754s (3635 rows/s), 8732 B/row
+  ingest rep1: 50000 rows in 11.548s (4330 rows/s), 8732 B/row
+  ingest rep2: 50000 rows in 11.320s (4417 rows/s), 8732 B/row
+=== variant=inline size=16384B ===
+  ingest rep0: 50000 rows in 21.369s (2340 rows/s), 16924 B/row
+  ingest rep1: 50000 rows in 23.998s (2084 rows/s), 16924 B/row
+  ingest rep2: 50000 rows in 23.052s (2169 rows/s), 16924 B/row
+=== variant=inline size=32768B ===
+  ingest rep0: 40000 rows in 31.280s (1279 rows/s), 33308 B/row [CUT OFF]
+  ingest rep1: 38000 rows in 30.904s (1230 rows/s), 33307 B/row [CUT OFF]
+  ingest rep2: 33000 rows in 30.205s (1093 rows/s), 33307 B/row [CUT OFF]
+=== variant=inline size=65536B ===
+  ingest rep0: 17000 rows in 33.762s (504 rows/s), 66075 B/row [CUT OFF]
+  ingest rep1: 14000 rows in 30.929s (453 rows/s), 66075 B/row [CUT OFF]
+  ingest rep2: 19000 rows in 31.934s (595 rows/s), 66075 B/row [CUT OFF]
+=== variant=offrow size=256B ===
+  ingest rep0: 50000 rows in 2.248s (22237 rows/s), 355 B/row
+  ingest rep1: 50000 rows in 2.043s (24474 rows/s), 355 B/row
+  ingest rep2: 50000 rows in 2.360s (21189 rows/s), 355 B/row
+=== variant=offrow size=512B ===
+  ingest rep0: 50000 rows in 2.586s (19338 rows/s), 668 B/row
+  ingest rep1: 50000 rows in 2.595s (19270 rows/s), 668 B/row
+  ingest rep2: 50000 rows in 2.941s (16998 rows/s), 668 B/row
+=== variant=offrow size=1024B ===
+  ingest rep0: 50000 rows in 3.803s (13148 rows/s), 1450 B/row
+  ingest rep1: 50000 rows in 4.160s (12018 rows/s), 1450 B/row
+  ingest rep2: 50000 rows in 4.987s (10027 rows/s), 1450 B/row
+=== variant=offrow size=2048B ===
+  ingest rep0: 50000 rows in 9.770s (5118 rows/s), 4187 B/row
+  ingest rep1: 50000 rows in 9.286s (5385 rows/s), 4187 B/row
+  ingest rep2: 50000 rows in 7.603s (6576 rows/s), 4187 B/row
+=== variant=offrow size=3072B ===
+  ingest rep0: 50000 rows in 7.680s (6510 rows/s), 4187 B/row
+  ingest rep1: 50000 rows in 7.325s (6826 rows/s), 4187 B/row
+  ingest rep2: 50000 rows in 7.526s (6643 rows/s), 4187 B/row
+=== variant=offrow size=4096B ===
+  ingest rep0: 50000 rows in 9.464s (5283 rows/s), 4691 B/row
+  ingest rep1: 50000 rows in 9.285s (5385 rows/s), 4691 B/row
+  ingest rep2: 50000 rows in 9.026s (5540 rows/s), 4691 B/row
+=== variant=offrow size=8192B ===
+  ingest rep0: 50000 rows in 14.336s (3488 rows/s), 8787 B/row
+  ingest rep1: 50000 rows in 16.973s (2946 rows/s), 8787 B/row
+  ingest rep2: 50000 rows in 13.967s (3580 rows/s), 8787 B/row
+=== variant=offrow size=16384B ===
+  ingest rep0: 50000 rows in 30.420s (1644 rows/s), 16979 B/row [CUT OFF]
+  ingest rep1: 49000 rows in 30.139s (1626 rows/s), 16979 B/row [CUT OFF]
+  ingest rep2: 50000 rows in 25.033s (1997 rows/s), 16979 B/row
+=== variant=offrow size=32768B ===
+  ingest rep0: 42000 rows in 30.111s (1395 rows/s), 33362 B/row [CUT OFF]
+  ingest rep1: 41000 rows in 30.821s (1330 rows/s), 33362 B/row [CUT OFF]
+  ingest rep2: 41000 rows in 30.751s (1333 rows/s), 33362 B/row [CUT OFF]
+=== variant=offrow size=65536B ===
+  ingest rep0: 25000 rows in 30.739s (813 rows/s), 66128 B/row [CUT OFF]
+  ingest rep1: 29000 rows in 32.115s (903 rows/s), 66129 B/row [CUT OFF]
+  ingest rep2: 28000 rows in 30.605s (915 rows/s), 66128 B/row [CUT OFF]
