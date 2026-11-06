@@ -23,6 +23,19 @@ pub use schema::*;
 pub use sql::*;
 pub use value::*;
 
+/// Bounded item-ID input for point seeks on composite keys. DISTINCT preserves
+/// IN semantics when a caller repeats an addressed item.
+pub fn addressed_item_ids_cte(count: usize, first_bind: usize) -> String {
+    assert!(count > 0 && first_bind > 0);
+    let values = (first_bind..first_bind + count)
+        .map(|bind| format!("(?{bind})"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "WITH requested_ids(requested_item_id) AS (VALUES {values}), requested AS (SELECT DISTINCT requested_item_id FROM requested_ids)"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

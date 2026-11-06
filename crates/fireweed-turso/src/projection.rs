@@ -613,9 +613,12 @@ async fn validate_secondary_indexes_on_insert(
         parameters.push(queue.to_string().into());
         let query = format!(
             "WITH incoming(index_name,index_key) AS (VALUES {}) \
-             SELECT 1 FROM fireweed_item_index existing JOIN incoming \
-             ON existing.index_name=incoming.index_name AND existing.index_key=incoming.index_key \
-             WHERE existing.tenant_id=? AND existing.queue_id=? LIMIT 1",
+             SELECT 1 FROM incoming WHERE EXISTS (\
+               SELECT 1 FROM fireweed_item_index existing \
+                 INDEXED BY fireweed_item_index_key_numeric_asc_idx \
+               WHERE existing.tenant_id=? AND existing.queue_id=? \
+                 AND existing.index_name=incoming.index_name \
+                 AND existing.index_key=incoming.index_key) LIMIT 1",
             values_rows(chunk.len(), 2)
         );
         if one_row(transaction, &query, parameters).await?.is_some() {
@@ -1506,14 +1509,12 @@ pub(crate) async fn server_pending_by_ids_on(
     }
     let mut by_id = HashMap::<ItemId, (i64, u32)>::with_capacity(ids.len());
     for chunk in ids.chunks(500) {
-        let placeholders = (0..chunk.len())
-            .map(|index| format!("?{}", index + 3))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT item_id,lease_expires_at,retry_count FROM fireweed_items \
-                 WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
-                 AND lease_expires_at IS NOT NULL AND item_id IN ({placeholders})"
+        let sql = addressed_rows_sql(
+            "fireweed_items",
+            "item_id,lease_expires_at,retry_count",
+            " AND lifecycle_state='Leased' AND lease_expires_at IS NOT NULL",
+            chunk.len(),
+            3,
         );
         let mut params = vec![
             shard.tenant_id.as_str().to_string().into(),
@@ -2224,6 +2225,19 @@ pub async fn materialize_grouped_cohort_claimed_on(
     materialize_claimed_on(connection, shard, ids, lease_token, lease_expires_at, None).await
 }
 
+pub(crate) fn addressed_rows_sql(
+    table: &str,
+    columns: &str,
+    extra: &str,
+    count: usize,
+    first_bind: usize,
+) -> String {
+    format!(
+        "{} SELECT {columns} FROM requested CROSS JOIN {table} INDEXED BY sqlite_autoindex_{table}_1 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=requested_item_id{extra}",
+        fireweed_relational::addressed_item_ids_cte(count, first_bind)
+    )
+}
+
 async fn materialize_claimed_on(
     connection: &Connection,
     shard: &QueueKey,
@@ -2256,10 +2270,6 @@ async fn materialize_claimed_on(
         ""
     };
     for chunk in ids.chunks(SQLITE_BIND_CAP.saturating_sub(id_bind).max(1)) {
-        let placeholders = (0..chunk.len())
-            .map(|index| format!("?{}", index + id_bind))
-            .collect::<Vec<_>>()
-            .join(",");
         let mut params = vec![
             shard.tenant_id.as_str().to_string().into(),
             shard.queue_id.as_str().to_string().into(),
@@ -2268,11 +2278,13 @@ async fn materialize_claimed_on(
             params.push(Value::Integer(due_at));
         }
         params.extend(chunk.iter().map(|id| id.to_string().into()));
-        let item_sql = format!(
-            "SELECT item_id,client_item_key,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,item_version,retry_count,priority,group_key,\
-             not_before,fields,metadata,max_attempts,entity_document,index_fields \
-             FROM fireweed_items \
-             WHERE tenant_id=?1 AND queue_id=?2 AND item_id IN ({placeholders}){due_clause}"
+        let item_sql = addressed_rows_sql(
+            "fireweed_items",
+            "item_id,client_item_key,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,item_version,retry_count,priority,group_key,\
+             not_before,fields,metadata,max_attempts,entity_document,index_fields",
+            due_clause,
+            chunk.len(),
+            id_bind,
         );
         for values in query_driver_value_rows(connection, item_sql, params.clone()).await? {
             let item = class_s_item_from_driver_row(&values, expires)?;
@@ -2282,9 +2294,12 @@ async fn materialize_claimed_on(
         if !gated {
             continue;
         }
-        let gate_sql = format!(
-            "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 \
-             AND queue_id=?2 AND item_id IN ({placeholders}) ORDER BY item_id,gate_key"
+        let gate_sql = addressed_rows_sql(
+            "fireweed_item_gates",
+            "item_id,gate_key",
+            " ORDER BY item_id,gate_key",
+            chunk.len(),
+            id_bind,
         );
         for values in query_driver_value_rows(connection, gate_sql, params).await? {
             let id = ItemId::new(text(&values[0])?).map_err(storage)?;
@@ -4323,10 +4338,6 @@ impl AsyncProjectionStore for TursoRelational {
             let mut item_rows = HashMap::<ItemId, Vec<Value>>::with_capacity(ids.len());
             let mut gate_keys = HashMap::<ItemId, Vec<String>>::new();
             for chunk in ids.chunks(500) {
-                let placeholders = (0..chunk.len())
-                    .map(|index| format!("?{}", index + 3))
-                    .collect::<Vec<_>>()
-                    .join(",");
                 let mut params = vec![
                     shard.tenant_id.as_str().to_string().into(),
                     shard.queue_id.as_str().to_string().into(),
@@ -4341,9 +4352,12 @@ impl AsyncProjectionStore for TursoRelational {
                     let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
                     item_rows.insert(id, row.values[1..].to_vec());
                 }
-                let gate_sql = format!(
-                    "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 \
-                     AND queue_id=?2 AND item_id IN ({placeholders}) ORDER BY item_id,gate_key"
+                let gate_sql = addressed_rows_sql(
+                    "fireweed_item_gates",
+                    "item_id,gate_key",
+                    " ORDER BY item_id,gate_key",
+                    chunk.len(),
+                    3,
                 );
                 for row in self.query(gate_sql, params).await.map_err(storage)? {
                     let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
@@ -4402,21 +4416,18 @@ impl AsyncProjectionStore for TursoRelational {
             let mut item_rows = HashMap::<ItemId, Vec<Value>>::with_capacity(visible.len());
             let mut gate_keys = HashMap::<ItemId, Vec<String>>::new();
             for chunk in visible.chunks(500) {
-                let placeholders = (0..chunk.len())
-                    .map(|index| format!("?{}", index + 3))
-                    .collect::<Vec<_>>()
-                    .join(",");
                 let mut params = vec![
                     shard.tenant_id.as_str().to_string().into(),
                     shard.queue_id.as_str().to_string().into(),
                 ];
                 params.extend(chunk.iter().map(|id| id.to_string().into()));
-                let item_sql = format!(
-                    "SELECT item_id,client_item_key,item_version,priority,group_key,not_before,\
-                     lease_expires_at,retry_count,max_attempts,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,fields,metadata,entity_document,index_fields \
-                     FROM fireweed_items \
-                     WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
-                     AND item_id IN ({placeholders})"
+                let item_sql = addressed_rows_sql(
+                    "fireweed_items",
+                    "item_id,client_item_key,item_version,priority,group_key,not_before,\
+                     lease_expires_at,retry_count,max_attempts,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,fields,metadata,entity_document,index_fields",
+                    " AND lifecycle_state='Leased'",
+                    chunk.len(),
+                    3,
                 );
                 for row in self
                     .query(item_sql, params.clone())
@@ -4426,9 +4437,12 @@ impl AsyncProjectionStore for TursoRelational {
                     let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
                     item_rows.insert(id, row.values[1..].to_vec());
                 }
-                let gate_sql = format!(
-                    "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 \
-                     AND queue_id=?2 AND item_id IN ({placeholders}) ORDER BY item_id,gate_key"
+                let gate_sql = addressed_rows_sql(
+                    "fireweed_item_gates",
+                    "item_id,gate_key",
+                    " ORDER BY item_id,gate_key",
+                    chunk.len(),
+                    3,
                 );
                 for row in self
                     .query(gate_sql, params.clone())
@@ -4438,9 +4452,12 @@ impl AsyncProjectionStore for TursoRelational {
                     let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
                     gate_keys.entry(id).or_default().push(text(&row.values[1])?);
                 }
-                let bearer_sql = format!(
-                    "SELECT item_id,lease_token FROM fireweed_lease_bearers \
-                     WHERE tenant_id=?1 AND queue_id=?2 AND item_id IN ({placeholders})"
+                let bearer_sql = addressed_rows_sql(
+                    "fireweed_lease_bearers",
+                    "item_id,lease_token",
+                    "",
+                    chunk.len(),
+                    3,
                 );
                 for row in self.query(bearer_sql, params).await.map_err(storage)? {
                     let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;

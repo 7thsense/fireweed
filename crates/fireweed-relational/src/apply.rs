@@ -1884,11 +1884,13 @@ fn check_secondary_unique_conflicts_batch(
             tx,
             &format!(
                 "WITH incoming(item_id,index_name,index_key) AS (VALUES {values}) \
-                     SELECT 1 FROM fireweed_item_index existing JOIN incoming \
-                       ON existing.index_name=incoming.index_name \
-                      AND existing.index_key=incoming.index_key \
-                      AND existing.item_id!=incoming.item_id \
-                     WHERE existing.tenant_id=? AND existing.queue_id=? LIMIT 1"
+                     SELECT 1 FROM incoming WHERE EXISTS (\
+                       SELECT 1 FROM fireweed_item_index existing \
+                         INDEXED BY fireweed_item_index_key_numeric_asc_idx \
+                       WHERE existing.tenant_id=? AND existing.queue_id=? \
+                         AND existing.index_name=incoming.index_name \
+                         AND existing.index_key=incoming.index_key \
+                         AND existing.item_id!=incoming.item_id) LIMIT 1"
             ),
             &parameters,
             |row| row.get(0),
@@ -1910,8 +1912,15 @@ fn insert_typed_index_rows_batch(
         .iter()
         .flat_map(|(item_id, keys)| keys.iter().map(move |(name, key)| (item_id, name, key)))
         .collect();
-    // Insert in index/key order so B-tree leaf splits stay sequential.
-    rows.sort_unstable_by(|a, b| a.1.cmp(b.1).then_with(|| a.2.cmp(b.2)));
+    // Match the complete covering-index order, including numeric item-id
+    // ties. Status and due-time keys often repeat across an entire campaign;
+    // leaving those ties unordered scatters inserts through both key trees.
+    rows.sort_unstable_by(|a, b| {
+        a.1.cmp(b.1)
+            .then_with(|| a.2.cmp(b.2))
+            .then_with(|| a.0.len().cmp(&b.0.len()))
+            .then_with(|| a.0.cmp(b.0))
+    });
     for chunk in rows.chunks(TYPED_INDEX_INSERT_CHUNK) {
         let values = vec!["(?,?,?,?,?)"; chunk.len()].join(",");
         let mut parameters = Vec::with_capacity(chunk.len() * 5);
@@ -1946,11 +1955,24 @@ pub fn delete_typed_index_rows(
     item_ids: &[String],
 ) -> EngineResult<()> {
     for chunk in item_ids.chunks(SQLITE_BATCH) {
-        let ph = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
-            "DELETE FROM fireweed_item_index \
+        let sql = if tx.prefer_point_updates() {
+            let values = (0..chunk.len())
+                .map(|i| format!("(?{})", i + 3))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "WITH requested(item_id) AS (VALUES {values}) \
+                DELETE FROM fireweed_item_index WHERE rowid IN (\
+                  SELECT i.rowid FROM requested r CROSS JOIN fireweed_item_index i \
+                  WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id=r.item_id)"
+            )
+        } else {
+            let ph = vec!["?"; chunk.len()].join(",");
+            format!(
+                "DELETE FROM fireweed_item_index \
              WHERE tenant_id=? AND queue_id=? AND item_id IN ({ph})"
-        );
+            )
+        };
         let mut p: Vec<RelValue> =
             vec![RelValue::Text(t.to_string()), RelValue::Text(q.to_string())];
         for id in chunk {
@@ -2823,10 +2845,17 @@ fn item_ids_in_state(
     let mut out = HashSet::new();
     for chunk in ids.chunks(SQLITE_BATCH) {
         let ph = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
-            "SELECT item_id FROM fireweed_items WHERE tenant_id=? AND queue_id=? \
+        let sql = if tx.prefer_point_updates() {
+            format!(
+                "{} SELECT item_id FROM requested CROSS JOIN fireweed_items INDEXED BY sqlite_autoindex_fireweed_items_1 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=requested_item_id AND lifecycle_state=?3",
+                crate::addressed_item_ids_cte(chunk.len(), 4)
+            )
+        } else {
+            format!(
+                "SELECT item_id FROM fireweed_items WHERE tenant_id=? AND queue_id=? \
              AND lifecycle_state=? AND item_id IN ({ph})"
-        );
+            )
+        };
         let mut params = vec![
             RelValue::Text(t.clone()),
             RelValue::Text(q.clone()),
@@ -2853,10 +2882,17 @@ fn item_ids_with_lease_hash(
     let mut out = HashSet::new();
     for chunk in ids.chunks(SQLITE_BATCH) {
         let ph = vec!["?"; chunk.len()].join(",");
-        let sql = format!(
-            "SELECT item_id FROM fireweed_items WHERE tenant_id=? AND queue_id=? \
+        let sql = if tx.prefer_point_updates() {
+            format!(
+                "{} SELECT item_id FROM requested CROSS JOIN fireweed_items INDEXED BY sqlite_autoindex_fireweed_items_1 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=requested_item_id AND lease_token_hash=?3",
+                crate::addressed_item_ids_cte(chunk.len(), 4)
+            )
+        } else {
+            format!(
+                "SELECT item_id FROM fireweed_items WHERE tenant_id=? AND queue_id=? \
              AND lease_token_hash=? AND item_id IN ({ph})"
-        );
+            )
+        };
         let mut params = vec![
             RelValue::Text(t.clone()),
             RelValue::Text(q.clone()),
