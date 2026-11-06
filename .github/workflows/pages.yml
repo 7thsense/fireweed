@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Validate and stage microsite (fail closed on broken links)
         run: bash scripts/ci/microsite-gate.sh
@@ -92,7 +92,7 @@ jobs:
       run:
         working-directory: scripts/site
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:

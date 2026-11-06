@@ -38,7 +38,7 @@ jobs:
       FIREWEED_GOVERNED_PRODUCT_LANE: "1"
       # product_release_readiness_claimed remains false until P13b proof exists.
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Rust 1.99.0
         run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy

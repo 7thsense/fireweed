@@ -38,7 +38,7 @@ jobs:
       evidence_commit: ${{ steps.identity.outputs.evidence_commit }}
       measured_source: ${{ steps.identity.outputs.measured_source }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
@@ -60,12 +60,12 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           path: preview-evidence
           ref: ${{ needs.channel.outputs.evidence_commit }}
           fetch-depth: 0
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           path: preview-source
           ref: ${{ needs.channel.outputs.measured_source }}
@@ -116,7 +116,7 @@ jobs:
 
       # Bootstrap a minimal clone solely to resolve tag → E without trusting ambient SHA as S.
       - name: Bootstrap repository for tag resolution
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           path: fireweed-bootstrap
           fetch-depth: 0
@@ -170,7 +170,7 @@ jobs:
           echo "Resolved release identity: tag=${id[tag]} V=${id[version]} E=${id[evidence_commit]} S=${id[measured_source]}"
 
       - name: Checkout evidence E (read-only promoted evidence)
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           path: fireweed-evidence
           ref: ${{ steps.identity.outputs.evidence_commit }}
@@ -234,7 +234,7 @@ jobs:
           chmod -R a-w fireweed-evidence || true
 
       - name: Checkout measured source S
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           path: fireweed-source
           ref: ${{ steps.identity.outputs.measured_source }}
