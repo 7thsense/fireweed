@@ -6,7 +6,6 @@ use fireweed_engine::{
 };
 
 pub struct ClaimReplayInput {
-    pub original: Option<fireweed_engine::queue_original_authority::AdmittedOriginalPosition>,
     pub genesis: OwnedQueueLogRecord,
     pub request: ClaimRequest,
     pub now: i64,
@@ -15,31 +14,6 @@ pub struct ClaimReplayInput {
     pub required_next_offset: u64,
     pub required_insertion_sequence: u64,
     pub required_last_record_epoch: u64,
-}
-impl ClaimReplayInput {
-    pub(super) fn original_descriptor(
-        &self,
-        job: &QueueReservation,
-    ) -> QueueResult<Option<Option<fireweed_engine::queue_original_authority::OriginalDescriptor>>>
-    {
-        self.original
-            .as_ref()
-            .map(|original| {
-                original.validate_domain(
-                    1,
-                    &self.request.queue,
-                    &self.request.request_id,
-                    &self.genesis,
-                    (
-                        self.required_next_offset,
-                        self.required_insertion_sequence,
-                        self.required_last_record_epoch,
-                    ),
-                    job,
-                )
-            })
-            .transpose()
-    }
 }
 pub struct AdmittedClaimReplay {
     records: Vec<ClaimedWork>,
@@ -162,7 +136,6 @@ impl NativeTransactionWork for ReplayWorker {
             connection,
             queue_id,
             request,
-            self.input.original_descriptor(&self.job)?,
         )
         .await?
         else {
@@ -187,9 +160,6 @@ impl NativeTransactionWork for ReplayWorker {
         let raw = bytes(&raw[0])?;
         if raw.len() as u64 != size {
             return Err(unknown("receipt length changed in snapshot"));
-        }
-        if let Some(Some(authority)) = self.input.original_descriptor(&self.job)? {
-            authority.verify_outcome(raw)?;
         }
         let receipt = view_claim_receipt(raw)?;
         if receipt.len() > u64::from(request.max_records) {
@@ -270,18 +240,15 @@ pub(super) async fn claim_receipt_size(
     connection: &Connection,
     queue_id: i64,
     request: &ClaimRequest,
-    authority: Option<Option<fireweed_engine::queue_original_authority::OriginalDescriptor>>,
+
 ) -> QueueResult<Option<u64>> {
-    use super::receipt_metadata::{
-        ReceiptDomain, ReceiptMetadata, read_receipt_metadata_with_authority,
-    };
-    match read_receipt_metadata_with_authority(
+    use super::receipt_metadata::{ReceiptDomain, ReceiptMetadata, read_receipt_metadata};
+    match read_receipt_metadata(
         connection,
         queue_id,
         ReceiptDomain::Claim,
         &request.request_id,
-        (3, request.fingerprint()?),
-        authority,
+        Some((3, request.fingerprint()?)),
     )
     .await?
     {

@@ -271,7 +271,6 @@ async fn hydrate(
         schema,
         super::group_authority::GroupRead {
             group: &group,
-            states: None,
             sequence,
         },
         job,
@@ -358,36 +357,14 @@ impl NativeTransactionWork for Worker {
         group.validate_for(&input.queue, schema, &input.limits)?;
         if matches!(self.mode, Mode::Publish { .. }) {
             let expected = (4, group.fingerprint(&input.queue)?);
-            let metadata = if let Some(original) = &input.original {
-                let descriptor = original.validate(
-                    &input.queue,
-                    &group.request_id,
-                    &input.genesis,
-                    (
-                        input.required_next_offset,
-                        input.required_insertion_sequence,
-                        input.required_last_record_epoch,
-                    ),
-                    &self.job,
-                )?;
-                super::receipt_metadata::read_original_metadata(
-                    connection,
-                    native.queue_id,
-                    &group.request_id,
-                    Some(expected),
-                    descriptor,
-                )
-                .await?
-            } else {
-                super::receipt_metadata::read_receipt_metadata(
-                    connection,
-                    native.queue_id,
-                    super::receipt_metadata::ReceiptDomain::Commit,
-                    &group.request_id,
-                    Some(expected),
-                )
-                .await?
-            };
+            let metadata = super::receipt_metadata::read_receipt_metadata(
+                connection,
+                native.queue_id,
+                super::receipt_metadata::ReceiptDomain::Commit,
+                &group.request_id,
+                Some(expected),
+            )
+            .await?;
             match metadata {
                 super::receipt_metadata::ReceiptMetadata::Absent => {}
                 super::receipt_metadata::ReceiptMetadata::Expired => {
@@ -413,26 +390,12 @@ impl NativeTransactionWork for Worker {
             measure_administrative_success_floor(&input.queue, native.definition.pin(), group)
                 .map_err(publication_error)?;
         let mut initial_charges = Vec::new();
-        if let Some(states) = &input.states {
-            states.validate(
-                &input.queue,
-                group,
-                &input.genesis,
-                (
-                    input.required_next_offset,
-                    input.required_insertion_sequence,
-                    input.required_last_record_epoch,
-                ),
-                &self.job,
-            )?;
-        }
         let mut initial = super::group_authority::load_group(
             connection,
             native.queue_id,
             schema,
             super::group_authority::GroupRead {
                 group,
-                states: input.states.as_ref(),
                 sequence: native.insertion_sequence,
             },
             &self.job,
