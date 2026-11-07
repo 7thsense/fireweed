@@ -138,6 +138,25 @@ async fn native_port_fixture_owned(
     clock: Arc<fireweed_conformance::queue_contract::TestClock>,
     ownership: QueueOwnership,
 ) -> NativeQueueStore {
+    native_port_fixture_sized(
+        root,
+        projection_name,
+        s3_prefix,
+        clock,
+        ownership,
+        256 << 20,
+    )
+    .await
+}
+/// As `native_port_fixture_owned`, with the pipeline's hard record bound.
+async fn native_port_fixture_sized(
+    root: &std::path::Path,
+    projection_name: &str,
+    s3_prefix: Option<&str>,
+    clock: Arc<fireweed_conformance::queue_contract::TestClock>,
+    ownership: QueueOwnership,
+    hard_record_bytes: u64,
+) -> NativeQueueStore {
     let store = native_log_fixture(root, s3_prefix);
     let workers = ScratchWorkers::new(2, 8).unwrap();
     let admission = QueueAdmission::new(1, 512 << 20).unwrap();
@@ -148,7 +167,7 @@ async fn native_port_fixture_owned(
     drop(job);
     let options = QueuePipelineOptions {
         operations: 128,
-        hard_record_bytes: 256 << 20,
+        hard_record_bytes,
     };
     options.validate().unwrap();
     let scratch = fireweed_queue_spool::ScratchRoot::open(root.join("scratch"), &workers)

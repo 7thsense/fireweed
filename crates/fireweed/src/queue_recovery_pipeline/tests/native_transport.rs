@@ -270,3 +270,41 @@ async fn namespace_elected_with_an_empty_head_is_absent_until_provisioned() {
         .unwrap();
     store.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oversized_genesis_is_a_definite_error_and_leaves_the_queue_absent() {
+    let env = Env::new("big-genesis", false);
+    let queue = env.address("q");
+    // The genesis record cannot fit a 64-byte bound.
+    let small = super::native_port_fixture_sized(
+        &env.root,
+        "small.db",
+        env.prefix.as_deref(),
+        env.clock.clone(),
+        env.ownership.handle("small"),
+        64,
+    )
+    .await;
+    let request = || ProvisionRequest {
+        queue: queue.clone(),
+        schema: suite::schema(),
+    };
+    assert_eq!(small.provision(request()).await, Err(QueueError::TooLarge));
+    // The owner did not loop on the error: the lease was given back.
+    let ordinary = env.open("ordinary.db").await;
+    assert_eq!(
+        ordinary
+            .read_commit(ReceiptReadRequest {
+                queue: queue.clone(),
+                request_ids: vec!["none".into()],
+                max_bytes: 1 << 20,
+            })
+            .await,
+        Err(QueueError::QueueNotFound)
+    );
+    ordinary.provision(request()).await.unwrap();
+    insert(&ordinary, &queue, 1).await;
+    assert_eq!(pending_items(&ordinary, &queue).await, 1);
+    small.shutdown().await.unwrap();
+    ordinary.shutdown().await.unwrap();
+}

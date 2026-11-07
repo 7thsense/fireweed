@@ -88,15 +88,19 @@ impl Plan for ProvisionPlan {
                 drop(source);
                 t.install(identity, writer);
             }
-            let genesis = encode_checked_genesis(
+            // Nothing is published yet: a definite error such as TooLarge goes
+            // back to the caller. The tenure keeps its fence over an empty head.
+            let genesis = match settle(encode_checked_genesis(
                 t.epoch,
                 &self.request.queue,
                 &definition,
                 &candidate_secret,
                 p.hard_record_bytes,
                 job,
-            )
-            .map_err(|_| Exit)?;
+            ))? {
+                Ok(genesis) => genesis,
+                Err(error) => return Ok(Err(error)),
+            };
             t.publish(p, genesis, 0, job).await?;
             Ok(Ok(()))
         })
