@@ -5,7 +5,7 @@ use super::ownership::TTL;
 use super::record_counts::{Env, commit, delta, grow, insert, now, reads};
 use super::*;
 use fireweed_conformance::queue_contract as suite;
-use fireweed_engine::queue_contract::QueueStore;
+use fireweed_engine::{AsyncQueueControlPlane, LeaseState, queue_contract::QueueStore};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -415,4 +415,34 @@ async fn long_batch_renews_instead_of_lapsing() {
     *a.pipeline_for_test().on_stage.lock().unwrap() = None;
     assert_eq!(pending_items(&a, &queue).await, 3 + 6);
     a.shutdown().await.unwrap();
+}
+
+async fn wait_for(what: &str, mut done: impl AsyncFnMut() -> bool) {
+    for _ in 0..200 {
+        if done().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropped_store_releases_its_lease() {
+    let env = Env::new("dropped", false);
+    let queue = env.address("q");
+    let a = env.open("a.db").await;
+    grow(&a, &queue, 4).await;
+    let key = owner::queue_key(&queue).unwrap();
+    assert_ne!(
+        env.ownership.plane.lease(&key).await.unwrap().state,
+        LeaseState::Unassigned
+    );
+    // No shutdown: the loop must neither keep the pipeline alive nor renew forever.
+    drop(a);
+    let plane = env.ownership.plane.clone();
+    wait_for("the dropped store's lease", async || {
+        plane.lease(&key).await.unwrap().state == LeaseState::Unassigned
+    })
+    .await;
 }

@@ -74,8 +74,8 @@ impl QueueOwnership {
     pub(super) fn clock(&self) -> Arc<dyn Clock> {
         self.clock.clone()
     }
-    fn stamp(&self) -> QueueResult<fireweed_core::UtcTimestamp> {
-        Ok(self.clock.now())
+    fn stamp(&self) -> fireweed_core::UtcTimestamp {
+        self.clock.now()
     }
 }
 
@@ -439,6 +439,7 @@ impl QueueRecoveryPipeline {
                 pipeline: Arc::downgrade(self),
                 address: address.clone(),
                 key,
+                ownership: self.ownership.clone(),
                 receiver,
                 pending: VecDeque::new(),
                 tenure: None,
@@ -483,7 +484,7 @@ impl QueueRecoveryPipeline {
     }
 }
 
-fn queue_key(address: &QueueAddress) -> QueueResult<QueueKey> {
+pub(super) fn queue_key(address: &QueueAddress) -> QueueResult<QueueKey> {
     use sha2::Digest;
     let digest = Sha256::digest(fireweed_engine::queue_namespace::encode_address(address)?);
     let mut name = String::from("q7-");
@@ -508,6 +509,9 @@ struct QueueLoop {
     pipeline: std::sync::Weak<QueueRecoveryPipeline>,
     address: QueueAddress,
     key: QueueKey,
+    /// The loop's own handle on the control plane, so it can renew and release
+    /// without keeping the pipeline alive.
+    ownership: QueueOwnership,
     receiver: UnboundedReceiver<Box<dyn QueueOp>>,
     pending: VecDeque<Box<dyn QueueOp>>,
     tenure: Option<Tenure>,
@@ -527,7 +531,7 @@ impl QueueLoop {
         }
     }
     /// Wait for an operation, or for `renew_at` when we own the queue.
-    async fn wait(&mut self, p: &QueueRecoveryPipeline) {
+    async fn wait(&mut self) {
         loop {
             self.take_queued();
             if !self.pending.is_empty() || self.closing {
@@ -536,7 +540,7 @@ impl QueueLoop {
             let wait = match &self.tenure {
                 None => None,
                 Some(t) => {
-                    let now = p.ownership.lease_clock.now();
+                    let now = self.ownership.lease_clock.now();
                     if now >= t.renew_at {
                         return;
                     }
@@ -559,18 +563,17 @@ impl QueueLoop {
     }
     async fn run(mut self) {
         loop {
+            self.wait().await;
+            // Upgrade only after waiting: an idle loop must not keep the pipeline alive.
             let Some(p) = self.pipeline.upgrade() else {
-                return;
+                break;
             };
-            self.wait(&p).await;
             if self.pending.is_empty() && self.closing {
                 break;
             }
             self.iterate(&p).await;
         }
-        if let Some(p) = self.pipeline.upgrade() {
-            self.release(&p).await;
-        }
+        self.release().await;
     }
     async fn iterate(&mut self, p: &Arc<QueueRecoveryPipeline>) {
         if self.tenure.is_none() {
@@ -655,14 +658,10 @@ impl QueueLoop {
             return;
         };
         let started = own.lease_clock.now();
-        let renewed = match own.stamp() {
-            Ok(now) => {
-                own.control
-                    .renew_queue_lease(&self.key, &own.owner, t.lease_epoch, now)
-                    .await
-            }
-            Err(_) => Err(fireweed_engine::EngineError::Unavailable),
-        };
+        let renewed = own
+            .control
+            .renew_queue_lease(&self.key, &own.owner, t.lease_epoch, own.stamp())
+            .await;
         match renewed {
             Ok(_) => {
                 t.deadline = started + own.ttl;
@@ -688,15 +687,13 @@ impl QueueLoop {
                 .await;
         }
     }
-    async fn release(&mut self, p: &Arc<QueueRecoveryPipeline>) {
+    async fn release(&mut self) {
         if let Some(t) = self.tenure.take() {
-            let own = &p.ownership;
-            if let Ok(now) = own.stamp() {
-                let _ = own
-                    .control
-                    .release_queue_lease(&self.key, &own.owner, t.lease_epoch, now)
-                    .await;
-            }
+            let own = &self.ownership;
+            let _ = own
+                .control
+                .release_queue_lease(&self.key, &own.owner, t.lease_epoch, own.stamp())
+                .await;
         }
     }
     async fn wait_lease_clock(p: &QueueRecoveryPipeline, until: Duration) {
@@ -734,12 +731,12 @@ impl QueueLoop {
             .await?;
         let mut requested = own.lease_clock.now();
         own.control
-            .register_owner(&own.owner, own.stamp()?)
+            .register_owner(&own.owner, own.stamp())
             .await
             .map_err(busy)?;
         let lease = match own
             .control
-            .acquire_queue_lease(&self.key, &own.owner, own.stamp()?)
+            .acquire_queue_lease(&self.key, &own.owner, own.stamp())
             .await
             .map_err(busy)?
         {
@@ -788,7 +785,7 @@ impl QueueLoop {
                         &self.key,
                         &own.owner,
                         lease.assignment_epoch,
-                        own.stamp()?,
+                        own.stamp(),
                     )
                     .await
                     .map_err(busy)?;
@@ -829,7 +826,7 @@ impl QueueLoop {
                             &self.key,
                             &own.owner,
                             lease.assignment_epoch,
-                            own.stamp()?,
+                            own.stamp(),
                         )
                         .await
                         .is_ok()
@@ -849,7 +846,7 @@ impl QueueLoop {
                     &self.key,
                     &own.owner,
                     lease.assignment_epoch,
-                    own.stamp()?,
+                    own.stamp(),
                 )
                 .await
                 .map_err(busy)?;
