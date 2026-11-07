@@ -10,6 +10,13 @@ pub(super) const RECORD_IDENTITY_BYTES: usize = 111;
 const DATA_FRAME_HEADER_BYTES: u64 = 24 + 224;
 // Current SDK ONB2 framing: eighty-byte header plus SHA-256 trailer.
 const BINDING_OVERHEAD_BYTES: u64 = 112;
+// What one owned queue's writer keeps charged to the native ledger between
+// appends: the right spine of the offset tree (at most seventeen decoded pages
+// of about seventeen KiB, the figure from the SDK's page layout, not measured
+// here) plus its head snapshots, rounded up.
+const OWNED_QUEUE_RETAINED_BYTES: u64 = 512 << 10;
+// Queues one process may own before the default ledger is too small.
+const OWNED_QUEUES: u64 = 1024;
 
 /// Explicit adapter execution and byte limits for bounded queue-log composition.
 #[derive(Clone, Copy, Debug)]
@@ -65,9 +72,12 @@ impl QueueNativeLogOptions {
             .ok_or_else(invalid)?;
         let bytes = match retained_bytes {
             Some(bytes) => bytes,
+            // Four frames in flight, 2 MiB for pages and metadata, and a
+            // retained spine for every queue a process may own.
             None => frame
                 .checked_mul(4)
                 .and_then(|n| n.checked_add(2 << 20))
+                .and_then(|n| n.checked_add(OWNED_QUEUE_RETAINED_BYTES * OWNED_QUEUES))
                 .ok_or_else(invalid)?,
         };
         let group_bytes = usize::try_from(frame).map_err(|_| invalid())?;

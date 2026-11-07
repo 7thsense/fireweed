@@ -181,11 +181,45 @@ async fn owner_write_reads_no_log(s3: bool, writes: usize) {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owner_write_reads_no_log_local() {
-    owner_write_reads_no_log(false, 300).await;
+    owner_write_reads_no_log(false, 1000).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owner_write_reads_no_log_real_s3() {
     owner_write_reads_no_log(true, 20).await;
+}
+
+/// After entry, neither writes nor the reads that follow them touch the log: no
+/// record read, no head read, no fence. The first append of a tenure reads the
+/// right spine of the log's index once, which these counters do not see.
+async fn owner_writes_then_reads_cost_nothing(s3: bool, writes: usize) {
+    let env = Env::new("write-read", s3);
+    let store = env.open("a.db").await;
+    let queue = env.address("q");
+    grow(&store, &queue, 2).await;
+    let before = now(&store);
+    for n in 0..writes {
+        if n % 2 == 0 {
+            insert(&store, &queue, 3000 + n).await;
+        } else {
+            commit(&store, &queue, 3000 + n).await;
+        }
+        if n % 5 == 4 {
+            reads(&store, &queue).await;
+        }
+    }
+    reads(&store, &queue).await;
+    let pending = super::owner_safety::pending_items(&store, &queue).await;
+    assert_eq!(pending, 1 + writes as u64);
+    assert_eq!(delta(&store, before), (0, 0, 0));
+    store.shutdown().await.unwrap();
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_writes_then_reads_cost_nothing_local() {
+    owner_writes_then_reads_cost_nothing(false, 100).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_writes_then_reads_cost_nothing_real_s3() {
+    owner_writes_then_reads_cost_nothing(true, 20).await;
 }
 
 async fn owner_read_reads_no_log(s3: bool, lengths: &[usize]) {
@@ -202,13 +236,11 @@ async fn owner_read_reads_no_log(s3: bool, lengths: &[usize]) {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owner_read_reads_no_log_local() {
-    // The 5000-record length returns with the transport change: setting up a log
-    // that long costs minutes on the manifest transport.
-    owner_read_reads_no_log(false, &[10, 1000]).await;
+    owner_read_reads_no_log(false, &[10, 1000, 5000]).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owner_read_reads_no_log_real_s3() {
-    owner_read_reads_no_log(true, &[10, 200]).await;
+    owner_read_reads_no_log(true, &[10, 5000]).await;
 }
 
 async fn reopen_rebuilds_from_log(s3: bool, len: usize) {

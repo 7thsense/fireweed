@@ -31,14 +31,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, Semaphore};
 
 use crate::s3_create_only::S3CreateOnlyPut;
-mod namespace;
-mod queue_append;
-mod queue_provision;
-mod queue_replay;
-pub use namespace::{Api007NamespaceIdentity, VerifiedApi007Namespace};
-pub use queue_append::AdmittedApi007Append;
-pub use queue_provision::{Api007GenesisRequest, ProvisionedApi007Genesis};
-pub use queue_replay::{AdmittedApi007Read, AdmittedApi007State, Api007ReadPlan};
 
 fn fresh_writer_id() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -418,52 +410,11 @@ fn valid_snapshot_ref_id(ref_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
-/// Process-local native API-007 provisioning capacity. Validation is pure and
-/// runs before local-directory creation, SDK construction or S3 probes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NativeLogOptions {
-    pub provision_operations: usize,
-    /// Inserted wait between unavailable-authority attempts. Zero yields; at
-    /// most seven waits are inserted. This does not bound physical I/O duration.
-    pub provision_retry_delay: Duration,
-}
-const NATIVE_PROVISION_ATTEMPTS: u32 = 8;
-impl Default for NativeLogOptions {
-    fn default() -> Self {
-        Self {
-            provision_operations: 64,
-            provision_retry_delay: Duration::from_millis(125),
-        }
-    }
-}
-impl NativeLogOptions {
-    pub fn validate(self) -> EngineResult<()> {
-        if self.provision_operations == 0
-            || self.provision_operations > tokio::sync::Semaphore::MAX_PERMITS
-        {
-            return Err(EngineError::Invalid("invalid native provisioning capacity"));
-        }
-        if self
-            .provision_retry_delay
-            .checked_mul(NATIVE_PROVISION_ATTEMPTS - 1)
-            .is_none_or(|wait| wait > OBJECT_LOG_PRE_POSITION_TIMEOUT)
-        {
-            return Err(EngineError::Invalid(
-                "invalid native provisioning retry delay",
-            ));
-        }
-        Ok(())
-    }
-}
-
 /// Fireweed log axis backed by crates.io object-log.
 pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     engine: Arc<LogEngine<S>>,
     blob: Arc<dyn BlobStore>,
-    namespace_origin: Arc<()>,
     raw_io_qualified: bool,
-    native_provision_tasks: Arc<tokio::sync::Semaphore>,
-    native_provision_retry_delay: Duration,
     /// In-process epoch cache (also written to blob for reopen).
     epochs: Arc<EpochCache>,
     high_water: Arc<HighWaterCache>,
@@ -489,16 +440,6 @@ pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
 impl ObjectLogEngineStore<ManifestSequencer> {
     /// Open a durable local-filesystem log under `root` (FIREWEED_OBJECT_LOG_ROOT).
     pub async fn open_local(root: impl AsRef<Path>, flush: FlushConfig) -> EngineResult<Self> {
-        Self::open_local_with_native_options(root, flush, NativeLogOptions::default()).await
-    }
-
-    /// Open with explicit provisioning capacity, validated before filesystem I/O.
-    pub async fn open_local_with_native_options(
-        root: impl AsRef<Path>,
-        flush: FlushConfig,
-        options: NativeLogOptions,
-    ) -> EngineResult<Self> {
-        options.validate()?;
         let root = root.as_ref();
         std::fs::create_dir_all(root).map_err(store_err)?;
         let root = std::fs::canonicalize(root).map_err(store_err)?;
@@ -571,12 +512,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         let store = Self {
             engine,
             blob,
-            namespace_origin: Arc::new(()),
             raw_io_qualified: true,
-            native_provision_tasks: Arc::new(tokio::sync::Semaphore::new(
-                options.provision_operations,
-            )),
-            native_provision_retry_delay: options.provision_retry_delay,
             epochs,
             high_water,
             high_water_appends: Mutex::new(HashMap::new()),
@@ -670,39 +606,6 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         })
     }
 
-    /// S3 open with explicit native capacity; invalid capacity performs no SDK or
-    /// network work. All other S3 storage qualification remains unchanged.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn open_s3_with_prefixes_and_native_options(
-        endpoint: &str,
-        region: &str,
-        bucket: &str,
-        access_key_id: &str,
-        secret_access_key: &str,
-        data_prefix: impl Into<String>,
-        meta_prefix: impl Into<String>,
-        flush: FlushConfig,
-        options: NativeLogOptions,
-    ) -> EngineResult<Self> {
-        Self::open_s3_with_prefixes_wrapping_blob_and_native_options(
-            endpoint,
-            region,
-            bucket,
-            access_key_id,
-            secret_access_key,
-            data_prefix,
-            meta_prefix,
-            flush,
-            options,
-            |blob| blob,
-        )
-        .await
-        .map(|mut store| {
-            store.raw_io_qualified = true;
-            store
-        })
-    }
-
     /// [`open_s3_with_prefixes`](Self::open_s3_with_prefixes) with the log's blob store wrapped
     /// before use, so a test can observe or delay object-log I/O. Queue-definition authority keeps
     /// its own create-only S3 client.
@@ -719,35 +622,6 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         flush: FlushConfig,
         wrap: impl FnOnce(Arc<dyn BlobStore>) -> Arc<dyn BlobStore>,
     ) -> EngineResult<Self> {
-        Self::open_s3_with_prefixes_wrapping_blob_and_native_options(
-            endpoint,
-            region,
-            bucket,
-            access_key_id,
-            secret_access_key,
-            data_prefix,
-            meta_prefix,
-            flush,
-            NativeLogOptions::default(),
-            wrap,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn open_s3_with_prefixes_wrapping_blob_and_native_options(
-        endpoint: &str,
-        region: &str,
-        bucket: &str,
-        access_key_id: &str,
-        secret_access_key: &str,
-        data_prefix: impl Into<String>,
-        meta_prefix: impl Into<String>,
-        flush: FlushConfig,
-        options: NativeLogOptions,
-        wrap: impl FnOnce(Arc<dyn BlobStore>) -> Arc<dyn BlobStore>,
-    ) -> EngineResult<Self> {
-        options.validate()?;
         let blob: Arc<dyn BlobStore> = wrap(Arc::new(object_log::S3BlobStore::new(
             endpoint,
             region,
@@ -779,13 +653,12 @@ impl ObjectLogEngineStore<ManifestSequencer> {
                 EngineError::Storage(detail) => open_store_err(endpoint, detail),
                 other => other,
             })?;
-        Self::open_with_blob_and_authority_and_native_options(
+        Self::open_with_blob_and_authority(
             blob,
             data_prefix,
             meta_prefix,
             flush,
             DefinitionAuthority::S3CreateOnly { put },
-            options,
         )
         .await
         .map_err(|err| match err {
@@ -829,26 +702,6 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         flush: FlushConfig,
         definition_authority: DefinitionAuthority,
     ) -> EngineResult<Self> {
-        Self::open_with_blob_and_authority_and_native_options(
-            blob,
-            data_prefix,
-            meta_prefix,
-            flush,
-            definition_authority,
-            NativeLogOptions::default(),
-        )
-        .await
-    }
-
-    async fn open_with_blob_and_authority_and_native_options(
-        blob: Arc<dyn BlobStore>,
-        data_prefix: impl Into<String>,
-        meta_prefix: impl Into<String>,
-        flush: FlushConfig,
-        definition_authority: DefinitionAuthority,
-        options: NativeLogOptions,
-    ) -> EngineResult<Self> {
-        options.validate()?;
         let data_prefix = data_prefix.into();
         let meta_prefix = meta_prefix.into();
         crate::storage_generation::reject_incompatible_storage_generation(
@@ -872,12 +725,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         let store = Self {
             engine,
             blob,
-            namespace_origin: Arc::new(()),
             raw_io_qualified: false,
-            native_provision_tasks: Arc::new(tokio::sync::Semaphore::new(
-                options.provision_operations,
-            )),
-            native_provision_retry_delay: options.provision_retry_delay,
             epochs: Arc::new(Mutex::new(HashMap::new())),
             high_water: Arc::new(Mutex::new(HashMap::new())),
             high_water_appends: Mutex::new(HashMap::new()),
@@ -1303,6 +1151,17 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
     }
 }
 
+#[cfg(test)]
+type PublicationHook = Arc<dyn Fn(&Path, bool, bool) + Send + Sync>;
+#[cfg(test)]
+static PUBLICATION_HOOK: Mutex<Option<PublicationHook>> = Mutex::new(None);
+#[cfg(test)]
+fn publication_hook(path: &Path, created: bool, synced: bool) {
+    let hook = PUBLICATION_HOOK.lock().unwrap().clone();
+    if let Some(hook) = hook {
+        hook(path, created, synced);
+    }
+}
 fn publish_local_definition(root: &Path, key: &str, bytes: &[u8]) -> EngineResult<bool> {
     let final_path = root.join(key);
     let parent = final_path
@@ -1333,7 +1192,7 @@ fn publish_local_definition(root: &Path, key: &str, bytes: &[u8]) -> EngineResul
         }
     };
     #[cfg(test)]
-    namespace::publication_hook(&final_path, created, false);
+    publication_hook(&final_path, created, false);
     std::fs::remove_file(&temp_path).map_err(store_err)?;
     // An EEXIST observer can otherwise outrun the winner's directory fsync.
     // Sync every ancestor so freshly created directory links are durable too.
@@ -1344,7 +1203,7 @@ fn publish_local_definition(root: &Path, key: &str, bytes: &[u8]) -> EngineResul
             .map_err(store_err)?;
         #[cfg(test)]
         if path == parent {
-            namespace::publication_hook(&final_path, created, true);
+            publication_hook(&final_path, created, true);
         }
         directory = path.parent();
     }
@@ -1546,20 +1405,6 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         expected_epoch: u64,
         encode: impl FnOnce() -> Result<(Bytes, i32), PackedAppendError>,
     ) -> Result<Vec<CommandPosition>, PackedAppendError> {
-        self.produce_payload_with_owner(shard, expected_epoch, encode, None, None, None)
-            .await
-    }
-
-    async fn produce_payload_with_owner(
-        &self,
-        shard: &QueueKey,
-        expected_epoch: u64,
-        encode: impl FnOnce() -> Result<(Bytes, i32), PackedAppendError>,
-        owner: Option<object_log::AppendOwner>,
-        job: Option<&Arc<fireweed_engine::queue_admission::QueueReservation>>,
-        expected_head: Option<i64>,
-    ) -> Result<Vec<CommandPosition>, PackedAppendError> {
-        let retain_completion = owner.is_some();
         let trace_started = Instant::now();
         let pre_budget =
             Duration::from_millis(self.pre_position_timeout_ms.load(Ordering::Relaxed));
@@ -1582,17 +1427,12 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             let wait_started = Instant::now();
             let metadata = permit.lock().await;
             self.lock_wait.record_append(wait_started.elapsed());
-            // Native conditional publication validates epoch and head together
-            // in the durable sequencer. Legacy epoch hints are not its authority.
-            if expected_head.is_none() {
-                let epoch = match job {
-                    Some(job) => self.load_epoch_admitted(shard, job).await,
-                    None => self.load_epoch(shard).await,
-                }
+            let epoch = self
+                .load_epoch(shard)
+                .await
                 .map_err(PackedAppendError::BeforePosition)?;
-                if epoch != expected_epoch {
-                    return Err(PackedAppendError::BeforePosition(EngineError::EpochFenced));
-                }
+            if epoch != expected_epoch {
+                return Err(PackedAppendError::BeforePosition(EngineError::EpochFenced));
             }
             let (payload, record_count) = encode()?;
             if record_count <= 0 {
@@ -1617,11 +1457,6 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 if let Some(observer) = self.timeout_phase_observer.lock().unwrap().as_ref() {
                     let _ = observer.send(1);
                 }
-                if retain_completion {
-                    // Finish any already-started preparation I/O, but never
-                    // submit a produce after the pre-position deadline.
-                    let _ = pre.await;
-                }
                 return Err(PackedAppendError::before_timeout());
             }
         };
@@ -1642,60 +1477,29 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         let post_metadata_started = std::sync::atomic::AtomicBool::new(false);
         let produced = async {
             let produce_started = Instant::now();
-            let outcome = match owner {
-                Some(owner) => match expected_head {
-                    Some(head) => {
-                        self.engine
-                            .produce_conditional_at_epoch(
-                                partition_key(shard),
-                                payload,
-                                record_count,
-                                (),
-                                expected_epoch,
-                                head,
-                                owner,
-                            )
-                            .await
+            let outcome = self
+                .engine
+                .produce_at_epoch(
+                    partition_key(shard),
+                    payload,
+                    record_count,
+                    (),
+                    Durability::Sequenced,
+                    expected_epoch,
+                )
+                .await
+                .map_err(|error| match error {
+                    object_log::ObjectLogError::Fenced { .. } => {
+                        PackedAppendError::BeforePosition(EngineError::EpochFenced)
                     }
-                    None => {
-                        self.engine
-                            .produce_owned_at_epoch(
-                                partition_key(shard),
-                                payload,
-                                record_count,
-                                (),
-                                Durability::Sequenced,
-                                expected_epoch,
-                                owner,
-                            )
-                            .await
+                    object_log::ObjectLogError::HeadRejected { expected, current } => {
+                        PackedAppendError::HeadRejected { expected, current }
                     }
-                },
-                None => {
-                    self.engine
-                        .produce_at_epoch(
-                            partition_key(shard),
-                            payload,
-                            record_count,
-                            (),
-                            Durability::Sequenced,
-                            expected_epoch,
-                        )
-                        .await
-                }
-            }
-            .map_err(|error| match error {
-                object_log::ObjectLogError::Fenced { .. } => {
-                    PackedAppendError::BeforePosition(EngineError::EpochFenced)
-                }
-                object_log::ObjectLogError::HeadRejected { expected, current } => {
-                    PackedAppendError::HeadRejected { expected, current }
-                }
-                other => PackedAppendError::PostPositionAmbiguous {
-                    shard: shard.clone(),
-                    reason: format!("{}; store={}", store_err(other), self.store_tag),
-                },
-            })?;
+                    other => PackedAppendError::PostPositionAmbiguous {
+                        shard: shard.clone(),
+                        reason: format!("{}; store={}", store_err(other), self.store_tag),
+                    },
+                })?;
             let produce_us = produce_started.elapsed().as_micros();
             post_metadata_started.store(true, Ordering::Relaxed);
             let metadata_started = Instant::now();
@@ -1741,12 +1545,6 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                     let _ = observer.send(if post_phase == "produce" { 2 } else { 3 });
                 }
 
-                if retain_completion {
-                    // Classification remains ambiguous even if completion later
-                    // succeeds. The owned worker must retain preparation state
-                    // through this terminal result; engine owners outlive ACK.
-                    let _ = produced.as_mut().await;
-                }
                 drop(produced);
 
                 if log_trace_enabled() {
@@ -2185,105 +1983,6 @@ mod tests {
             linger: std::time::Duration::ZERO,
             ..FlushConfig::default()
         }
-    }
-
-    #[tokio::test]
-    async fn api007_native_log_capacity_is_validated_before_local_or_s3_io() {
-        for provision_operations in [0, tokio::sync::Semaphore::MAX_PERMITS + 1] {
-            let options = super::NativeLogOptions {
-                provision_operations,
-                ..Default::default()
-            };
-            let root = temp_root("invalid-native-capacity");
-            assert!(matches!(
-                ObjectLogEngineStore::open_local_with_native_options(&root, zero_linger(), options)
-                    .await,
-                Err(EngineError::Invalid("invalid native provisioning capacity"))
-            ));
-            assert!(!root.exists());
-            let wrapped = std::cell::Cell::new(false);
-            assert!(matches!(
-                ObjectLogEngineStore::open_s3_with_prefixes_wrapping_blob_and_native_options(
-                    "http://127.0.0.1:9",
-                    "region",
-                    "bucket",
-                    "access",
-                    "secret",
-                    "data/",
-                    "meta/",
-                    zero_linger(),
-                    options,
-                    |blob| {
-                        wrapped.set(true);
-                        blob
-                    }
-                )
-                .await,
-                Err(EngineError::Invalid("invalid native provisioning capacity"))
-            ));
-            assert!(!wrapped.get());
-            assert!(matches!(
-                ObjectLogEngineStore::open_s3_with_prefixes_and_native_options(
-                    "http://127.0.0.1:9",
-                    "region",
-                    "bucket",
-                    "access",
-                    "secret",
-                    "data/",
-                    "meta/",
-                    zero_linger(),
-                    options
-                )
-                .await,
-                Err(EngineError::Invalid("invalid native provisioning capacity"))
-            ));
-        }
-        for provision_operations in [1, tokio::sync::Semaphore::MAX_PERMITS] {
-            super::NativeLogOptions {
-                provision_operations,
-                ..Default::default()
-            }
-            .validate()
-            .unwrap();
-        }
-        for provision_retry_delay in [Duration::from_secs(5), Duration::MAX] {
-            let options = super::NativeLogOptions {
-                provision_retry_delay,
-                ..Default::default()
-            };
-            let root = temp_root("invalid-native-retry-delay");
-            assert!(matches!(
-                ObjectLogEngineStore::open_local_with_native_options(&root, zero_linger(), options)
-                    .await,
-                Err(EngineError::Invalid(
-                    "invalid native provisioning retry delay"
-                ))
-            ));
-            assert!(!root.exists());
-            assert!(matches!(
-                ObjectLogEngineStore::open_s3_with_prefixes_and_native_options(
-                    "http://127.0.0.1:9",
-                    "region",
-                    "bucket",
-                    "access",
-                    "secret",
-                    "data/",
-                    "meta/",
-                    zero_linger(),
-                    options
-                )
-                .await,
-                Err(EngineError::Invalid(
-                    "invalid native provisioning retry delay"
-                ))
-            ));
-        }
-        super::NativeLogOptions {
-            provision_retry_delay: Duration::ZERO,
-            ..Default::default()
-        }
-        .validate()
-        .unwrap();
     }
 
     pub(super) fn qdef() -> QueueDefinition {
@@ -2789,162 +2488,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api007_transport_isolates_delimiter_addresses_and_replays_oversized_first_batch() {
-        use fireweed_core::queue_contract::QueueAddress;
-        use fireweed_engine::queue_namespace::{
-            decode_namespace, namespace_component, view_address,
-        };
-        let root = temp_root("api007-namespace");
-        struct Cleanup(std::path::PathBuf);
-        impl Drop for Cleanup {
+    async fn local_loser_syncs_directory_while_winner_is_paused_after_link() {
+        let root = temp_root("loser-fsync");
+        let key = "new/ancestors/identity.bin";
+        let expected_path = root.join(key);
+        let (linked_tx, linked_rx) = std::sync::mpsc::channel();
+        let (synced_tx, synced_rx) = std::sync::mpsc::channel();
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let gate = Arc::clone(&release);
+        *super::PUBLICATION_HOOK.lock().unwrap() = Some(Arc::new(move |path, created, synced| {
+            if path != expected_path {
+                return;
+            }
+            if created && !synced {
+                linked_tx.send(()).unwrap();
+                let (lock, cv) = &*gate;
+                let mut ready = lock.lock().unwrap();
+                while !*ready {
+                    ready = cv.wait(ready).unwrap();
+                }
+            }
+            if !created && synced {
+                synced_tx.send(()).unwrap();
+            }
+        }));
+        struct Reset;
+        impl Drop for Reset {
             fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
+                *super::PUBLICATION_HOOK.lock().unwrap() = None;
             }
         }
-        let _cleanup = Cleanup(root.clone());
-        let addresses = [
-            QueueAddress {
-                tenant: "a\0b".into(),
-                queue: "c".into(),
-            },
-            QueueAddress {
-                tenant: "a".into(),
-                queue: "b\0c".into(),
-            },
-            QueueAddress {
-                tenant: "a/b".into(),
-                queue: "β".into(),
-            },
-            QueueAddress {
-                tenant: "a".into(),
-                queue: "b/β".into(),
-            },
-        ];
-        let definitions: Vec<_> = addresses
-            .iter()
-            .map(|address| {
-                let mut definition = qdef();
-                definition.tenant_id = TenantId::new("api007").unwrap();
-                definition.queue_id = QueueId::new(namespace_component(address).unwrap()).unwrap();
-                definition
-            })
-            .collect();
-        let large = "X".repeat(5 * 1024 * 1024);
-        {
-            // Isolated root only: no old partition is remapped by this bridge.
-            let log = ObjectLogEngineStore::open_local(&root, zero_linger())
-                .await
-                .unwrap();
-            let command = |id: String| CommandEnvelope {
-                command_id: CommandId::new(id),
-                request_id: None,
-                request_fingerprint: None,
-                request_outcome: None,
-                item_ids: vec![],
-                command: QueueCommand::PauseQueue(Default::default()),
-                checksum: CommandChecksum(0),
-                created_at: UtcTimestamp::new(1, 0).unwrap(),
-            };
-            for (index, definition) in definitions.iter().enumerate() {
-                log.create_or_read_definition(definition.clone())
-                    .await
-                    .unwrap();
-                let shard =
-                    QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-                log.ensure_shard(shard.clone()).await.unwrap();
-                let mut epoch = 0;
-                for _ in 0..=index {
-                    epoch = log.acquire_epoch(shard.clone()).await.unwrap();
-                }
-                assert_eq!(epoch, index as u64 + 1);
-                log.append(
-                    shard.clone(),
-                    vec![command(if index == 0 {
-                        large.clone()
-                    } else {
-                        format!("first-{index}")
-                    })],
-                    epoch,
-                )
-                .await
-                .unwrap();
-            }
-            // Interleave partitions: every first batch is durable before any tail.
-            for (index, definition) in definitions.iter().enumerate() {
-                let shard =
-                    QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-                let epoch = index as u64 + 1;
-                let positions = log
-                    .append(shard.clone(), vec![command(format!("last-{index}"))], epoch)
-                    .await
-                    .unwrap();
-                log.set_emission_cursor(&shard, positions[0].clone())
-                    .await
-                    .unwrap();
-                for extra in 0..index {
-                    log.append(
-                        shard.clone(),
-                        vec![command(format!("extra-{index}-{extra}"))],
-                        epoch,
-                    )
-                    .await
-                    .unwrap();
-                }
-            }
-        }
-        let log = ObjectLogEngineStore::open_local(&root, zero_linger())
-            .await
-            .unwrap();
-        for (index, definition) in definitions.iter().enumerate() {
-            let decoded = decode_namespace(definition.queue_id.as_str()).unwrap();
-            let identity = view_address(&decoded).unwrap();
-            assert_eq!(identity.tenant, addresses[index].tenant);
-            assert_eq!(identity.queue, addresses[index].queue);
-            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            log.ensure_shard(shard.clone()).await.unwrap();
-            let epoch = log.current_epoch(shard.clone()).await.unwrap();
-            let first = log.read_from(shard.clone(), None, 1).await.unwrap();
-            assert_eq!(first.entries.len(), 1);
-            assert_eq!(first.entries[0].0.sequence, 0);
-            assert_eq!(epoch, index as u64 + 1);
-            assert_eq!(first.entries[0].0.backend_epoch, epoch);
-            let expected_first = if index == 0 {
-                large.clone()
-            } else {
-                format!("first-{index}")
-            };
-            assert_eq!(first.entries[0].1.command_id.0.as_str(), expected_first);
-            let second = log
-                .read_from(shard.clone(), first.next.clone(), 1)
-                .await
-                .unwrap();
-            assert_eq!(second.entries.len(), 1);
-            assert_eq!(second.entries[0].0.sequence, 1);
-            assert_eq!(
-                second.entries[0].1.command_id.0.as_str(),
-                format!("last-{index}")
-            );
-            assert_eq!(log.emission_cursor(&shard).await.unwrap(), second.next);
-            let mut from = second.next;
-            for extra in 0..index {
-                let page = log.read_from(shard.clone(), from, 1).await.unwrap();
-                assert_eq!(page.entries.len(), 1);
-                assert_eq!(page.entries[0].0.sequence, extra as u64 + 2);
-                assert_eq!(
-                    page.entries[0].1.command_id.0.as_str(),
-                    format!("extra-{index}-{extra}")
-                );
-                from = page.next;
-            }
-            assert_eq!(log.high_water(shard.clone()).await.unwrap(), from);
-            let end = log.read_from(shard, from, 1).await.unwrap();
-            assert!(end.entries.is_empty());
-            assert!(end.next.is_none());
-        }
+        let _reset = Reset;
+        let winner_root = root.clone();
+        let winner = tokio::task::spawn_blocking(move || {
+            super::publish_local_definition(&winner_root, key, b"winner")
+        });
+        let linked = linked_rx.recv_timeout(Duration::from_secs(5));
+        let loser_root = root.clone();
+        let loser =
+            std::thread::spawn(move || super::publish_local_definition(&loser_root, key, b"loser"));
+        let synced = synced_rx.recv_timeout(Duration::from_secs(5));
+        let (lock, cv) = &*release;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+        assert!(winner.await.unwrap().unwrap());
+        assert!(!loser.join().unwrap().unwrap());
+        linked.unwrap();
+        synced.unwrap();
+        assert_eq!(std::fs::read(root.join(key)).unwrap(), b"winner");
+        std::fs::remove_dir_all(root).unwrap();
     }
-
-    /// fireweed-481d3e43: reopen must not overwrite sealed data objects (object-log v0.3.1).
-    /// Large multi-command frames (~20KiB) are the snorri transition-commit shape.
     #[tokio::test]
     async fn local_log_reopen_preserves_large_batches_across_process_boundary() {
         let root = std::env::temp_dir().join(format!(

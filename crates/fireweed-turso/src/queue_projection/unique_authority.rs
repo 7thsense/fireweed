@@ -2,6 +2,10 @@
 use super::*;
 use fireweed_engine::queue_planner::{RecordIdentity, RecordSnapshot, UniqueIdentity};
 use std::collections::BTreeSet;
+// Stock Turso otherwise chooses q7_index_order for these lookups and scans the
+// whole index domain; the equal index seeks by digest.
+pub(super) const UNIQUE_OWNER_METADATA_SQL: &str = "SELECT CASE WHEN typeof(r.key)='blob' THEN length(r.key) ELSE -1 END,CASE WHEN typeof(r.id)='integer' THEN r.id ELSE NULL END,CASE WHEN typeof(r.queue_id)='integer' THEN r.queue_id ELSE NULL END,CASE WHEN typeof(r.collection)='integer' THEN r.collection ELSE NULL END,CASE WHEN typeof(r.active)='integer' THEN r.active ELSE NULL END FROM q7_indexes i INDEXED BY q7_index_equal LEFT JOIN q7_records r ON r.id=i.record_id WHERE i.queue_id=?1 AND i.collection=?2 AND i.index_no=?3 AND i.hash=?4 AND i.full_key=?5 AND i.is_unique=1";
+pub(super) const UNIQUE_OWNER_KEY_SQL: &str = "SELECT r.key FROM q7_indexes i INDEXED BY q7_index_equal JOIN q7_records r ON r.id=i.record_id WHERE i.queue_id=?1 AND i.collection=?2 AND i.index_no=?3 AND i.hash=?4 AND i.full_key=?5 AND i.is_unique=1";
 pub(super) async fn load_unique_authority(
     connection: &Connection,
     queue_id: i64,
@@ -50,7 +54,7 @@ pub(super) async fn load_unique_authority(
             blob(&digest),
             blob(&probe.full_sort_key),
         ];
-        let metadata=one(connection,"SELECT CASE WHEN typeof(r.key)='blob' THEN length(r.key) ELSE -1 END,CASE WHEN typeof(r.id)='integer' THEN r.id ELSE NULL END,CASE WHEN typeof(r.queue_id)='integer' THEN r.queue_id ELSE NULL END,CASE WHEN typeof(r.collection)='integer' THEN r.collection ELSE NULL END,CASE WHEN typeof(r.active)='integer' THEN r.active ELSE NULL END FROM q7_indexes i LEFT JOIN q7_records r ON r.id=i.record_id WHERE i.queue_id=?1 AND i.collection=?2 AND i.index_no=?3 AND i.hash=?4 AND i.full_key=?5 AND i.is_unique=1",params.clone(),5).await?;
+        let metadata = one(connection, UNIQUE_OWNER_METADATA_SQL, params.clone(), 5).await?;
         if let Some(metadata) = metadata {
             if integer(&metadata[1])? <= 0
                 || integer(&metadata[2])? != queue_id
@@ -70,7 +74,9 @@ pub(super) async fn load_unique_authority(
                         .ok_or(QueueError::TooLarge)?,
                 )?,
             );
-            let row=one(connection,"SELECT r.key FROM q7_indexes i JOIN q7_records r ON r.id=i.record_id WHERE i.queue_id=?1 AND i.collection=?2 AND i.index_no=?3 AND i.hash=?4 AND i.full_key=?5 AND i.is_unique=1",params,1).await?.ok_or_else(||unknown("unique owner disappeared"))?;
+            let row = one(connection, UNIQUE_OWNER_KEY_SQL, params, 1)
+                .await?
+                .ok_or_else(|| unknown("unique owner disappeared"))?;
             let key = std::str::from_utf8(bytes(&row[0])?)
                 .map_err(unknown)?
                 .to_owned();

@@ -27,7 +27,7 @@ use fireweed_engine::{
     queue_log_record::{QueueLogFormat, encode_checked_genesis},
     queue_schema_codec::AdmittedQueueDefinition,
 };
-use fireweed_objectlog::ObjectLogEngineStore;
+use fireweed_objectlog::queue_native_log::QueueNativeLog;
 use fireweed_queue_spool::ScratchWorkers;
 use fireweed_turso::queue_projection::QueueProjection;
 use sha2::Sha256;
@@ -42,14 +42,12 @@ fn unknown(message: &str) -> QueueError {
 #[derive(Debug, Clone, Copy)]
 pub struct QueuePipelineOptions {
     pub operations: usize,
-    pub metadata_bytes: usize,
     pub hard_record_bytes: u64,
 }
 impl QueuePipelineOptions {
     pub fn validate(&self) -> QueueResult<()> {
         if self.operations == 0
             || self.operations > Semaphore::MAX_PERMITS
-            || self.metadata_bytes == 0
             || self.hard_record_bytes == 0
         {
             return Err(QueueError::Invalid(
@@ -61,13 +59,12 @@ impl QueuePipelineOptions {
 }
 /// A pipeline owns its queues' loops; it has no blocking worker while awaiting stages.
 pub struct QueueRecoveryPipeline {
-    store: Arc<ObjectLogEngineStore>,
+    log: Arc<QueueNativeLog>,
     projection: Arc<QueueProjection>,
     workers: ScratchWorkers,
     scratch_root: Arc<fireweed_queue_spool::ScratchRoot>,
     scratch_quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
     operation_slots: Arc<Semaphore>,
-    metadata_bytes: usize,
     hard_record_bytes: u64,
     diagnostics: Arc<RecoveryCounters>,
     ownership: QueueOwnership,
@@ -97,7 +94,7 @@ struct OperationCompletion {
 }
 impl QueueRecoveryPipeline {
     pub fn new(
-        store: Arc<ObjectLogEngineStore>,
+        log: Arc<QueueNativeLog>,
         projection: Arc<QueueProjection>,
         workers: ScratchWorkers,
         options: QueuePipelineOptions,
@@ -107,13 +104,12 @@ impl QueueRecoveryPipeline {
     ) -> QueueResult<Arc<Self>> {
         options.validate()?;
         Ok(Arc::new(Self {
-            store,
+            log,
             projection,
             workers,
             scratch_root,
             scratch_quota,
             operation_slots: Arc::new(Semaphore::new(options.operations)),
-            metadata_bytes: options.metadata_bytes,
             hard_record_bytes: options.hard_record_bytes,
             diagnostics: Arc::new(RecoveryCounters::default()),
             ownership,

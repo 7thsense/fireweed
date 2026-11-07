@@ -1232,25 +1232,11 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "dc6d94d091bc8c206fb4",
+        "id": "fdfb24aca95cb95aeee9",
         "identity": "/// Signaled after the pack leader has published apply (or skipped it).",
-        "line": 139,
+        "line": 131,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-objectlog/src/log_engine_store.rs",
-        "status": "discovery_negative"
-      },
-      {
-        "category": "loud_skip",
-        "dependency_chain": [
-          "P3-P9/P15",
-          "P2f"
-        ],
-        "detail": "early_success=false",
-        "id": "f461140311ed59948a22",
-        "identity": "// Corrupt slots are never interpreted as collisions or skipped.",
-        "line": 147,
-        "owner": "P3-P9/P15",
-        "path": "crates/fireweed-objectlog/src/log_engine_store/namespace.rs",
         "status": "discovery_negative"
       },
       {
@@ -17028,6 +17014,146 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::native_transport::namespace_elected_with_an_empty_head_is_absent_until_provisioned",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_transport::namespace_elected_with_an_empty_head_is_absent_until_provisioned",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::native_transport::namespace_elected_with_an_empty_head_is_absent_until_provisioned"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::native_transport::oversized_genesis_is_a_definite_error_and_leaves_the_queue_absent",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_transport::oversized_genesis_is_a_definite_error_and_leaves_the_queue_absent",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::native_transport::oversized_genesis_is_a_definite_error_and_leaves_the_queue_absent"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::native_transport::rebuild_crosses_several_leaves_local",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_transport::rebuild_crosses_several_leaves_local",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::native_transport::rebuild_crosses_several_leaves_local"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::native_transport::rebuild_crosses_several_leaves_real_s3",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_transport::rebuild_crosses_several_leaves_real_s3",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::native_transport::rebuild_crosses_several_leaves_real_s3"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::native_transport::rejected_renewal_during_rebuild_is_busy",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_transport::rejected_renewal_during_rebuild_is_busy",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::native_transport::rejected_renewal_during_rebuild_is_busy"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::native_transport::runs_of_records_match_single_reads_local",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_transport::runs_of_records_match_single_reads_local",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::native_transport::runs_of_records_match_single_reads_local"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::native_transport::runs_of_records_match_single_reads_real_s3",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_transport::runs_of_records_match_single_reads_real_s3",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::native_transport::runs_of_records_match_single_reads_real_s3"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::operation_completion_releases_permit_before_terminal_notification_on_every_drop_path",
           "--",
           "--exact"
@@ -17495,6 +17621,46 @@
         "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::record_counts::owner_write_reads_no_log_real_s3",
         "target": "fireweed",
         "test_id": "queue_recovery_pipeline::tests::record_counts::owner_write_reads_no_log_real_s3"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::record_counts::owner_writes_then_reads_cost_nothing_local",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::record_counts::owner_writes_then_reads_cost_nothing_local",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::record_counts::owner_writes_then_reads_cost_nothing_local"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::record_counts::owner_writes_then_reads_cost_nothing_real_s3",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::record_counts::owner_writes_then_reads_cost_nothing_real_s3",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::record_counts::owner_writes_then_reads_cost_nothing_real_s3"
       },
       {
         "exact_invocation": [
@@ -119469,7 +119635,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "6676b83323527c337472ddb21a508eaaa7f486fe55d963e09c2630b0aca5ae27",
+  "source_inventory_sha256": "099d8cfd34bd54a34dc4970f88c341c7ccda7f758323a19031d91836a2486674",
   "workspaces": [
     {
       "listing_error_sha256": "",

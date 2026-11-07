@@ -45,12 +45,10 @@ listed benchmark/common sources and manifests/locks with their compiled bytes.
 HEAD and the dirty patch identify the remaining backend source snapshot. Source
 changes invalidate the report. Artifact-write failure preserves stdout evidence.
 
-The optional `zero-linger` diagnostic changes only native `FlushConfig.linger`
-to zero for both local and S3. It retains the budget controller and every other
-setting; PostgreSQL behavior is unchanged. Compare profiles with the same rebuilt
-executable, workload, and capacities on fresh roots, sequentially. The experiment
-isolates configured linger; it does not remove budget, durability, or recovery
-waiting and does not change production defaults.
+The optional `zero-linger` argument is accepted and recorded in the report, but
+it changes nothing: the native log has no flush linger, and PostgreSQL behavior
+is unchanged. Compare runs with the same rebuilt executable, workload, and
+capacities on fresh roots, sequentially.
 
 Native recovery diagnostics cover the interval after construction through owned
 shutdown, including warmup and verification. They count admitted framed records

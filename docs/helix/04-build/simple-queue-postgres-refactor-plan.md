@@ -146,19 +146,19 @@ configuration must integrate provisioning capacity and validate before external
 resource access. Scratch roots are resolved once and shared by cloned handles.
 
 Complete stock SDK memory-peak correspondence, cached integrity and bounded
-manifest retention/rewrite remain gates. In particular, native `typeof`/`length`
+index retention remain gates. In particular, native `typeof`/`length`
 can materialize overflow records before later per-key admission; opcode and
 corruption controls establish correctness, not a hard allocation bound. Settled
 release density, scale and cost workloads must qualify performance.
 
 The SDK provides required bounded metadata reads/conditional writes with exact
 provider/key/version tokens and source-buffer lifetime ownership. Its fixed-head
-reader/fencer is qualification-internal. Production reuse requires lazy immutable
-paged log indexes and a source-committed semantic summary covering originals,
-tombstones, payload descriptors, complete selection indexes and aggregates.
+reader/fencer is qualification-internal. The owner loop publishes through the native
+log (head CAS over a copy-on-write paged index), so a write rewrites no whole
+index. The source-committed semantic summary covering originals, tombstones,
+payload descriptors, complete selection indexes and aggregates stays off.
 Operations mint no per-operation proofs against that head; they serve from the
-projection. The current full-vector manifest and rebuild from genesis remain in
-use until those gates pass.
+projection. Rebuild from genesis remains in use, and the log is not truncated.
 
 The single Snorri adapter, diagnostics receiver integration, revised formal
 correspondence and matched settled release benchmarks remain required. Snorri

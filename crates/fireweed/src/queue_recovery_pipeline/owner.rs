@@ -12,15 +12,20 @@ use fireweed_engine::{
     AcquireOutcome, AsyncQueueControlPlane, Clock, LeaseState, QueueKey,
     queue_log_record::{QueueLogPayload, QueueLogRecordView},
 };
-use fireweed_objectlog::Api007NamespaceIdentity;
+use fireweed_objectlog::queue_native_log::{
+    QueueNativeNamespace, QueueNativeNamespaceIdentity, QueueNativeSubmit, QueueNativeWriter,
+};
 use futures::future::BoxFuture;
 use std::{collections::VecDeque, time::Duration};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 /// An operation whose own execution leaves owner state this many times fails.
 const MAX_ATTEMPTS: u32 = 3;
-/// Records read between lease checks during entry.
-const ENTRY_CHUNK: u64 = 256;
+/// Most records one read run asks for during entry. A run also ends at a leaf
+/// of the log's index, so this is a ceiling, not the usual run.
+const ENTRY_RUN_RECORDS: u64 = 256;
+/// Payload bytes one read run takes during entry, unless one record is larger.
+const ENTRY_RUN_BYTES: u64 = 8 << 20;
 
 /// Everything a pipeline needs to own queues by lease. Every store has one.
 #[derive(Clone)]
@@ -84,6 +89,8 @@ pub(super) enum Stage {
     BatchTaken,
     BeforeAppend,
     AfterRead,
+    /// One run of the rebuild has been applied.
+    RebuildRun,
 }
 
 /// Leave owner state: drop the projection, forget the position and fence, and
@@ -107,7 +114,11 @@ pub(super) struct Genesis {
 /// Position, fence and genesis authority of one owned queue.
 pub(super) struct Tenure {
     lease_epoch: u64,
-    identity: Api007NamespaceIdentity,
+    /// The queue's namespace, once it exists. Bound to each operation with no I/O.
+    identity: Option<QueueNativeNamespaceIdentity>,
+    /// The storage fence taken at entry or at provisioning. It holds no charge
+    /// of any operation, so it lives as long as the tenure.
+    writer: Option<QueueNativeWriter>,
     /// Writer epoch: the storage fence taken at entry.
     pub epoch: u64,
     pub next_offset: u64,
@@ -122,9 +133,27 @@ impl Tenure {
         &self,
         p: &QueueRecoveryPipeline,
         job: &Arc<QueueReservation>,
-    ) -> QueueResult<fireweed_objectlog::VerifiedApi007Namespace> {
-        p.store.rebind_api007_namespace(&self.identity, job)
+    ) -> QueueResult<QueueNativeNamespace> {
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or_else(|| unknown("queue namespace is not bound"))?;
+        p.log.rebind(identity, job)
     }
+    /// Take the fence that provisioning acquired.
+    pub(super) fn install(
+        &mut self,
+        identity: QueueNativeNamespaceIdentity,
+        writer: QueueNativeWriter,
+    ) {
+        self.epoch = writer.epoch();
+        self.identity = Some(identity);
+        self.writer = Some(writer);
+    }
+    pub(super) fn has_writer(&self) -> bool {
+        self.writer.is_some()
+    }
+
     pub(super) fn point(&self) -> (u64, u64, u64) {
         (
             self.next_offset,
@@ -200,40 +229,46 @@ impl Tenure {
             job,
         )
         .map_err(|_| Exit)?;
-        let namespace = p
-            .store
-            .rebind_api007_namespace(&self.identity, job)
-            .map_err(|_| Exit)?;
+        let namespace = self.namespace(p, job).map_err(|_| Exit)?;
+        let writer = self.writer.as_mut().ok_or(Exit)?;
+        if writer.epoch() != epoch || writer.next_offset() != expected_head {
+            return Err(Exit);
+        }
         #[cfg(test)]
         p.stage(Stage::BeforeAppend);
-        let appended = p
-            .store
-            .append_api007_record(namespace, record, expected_head, job, &p.workers)
-            .await;
+        let publication = writer
+            .prepare_record(&p.log, &namespace, &record, job)
+            .await
+            .map_err(|_| Exit)?;
+        let submitted = p.log.submit(&publication).await;
         #[cfg(test)]
-        let appended = if p
+        let submitted = if p
             .lose_append_reply
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            assert!(
-                appended
-                    .as_ref()
-                    .is_ok_and(|result| result.outcome().is_ok())
-            );
-            // The real append completed; suppress only its returned classification.
+            assert!(matches!(submitted, Ok(QueueNativeSubmit::Stored(_))));
+            // The real publish completed; suppress only its returned classification.
             Err(unknown("injected lost durable append reply"))
         } else {
-            appended
+            submitted
         };
-        let stored = matches!(
-            appended.as_ref().map(|result| result.outcome()),
-            Ok(Ok(position)) if position.backend_epoch == epoch
-                && position.sequence == expected_head
-        );
-        drop(appended);
-        if !stored {
+        // Only a stored direct successor is success. A conflict, an error or any
+        // other head leaves owner state.
+        let Ok(QueueNativeSubmit::Stored(stored)) = submitted else {
+            return Err(Exit);
+        };
+        if stored.epoch() != epoch || stored.bounds().1 != expected_head + 1 {
             return Err(Exit);
         }
+        let advanced = p
+            .log
+            .advance(writer, &publication)
+            .await
+            .map_err(|_| Exit)?;
+        if advanced != stored {
+            return Err(Exit);
+        }
+        drop((publication, namespace, record));
         self.apply(p, frozen, expected_head, job)
             .await
             .map_err(|_| Exit)
@@ -781,16 +816,10 @@ impl QueueLoop {
         *acquired = Some(lease.assignment_epoch);
         // Always wait, with no check of whether there was a previous owner.
         Self::wait_lease_clock(p, own.lease_clock.now() + own.skew).await;
-        let namespace = p.store.bind_api007_namespace(&self.address, job).await?;
-        let identity = namespace.identity();
-        p.diagnostics.head_read();
-        let head = p
-            .store
-            .read_api007_state(namespace, job, &p.workers)
-            .await?;
         let mut tenure = Tenure {
             lease_epoch: lease.assignment_epoch,
-            identity,
+            identity: None,
+            writer: None,
             epoch: 0,
             next_offset: 0,
             insertion_sequence: 0,
@@ -799,21 +828,20 @@ impl QueueLoop {
             deadline: Duration::ZERO,
             renew_at: Duration::ZERO,
         };
-        // With no queue yet there is nothing to fence or read; provisioning fences.
-        let absent = head.state().next_offset == 0 && head.state().log_start == 0;
-        if !absent {
+        // With no namespace there is nothing to fence or read; provisioning fences.
+        // An existing namespace is always fenced. An empty head means nothing to
+        // rebuild: the tenure keeps the writer for provisioning.
+        if let Some(namespace) = p.log.open(&self.address, job).await? {
+            p.diagnostics.head_read();
             p.diagnostics.fence_acquire();
-            let acquired = p
-                .store
-                .acquire_api007_state(head.into_namespace(), job, &p.workers)
-                .await?;
-            let state = acquired.state();
-            if state.log_start != 0 || state.next_offset < 1 {
+            let (writer, source) = p.log.acquire_bundle(namespace, job).await?.into_parts();
+            let (log_start, target) = source.head().bounds();
+            if log_start != 0 {
                 return Err(unknown("complete genesis history unavailable"));
             }
-            tenure.epoch = state.epoch;
-            let target =
-                u64::try_from(state.next_offset).map_err(|_| unknown("invalid acquired head"))?;
+            tenure.epoch = writer.epoch();
+            tenure.identity = Some(source.identity());
+            tenure.writer = Some(writer);
             if lease.state == LeaseState::PendingFence {
                 own.control
                     .confirm_queue_lease_fence(
@@ -826,33 +854,37 @@ impl QueueLoop {
                     .map_err(busy)?;
             }
             let mut renewed_at = requested;
-            let mut chunk = 0u64;
             while tenure.next_offset < target {
                 span.phase(diagnostics::RecoveryPhase::PlannedRead);
                 let offset = tenure.next_offset;
-                let plan = p.store.plan_api007_read(
-                    acquired.namespace(),
-                    offset,
-                    p.metadata_bytes,
-                    job,
-                )?;
-                let read = plan
-                    .read(&p.workers, p.hard_record_bytes)
-                    .await?
-                    .ok_or_else(|| unknown("early EOF before acquired target"))?;
-                let (actual, record) = read.into_record(job)?;
-                span.record(record.bytes().len());
-                if actual != offset {
-                    return Err(unknown("record offset mismatch"));
+                let remaining = target - offset;
+                let run = source
+                    .read_run(
+                        &p.log,
+                        offset,
+                        usize::try_from(remaining.min(ENTRY_RUN_RECORDS))
+                            .map_err(|_| unknown("invalid read run"))?,
+                        ENTRY_RUN_BYTES,
+                        p.hard_record_bytes,
+                        job,
+                    )
+                    .await?;
+                if run.is_empty() {
+                    return Err(unknown("early EOF before acquired target"));
                 }
-                span.phase(diagnostics::RecoveryPhase::CheckedFold);
-                tenure.check(&record, offset)?;
-                span.phase(diagnostics::RecoveryPhase::NativeApply);
-                p.projection.apply(record, offset, job, &p.workers).await?;
-                chunk += 1;
-                if chunk.is_multiple_of(ENTRY_CHUNK)
-                    && own.lease_clock.now() >= renewed_at + own.ttl / 2
-                {
+                if run.len() as u64 > remaining {
+                    return Err(unknown("read run passes acquired target"));
+                }
+                for (at, record) in (offset..).zip(run) {
+                    span.record(record.bytes().len());
+                    span.phase(diagnostics::RecoveryPhase::CheckedFold);
+                    tenure.check(&record, at)?;
+                    span.phase(diagnostics::RecoveryPhase::NativeApply);
+                    p.projection.apply(record, at, job, &p.workers).await?;
+                }
+                #[cfg(test)]
+                p.stage(Stage::RebuildRun);
+                if own.lease_clock.now() >= renewed_at + own.ttl / 2 {
                     // A long rebuild keeps the lease it is building under.
                     let started = own.lease_clock.now();
                     match own
