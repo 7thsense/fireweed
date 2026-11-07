@@ -135,6 +135,8 @@ async fn new_owner_waits_ttl_plus_skew() {
         .open_with("b.db", env.ownership.handle_with_skew("b", skew))
         .await;
     grow(&a, &queue, 4).await;
+    // The first owner must stall: a renewal would keep refusing the second handle.
+    env.ownership.plane.fail_renew.store(true, Ordering::SeqCst);
     // While the first lease is live the second handle is refused.
     env.ownership.advance(TTL - SECOND);
     assert_eq!(stats(&b, &queue).await.err(), Some(QueueError::Busy));
@@ -147,6 +149,7 @@ async fn new_owner_waits_ttl_plus_skew() {
     };
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!waiting.is_finished(), "served before the skew allowance");
+    env.ownership.plane.fail_renew.store(false, Ordering::SeqCst);
     env.ownership.lease_clock.advance(skew);
     let served = tokio::time::timeout(Duration::from_secs(30), waiting)
         .await
