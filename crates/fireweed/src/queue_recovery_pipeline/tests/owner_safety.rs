@@ -149,7 +149,10 @@ async fn new_owner_waits_ttl_plus_skew() {
     };
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!waiting.is_finished(), "served before the skew allowance");
-    env.ownership.plane.fail_renew.store(false, Ordering::SeqCst);
+    env.ownership
+        .plane
+        .fail_renew
+        .store(false, Ordering::SeqCst);
     env.ownership.lease_clock.advance(skew);
     let served = tokio::time::timeout(Duration::from_secs(30), waiting)
         .await
