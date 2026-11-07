@@ -98,8 +98,13 @@ pub(super) async fn commit(store: &NativeQueueStore, queue: &QueueAddress, n: us
         GroupOutcome::Committed { .. }
     ));
 }
-/// Provision, then alternate inserts and commits until the log has `len` records.
-pub(super) async fn grow(store: &NativeQueueStore, queue: &QueueAddress, len: usize) {
+/// Provision, then alternate inserts and commits, `len` operations in all. Returns
+/// the number of log records that took: operations queued together share a
+/// record, so it is at most `len`.
+pub(super) async fn grow(store: &NativeQueueStore, queue: &QueueAddress, len: usize) -> u64 {
+    let pipeline = store.pipeline_for_test();
+    let published = &pipeline.published;
+    let before = published.load(std::sync::atomic::Ordering::SeqCst);
     store
         .provision(ProvisionRequest {
             queue: queue.clone(),
@@ -107,7 +112,7 @@ pub(super) async fn grow(store: &NativeQueueStore, queue: &QueueAddress, len: us
         })
         .await
         .unwrap();
-    // Queued together the operations share loop iterations; each is still one record.
+    // Queued together the operations share loop iterations and records.
     let numbers: Vec<usize> = (1..len).collect();
     for chunk in numbers.chunks(50) {
         futures::future::join_all(chunk.iter().map(|&n| async move {
@@ -119,6 +124,7 @@ pub(super) async fn grow(store: &NativeQueueStore, queue: &QueueAddress, len: us
         }))
         .await;
     }
+    published.load(std::sync::atomic::Ordering::SeqCst) - before
 }
 pub(super) async fn reads(store: &NativeQueueStore, queue: &QueueAddress) {
     store
@@ -247,14 +253,14 @@ async fn reopen_rebuilds_from_log(s3: bool, len: usize) {
     let env = Env::new("reopen", s3);
     let queue = env.address("q");
     let first = env.open("a.db").await;
-    grow(&first, &queue, len).await;
+    let log = grow(&first, &queue, len).await;
     first.shutdown().await.unwrap();
     drop(first);
     let second = env.open("a.db").await;
     let before = now(&second);
     reads(&second, &queue).await;
     let (records, _, _) = delta(&second, before);
-    assert_eq!(records, len as u64, "reopen reads the whole log once");
+    assert_eq!(records, log, "reopen reads the whole log once");
     let before = now(&second);
     reads(&second, &queue).await;
     insert(&second, &queue, 9999).await;

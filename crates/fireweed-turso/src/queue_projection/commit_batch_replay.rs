@@ -43,6 +43,21 @@ impl QueueProjection {
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
     ) -> QueueResult<AdmittedCommitBatchReplay> {
+        self.replay_commit_batch_in(
+            TxHost::Own(TransactionBehavior::Deferred),
+            input,
+            job,
+            workers,
+        )
+        .await
+    }
+    pub(super) async fn replay_commit_batch_in(
+        self: &Arc<Self>,
+        host: TxHost,
+        input: CommitBatchReplayInput,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<AdmittedCommitBatchReplay> {
         if !input.genesis.belongs_to(job) {
             return Err(unknown("batch genesis belongs to another operation"));
         }
@@ -80,12 +95,7 @@ impl QueueProjection {
             .run(move || {
                 Ok(crate::tx::block_on_owned_apply(async {
                     let projection = worker.projection.clone();
-                    let known = owned_native_transaction(
-                        &projection,
-                        TransactionBehavior::Deferred,
-                        &mut worker,
-                    )
-                    .await?;
+                    let known = host_transaction(&projection, host, &mut worker).await?;
                     Ok(AdmittedCommitBatchReplay {
                         known,
                         _charges: std::mem::take(&mut worker.charges),

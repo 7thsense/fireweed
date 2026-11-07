@@ -169,6 +169,18 @@ impl QueueBatch {
             .prepare_ordinary_pack_in(host, input, epoch, max_record_bytes, clock, job, workers)
             .await
     }
+    /// Classify a commit batch's groups against the staged state.
+    pub async fn replay_commit_batch(
+        &mut self,
+        input: CommitBatchReplayInput,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<AdmittedCommitBatchReplay> {
+        let host = self.host()?;
+        self.projection
+            .replay_commit_batch_in(host, input, job, workers)
+            .await
+    }
     /// Apply one planned entry inside the batch, with the same function rebuild
     /// uses, and check the unique keys it touched. `offset` is the log offset of
     /// the record the entry will be published in. Any error leaves the batch in

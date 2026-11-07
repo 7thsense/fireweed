@@ -71,6 +71,12 @@ pub struct QueueRecoveryPipeline {
     queues: std::sync::Mutex<owner::QueueTable>,
     #[cfg(test)]
     lose_append_reply: std::sync::atomic::AtomicBool,
+    /// Conditional publishes submitted, whatever their outcome.
+    #[cfg(test)]
+    published: std::sync::atomic::AtomicU64,
+    /// Entries staged into a batch's projection transaction.
+    #[cfg(test)]
+    staged: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     before_drop: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -116,6 +122,10 @@ impl QueueRecoveryPipeline {
             queues: std::sync::Mutex::new(owner::QueueTable::default()),
             #[cfg(test)]
             lose_append_reply: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            published: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            staged: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             before_drop: std::sync::Mutex::new(None),
             #[cfg(test)]

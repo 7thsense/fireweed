@@ -1,5 +1,6 @@
-//! Insert: plan against the projection, publish, apply, reply from the projection.
-use super::owner::{Exit, Plan, Tenure, settle};
+//! Insert: plan against the batch, stage the entry, reply from the projection
+//! once the batch is published and committed.
+use super::owner::{Batch, Exit, Plan, Staged, StagedEntry, Tenure, settle};
 use super::*;
 use fireweed_core::queue_contract::{InsertRequest, QueueLimits, RequestPreflight, encoded_len};
 use fireweed_engine::{Clock, queue_memory::incoming_headers};
@@ -38,10 +39,11 @@ impl InsertPlan {
         &self,
         p: &QueueRecoveryPipeline,
         t: &Tenure,
+        point: (u64, u64, u64),
         limits: QueueLimits,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<InsertReplayInput> {
-        let (next, sequence, epoch) = t.point();
+        let (next, sequence, epoch) = point;
         Ok(InsertReplayInput {
             genesis: t.genesis_record(p, &self.request.queue, job)?,
             request: self.request.clone(),
@@ -58,21 +60,24 @@ impl Plan for InsertPlan {
     fn address(&self) -> &QueueAddress {
         &self.request.queue
     }
-    fn run<'a>(
+    fn stage<'a>(
         &'a self,
         p: &'a QueueRecoveryPipeline,
-        t: &'a mut Tenure,
+        t: &'a Tenure,
+        batch: &'a mut Batch,
         limits: QueueLimits,
         clock: &'a Arc<dyn Clock>,
         job: &'a Arc<QueueReservation>,
-    ) -> BoxFuture<'a, Result<QueueResult<Self::Output>, Exit>> {
+    ) -> BoxFuture<'a, Result<Staged, Exit>> {
         Box::pin(async move {
-            let input = match self.input(p, t, limits, job) {
+            let input = match self.input(p, t, batch.point(t), limits, job) {
                 Ok(input) => input,
-                Err(error) => return Ok(Err(error)),
+                Err(error) => return Ok(Staged::Rejected(error)),
             };
             let prepared = settle(
-                p.projection
+                batch
+                    .host(p)
+                    .await?
                     .prepare_insert(
                         input,
                         t.epoch,
@@ -84,16 +89,31 @@ impl Plan for InsertPlan {
                     .await,
             )?;
             match prepared {
-                Err(error) => return Ok(Err(error)),
+                Err(error) => Ok(Staged::Rejected(error)),
                 // A known request id is just its stored outcome.
-                Ok(None) => {}
+                Ok(None) => Ok(Staged::Pending),
                 Ok(Some(prepared)) => {
                     let (record, provisional, expected_head) = prepared.into_parts();
                     drop(provisional);
-                    t.publish(p, record, expected_head, job).await?;
+                    Ok(match batch.stage(p, t, record, expected_head, job).await? {
+                        StagedEntry::Staged => Staged::Pending,
+                        StagedEntry::TooLarge => Staged::Rejected(QueueError::TooLarge),
+                        StagedEntry::Full => Staged::Full { progressed: false },
+                    })
                 }
             }
-            let input = match self.input(p, t, limits, job) {
+        })
+    }
+    fn run<'a>(
+        &'a self,
+        p: &'a QueueRecoveryPipeline,
+        t: &'a mut Tenure,
+        limits: QueueLimits,
+        _clock: &'a Arc<dyn Clock>,
+        job: &'a Arc<QueueReservation>,
+    ) -> BoxFuture<'a, Result<QueueResult<Self::Output>, Exit>> {
+        Box::pin(async move {
+            let input = match self.input(p, t, t.point(), limits, job) {
                 Ok(input) => input,
                 Err(error) => return Ok(Err(error)),
             };
