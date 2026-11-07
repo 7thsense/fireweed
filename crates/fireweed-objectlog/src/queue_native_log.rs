@@ -13,9 +13,12 @@ use fireweed_engine::{
 use object_log::NativeRecord;
 use object_log::{
     NativeAppend, NativeHead, NativeLog, NativeNamespace, NativePublication, NativePublishOutcome,
-    NativeReadCut, NativeResolution, NativeWriter,
+    NativeReadCut, NativeReadPlan, NativeResolution, NativeWriter,
 };
 use std::sync::Arc;
+
+/// Records `read_run` hydrates at once.
+const READ_RUN_CONCURRENCY: usize = 16;
 
 /// Observation values for the internal queue composition; SDK roots stay sealed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +64,16 @@ pub struct QueueNativeNamespace {
     log_identity: Arc<()>,
     _charge: Arc<OwnedQueueBufferCharge>,
 }
+/// A namespace without any operation charge. Opening one costs object-store
+/// I/O; an owner does that once and rebinds the identity to each operation
+/// with `QueueNativeLog::rebind`, which does none.
+#[derive(Clone)]
+pub struct QueueNativeNamespaceIdentity {
+    namespace: NativeNamespace,
+    identity: Arc<()>,
+    address: Vec<u8>,
+    log_identity: Arc<()>,
+}
 pub struct QueueNativeCut {
     cut: NativeReadCut,
     namespace: Arc<()>,
@@ -105,6 +118,17 @@ fn construction_error(error: object_log::ObjectLogError) -> QueueError {
         _ => QueueError::Invalid("invalid native queue transport configuration".into()),
     }
 }
+/// A planned record must be exactly the one at `offset`, and within the hard bound.
+fn check_plan(plan: &NativeReadPlan, offset: u64, hard_record_bytes: u64) -> QueueResult<()> {
+    if plan.base_offset() != offset || plan.record_count() != 1 {
+        return Err(unknown("planned queue record logical range differs"));
+    }
+    let actual = u64::try_from(plan.payload_bytes()).map_err(|_| QueueError::TooLarge)?;
+    if actual > hard_record_bytes {
+        return Err(QueueError::TooLarge);
+    }
+    Ok(())
+}
 fn read_error(error: object_log::ObjectLogError) -> QueueError {
     match error {
         object_log::ObjectLogError::ReadLimitExceeded { .. } => QueueError::TooLarge,
@@ -114,6 +138,71 @@ fn read_error(error: object_log::ObjectLogError) -> QueueError {
 impl QueueNativeNamespace {
     pub fn belongs_to(&self, job: &QueueReservation) -> bool {
         std::ptr::eq(self._charge.reservation(), job)
+    }
+    /// The charge-free identity, which may outlive this operation.
+    pub fn identity(&self) -> QueueNativeNamespaceIdentity {
+        QueueNativeNamespaceIdentity {
+            namespace: self.namespace.clone(),
+            identity: self.identity.clone(),
+            address: self.address.clone(),
+            log_identity: self.log_identity.clone(),
+        }
+    }
+}
+fn namespace_charge(
+    address_bytes: usize,
+    job: &Arc<QueueReservation>,
+) -> QueueResult<Arc<OwnedQueueBufferCharge>> {
+    // A retained alias can outlive the original namespace charge.
+    // Conservatively fund its shared identity Arc header independently.
+    let bytes = address_bytes
+        .checked_add(std::mem::size_of::<QueueNativeNamespace>() + 2 * std::mem::size_of::<usize>())
+        .ok_or(QueueError::TooLarge)?;
+    ownership::shared_charge(job, u64::try_from(bytes).map_err(unknown)?)
+}
+impl QueueNativeWriter {
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    /// The offset the next record must have.
+    pub fn next_offset(&self) -> u64 {
+        self.next_offset
+    }
+    fn record_identity(
+        &self,
+        record: &OwnedQueueLogRecord,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<QueueNativeRecordIdentity> {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write;
+        let charge = job.owned_buffer(256)?;
+        let mut value = String::with_capacity(config::RECORD_IDENTITY_BYTES);
+        write!(
+            &mut value,
+            "queue-record/{:016x}/{:016x}/",
+            self.epoch, self.next_offset
+        )
+        .expect("String write");
+        for byte in Sha256::digest(record.bytes()) {
+            write!(&mut value, "{byte:02x}").expect("String write");
+        }
+        debug_assert_eq!(value.len(), config::RECORD_IDENTITY_BYTES);
+        Ok(QueueNativeRecordIdentity {
+            value,
+            _charge: charge,
+        })
+    }
+    /// Prepare the record at this writer's next offset.
+    pub async fn prepare_record(
+        &self,
+        log: &QueueNativeLog,
+        namespace: &QueueNativeNamespace,
+        record: &OwnedQueueLogRecord,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<QueueNativePublication> {
+        let identity = self.record_identity(record, job)?;
+        log.prepare(namespace, self, record, &identity.value, job)
+            .await
     }
 }
 impl QueueNativeLog {
@@ -231,6 +320,25 @@ impl QueueNativeLog {
             return Err(unknown("namespace belongs to another log"));
         }
         Ok(())
+    }
+    /// Bind a retained identity to one operation. No I/O: the namespace
+    /// carries only this operation's charge.
+    pub fn rebind(
+        &self,
+        identity: &QueueNativeNamespaceIdentity,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<QueueNativeNamespace> {
+        if !Arc::ptr_eq(&self.identity, &identity.log_identity) {
+            return Err(unknown("namespace identity belongs to another log"));
+        }
+        let charge = namespace_charge(identity.address.len(), job)?;
+        Ok(QueueNativeNamespace {
+            namespace: identity.namespace.clone(),
+            identity: identity.identity.clone(),
+            address: identity.address.clone(),
+            log_identity: identity.log_identity.clone(),
+            _charge: charge,
+        })
     }
     fn preparation_charge(
         &self,
@@ -512,6 +620,29 @@ impl QueueNativeLog {
             },
         )
     }
+    /// Move the writer past a publication that `submit` reported `Stored`,
+    /// making no storage request: the next `prepare` needs no head read. Only
+    /// the direct successor of the writer's head is accepted. After an error the
+    /// writer must not be used again; resolve and re-acquire.
+    pub async fn advance(
+        &self,
+        writer: &mut QueueNativeWriter,
+        publication: &QueueNativePublication,
+    ) -> QueueResult<QueueNativeHead> {
+        if !Arc::ptr_eq(&self.identity, &publication.log_identity) {
+            return Err(unknown("publication belongs to another log"));
+        }
+        let head = self
+            .log
+            .advance_writer(&writer.writer, &publication.publication)
+            .await
+            .map_err(unknown)?;
+        if head.epoch() != writer.epoch || head.bounds().1 <= writer.next_offset {
+            return Err(unknown("advanced head is not the writer's successor"));
+        }
+        writer.next_offset = head.bounds().1;
+        Ok(QueueNativeHead { inner: head })
+    }
     #[cfg(test)]
     pub async fn read(
         &self,
@@ -554,12 +685,7 @@ impl QueueNativeLog {
         hard_record_bytes: u64,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<Option<OwnedQueueLogRecord>> {
-        if !std::ptr::eq(namespace._charge.reservation(), job.as_ref())
-            || !Arc::ptr_eq(&namespace.identity, &cut.namespace)
-        {
-            return Err(unknown("read namespace, cut or operation differs"));
-        }
-        self.validate_namespace(namespace)?;
+        self.check_read(namespace, cut, job)?;
         let metadata = ownership::shared_charge(job, 65536)?;
         let Some(plan) = self
             .log
@@ -570,13 +696,88 @@ impl QueueNativeLog {
         else {
             return Ok(None);
         };
-        if plan.base_offset() != offset || plan.record_count() != 1 {
-            return Err(unknown("planned queue record logical range differs"));
+        check_plan(&plan, offset, hard_record_bytes)?;
+        Ok(Some(
+            self.hydrate(plan, offset, namespace, cut, &metadata, job)
+                .await?,
+        ))
+    }
+    /// Records from `offset` on, admitted like `read_admitted`, from one
+    /// root-to-leaf walk: up to `max_records`, to the end of the leaf that holds
+    /// `offset`, and while their payloads together fit `max_bytes`, but always
+    /// at least one. Hydrated concurrently, returned in offset order. Empty at
+    /// or past the end of the cut. A record that cannot be admitted fails the
+    /// run exactly as it fails `read_admitted`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn read_run(
+        &self,
+        namespace: &QueueNativeNamespace,
+        cut: &QueueNativeCut,
+        offset: u64,
+        max_records: usize,
+        max_bytes: u64,
+        hard_record_bytes: u64,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Vec<OwnedQueueLogRecord>> {
+        use futures::{StreamExt, TryStreamExt};
+        self.check_read(namespace, cut, job)?;
+        if max_records == 0 {
+            return Err(QueueError::Invalid(
+                "a read run needs at least one record".into(),
+            ));
         }
+        let metadata = ownership::shared_charge(job, 65536)?;
+        let plans = self
+            .log
+            .with_operation_owner(ownership::physical_owner([metadata.clone()])?)
+            .plan_range(&cut.cut, offset, max_records)
+            .await
+            .map_err(unknown)?;
+        let mut taken = Vec::with_capacity(plans.len());
+        let mut bytes = 0u64;
+        for (position, plan) in plans.into_iter().enumerate().take(max_records) {
+            let expected = offset
+                .checked_add(u64::try_from(position).map_err(unknown)?)
+                .ok_or(QueueError::TooLarge)?;
+            let actual = u64::try_from(plan.payload_bytes()).map_err(|_| QueueError::TooLarge)?;
+            if position > 0 && bytes.checked_add(actual).is_none_or(|n| n > max_bytes) {
+                break;
+            }
+            check_plan(&plan, expected, hard_record_bytes)?;
+            bytes += actual;
+            taken.push((expected, plan));
+        }
+        futures::stream::iter(taken)
+            .map(|(expected, plan)| self.hydrate(plan, expected, namespace, cut, &metadata, job))
+            .buffered(READ_RUN_CONCURRENCY)
+            .try_collect()
+            .await
+    }
+    fn check_read(
+        &self,
+        namespace: &QueueNativeNamespace,
+        cut: &QueueNativeCut,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<()> {
+        if !std::ptr::eq(namespace._charge.reservation(), job.as_ref())
+            || !Arc::ptr_eq(&namespace.identity, &cut.namespace)
+        {
+            return Err(unknown("read namespace, cut or operation differs"));
+        }
+        self.validate_namespace(namespace)
+    }
+    /// Charge the output, then hydrate one planned record and check it against
+    /// its namespace and cut. The plan has passed `check_plan`.
+    async fn hydrate(
+        &self,
+        plan: NativeReadPlan,
+        offset: u64,
+        namespace: &QueueNativeNamespace,
+        cut: &QueueNativeCut,
+        metadata: &Arc<OwnedQueueBufferCharge>,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<OwnedQueueLogRecord> {
         let actual = u64::try_from(plan.payload_bytes()).map_err(|_| QueueError::TooLarge)?;
-        if actual > hard_record_bytes {
-            return Err(QueueError::TooLarge);
-        }
         let capacity = actual
             .checked_mul(4)
             .and_then(|n| n.checked_add(4096))
@@ -610,11 +811,7 @@ impl QueueNativeLog {
                 return Err(unknown("planned read retained physical output ownership"));
             }
         };
-        Ok(Some(OwnedQueueLogRecord::from_admitted_bytes(
-            record.into_bytes(),
-            charge,
-            job,
-        )?))
+        OwnedQueueLogRecord::from_admitted_bytes(record.into_bytes(), charge, job)
     }
     pub async fn shutdown(&self) -> QueueResult<()> {
         self.log.shutdown().await.map_err(unknown)
@@ -648,17 +845,7 @@ impl QueueNativeCaptured {
         if retained.tenant != address.tenant || retained.queue != address.queue {
             return Err(unknown("retained namespace belongs to another queue"));
         }
-        let bytes = self
-            .namespace
-            .address
-            .len()
-            // A retained alias can outlive the original namespace charge.
-            // Conservatively fund its shared identity Arc header independently.
-            .checked_add(
-                std::mem::size_of::<QueueNativeNamespace>() + 2 * std::mem::size_of::<usize>(),
-            )
-            .ok_or(QueueError::TooLarge)?;
-        let charge = ownership::shared_charge(job, u64::try_from(bytes).map_err(unknown)?)?;
+        let charge = namespace_charge(self.namespace.address.len(), job)?;
         Ok(QueueNativeNamespace {
             namespace: self.namespace.namespace.clone(),
             identity: self.namespace.identity.clone(),
@@ -669,6 +856,10 @@ impl QueueNativeCaptured {
     }
     pub fn head(&self) -> QueueNativeHead {
         self.cut.head()
+    }
+    /// The namespace identity, to bind to later operations.
+    pub fn identity(&self) -> QueueNativeNamespaceIdentity {
+        self.namespace.identity()
     }
     pub async fn confirms(
         &self,
@@ -690,10 +881,36 @@ impl QueueNativeCaptured {
         log.read_admitted(&self.namespace, &self.cut, offset, hard_record_bytes, job)
             .await
     }
+    /// See `QueueNativeLog::read_run`.
+    pub async fn read_run(
+        &self,
+        log: &QueueNativeLog,
+        offset: u64,
+        max_records: usize,
+        max_bytes: u64,
+        hard_record_bytes: u64,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Vec<OwnedQueueLogRecord>> {
+        log.read_run(
+            &self.namespace,
+            &self.cut,
+            offset,
+            max_records,
+            max_bytes,
+            hard_record_bytes,
+            job,
+        )
+        .await
+    }
 }
 impl QueueNativeAcquired {
     pub fn as_source(&self) -> &QueueNativeCaptured {
         &self.source
+    }
+    /// The writer, which holds no operation charge and may outlive this
+    /// operation, and the operation-scoped source cut to read through.
+    pub fn into_parts(self) -> (QueueNativeWriter, QueueNativeCaptured) {
+        (self.writer, self.source)
     }
     pub async fn prepare_record(
         &self,
@@ -701,39 +918,16 @@ impl QueueNativeAcquired {
         record: &OwnedQueueLogRecord,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<QueueNativePublication> {
-        let identity = self.record_identity(record, job)?;
-        log.prepare(
-            &self.source.namespace,
-            &self.writer,
-            record,
-            &identity.value,
-            job,
-        )
-        .await
+        self.writer
+            .prepare_record(log, &self.source.namespace, record, job)
+            .await
     }
     fn record_identity(
         &self,
         record: &OwnedQueueLogRecord,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<QueueNativeRecordIdentity> {
-        use sha2::{Digest, Sha256};
-        use std::fmt::Write;
-        let charge = job.owned_buffer(256)?;
-        let mut value = String::with_capacity(config::RECORD_IDENTITY_BYTES);
-        write!(
-            &mut value,
-            "queue-record/{:016x}/{:016x}/",
-            self.writer.epoch, self.writer.next_offset
-        )
-        .expect("String write");
-        for byte in Sha256::digest(record.bytes()) {
-            write!(&mut value, "{byte:02x}").expect("String write");
-        }
-        debug_assert_eq!(value.len(), config::RECORD_IDENTITY_BYTES);
-        Ok(QueueNativeRecordIdentity {
-            value,
-            _charge: charge,
-        })
+        self.writer.record_identity(record, job)
     }
     pub async fn prepare(
         &self,
@@ -1573,5 +1767,138 @@ mod tests {
                 .is_err()
         );
         fresh.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tenure_writer_and_identity_outlive_the_operation_that_acquired_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = QueueNativeLog::new(
+            NativeLog::local(
+                object_log::LocalBlobStore::new(directory.path()),
+                "tenure".into(),
+                test_limits(),
+            )
+            .unwrap(),
+        );
+        let address = QueueAddress {
+            tenant: "tenant".into(),
+            queue: "queue".into(),
+        };
+        let schema = QueueSchema {
+            work: CollectionDefinition {
+                fields: Default::default(),
+                indexes: Default::default(),
+                unique_indexes: Default::default(),
+                additional_field_prefixes: Default::default(),
+            },
+            state: Default::default(),
+            progress_bound_nanos: 1,
+            max_attempts: 3,
+        };
+        let admission = QueueAdmission::new(3, 16 << 20).unwrap();
+        let first = Arc::new(admission.reserve(0).unwrap());
+        let namespace = log.provision_namespace(&address, &first).await.unwrap();
+        let (mut writer, source) = log
+            .acquire_bundle(namespace, &first)
+            .await
+            .unwrap()
+            .into_parts();
+        let identity = source.identity();
+        let definition =
+            AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), &first)
+                .unwrap();
+        let record = encode_checked_genesis(
+            writer.epoch(),
+            &address,
+            &definition,
+            &[5; 32],
+            4096,
+            &first,
+        )
+        .unwrap();
+        let expected = record.bytes().to_vec();
+        assert_eq!(writer.next_offset(), 0);
+        let bound = log.rebind(&identity, &first).unwrap();
+        let publication = writer
+            .prepare_record(&log, &bound, &record, &first)
+            .await
+            .unwrap();
+        assert!(matches!(
+            log.submit(&publication).await.unwrap(),
+            QueueNativeSubmit::Stored(_)
+        ));
+        let head = log.advance(&mut writer, &publication).await.unwrap();
+        assert_eq!((head.epoch(), head.bounds()), (writer.epoch(), (0, 1)));
+        assert_eq!(writer.next_offset(), 1);
+        // The same publication is no longer the writer's direct successor.
+        assert!(log.advance(&mut writer, &publication).await.is_err());
+        assert_eq!(writer.next_offset(), 1);
+        // Only the writer and the identity survive; nothing of the first
+        // operation stays charged.
+        drop((bound, publication, record, source, definition));
+        drop(first);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+
+        let second = Arc::new(admission.reserve(0).unwrap());
+        let bound = log.rebind(&identity, &second).unwrap();
+        assert!(bound.belongs_to(&second));
+        let cut = log.capture(&bound).await.unwrap();
+        assert_eq!(cut.head().bounds(), (0, 1));
+        let run = log
+            .read_run(&bound, &cut, 0, 16, u64::MAX, 4096, &second)
+            .await
+            .unwrap();
+        assert_eq!(run.len(), 1);
+        assert_eq!(run[0].bytes(), expected.as_slice());
+        drop(run);
+        // Past the end, and with nothing to take.
+        assert!(
+            log.read_run(&bound, &cut, 1, 16, u64::MAX, 4096, &second)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            log.read_run(&bound, &cut, 0, 0, u64::MAX, 4096, &second)
+                .await,
+            Err(QueueError::Invalid(_))
+        ));
+        // The hard bound fails the run as it fails a single read, and always
+        // admits the first record whatever `max_bytes` is.
+        assert!(matches!(
+            log.read_run(&bound, &cut, 0, 16, u64::MAX, 8, &second)
+                .await,
+            Err(QueueError::TooLarge)
+        ));
+        assert_eq!(
+            log.read_run(&bound, &cut, 0, 16, 1, 4096, &second)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // Another operation's namespace is refused.
+        let third = Arc::new(admission.reserve(0).unwrap());
+        assert!(
+            log.read_run(&bound, &cut, 0, 16, u64::MAX, 4096, &third)
+                .await
+                .is_err()
+        );
+        // A second log does not accept this log's identity.
+        let other_directory = tempfile::tempdir().unwrap();
+        let other = QueueNativeLog::new(
+            NativeLog::local(
+                object_log::LocalBlobStore::new(other_directory.path()),
+                "tenure".into(),
+                test_limits(),
+            )
+            .unwrap(),
+        );
+        assert!(other.rebind(&identity, &second).is_err());
+        drop((bound, cut, third));
+        drop(second);
+        assert_eq!(admission.usage().unwrap(), (0, 0));
+        other.shutdown().await.unwrap();
+        log.shutdown().await.unwrap();
     }
 }
