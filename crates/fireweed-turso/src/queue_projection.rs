@@ -214,10 +214,18 @@ fn unsigned(value: &Value) -> QueueResult<u64> {
             .map_err(|_| unknown("invalid unsigned authority"))?,
     ))
 }
-// The right-hand seek must include the digest and record-ID range. Stock
-// Turso otherwise chooses q7_index_order and scans an entire index domain for
-// each left row. Full-key and uniqueness predicates remain mandatory residuals.
-const FINAL_UNIQUE_OWNERSHIP_SQL: &str = "SELECT a.record_id FROM q7_indexes a JOIN q7_indexes b INDEXED BY q7_index_equal ON a.queue_id=b.queue_id AND a.collection=b.collection AND a.index_no=b.index_no AND a.hash=b.hash AND a.full_key=b.full_key AND a.record_id<b.record_id WHERE a.queue_id=?1 AND a.is_unique=1 AND b.is_unique=1 LIMIT 1";
+// The probe must name q7_index_equal and the digest: stock Turso otherwise may
+// choose q7_index_order and scan an entire index domain. Full-key and uniqueness
+// predicates remain mandatory residuals.
+/// One unique index entry that a record wrote, to be probed through
+/// `q7_index_equal` once the record's commands are all applied.
+struct UniqueTouch {
+    collection: i32,
+    number: i32,
+    key: Vec<u8>,
+    _charge: OwnedQueueBufferCharge,
+}
+const UNIQUE_PROBE_SQL: &str = "SELECT record_id FROM q7_indexes INDEXED BY q7_index_equal WHERE queue_id=?1 AND collection=?2 AND index_no=?3 AND hash=?4 AND is_unique=1 AND full_key=?5 LIMIT 2";
 
 async fn one(
     connection: &Connection,
@@ -581,6 +589,7 @@ async fn apply_transaction(
                 job,
                 claim: claim.zip(binding.as_ref()),
             };
+            let mut touched = Vec::new();
             for command in frame.commands() {
                 apply_command(
                     connection,
@@ -588,6 +597,7 @@ async fn apply_transaction(
                     definition.schema(),
                     command.map_err(publication_error)?,
                     &context,
+                    &mut touched,
                 )
                 .await?;
                 #[cfg(test)]
@@ -597,16 +607,30 @@ async fn apply_transaction(
             }
             // Native indexes are not individually constrained: atomic swaps are
             // validated against the completed transaction's exact full values.
-            if one(
-                connection,
-                FINAL_UNIQUE_OWNERSHIP_SQL,
-                vec![Value::Integer(queue_id)],
-                1,
-            )
-            .await?
-            .is_some()
-            {
-                return Err(unknown("final projection unique ownership conflict"));
+            // Every earlier record passed this check, so the table has no
+            // duplicate before this one; only a unique entry this record wrote
+            // can create one, and each is probed by its equal-index position.
+            for touch in &touched {
+                let mut rows = connection
+                    .query(
+                        UNIQUE_PROBE_SQL,
+                        vec![
+                            Value::Integer(queue_id),
+                            Value::Integer(i64::from(touch.collection)),
+                            Value::Integer(i64::from(touch.number)),
+                            blob(&discovery_digest(&touch.key)),
+                            blob(&touch.key),
+                        ],
+                    )
+                    .await
+                    .map_err(unknown)?;
+                let mut owners = 0;
+                while rows.next().await.map_err(unknown)?.is_some() {
+                    owners += 1;
+                }
+                if owners > 1 {
+                    return Err(unknown("final projection unique ownership conflict"));
+                }
             }
             for receipt in frame.receipts() {
                 let receipt = receipt.map_err(publication_error)?;
@@ -920,6 +944,7 @@ async fn apply_command(
     schema: &QueueSchema,
     command: CommandRef<'_>,
     context: &FrameContext<'_>,
+    touched: &mut Vec<UniqueTouch>,
 ) -> QueueResult<()> {
     let FrameContext {
         offset,
@@ -1083,6 +1108,7 @@ async fn apply_command(
                 &owned.change,
                 current_version.is_some(),
                 job,
+                touched,
             )
             .await?;
             if let BodyCommandRef::Replace(body) = body {
@@ -1103,6 +1129,7 @@ async fn apply_command(
                 &owned.change,
                 current_version.is_some(),
                 job,
+                touched,
             )
             .await?;
             write_body(connection, record_id, value, job).await?;
@@ -1118,6 +1145,7 @@ async fn apply_fields_and_indexes(
     change: &ResolvedFields,
     existed: bool,
     job: &Arc<QueueReservation>,
+    touched: &mut Vec<UniqueTouch>,
 ) -> QueueResult<()> {
     let PhysicalRecord {
         id: record_id,
@@ -1206,6 +1234,8 @@ async fn apply_fields_and_indexes(
                 index_number(definition, name)?,
                 &key,
                 unique,
+                touched,
+                job,
             )
             .await?;
         }
@@ -1224,6 +1254,8 @@ async fn apply_fields_and_indexes(
                 index_number(definition, &effect.index)?,
                 &key,
                 effect.after_unique,
+                touched,
+                job,
             )
             .await?;
         }
@@ -1236,6 +1268,8 @@ async fn persist_index(
     number: i32,
     key: &[u8],
     unique: bool,
+    touched: &mut Vec<UniqueTouch>,
+    job: &Arc<QueueReservation>,
 ) -> QueueResult<()> {
     let PhysicalRecord {
         id: record_id,
@@ -1243,6 +1277,14 @@ async fn persist_index(
         collection,
     } = location;
     connection.execute("INSERT INTO q7_indexes(record_id,queue_id,collection,index_no,prefix,hash,full_key,is_unique) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(record_id,index_no) DO UPDATE SET prefix=excluded.prefix,hash=excluded.hash,full_key=excluded.full_key,is_unique=excluded.is_unique",vec![Value::Integer(record_id),Value::Integer(queue_id),Value::Integer(i64::from(collection)),Value::Integer(i64::from(number)),blob(&discovery_prefix(key)),blob(&discovery_digest(key)),blob(key),Value::Integer(i64::from(unique))]).await.map_err(unknown)?;
+    if unique {
+        touched.push(UniqueTouch {
+            collection,
+            number,
+            key: key.to_vec(),
+            _charge: job.owned_buffer(key.len() as u64 + 256)?,
+        });
+    }
     Ok(())
 }
 async fn validate_success_version(
