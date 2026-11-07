@@ -782,10 +782,9 @@ impl QueueLoop {
             deadline: Duration::ZERO,
             renew_at: Duration::ZERO,
         };
-        let target = if head.state().next_offset == 0 && head.state().log_start == 0 {
-            // No queue yet: nothing to fence or read. Provisioning fences.
-            0
-        } else {
+        // With no queue yet there is nothing to fence or read; provisioning fences.
+        let absent = head.state().next_offset == 0 && head.state().log_start == 0;
+        if !absent {
             p.diagnostics.fence_acquire();
             let acquired = p
                 .store
@@ -839,7 +838,7 @@ impl QueueLoop {
                 {
                     // A long rebuild keeps the lease it is building under.
                     let started = own.lease_clock.now();
-                    if own
+                    match own
                         .control
                         .renew_queue_lease(
                             &self.key,
@@ -848,16 +847,21 @@ impl QueueLoop {
                             own.stamp(),
                         )
                         .await
-                        .is_ok()
                     {
-                        requested = started;
-                        renewed_at = started;
+                        Ok(_) => {
+                            requested = started;
+                            renewed_at = started;
+                        }
+                        // The lease is gone: building under it is pointless.
+                        Err(fireweed_engine::EngineError::EpochFenced) => {
+                            return Err(QueueError::Busy);
+                        }
+                        // Other failures keep going; the deadline check at the end stands.
+                        Err(_) => {}
                     }
                 }
             }
-            target
-        };
-        let _ = target;
+        }
         if lease.state == LeaseState::PendingFence && tenure.epoch == 0 {
             // Absent queue: the lease row is confirmed with nothing to fence.
             own.control
