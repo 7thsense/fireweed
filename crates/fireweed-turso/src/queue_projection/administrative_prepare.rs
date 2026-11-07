@@ -112,8 +112,30 @@ impl QueueProjection {
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
     ) -> QueueResult<Option<PreparedOrdinaryCommit>> {
+        self.prepare_administration_in(
+            TxHost::Own(TransactionBehavior::Deferred),
+            input,
+            epoch,
+            max_record_bytes,
+            clock,
+            job,
+            workers,
+        )
+        .await
+    }
+    pub(super) async fn prepare_administration_in(
+        self: &Arc<Self>,
+        host: TxHost,
+        input: AdministrativePreparationInput,
+        epoch: u64,
+        max_record_bytes: u64,
+        clock: Arc<dyn Clock>,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<Option<PreparedOrdinaryCommit>> {
         let result = self
             .dispatch_administration(
+                host,
                 input,
                 Mode::Publish {
                     epoch,
@@ -154,7 +176,14 @@ impl QueueProjection {
         workers: &ScratchWorkers,
     ) -> QueueResult<AdmittedQueuePreview> {
         match self
-            .dispatch_administration(input, Mode::Preview, clock, job, workers)
+            .dispatch_administration(
+                TxHost::Own(TransactionBehavior::Deferred),
+                input,
+                Mode::Preview,
+                clock,
+                job,
+                workers,
+            )
             .await?
         {
             Some(Completed {
@@ -166,6 +195,7 @@ impl QueueProjection {
     }
     async fn dispatch_administration(
         self: &Arc<Self>,
+        host: TxHost,
         input: AdministrativePreparationInput,
         mode: Mode,
         clock: Arc<dyn Clock>,
@@ -232,12 +262,7 @@ impl QueueProjection {
             .run(move || {
                 Ok(crate::tx::block_on_owned_apply(async {
                     let projection = worker.projection.clone();
-                    let parts = owned_native_transaction(
-                        &projection,
-                        TransactionBehavior::Deferred,
-                        &mut worker,
-                    )
-                    .await?;
+                    let parts = host_transaction(&projection, host, &mut worker).await?;
                     Ok(parts.map(|parts| Completed {
                         parts,
                         charges: std::mem::take(&mut worker.charges),

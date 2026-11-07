@@ -70,6 +70,27 @@ impl QueueProjection {
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
     ) -> QueueResult<OrdinaryPackPreparation> {
+        self.prepare_ordinary_pack_in(
+            TxHost::Own(TransactionBehavior::Deferred),
+            input,
+            epoch,
+            max_record_bytes,
+            clock,
+            job,
+            workers,
+        )
+        .await
+    }
+    pub(super) async fn prepare_ordinary_pack_in(
+        self: &Arc<Self>,
+        host: TxHost,
+        input: CommitPackPreparationInput,
+        epoch: u64,
+        max_record_bytes: u64,
+        clock: Arc<dyn Clock>,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<OrdinaryPackPreparation> {
         input.request.preflight(&input.limits)?;
         fireweed_engine::queue_memory::administrative_envelope_preflight(
             &input.request,
@@ -113,12 +134,7 @@ impl QueueProjection {
             .run(move || {
                 Ok(crate::tx::block_on_owned_apply(async {
                     let projection = worker.projection.clone();
-                    let result = owned_native_transaction(
-                        &projection,
-                        TransactionBehavior::Deferred,
-                        &mut worker,
-                    )
-                    .await?;
+                    let result = host_transaction(&projection, host, &mut worker).await?;
                     Ok(match result {
                         Parts::Reclassify => OrdinaryPackPreparation::Reclassify,
                         Parts::SingleGroup => OrdinaryPackPreparation::SingleGroup,

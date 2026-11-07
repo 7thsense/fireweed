@@ -55,6 +55,27 @@ impl QueueProjection {
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
     ) -> QueueResult<Option<PreparedClaim>> {
+        self.prepare_claim_in(
+            TxHost::Own(TransactionBehavior::Deferred),
+            input,
+            epoch,
+            max_record_bytes,
+            clock,
+            job,
+            workers,
+        )
+        .await
+    }
+    pub(super) async fn prepare_claim_in(
+        self: &Arc<Self>,
+        host: TxHost,
+        input: ClaimReplayInput,
+        epoch: u64,
+        max_record_bytes: u64,
+        clock: Arc<dyn Clock>,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<Option<PreparedClaim>> {
         if !input.genesis.belongs_to(job) {
             return Err(unknown("prepare genesis belongs to another operation"));
         }
@@ -87,12 +108,7 @@ impl QueueProjection {
             .run(move || {
                 Ok(crate::tx::block_on_owned_apply(async {
                     let projection = Arc::clone(&worker.projection);
-                    let result = owned_native_transaction(
-                        &projection,
-                        TransactionBehavior::Deferred,
-                        &mut worker,
-                    )
-                    .await?;
+                    let result = host_transaction(&projection, host, &mut worker).await?;
                     Ok(result.map(|parts| {
                         PreparedClaim::new(
                             parts.record,

@@ -45,6 +45,27 @@ impl QueueProjection {
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
     ) -> QueueResult<Option<PreparedInsert>> {
+        self.prepare_insert_in(
+            TxHost::Own(TransactionBehavior::Deferred),
+            input,
+            epoch,
+            max_record_bytes,
+            clock,
+            job,
+            workers,
+        )
+        .await
+    }
+    pub(super) async fn prepare_insert_in(
+        self: &Arc<Self>,
+        host: TxHost,
+        input: InsertReplayInput,
+        epoch: u64,
+        max_record_bytes: u64,
+        clock: Arc<dyn Clock>,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<Option<PreparedInsert>> {
         if !input.genesis.belongs_to(job) {
             return Err(unknown(
                 "insert preparation genesis belongs to another operation",
@@ -74,12 +95,7 @@ impl QueueProjection {
             .run(move || {
                 Ok(crate::tx::block_on_owned_apply(async {
                     let projection = worker.projection.clone();
-                    let parts = owned_native_transaction(
-                        &projection,
-                        TransactionBehavior::Deferred,
-                        &mut worker,
-                    )
-                    .await?;
+                    let parts = host_transaction(&projection, host, &mut worker).await?;
                     Ok(parts.map(|parts| {
                         PreparedInsert::new(
                             parts.record,
