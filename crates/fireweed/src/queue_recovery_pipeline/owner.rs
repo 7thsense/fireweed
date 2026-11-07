@@ -633,6 +633,12 @@ impl QueueLoop {
         p.stage(Stage::AfterRead);
         // Every result passes this check after it was read and before it is acknowledged.
         if leave || p.ownership.lease_clock.now() >= tenure.deadline {
+            if !leave {
+                // An operation that outlasts every lease must not retry forever.
+                for op in batch.iter_mut() {
+                    *op.attempts() += 1;
+                }
+            }
             self.exit(p, batch.first().map(|op| op.job().clone())).await;
             batch.append(&mut unstarted);
             self.requeue(batch);

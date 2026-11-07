@@ -504,3 +504,28 @@ async fn failed_entry_releases_its_lease() {
     failing.shutdown().await.unwrap();
     third.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn operation_outlasting_every_lease_fails() {
+    let env = Env::new("outlasting", false);
+    let queue = env.address("q");
+    let a = env.open("a.db").await;
+    grow(&a, &queue, 4).await;
+    let ownership = env.ownership.clone();
+    // Every iteration takes longer than the lease.
+    *a.pipeline_for_test().on_stage.lock().unwrap() = Some(Arc::new(move |stage| {
+        if stage == owner::Stage::AfterRead {
+            ownership.advance(TTL + SECOND);
+        }
+    }));
+    let result = tokio::time::timeout(Duration::from_secs(60), stats(&a, &queue))
+        .await
+        .expect("no hang");
+    assert!(
+        matches!(result, Err(QueueError::OutcomeUnknown(_))),
+        "{result:?}"
+    );
+    *a.pipeline_for_test().on_stage.lock().unwrap() = None;
+    assert_eq!(pending_items(&a, &queue).await, 3);
+    a.shutdown().await.unwrap();
+}
