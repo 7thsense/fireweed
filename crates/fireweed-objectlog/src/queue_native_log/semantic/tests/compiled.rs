@@ -1349,4 +1349,6 @@ mod administrative;
 
 mod state;
 
+// `fireweed_turso::queue_scratch` exists only on Linux.
+#[cfg(target_os = "linux")]
 mod selection;
