@@ -44,7 +44,7 @@ class PackPublication(Model):
     bounds={'logical_groups':3,'initial_cut':2,'physical_packs':3,
             'provider_schedules':list(CASES),'retry':'one representative replay failure and fresh continuation'}
     properties=sorted(set(FAULTS.values()))
-    assumptions=['complete-batch source proof/classification validated by separate models',
+    assumptions=['complete-batch classification comes from a trusted projection; owner_models covers its trust boundary',
        'independent addressed effects; receipts are abstract opaque source-verified values',
        'atomic conditional publication per physical pack; enumerated ambiguous replies and races',
        'stale-overlay semantic replanning is covered separately; this model proves only publication protocol',
