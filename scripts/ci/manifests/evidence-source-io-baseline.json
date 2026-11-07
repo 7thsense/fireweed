@@ -17449,6 +17449,42 @@
       "operations": [
         "constant"
       ],
+      "path": "scripts/formal/check_owner.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 57,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 57,
+      "line": 46,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/check_owner.py",
+      "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 2,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 2,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
       "path": "scripts/formal/check_pack_preparation.py",
       "symbol": "<module>"
     },
@@ -17581,6 +17617,24 @@
       ],
       "path": "scripts/formal/run_replay.py",
       "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 1,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/test_owner.py",
+      "symbol": "<module>"
     },
     {
       "evidence_paths": [],
