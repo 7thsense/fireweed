@@ -382,3 +382,37 @@ async fn requeued_mutation_is_never_busy() {
     assert_eq!(pending_items(&a, &queue).await, 4, "published once");
     a.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn long_batch_renews_instead_of_lapsing() {
+    let env = Env::new("long-batch", false);
+    let queue = env.address("q");
+    let a = env.open("a.db").await;
+    grow(&a, &queue, 4).await;
+    // The owner lapses; the next batch re-enters once and then takes longer than the lease.
+    env.ownership.advance(TTL + SECOND);
+    let ownership = env.ownership.clone();
+    *a.pipeline_for_test().on_stage.lock().unwrap() = Some(Arc::new(move |stage| {
+        if stage == owner::Stage::BeforeAppend {
+            ownership.advance(4 * SECOND);
+        }
+    }));
+    let before = now(&a);
+    let mut tasks = Vec::new();
+    for n in 0..6 {
+        let a = a.clone();
+        let queue = queue.clone();
+        tasks.push(tokio::spawn(
+            async move { insert(&a, &queue, 300 + n).await },
+        ));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    let (_, _, fences) = delta(&a, before);
+    assert_eq!(fences, 1, "one entry; the batch renewed instead of lapsing");
+    assert!(env.ownership.plane.renewals.load(Ordering::SeqCst) >= 1);
+    *a.pipeline_for_test().on_stage.lock().unwrap() = None;
+    assert_eq!(pending_items(&a, &queue).await, 3 + 6);
+    a.shutdown().await.unwrap();
+}

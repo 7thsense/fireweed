@@ -588,35 +588,47 @@ impl QueueLoop {
                 }
             }
         }
-        let mut batch: Vec<Box<dyn QueueOp>> = self.pending.drain(..).collect();
+        // Mutations in order, then the batch's reads from the projection.
+        let (mut batch, reads): (Vec<_>, Vec<_>) =
+            self.pending.drain(..).partition(|op| op.mutation());
+        batch.extend(reads);
         #[cfg(test)]
         p.stage(Stage::BatchTaken);
         let tenure = self.tenure.as_mut().expect("owner");
         let mut leave = false;
-        // Mutations in order, then the batch's reads from the projection.
-        for want_mutation in [true, false] {
-            for op in batch.iter_mut().filter(|op| op.mutation() == want_mutation) {
-                if op.run(p, tenure).await.is_err() {
-                    *op.attempts() += 1;
-                    leave = true;
-                    break;
-                }
-            }
-            if leave {
+        let mut started = 0;
+        while started < batch.len() {
+            // A batch longer than half a lease stops starting work and renews first.
+            if started > 0 && p.ownership.lease_clock.now() >= tenure.renew_at {
                 break;
             }
+            if batch[started].run(p, tenure).await.is_err() {
+                *batch[started].attempts() += 1;
+                leave = true;
+                break;
+            }
+            started += 1;
         }
+        let mut unstarted = if leave {
+            Vec::new()
+        } else {
+            batch.split_off(started)
+        };
         #[cfg(test)]
         p.stage(Stage::AfterRead);
         // Every result passes this check after it was read and before it is acknowledged.
         if leave || p.ownership.lease_clock.now() >= tenure.deadline {
             self.exit(p, batch.first().map(|op| op.job().clone())).await;
+            batch.append(&mut unstarted);
             self.requeue(batch);
             return;
         }
         for op in batch {
             op.ack();
         }
+        // Unstarted operations stay at the front, with no exit.
+        unstarted.extend(self.pending.drain(..));
+        self.pending = unstarted.into();
         let renew_at = self.tenure.as_ref().expect("owner").renew_at;
         if p.ownership.lease_clock.now() >= renew_at {
             self.renew(p).await;
