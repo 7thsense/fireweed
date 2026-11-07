@@ -17108,6 +17108,26 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::owner_safety::failed_entry_releases_its_lease",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::failed_entry_releases_its_lease",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::failed_entry_releases_its_lease"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::owner_safety::handoff_reads_only_the_suffix",
           "--",
           "--exact"
@@ -17175,6 +17195,26 @@
         "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::new_owner_waits_ttl_plus_skew",
         "target": "fireweed",
         "test_id": "queue_recovery_pipeline::tests::owner_safety::new_owner_waits_ttl_plus_skew"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::owner_safety::operation_outlasting_every_lease_fails",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::operation_outlasting_every_lease_fails",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::operation_outlasting_every_lease_fails"
       },
       {
         "exact_invocation": [
@@ -119429,7 +119469,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "cd9a6b0fb5a59bf0f5c577425f2415eb4bb896e5779d84930019cb8e7d18dec1",
+  "source_inventory_sha256": "6676b83323527c337472ddb21a508eaaa7f486fe55d963e09c2630b0aca5ae27",
   "workspaces": [
     {
       "listing_error_sha256": "",
