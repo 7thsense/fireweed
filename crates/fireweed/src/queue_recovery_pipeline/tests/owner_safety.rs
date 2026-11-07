@@ -11,7 +11,10 @@ use std::time::Duration;
 
 const SECOND: Duration = Duration::from_secs(1);
 
-async fn stats(store: &NativeQueueStore, queue: &QueueAddress) -> QueueResult<QueueStats> {
+pub(super) async fn stats(
+    store: &NativeQueueStore,
+    queue: &QueueAddress,
+) -> QueueResult<QueueStats> {
     store
         .stats(StatsRequest {
             buckets: None,
@@ -22,7 +25,7 @@ async fn stats(store: &NativeQueueStore, queue: &QueueAddress) -> QueueResult<Qu
         })
         .await
 }
-async fn pending_items(store: &NativeQueueStore, queue: &QueueAddress) -> u64 {
+pub(super) async fn pending_items(store: &NativeQueueStore, queue: &QueueAddress) -> u64 {
     stats(store, queue).await.unwrap().totals.pending
 }
 fn hook_once(
@@ -417,7 +420,7 @@ async fn long_batch_renews_instead_of_lapsing() {
     a.shutdown().await.unwrap();
 }
 
-async fn wait_for(what: &str, mut done: impl AsyncFnMut() -> bool) {
+pub(super) async fn wait_for(what: &str, mut done: impl AsyncFnMut() -> bool) {
     for _ in 0..200 {
         if done().await {
             return;

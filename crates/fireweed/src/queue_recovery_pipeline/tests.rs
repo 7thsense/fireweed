@@ -4,8 +4,9 @@ use fireweed_engine::queue_admission::QueueAdmission;
 use fireweed_objectlog::FlushConfig;
 
 mod owner_safety;
-mod ownership;
+pub(super) mod ownership;
 mod record_counts;
+mod store_lifecycle;
 use ownership::TestOwnership;
 
 #[test]

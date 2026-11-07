@@ -250,3 +250,125 @@ impl NativeQueueStore {
             .expect("open store")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn abandoned_dispatch_and_cancelled_shutdown_retain_final_ownership() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("fireweed-port-drain-{nonce}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let log = Arc::new(
+            ObjectLogEngineStore::open_local(
+                root.join("log"),
+                fireweed_objectlog::FlushConfig::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let admission = fireweed_engine::queue_admission::QueueAdmission::new(1, 1 << 20).unwrap();
+        let init = Arc::new(admission.reserve(0).unwrap());
+        let projection = QueueProjection::open(&root.join("projection.db"), &init, &workers)
+            .await
+            .unwrap();
+        drop(init);
+        let scratch_root = fireweed_queue_spool::ScratchRoot::open(root.join("scratch"), &workers)
+            .await
+            .unwrap();
+        let pipeline = QueueRecoveryPipeline::new(
+            log,
+            projection,
+            workers,
+            QueuePipelineOptions {
+                operations: 1,
+                metadata_bytes: 65536,
+                hard_record_bytes: 1 << 20,
+            },
+            scratch_root,
+            fireweed_queue_spool::ScratchDiskQuota::new(1 << 20).unwrap(),
+            super::super::tests::ownership::TestOwnership::new().handle("only"),
+        )
+        .unwrap();
+        assert!(matches!(
+            NativeQueueStore::new(
+                pipeline.clone(),
+                QueueLimits::default(),
+                1 << 20,
+                Arc::new(fireweed_conformance::queue_contract::TestClock::default())
+            ),
+            Err(QueueError::Invalid(_))
+        ));
+        let drop_entered = Arc::new(tokio::sync::Notify::new());
+        let drop_release = Arc::new(std::sync::Barrier::new(2));
+        let ready = drop_entered.clone();
+        let release = drop_release.clone();
+        *pipeline.before_drop.lock().unwrap() = Some(Box::new(move || {
+            ready.notify_one();
+            release.wait();
+        }));
+        let store = NativeQueueStore::new(
+            pipeline,
+            QueueLimits::default(),
+            1 << 20,
+            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
+        )
+        .unwrap();
+        let diagnostic_handle = store.recovery_diagnostics();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let caller = store.clone();
+        let ready = entered.clone();
+        let unblock = release.clone();
+        let task = tokio::spawn(async move {
+            caller
+                .dispatch(7, move |_pipeline, job| async move {
+                    let charge = job.owned_buffer(11)?;
+                    ready.notify_one();
+                    unblock.notified().await;
+                    Ok(OwnedQueueValue::new(vec![1u8; 11], (charge, job)))
+                })
+                .await
+        });
+        entered.notified().await;
+        task.abort();
+        let _ = task.await;
+        assert_eq!(store.inner.runtime.usage().unwrap(), (1, 18));
+        let mut first = Box::pin(store.shutdown());
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+        assert!(matches!(
+            first.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        drop(first);
+        assert!(matches!(
+            store.inner.runtime.reserve(0),
+            Err(QueueError::Busy)
+        ));
+        let a = store.clone();
+        let b = store.clone();
+        let drain_a = tokio::spawn(async move { a.shutdown().await });
+        let drain_b = tokio::spawn(async move { b.shutdown().await });
+        release.notify_one();
+        drop_entered.notified().await;
+        assert!(!drain_a.is_finished());
+        assert!(!drain_b.is_finished());
+        drop_release.wait();
+        drain_a.await.unwrap().unwrap();
+        drain_b.await.unwrap().unwrap();
+        assert_eq!(store.inner.runtime.usage().unwrap(), (0, 0));
+        assert!(store.inner.pipeline.lock().unwrap().is_none());
+        store.shutdown().await.unwrap();
+        drop(store);
+        assert_eq!(Arc::strong_count(&diagnostic_handle), 1);
+        assert_eq!(diagnostic_handle.snapshot().attempts, 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
