@@ -45,6 +45,22 @@ impl Env {
         )
         .await
     }
+    /// As `open`, with a bound on the size of one log record.
+    pub(super) async fn open_bounded(
+        &self,
+        projection: &str,
+        hard_record_bytes: u64,
+    ) -> NativeQueueStore {
+        super::native_port_fixture_sized(
+            &self.root,
+            projection,
+            self.prefix.as_deref(),
+            self.clock.clone(),
+            self.ownership.handle(projection),
+            hard_record_bytes,
+        )
+        .await
+    }
     pub(super) fn address(&self, name: &str) -> QueueAddress {
         QueueAddress {
             tenant: "api007-counts".into(),
