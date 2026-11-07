@@ -446,3 +446,32 @@ async fn dropped_store_releases_its_lease() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn absent_queue_holds_nothing() {
+    let env = Env::new("absent", false);
+    let queue = env.address("missing");
+    let a = env.open("a.db").await;
+    assert_eq!(
+        a.read_commit(ReceiptReadRequest {
+            queue: queue.clone(),
+            request_ids: vec!["none".into()],
+            max_bytes: 1 << 20,
+        })
+        .await,
+        Err(QueueError::QueueNotFound)
+    );
+    let pipeline = a.pipeline_for_test();
+    let key = owner::queue_key(&queue).unwrap();
+    let plane = env.ownership.plane.clone();
+    wait_for("the absent queue's loop to end", async || {
+        pipeline.queues.lock().unwrap().len() == 0
+            && plane.lease(&key).await.unwrap().state == LeaseState::Unassigned
+    })
+    .await;
+    // A later operation starts a fresh loop.
+    grow(&a, &queue, 3).await;
+    assert_eq!(pipeline.queues.lock().unwrap().len(), 1);
+    drop(pipeline);
+    a.shutdown().await.unwrap();
+}

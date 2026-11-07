@@ -17,8 +17,6 @@ use futures::future::BoxFuture;
 use std::{collections::VecDeque, time::Duration};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-/// A handle serves at most this many queues. Further queues receive `Busy`.
-const MAX_QUEUES: usize = 4096;
 /// An operation whose own execution leaves owner state this many times fails.
 const MAX_ATTEMPTS: u32 = 3;
 /// Records read between lease checks during entry.
@@ -367,6 +365,12 @@ pub(super) struct QueueTable {
     open: bool,
     slots: std::collections::BTreeMap<QueueAddress, QueueSlot>,
 }
+impl QueueTable {
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.slots.len()
+    }
+}
 impl Default for QueueTable {
     fn default() -> Self {
         Self {
@@ -391,7 +395,7 @@ impl QueueRecoveryPipeline {
             .try_acquire_owned()
             .map_err(|_| QueueError::Busy)?;
         let (reply, receiver) = tokio::sync::oneshot::channel();
-        let sender = self.sender(plan.address())?;
+        let address = plan.address().clone();
         let op: Box<dyn QueueOp> = Box::new(Op {
             plan,
             limits,
@@ -407,15 +411,15 @@ impl QueueRecoveryPipeline {
                 _job: job,
             },
         });
-        sender.send(op).map_err(|_| QueueError::Busy)?;
+        self.enqueue(&address, op)?;
         receiver
             .await
             .map_err(|_| unknown("queue loop dropped an operation"))?
     }
-    fn sender(
-        self: &Arc<Self>,
-        address: &QueueAddress,
-    ) -> QueueResult<UnboundedSender<Box<dyn QueueOp>>> {
+    /// Hand the operation to the queue's loop, starting one if none runs. The send
+    /// happens under the table lock, and a finishing loop removes its slot under
+    /// the same lock, so an operation cannot land on a loop that has ended.
+    fn enqueue(self: &Arc<Self>, address: &QueueAddress, op: Box<dyn QueueOp>) -> QueueResult<()> {
         let mut table = self
             .queues
             .lock()
@@ -426,19 +430,14 @@ impl QueueRecoveryPipeline {
         if let Some(slot) = table.slots.get(address)
             && !slot.task.is_finished()
         {
-            return Ok(slot.sender.clone());
-        }
-        table.slots.retain(|_, slot| !slot.task.is_finished());
-        if table.slots.len() >= MAX_QUEUES {
-            return Err(QueueError::Busy);
+            return slot.sender.send(op).map_err(|_| QueueError::Busy);
         }
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let key = queue_key(address)?;
         let task = tokio::spawn(
             QueueLoop {
                 pipeline: Arc::downgrade(self),
                 address: address.clone(),
-                key,
+                key: queue_key(address)?,
                 ownership: self.ownership.clone(),
                 receiver,
                 pending: VecDeque::new(),
@@ -447,14 +446,11 @@ impl QueueRecoveryPipeline {
             }
             .run(),
         );
-        table.slots.insert(
-            address.clone(),
-            QueueSlot {
-                sender: sender.clone(),
-                task,
-            },
-        );
-        Ok(sender)
+        let sent = sender.send(op).map_err(|_| QueueError::Busy);
+        table
+            .slots
+            .insert(address.clone(), QueueSlot { sender, task });
+        sent
     }
     /// Stop accepting operations, let every loop finish what it holds, and
     /// release the leases. The projection is not touched: it dies with the process.
@@ -572,8 +568,24 @@ impl QueueLoop {
                 break;
             }
             self.iterate(&p).await;
+            if self.tenure.is_none() && self.pending.is_empty() && self.finish(&p) {
+                break;
+            }
         }
         self.release().await;
+    }
+    /// A loop with no tenure and nothing pending removes its slot and ends. The
+    /// last look at the channel and the removal share the table lock with `enqueue`.
+    fn finish(&mut self, p: &QueueRecoveryPipeline) -> bool {
+        let Ok(mut table) = p.queues.lock() else {
+            return false;
+        };
+        self.take_queued();
+        if !self.pending.is_empty() {
+            return false;
+        }
+        table.slots.remove(&self.address);
+        true
     }
     async fn iterate(&mut self, p: &Arc<QueueRecoveryPipeline>) {
         if self.tenure.is_none() {
@@ -629,11 +641,18 @@ impl QueueLoop {
         for op in batch {
             op.ack();
         }
+        // A queue that does not exist holds nothing.
+        if self.tenure.as_ref().is_some_and(|t| t.genesis.is_none()) {
+            self.release().await;
+        }
         // Unstarted operations stay at the front, with no exit.
         unstarted.extend(self.pending.drain(..));
         self.pending = unstarted.into();
-        let renew_at = self.tenure.as_ref().expect("owner").renew_at;
-        if p.ownership.lease_clock.now() >= renew_at {
+        if self
+            .tenure
+            .as_ref()
+            .is_some_and(|t| p.ownership.lease_clock.now() >= t.renew_at)
+        {
             self.renew(p).await;
         }
     }
