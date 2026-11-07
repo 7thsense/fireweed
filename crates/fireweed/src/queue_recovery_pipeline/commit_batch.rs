@@ -147,6 +147,7 @@ fn staged_group(entry: StagedEntry) -> GroupStage {
     }
 }
 /// Prepare one group against the batch and stage its entry.
+#[allow(clippy::too_many_arguments)]
 async fn stage_group(
     p: &QueueRecoveryPipeline,
     t: &Tenure,
@@ -325,6 +326,7 @@ impl BatchPlan {
         )
     }
     /// Stage one ordinary pack of the groups at `positions`.
+    #[allow(clippy::too_many_arguments)]
     async fn pack(
         &self,
         p: &QueueRecoveryPipeline,

@@ -81,6 +81,7 @@ impl QueueProjection {
         )
         .await
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn prepare_ordinary_pack_in(
         self: &Arc<Self>,
         host: TxHost,

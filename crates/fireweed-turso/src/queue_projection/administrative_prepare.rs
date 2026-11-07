@@ -123,6 +123,7 @@ impl QueueProjection {
         )
         .await
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn prepare_administration_in(
         self: &Arc<Self>,
         host: TxHost,
