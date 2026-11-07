@@ -55,6 +55,8 @@ pub(super) struct TestPlane {
     pub(super) fail_confirm: AtomicBool,
     /// Renewals fail while every other call works: a stalled owner.
     pub(super) fail_renew: AtomicBool,
+    /// Renewals are refused as a lost lease: the owner was fenced out.
+    pub(super) reject_renew: AtomicBool,
     pub(super) renewals: AtomicU64,
     /// Runs inside a renewal call, before it returns: a slow control plane.
     pub(super) during_renew: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -67,6 +69,7 @@ impl TestPlane {
             lose_renew_reply: AtomicBool::new(false),
             fail_confirm: AtomicBool::new(false),
             fail_renew: AtomicBool::new(false),
+            reject_renew: AtomicBool::new(false),
             renewals: AtomicU64::new(0),
             during_renew: std::sync::Mutex::new(None),
         })
@@ -156,6 +159,9 @@ impl AsyncQueueControlPlane for TestPlane {
             return Err(EngineError::Unavailable);
         }
         self.renewals.fetch_add(1, Ordering::SeqCst);
+        if self.reject_renew.load(Ordering::SeqCst) {
+            return Err(EngineError::EpochFenced);
+        }
         if let Some(hook) = self.during_renew.lock().unwrap().as_ref() {
             hook();
         }

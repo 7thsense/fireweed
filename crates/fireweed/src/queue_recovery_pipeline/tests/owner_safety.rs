@@ -185,16 +185,9 @@ async fn publish_failure_drops_projection_and_exits() {
                         .reserve(0)
                         .unwrap(),
                 );
-                let namespace = pipeline
-                    .store
-                    .bind_api007_namespace(&queue, &job)
-                    .await
-                    .unwrap();
-                pipeline
-                    .store
-                    .acquire_api007_state(namespace, &job, &pipeline.workers)
-                    .await
-                    .unwrap();
+                // Another writer takes a strictly newer fence.
+                let namespace = pipeline.log.open(&queue, &job).await.unwrap().unwrap();
+                pipeline.log.acquire_bundle(namespace, &job).await.unwrap();
                 None
             }
             _ => {

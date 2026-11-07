@@ -1,7 +1,9 @@
 use super::*;
 use fireweed_core::queue_contract::*;
 use fireweed_engine::queue_admission::QueueAdmission;
-use fireweed_objectlog::FlushConfig;
+use fireweed_objectlog::queue_native_log::{
+    QueueNativeLog, QueueNativeLogOptions, QueueNativeS3Connection, QueueNativeS3TransportOptions,
+};
 
 mod owner_safety;
 pub(super) mod ownership;
@@ -90,28 +92,30 @@ fn operation_completion_releases_permit_before_terminal_notification_on_every_dr
     }
 }
 
-async fn native_log_fixture(
-    root: &std::path::Path,
-    s3_prefix: Option<&str>,
-) -> ObjectLogEngineStore {
+/// The log every store in a test shares, through `prefix` on S3 or `root` on disk.
+/// `retained_bytes` is left to the default, which covers a retained spine for a
+/// thousand owned queues.
+fn native_log_fixture(root: &std::path::Path, s3_prefix: Option<&str>) -> QueueNativeLog {
+    let options =
+        QueueNativeLogOptions::for_queue_limits(&QueueLimits::default(), 128, 2, 4096, None)
+            .unwrap();
     if let Some(prefix) = s3_prefix {
         let env = fireweed_objectlog::test_s3::shared_s3_test_env();
-        ObjectLogEngineStore::open_s3_with_prefixes(
-            &env.endpoint,
-            &env.region,
-            &env.bucket,
-            &env.access_key,
-            &env.secret_key,
-            format!("{prefix}/data/"),
-            format!("{prefix}/meta/"),
-            FlushConfig::default(),
+        QueueNativeLog::s3(
+            QueueNativeS3Connection {
+                endpoint: &env.endpoint,
+                region: &env.region,
+                bucket: &env.bucket,
+                access_key: &env.access_key,
+                secret_key: &env.secret_key,
+            },
+            prefix.to_owned(),
+            options,
+            QueueNativeS3TransportOptions::default(),
         )
-        .await
         .unwrap()
     } else {
-        ObjectLogEngineStore::open_local(root.join("log"), FlushConfig::default())
-            .await
-            .unwrap()
+        QueueNativeLog::local(&root.join("log"), "native".to_owned(), options).unwrap()
     }
 }
 async fn native_port_fixture(
@@ -137,7 +141,7 @@ async fn native_port_fixture_owned(
     clock: Arc<fireweed_conformance::queue_contract::TestClock>,
     ownership: QueueOwnership,
 ) -> NativeQueueStore {
-    let store = native_log_fixture(root, s3_prefix).await;
+    let store = native_log_fixture(root, s3_prefix);
     let workers = ScratchWorkers::new(2, 8).unwrap();
     let admission = QueueAdmission::new(1, 512 << 20).unwrap();
     let job = Arc::new(admission.reserve(0).unwrap());

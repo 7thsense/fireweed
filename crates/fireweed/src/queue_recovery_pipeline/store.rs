@@ -131,10 +131,10 @@ impl QueueStore for NativeQueueStore {
             let limits = self.inner.limits;
             self.dispatch(bytes, move |pipeline, job| async move {
                 let charge = job.owned_buffer(bytes)?;
-                let original = pipeline
+                pipeline
                     .provision(request.clone(), limits, job.clone(), charge)
                     .await?;
-                Ok(OwnedQueueValue::new((), (original, request, job)))
+                Ok(OwnedQueueValue::new((), (request, job)))
             })
             .await
         })
@@ -254,6 +254,7 @@ impl NativeQueueStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fireweed_objectlog::queue_native_log::QueueNativeLogOptions;
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn abandoned_dispatch_and_cancelled_shutdown_retain_final_ownership() {
         let nonce = std::time::SystemTime::now()
@@ -263,11 +264,12 @@ mod tests {
         let root = std::env::temp_dir().join(format!("fireweed-port-drain-{nonce}"));
         std::fs::create_dir_all(&root).unwrap();
         let log = Arc::new(
-            ObjectLogEngineStore::open_local(
-                root.join("log"),
-                fireweed_objectlog::FlushConfig::default(),
+            QueueNativeLog::local(
+                &root.join("log"),
+                "native".to_owned(),
+                QueueNativeLogOptions::for_queue_limits(&QueueLimits::default(), 8, 1, 4096, None)
+                    .unwrap(),
             )
-            .await
             .unwrap(),
         );
         let workers = ScratchWorkers::new(1, 1).unwrap();

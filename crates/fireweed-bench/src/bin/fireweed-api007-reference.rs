@@ -34,7 +34,6 @@ struct Config {
     runtime: QueueRuntimeOptions,
     prefix: String,
     profile: String,
-    flush: fireweed_objectlog::FlushConfig,
 }
 fn limits() -> QueueLimits {
     QueueLimits {
@@ -54,10 +53,8 @@ fn config() -> Result<Config, String> {
         return Err("usage: fireweed-api007-reference <postgres|local|s3> <fresh-absolute-root> <fresh-absolute-artifact> <records> <batch> <seed> <body-bytes> <state-bytes> [default|zero-linger]".into());
     }
     let profile = args.get(8).map(String::as_str).unwrap_or("default");
-    let mut flush = fireweed_objectlog::FlushConfig::default();
     match profile {
-        "default" => {}
-        "zero-linger" => flush.linger = std::time::Duration::ZERO,
+        "default" | "zero-linger" => {}
         _ => return Err("profile must be default or zero-linger".into()),
     }
     let root = PathBuf::from(&args[1]);
@@ -162,7 +159,6 @@ fn config() -> Result<Config, String> {
         s3,
         runtime,
         profile: profile.to_owned(),
-        flush,
         prefix: format!(
             "api007-reference-{}-{}",
             std::process::id(),
@@ -280,37 +276,39 @@ async fn construct(c: &Config) -> QueueResult<Constructed> {
         SystemLeaseClock,
     };
     use fireweed_engine::queue_admission::QueueAdmission;
-    use fireweed_objectlog::{NativeLogOptions, ObjectLogEngineStore};
+    use fireweed_objectlog::queue_native_log::{
+        QueueNativeLog, QueueNativeLogOptions, QueueNativeS3Connection,
+        QueueNativeS3TransportOptions,
+    };
     use fireweed_queue_spool::{ScratchDiskQuota, ScratchRoot, ScratchWorkers};
     let workers = ScratchWorkers::new(2, c.runtime.operations)?;
     let result = std::panic::AssertUnwindSafe(async {
         let scratch = ScratchRoot::open(c.root.join("scratch"), &workers).await?;
-        let native = NativeLogOptions {
-            provision_operations: c.runtime.operations,
-            ..NativeLogOptions::default()
-        };
-        let store = if let Some(s3) = &c.s3 {
-            ObjectLogEngineStore::open_s3_with_prefixes_and_native_options(
-                &s3.endpoint,
-                &s3.region,
-                &s3.bucket,
-                &s3.access,
-                &s3.secret,
-                format!("{}/data/", c.prefix),
-                format!("{}/meta/", c.prefix),
-                c.flush,
+        // The native ledger's default covers four frames in flight and a retained
+        // spine for a thousand owned queues.
+        let native = QueueNativeLogOptions::for_queue_limits(
+            &limits(),
+            c.runtime.operations,
+            2,
+            4096,
+            None,
+        )?;
+        let log = if let Some(s3) = &c.s3 {
+            QueueNativeLog::s3(
+                QueueNativeS3Connection {
+                    endpoint: &s3.endpoint,
+                    region: &s3.region,
+                    bucket: &s3.bucket,
+                    access_key: &s3.access,
+                    secret_key: &s3.secret,
+                },
+                c.prefix.clone(),
                 native,
-            )
-            .await
+                QueueNativeS3TransportOptions::default(),
+            )?
         } else {
-            ObjectLogEngineStore::open_local_with_native_options(
-                c.root.join("log"),
-                c.flush,
-                native,
-            )
-            .await
-        }
-        .map_err(|_| QueueError::OutcomeUnknown("native constructor failed".into()))?;
+            QueueNativeLog::local(&c.root.join("log"), c.prefix.clone(), native)?
+        };
         let admission = QueueAdmission::new(1, c.runtime.retained_bytes.unwrap())?;
         let job = Arc::new(admission.reserve(0)?);
         let projection = fireweed_turso::queue_projection::QueueProjection::open(
@@ -322,7 +320,7 @@ async fn construct(c: &Config) -> QueueResult<Constructed> {
         drop(job);
         let quota = ScratchDiskQuota::new(c.runtime.scratch_bytes.unwrap())?;
         let pipeline = QueueRecoveryPipeline::new(
-            Arc::new(store),
+            Arc::new(log),
             projection,
             workers.clone(),
             QueuePipelineOptions {
@@ -436,7 +434,7 @@ async fn execute(c: Config, source: Value) -> Result<bool, String> {
     };
     let source_matches = provenance().is_ok_and(|current| current == source);
     passed &= source_matches;
-    let mut report = json!({"qualification":"internal-port reference; histogram only; not TP-005 or public-facade acceptance", "backend":c.backend,"native_flush_profile":c.profile,"profile_effect":if c.pg.is_some() {"no PostgreSQL behavior change"} else {"configured native linger only; budget, durability and recovery waits remain"}, "source":source,"compiled_source_scope":"listed benchmark/common sources and manifests/locks; remaining backend source is identified by HEAD and dirty patch", "source_matches_after_drain":source_matches, "command":std::env::args().collect::<Vec<_>>(), "build_profile":if cfg!(debug_assertions) {"debug"} else {"release"}, "clock":"fixed0", "postgres_pool_size":c.pg.as_ref().map(|_|2), "operation_slots":8, "scratch_workers":2, "retained_bytes":512u64<<20, "scratch_bytes":64u64<<20, "queue_limits":limits(),"native_settings":if c.pg.is_none() { Some(json!({"provision_operations":8,"provision_retry_delay_ms":125,"metadata_bytes":65536,"hard_record_bytes":256u64<<20,"flush":format!("{:?}",c.flush),"turso_cache_kib":4096,"turso_cache_scope":"SDK soft cache setting; hard RAM qualification pending"})) } else { None }, "construction_ns":construction_ns,"namespace_prefix":c.prefix,"local_root":c.root,"s3_endpoint":c.s3.as_ref().map(|s3| &s3.endpoint),"s3_bucket":c.s3.as_ref().map(|s3| &s3.bucket),"s3_region":c.s3.as_ref().map(|s3| &s3.region),"postgres_config_source":c.pg.as_ref().map(|_| "FIREWEED_API007_PG_TEST_URL (credentials omitted)"),"host":std::fs::read_to_string("/proc/sys/kernel/hostname").ok().map(|v| v.trim().to_owned()), "client_peak_rss_kib":client_peak_rss_kib(), "service_memory":"unmeasured; client RSS is not backend-total RAM", "remote_storage_and_cost":"unmeasured", "workload":workload, "passed":passed});
+    let mut report = json!({"qualification":"internal-port reference; histogram only; not TP-005 or public-facade acceptance", "backend":c.backend,"native_flush_profile":c.profile,"profile_effect":if c.pg.is_some() {"no PostgreSQL behavior change"} else {"none: the native log has no flush linger; the profile is recorded only"}, "source":source,"compiled_source_scope":"listed benchmark/common sources and manifests/locks; remaining backend source is identified by HEAD and dirty patch", "source_matches_after_drain":source_matches, "command":std::env::args().collect::<Vec<_>>(), "build_profile":if cfg!(debug_assertions) {"debug"} else {"release"}, "clock":"fixed0", "postgres_pool_size":c.pg.as_ref().map(|_|2), "operation_slots":8, "scratch_workers":2, "retained_bytes":512u64<<20, "scratch_bytes":64u64<<20, "queue_limits":limits(),"native_settings":if c.pg.is_none() { Some(json!({"native_log_workers":2,"native_log_operations":c.runtime.operations,"native_log_retained_bytes":"default: four frames, 2 MiB and 512 KiB for each of 1024 owned queues","metadata_bytes":65536,"hard_record_bytes":256u64<<20,"turso_cache_kib":4096,"turso_cache_scope":"SDK soft cache setting; hard RAM qualification pending"})) } else { None }, "construction_ns":construction_ns,"namespace_prefix":c.prefix,"local_root":c.root,"s3_endpoint":c.s3.as_ref().map(|s3| &s3.endpoint),"s3_bucket":c.s3.as_ref().map(|s3| &s3.bucket),"s3_region":c.s3.as_ref().map(|s3| &s3.region),"postgres_config_source":c.pg.as_ref().map(|_| "FIREWEED_API007_PG_TEST_URL (credentials omitted)"),"host":std::fs::read_to_string("/proc/sys/kernel/hostname").ok().map(|v| v.trim().to_owned()), "client_peak_rss_kib":client_peak_rss_kib(), "service_memory":"unmeasured; client RSS is not backend-total RAM", "remote_storage_and_cost":"unmeasured", "workload":workload, "passed":passed});
     report["native_recovery"] = recovery.unwrap_or(Value::Null);
     if !source_matches {
         report["workload"]["correctness"] = json!("failed_provenance");
