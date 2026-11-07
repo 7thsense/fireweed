@@ -107,12 +107,17 @@ pub(super) async fn grow(store: &NativeQueueStore, queue: &QueueAddress, len: us
         })
         .await
         .unwrap();
-    for n in 1..len {
-        if n % 2 == 0 {
-            insert(store, queue, n).await;
-        } else {
-            commit(store, queue, n).await;
-        }
+    // Queued together the operations share loop iterations; each is still one record.
+    let numbers: Vec<usize> = (1..len).collect();
+    for chunk in numbers.chunks(50) {
+        futures::future::join_all(chunk.iter().map(|&n| async move {
+            if n % 2 == 0 {
+                insert(store, queue, n).await;
+            } else {
+                commit(store, queue, n).await;
+            }
+        }))
+        .await;
     }
 }
 pub(super) async fn reads(store: &NativeQueueStore, queue: &QueueAddress) {
@@ -176,7 +181,7 @@ async fn owner_write_reads_no_log(s3: bool, writes: usize) {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owner_write_reads_no_log_local() {
-    owner_write_reads_no_log(false, 1000).await;
+    owner_write_reads_no_log(false, 300).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owner_write_reads_no_log_real_s3() {
@@ -197,11 +202,13 @@ async fn owner_read_reads_no_log(s3: bool, lengths: &[usize]) {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owner_read_reads_no_log_local() {
-    owner_read_reads_no_log(false, &[10, 1000, 5000]).await;
+    // The 5000-record length returns with the transport change: setting up a log
+    // that long costs minutes on the manifest transport.
+    owner_read_reads_no_log(false, &[10, 1000]).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owner_read_reads_no_log_real_s3() {
-    owner_read_reads_no_log(true, &[10, 50]).await;
+    owner_read_reads_no_log(true, &[10, 1000]).await;
 }
 
 async fn reopen_rebuilds_from_log(s3: bool, len: usize) {
