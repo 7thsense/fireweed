@@ -414,3 +414,48 @@ async fn forged_duplicate_unique_key_is_refused_and_a_swap_in_one_record_passes(
     workers.close_and_drain().await.unwrap();
     assert_eq!(admission.usage().unwrap(), (0, 0));
 }
+
+#[tokio::test]
+async fn unique_owner_lookups_seek_the_equal_index_by_digest() {
+    use super::super::unique_authority::{UNIQUE_OWNER_KEY_SQL, UNIQUE_OWNER_METADATA_SQL};
+    let directory = tempfile::tempdir().unwrap();
+    let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+    let job = Arc::new(admission.reserve(0).unwrap());
+    let workers = ScratchWorkers::new(1, 1).unwrap();
+    let (projection, definition) =
+        bootstrap(&directory.path().join("owner-plan.db"), &job, &workers).await;
+    tokio::task::spawn_blocking({
+        let projection = projection.clone();
+        move || {
+            crate::tx::block_on_owned_apply(async {
+                let writer = projection.writer.lock().await;
+                let connection = writer.as_ref().unwrap();
+                for sql in [UNIQUE_OWNER_METADATA_SQL, UNIQUE_OWNER_KEY_SQL] {
+                    let production = plan(connection, sql).await;
+                    assert!(
+                        production
+                            .iter()
+                            .any(|step| step.contains("SEARCH i USING INDEX q7_index_equal")
+                                && step.contains("hash=?")),
+                        "{production:?}"
+                    );
+                    let unhinted = sql.replace(" INDEXED BY q7_index_equal", "");
+                    assert!(
+                        !plan(connection, &unhinted)
+                            .await
+                            .iter()
+                            .any(|step| step.contains("q7_index_equal") && step.contains("hash=?")),
+                        "unhinted control must reproduce the optimizer regression"
+                    );
+                }
+            })
+        }
+    })
+    .await
+    .unwrap();
+    drop(projection);
+    drop(definition);
+    drop(job);
+    workers.close_and_drain().await.unwrap();
+    assert_eq!(admission.usage().unwrap(), (0, 0));
+}
