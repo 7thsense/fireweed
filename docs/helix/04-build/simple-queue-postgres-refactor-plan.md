@@ -71,23 +71,32 @@ source/config/tool identity and explicit retention/loss. Exact live test fixture
 belong with tests, not among governed specifications. Keep current requirements,
 contracts, designs and this execution plan concise and maintained in place.
 
-## Continuation Evidence
+## Native Owner Path Evidence
 
-Recovery observers share one structurally checked view of the exact admitted
-record while retaining independent scope, continuity and poison checks. Fixed
-phase totals partition elapsed recovery time into fresh authority, planned
-read/worker/transfer, checked history/proof folding and native checkpoint/apply.
+Fixed phase totals partition elapsed owner-entry time into fresh authority,
+planned read/worker/transfer, checked record verification and native apply.
 Quiescent deltas reject saturation and inconsistent totals. Worker-side parsing
 is included in read time; elapsed buckets are not CPU or provider-request counts.
+Head reads, fence acquisitions and log records read are counted separately.
 
-Within one exact admitted commit batch, a sealed prior cut can seed suffix
-folding after a fresh durable acquire. Store, job, genesis, complete declarations,
-progress and every state/original descriptor remain bound. A lost/regressed
-source or failed continuation is terminal unknown; replay retries retain their
-last checked authority floor. Missing/behind projections rebuild cold under the
-same acquired target and recovery slot. Independent operations remain cold.
-`check_continuation.py` bounds scope, fence, suffix poison, original duplicates,
-state high-water and historical-epoch preservation; mappings are documentary.
+Native writes publish to the immutable log and every read or query serves from
+the local projection, so healthy operation reads zero log records and makes no
+object-store read. Each queue has one owner at a time, by a control-plane lease,
+and one loop through which every operation passes; a second handle receives
+`Busy`. Entry acquires the lease, waits the skew allowance `S`, takes a strictly
+newer fence and rebuilds the projection from the log. The owner plans a write
+against the projection, publishes conditionally on epoch and exact offset, then
+applies the same record bytes and replies from the projection. It tracks a local
+lease deadline, measured on a clock that counts suspend from before each lease
+request was sent, and releases a read only if it is still before the deadline
+after the read. Any failed or unconfirmed publish, passed deadline, rejected
+renewal or projection error drops the queue's projection and leaves owner state;
+re-entry rebuilds under a newer fence, so an original that did publish is found
+by its identity. The projection lives exactly as long as its process: open
+deletes whatever an earlier process left. `check_owner.py` bounds this path with
+two handles, skewed wall clocks, a reply window, a stall, a lost renewal reply
+and a crash, and its faulty controls name each safety rule; its mapping is
+documentary.
 
 Native ordinary-pack preparation uses one exact per-key read union and an
 evolving shared-planner snapshot. Whole-batch original classification precedes
@@ -97,10 +106,9 @@ Accepted deltas, receipts and clock decisions survive splitting at the first
 physical size overflow; physical receipts sort canonically without reordering logical
 outputs. Reservation or authority errors cannot masquerade as a size split.
 Root publishes the actual accepted contiguous prefix once, then resolves the
-complete declared batch at a freshly acquired, head-confirmed cut. Every retry
-retains its checked authority floor; absent submitted originals require a newer
-fence and fresh planning. Finalized caller positions retain their admitted owners,
-including single/administrative conflict or expiry classifications with their cut.
+complete declared batch from the projection. Absent submitted originals are replanned only after the owner re-enters under a
+newer fence. Caller positions finalize from the projection, including
+single/administrative conflict or expiry classifications.
 `check_pack_preparation.py` bounds preparation; `check_pack_publication.py` bounds
 physical publication, contiguous remainder retries and source-confirmed receipts.
 Native final-transaction uniqueness checks seek the existing digest/range equality
@@ -110,43 +118,21 @@ Neither finite family establishes provider durability or performance readiness;
 public activation and the matched release workloads remain separate gates.
 
 The concrete PostgreSQL facade and mandatory suite are implemented. The hidden
-Linux native port assembles all ten operations from shared planners, native
+native port assembles all ten operations from shared planners, native
 filtered selection, stock-Turso atomic projection and conditional log publication.
 Owned response handoff retains admission through delivery or abandoned reply
 cleanup. Shared shutdown drains admission and workers and serializes final
 resource teardown. These internal operations do not activate the public backend.
 
-Native mutation retries require a strictly newer durable fence, complete checked
-log history and covered original-receipt absence. Operation-owned descriptors
-bind the requested literal identities and domains to that complete source cut.
-Insert, claim and commit preparation and replay compare cached presence,
-fingerprint and outcome bytes with these descriptors before accepting an
-original result. Matching callers cannot trust an unwitnessed cached expiry;
-independently proven caller conflicts retain their existing precedence.
-`check_domains.py` bounds domain/identity proof use, including proved absence;
-`check_originals.py` bounds metadata and opaque-outcome classification. Their
-production mappings remain documentary. Ordered receipt lookups bind the whole
-request vector, including aliases and empty requests, before native reads;
-cached outcomes require the same source metadata and byte checks.
-`check_lookups.py` bounds vector scope, order and duplicate-source rejection.
-Addressed state reads bind ordered keys and their current presence/high-water
-history to the checked cut. Source-derived exact response sizes precede payload
-admission; cached metadata, complete fields and values require source agreement.
-`check_state_authority.py` bounds predecessor, scope, cache and size ordering.
-Commit and preview bind the complete declared state component, including every
-batch sibling, before fresh planning. Metadata-only checks verify presence and
-retained high-water; replacement/deletion verify complete old fields without
-reading old values. Immutable original replay precedes current-state validation.
-`check_state_preparation.py` bounds this ordering and payload knowledge; its
-production map remains documentary. Ordinary commit, preview and pack preparation now compose addressed work
-metadata and selected-field/body descriptors with the existing group proof.
-Checked genesis establishes the exact field closure; lease/presence metadata,
-source lengths and canonical value digests precede planner use. Failed proof
-initialization is terminal, and continuation retains admitted knowledge.
-`check_state_preparation.py` also bounds this selected-work knowledge ordering;
-its production map remains documentary. Complete administrative hydration,
-state query paths, unique owners and selection indexes still require full cached
-integrity.
+Native mutation retries happen only after the owner re-enters under a strictly
+newer durable fence and rebuilds from the log. Insert, claim and commit then look
+up the original identity in the projection; immutable original replay precedes
+current-state validation.
+Originals, receipt lookups, addressed state reads, commit, preview and pack
+preparation read the trusted projection directly. They bind no per-operation
+source descriptors and compare no projection bytes with the log. Complete
+administrative hydration, state query paths, unique owners and selection indexes
+still require full cached integrity.
 Fresh catalog-known missing indexes and previously observed malformed authority
 fail closed across reopen, independent handles and later metadata deletion.
 Native S3 conditional writes classify typed conflicts and never retry a lost
@@ -170,9 +156,9 @@ provider/key/version tokens and source-buffer lifetime ownership. Its fixed-head
 reader/fencer is qualification-internal. Production reuse requires lazy immutable
 paged log indexes and a source-committed semantic summary covering originals,
 tombstones, payload descriptors, complete selection indexes and aggregates.
-Fresh operations mint their own proofs against that head; existing tracker
-objects remain operation-scoped. The current full-vector manifest and cold
-prefix recovery remain in use until those gates pass.
+Operations mint no per-operation proofs against that head; they serve from the
+projection. The current full-vector manifest and rebuild from genesis remain in
+use until those gates pass.
 
 The single Snorri adapter, diagnostics receiver integration, revised formal
 correspondence and matched settled release benchmarks remain required. Snorri

@@ -47,6 +47,10 @@ fireweed-projection = { path = "../fireweed-projection", optional = true }
 # Optional: pulled by `objectlog` / `postgres` / `turso`. Workers need `rt` + I/O drivers for LogEngine.
 tokio = { version = "1", features = ["rt", "time", "fs", "io-util", "net", "sync"], optional = true }
 
+# Lease deadlines are measured on CLOCK_BOOTTIME, which `Instant` is not.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", default-features = false, features = ["time"] }
+
 [features]
 # Public construction is object-log + Turso (ADR-024). Whitebox tests use
 # Turso `:memory:` (`TursoConfig::in_memory`), not `fireweed-memory`.
@@ -63,6 +67,7 @@ postgres = ["dep:fireweed-postgres", "dep:tokio"]
 turso = ["dep:fireweed-turso", "fireweed-turso/local", "dep:tokio", "dep:fireweed-projection"]
 
 [dev-dependencies]
+async-trait = "0.1"
 turso = { version = "0.8.2", default-features = false }
 fireweed-conformance = { path = "../fireweed-conformance" }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread", "time", "sync"] }

@@ -27,25 +27,25 @@ for module_name in ('models', 'explorer', 'api007_models'):
 from api007_models import CONFIGURATIONS, FAULTS, ModelBoundError, Publication
 from explorer import SearchLimit, explore, render
 
+_PIPELINE = 'crates/fireweed/src/queue_recovery_pipeline/'
 MAPPINGS = {
-    'F-ACK': {'symbol': 'QueueRecoveryPipeline::recover_checked',
-              'source': 'crates/fireweed/src/queue_recovery_pipeline.rs',
-              'test': 'owned_claim_publishes_then_replays_original_identity_and_expiry'},
-    'F-PREFIX': {'symbol': 'verify_prefix',
-                 'source': 'crates/fireweed/src/queue_recovery_pipeline.rs',
-                 'test': 'cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target'},
-    'F-FENCE': {'symbol': 'resolve_submission',
-                'source': 'crates/fireweed/src/queue_recovery_pipeline/mutation.rs',
-                'test': 'losing_insert_fence_resolves_winner_without_replanning_or_extra_publication'},
-    'F-REPLAY': {'symbol': 'recover_original',
-                 'source': 'crates/fireweed/src/queue_recovery_pipeline/mutation.rs',
-                 'test': 'missing_original_cache_cannot_duplicate_durable_claim'},
-    'F-GROUP': {'symbol': 'CommitExecution',
-                'source': 'crates/fireweed/src/queue_recovery_pipeline/commit.rs',
-                'test': 'owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry'},
+    'F-ACK': {'symbol': 'QueueLoop::iterate', 'source': _PIPELINE + 'owner.rs',
+              'test': 'publish_failure_drops_projection_and_exits',
+              'test_source': _PIPELINE + 'tests/owner_safety.rs'},
+    'F-PREFIX': {'symbol': 'Tenure::check', 'source': _PIPELINE + 'owner.rs',
+                 'test': 'reopen_rebuilds_from_log_local',
+                 'test_source': _PIPELINE + 'tests/record_counts.rs'},
+    'F-FENCE': {'symbol': 'Tenure::publish', 'source': _PIPELINE + 'owner.rs',
+                'test': 'zombie_publish_is_rejected',
+                'test_source': _PIPELINE + 'tests/owner_safety.rs'},
+    'F-REPLAY': {'symbol': 'InsertPlan::run', 'source': _PIPELINE + 'insert.rs',
+                 'test': 'publish_failure_drops_projection_and_exits',
+                 'test_source': _PIPELINE + 'tests/owner_safety.rs'},
+    'F-GROUP': {'symbol': 'BatchPlan::run', 'source': _PIPELINE + 'commit_batch.rs',
+                'test': 'native_store_runs_identical_contract_local',
+                'test_source': _PIPELINE + 'tests.rs'},
 }
 for mapping in MAPPINGS.values():
-    mapping['test_source'] = 'crates/fireweed/src/queue_recovery_pipeline/tests.rs'
     mapping['status'] = 'documentary_unexecuted'
 
 

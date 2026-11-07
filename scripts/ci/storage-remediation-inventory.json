@@ -1246,9 +1246,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "a103f23d46a91c0ef308",
+        "id": "f461140311ed59948a22",
         "identity": "// Corrupt slots are never interpreted as collisions or skipped.",
-        "line": 131,
+        "line": 147,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-objectlog/src/log_engine_store/namespace.rs",
         "status": "discovery_negative"
@@ -3444,9 +3444,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "326bae0d6b843fd1f16f",
+        "id": "f7593324a04d7bafb6fc",
         "identity": "async fn pack_rejects_skipped_fresh_prefix_noncontiguous_positions_and_foreign_cut() {",
-        "line": 527,
+        "line": 510,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-turso/src/queue_projection/commit_pack_prepare/tests.rs",
         "status": "discovery_negative"
@@ -16102,7 +16102,7 @@
     "cargo_status": "listed",
     "errors": [],
     "generated_by": "scripts/ci/fireweed_test_placement.py",
-    "input_sha256": "68115a98c560b82273ce21d4dcb3f9fbbfe46bbefdaabea8d685194e3cfae29e",
+    "input_sha256": "922ee5fa41e1c0219eae08c591d10e5c49a926a98e9ba746038963b8ea301548",
     "private_surface": [
       {
         "declaration_kind": "fn",
@@ -16948,446 +16948,6 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::addressed_preview_discards_stale_before_image_and_never_publishes_execution_receipt",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::addressed_preview_discards_stale_before_image_and_never_publishes_execution_receipt",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::addressed_preview_discards_stale_before_image_and_never_publishes_execution_receipt"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::administrative_commit::addressed_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::administrative_commit::addressed_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::administrative_commit::addressed_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::administrative_commit::broad_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::administrative_commit::broad_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::administrative_commit::broad_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::cold_prefix_cached_prefix_and_new_suffix_recover_to_exact_native_target"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::commit_batch::batch_continuation_empty_suffix_preserves_historical_epoch_and_rebuilds_missing_projection",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::batch_continuation_empty_suffix_preserves_historical_epoch_and_rebuilds_missing_projection",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::commit_batch::batch_continuation_empty_suffix_preserves_historical_epoch_and_rebuilds_missing_projection"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::commit_batch::batch_continuation_rejects_real_valid_rewound_and_vanished_authority",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::batch_continuation_rejects_real_valid_rewound_and_vanished_authority",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::commit_batch::batch_continuation_rejects_real_valid_rewound_and_vanished_authority"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_local",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_local",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_local"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_real_s3",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_real_s3",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::commit_batch::confirmed_batch_handoff_recovers_head_and_fence_races_real_s3"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::commit_batch::one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_local",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_local",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_local"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_real_s3",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_real_s3",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::commit_batch::packed_replay_head_advancement_retains_checked_floor_real_s3"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_local",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_local",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_local"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::commit_batch::packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::commit_batch::single_continuation_rejects_real_valid_rewound_and_vanished_authority",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::single_continuation_rejects_real_valid_rewound_and_vanished_authority",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::commit_batch::single_continuation_rejects_real_valid_rewound_and_vanished_authority"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::commit_batch::submission_resolution_does_not_retry_failed_continuation_into_fenced_absence",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::commit_batch::submission_resolution_does_not_retry_failed_continuation_into_fenced_absence",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::commit_batch::submission_resolution_does_not_retry_failed_continuation_into_fenced_absence"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::competing_same_identity_claims_never_acknowledge_losing_tokens",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::competing_same_identity_claims_never_acknowledge_losing_tokens",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::competing_same_identity_claims_never_acknowledge_losing_tokens"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::duplicate_original_witness_rejects_already_checkpointed_history",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::duplicate_original_witness_rejects_already_checkpointed_history",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::duplicate_original_witness_rejects_already_checkpointed_history"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::legacy_record_below_cached_cursor_never_establishes_coverage",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::legacy_record_below_cached_cursor_never_establishes_coverage",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::legacy_record_below_cached_cursor_never_establishes_coverage"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::losing_insert_fence_resolves_winner_without_replanning_or_extra_publication",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::losing_insert_fence_resolves_winner_without_replanning_or_extra_publication",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::losing_insert_fence_resolves_winner_without_replanning_or_extra_publication"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::missing_original_cache_cannot_duplicate_durable_claim",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::missing_original_cache_cannot_duplicate_durable_claim",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::missing_original_cache_cannot_duplicate_durable_claim"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_local",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_local",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_local"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_real_s3",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_real_s3",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::native_batch_original_authority_rejects_corrupt_cache_real_s3"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
           "queue_recovery_pipeline::tests::native_store_condition_checks_replay_and_rebuild_local",
           "--",
           "--exact"
@@ -17488,13 +17048,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::original_domains::native_claim_original_hash_rejects_same_length_valid_membership",
+          "queue_recovery_pipeline::tests::owner_safety::absent_queue_holds_nothing",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::original_domains::native_claim_original_hash_rejects_same_length_valid_membership",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::absent_queue_holds_nothing",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::original_domains::native_claim_original_hash_rejects_same_length_valid_membership"
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::absent_queue_holds_nothing"
       },
       {
         "exact_invocation": [
@@ -17508,13 +17068,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::original_domains::native_insert_original_hash_rejects_same_length_valid_result",
+          "queue_recovery_pipeline::tests::owner_safety::deadline_is_measured_from_before_the_request",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::original_domains::native_insert_original_hash_rejects_same_length_valid_result",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::deadline_is_measured_from_before_the_request",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::original_domains::native_insert_original_hash_rejects_same_length_valid_result"
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::deadline_is_measured_from_before_the_request"
       },
       {
         "exact_invocation": [
@@ -17528,13 +17088,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::original_domains::native_single_original_authority_rejects_corrupt_cache_local",
+          "queue_recovery_pipeline::tests::owner_safety::dropped_store_releases_its_lease",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::original_domains::native_single_original_authority_rejects_corrupt_cache_local",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::dropped_store_releases_its_lease",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::original_domains::native_single_original_authority_rejects_corrupt_cache_local"
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::dropped_store_releases_its_lease"
       },
       {
         "exact_invocation": [
@@ -17548,13 +17108,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::original_domains::native_single_original_authority_rejects_corrupt_cache_real_s3",
+          "queue_recovery_pipeline::tests::owner_safety::failed_entry_releases_its_lease",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::original_domains::native_single_original_authority_rejects_corrupt_cache_real_s3",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::failed_entry_releases_its_lease",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::original_domains::native_single_original_authority_rejects_corrupt_cache_real_s3"
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::failed_entry_releases_its_lease"
       },
       {
         "exact_invocation": [
@@ -17568,13 +17128,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::owned_claim_publishes_then_replays_original_identity_and_expiry",
+          "queue_recovery_pipeline::tests::owner_safety::handoff_reads_only_the_suffix",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owned_claim_publishes_then_replays_original_identity_and_expiry",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::handoff_reads_only_the_suffix",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::owned_claim_publishes_then_replays_original_identity_and_expiry"
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::handoff_reads_only_the_suffix"
       },
       {
         "exact_invocation": [
@@ -17588,13 +17148,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry",
+          "queue_recovery_pipeline::tests::owner_safety::long_batch_renews_instead_of_lapsing",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::long_batch_renews_instead_of_lapsing",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::owned_commit_resolves_atomic_original_group_and_rejects_regrouped_retry"
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::long_batch_renews_instead_of_lapsing"
       },
       {
         "exact_invocation": [
@@ -17608,13 +17168,193 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::owned_insert_publishes_original_results_rebuilds_and_survives_caller_drop",
+          "queue_recovery_pipeline::tests::owner_safety::lost_renewal_reply_is_safe",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owned_insert_publishes_original_results_rebuilds_and_survives_caller_drop",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::lost_renewal_reply_is_safe",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::owned_insert_publishes_original_results_rebuilds_and_survives_caller_drop"
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::lost_renewal_reply_is_safe"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::owner_safety::new_owner_waits_ttl_plus_skew",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::new_owner_waits_ttl_plus_skew",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::new_owner_waits_ttl_plus_skew"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::owner_safety::operation_outlasting_every_lease_fails",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::operation_outlasting_every_lease_fails",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::operation_outlasting_every_lease_fails"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::owner_safety::owner_stops_at_deadline_with_control_plane_down",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::owner_stops_at_deadline_with_control_plane_down",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::owner_stops_at_deadline_with_control_plane_down"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::owner_safety::publish_failure_drops_projection_and_exits",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::publish_failure_drops_projection_and_exits",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::publish_failure_drops_projection_and_exits"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::owner_safety::requeued_mutation_is_never_busy",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::requeued_mutation_is_never_busy",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::requeued_mutation_is_never_busy"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::owner_safety::same_instance_id_restart_waits_for_expiry",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::same_instance_id_restart_waits_for_expiry",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::same_instance_id_restart_waits_for_expiry"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::owner_safety::second_handle_gets_busy",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::second_handle_gets_busy",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::second_handle_gets_busy"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::owner_safety::stalled_owner_rechecks_before_ack",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::stalled_owner_rechecks_before_ack",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::stalled_owner_rechecks_before_ack"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::owner_safety::zombie_publish_is_rejected",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::owner_safety::zombie_publish_is_rejected",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::owner_safety::zombie_publish_is_rejected"
       },
       {
         "exact_invocation": [
@@ -17648,13 +17388,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::receipt_authority::native_lookup_mixed_formats_aliases_absence_and_exact_budget_local",
+          "queue_recovery_pipeline::tests::record_counts::concurrent_operations_share_one_iteration_local",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::receipt_authority::native_lookup_mixed_formats_aliases_absence_and_exact_budget_local",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::record_counts::concurrent_operations_share_one_iteration_local",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::receipt_authority::native_lookup_mixed_formats_aliases_absence_and_exact_budget_local"
+        "test_id": "queue_recovery_pipeline::tests::record_counts::concurrent_operations_share_one_iteration_local"
       },
       {
         "exact_invocation": [
@@ -17668,13 +17408,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::receipt_authority::native_lookup_mixed_formats_aliases_absence_and_exact_budget_real_s3",
+          "queue_recovery_pipeline::tests::record_counts::concurrent_operations_share_one_iteration_real_s3",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::receipt_authority::native_lookup_mixed_formats_aliases_absence_and_exact_budget_real_s3",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::record_counts::concurrent_operations_share_one_iteration_real_s3",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::receipt_authority::native_lookup_mixed_formats_aliases_absence_and_exact_budget_real_s3"
+        "test_id": "queue_recovery_pipeline::tests::record_counts::concurrent_operations_share_one_iteration_real_s3"
       },
       {
         "exact_invocation": [
@@ -17688,13 +17428,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::receipt_authority::native_lookup_original_authority_rejects_corrupt_cache_local",
+          "queue_recovery_pipeline::tests::record_counts::owner_read_reads_no_log_local",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::receipt_authority::native_lookup_original_authority_rejects_corrupt_cache_local",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::record_counts::owner_read_reads_no_log_local",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::receipt_authority::native_lookup_original_authority_rejects_corrupt_cache_local"
+        "test_id": "queue_recovery_pipeline::tests::record_counts::owner_read_reads_no_log_local"
       },
       {
         "exact_invocation": [
@@ -17708,13 +17448,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::receipt_authority::native_lookup_original_authority_rejects_corrupt_cache_real_s3",
+          "queue_recovery_pipeline::tests::record_counts::owner_read_reads_no_log_real_s3",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::receipt_authority::native_lookup_original_authority_rejects_corrupt_cache_real_s3",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::record_counts::owner_read_reads_no_log_real_s3",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::receipt_authority::native_lookup_original_authority_rejects_corrupt_cache_real_s3"
+        "test_id": "queue_recovery_pipeline::tests::record_counts::owner_read_reads_no_log_real_s3"
       },
       {
         "exact_invocation": [
@@ -17728,13 +17468,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::receipt_read_discards_stale_absence_and_confirms_current_errors",
+          "queue_recovery_pipeline::tests::record_counts::owner_write_reads_no_log_local",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::receipt_read_discards_stale_absence_and_confirms_current_errors",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::record_counts::owner_write_reads_no_log_local",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::receipt_read_discards_stale_absence_and_confirms_current_errors"
+        "test_id": "queue_recovery_pipeline::tests::record_counts::owner_write_reads_no_log_local"
       },
       {
         "exact_invocation": [
@@ -17748,13 +17488,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::replay_discards_stale_expiry_after_concurrent_durable_renewal",
+          "queue_recovery_pipeline::tests::record_counts::owner_write_reads_no_log_real_s3",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::replay_discards_stale_expiry_after_concurrent_durable_renewal",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::record_counts::owner_write_reads_no_log_real_s3",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::replay_discards_stale_expiry_after_concurrent_durable_renewal"
+        "test_id": "queue_recovery_pipeline::tests::record_counts::owner_write_reads_no_log_real_s3"
       },
       {
         "exact_invocation": [
@@ -17768,13 +17508,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::single_continuation::single_original_continuation_preserves_presence_and_reads_only_suffix",
+          "queue_recovery_pipeline::tests::record_counts::reopen_rebuilds_from_log_local",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::single_continuation::single_original_continuation_preserves_presence_and_reads_only_suffix",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::record_counts::reopen_rebuilds_from_log_local",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::single_continuation::single_original_continuation_preserves_presence_and_reads_only_suffix"
+        "test_id": "queue_recovery_pipeline::tests::record_counts::reopen_rebuilds_from_log_local"
       },
       {
         "exact_invocation": [
@@ -17788,13 +17528,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::state_authority::native_state_authority_aliases_delete_recreate_and_budget_local",
+          "queue_recovery_pipeline::tests::record_counts::reopen_rebuilds_from_log_real_s3",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::state_authority::native_state_authority_aliases_delete_recreate_and_budget_local",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::record_counts::reopen_rebuilds_from_log_real_s3",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::state_authority::native_state_authority_aliases_delete_recreate_and_budget_local"
+        "test_id": "queue_recovery_pipeline::tests::record_counts::reopen_rebuilds_from_log_real_s3"
       },
       {
         "exact_invocation": [
@@ -17808,13 +17548,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::state_authority::native_state_authority_aliases_delete_recreate_and_budget_real_s3",
+          "queue_recovery_pipeline::tests::store_lifecycle::administration_splits_the_pack",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::state_authority::native_state_authority_aliases_delete_recreate_and_budget_real_s3",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::store_lifecycle::administration_splits_the_pack",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::state_authority::native_state_authority_aliases_delete_recreate_and_budget_real_s3"
+        "test_id": "queue_recovery_pipeline::tests::store_lifecycle::administration_splits_the_pack"
       },
       {
         "exact_invocation": [
@@ -17828,13 +17568,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::state_authority::native_state_authority_rejects_corrupt_cache_local",
+          "queue_recovery_pipeline::tests::store_lifecycle::batch_interrupted_after_a_durable_prefix_resolves_by_identity",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::state_authority::native_state_authority_rejects_corrupt_cache_local",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::store_lifecycle::batch_interrupted_after_a_durable_prefix_resolves_by_identity",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::state_authority::native_state_authority_rejects_corrupt_cache_local"
+        "test_id": "queue_recovery_pipeline::tests::store_lifecycle::batch_interrupted_after_a_durable_prefix_resolves_by_identity"
       },
       {
         "exact_invocation": [
@@ -17848,13 +17588,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::state_authority::native_state_authority_rejects_corrupt_cache_real_s3",
+          "queue_recovery_pipeline::tests::store_lifecycle::caller_drop_still_completes_the_operation_durably",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::state_authority::native_state_authority_rejects_corrupt_cache_real_s3",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::store_lifecycle::caller_drop_still_completes_the_operation_durably",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::state_authority::native_state_authority_rejects_corrupt_cache_real_s3"
+        "test_id": "queue_recovery_pipeline::tests::store_lifecycle::caller_drop_still_completes_the_operation_durably"
       },
       {
         "exact_invocation": [
@@ -17868,13 +17608,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::state_authority::native_state_preparation_administration_local",
+          "queue_recovery_pipeline::tests::store_lifecycle::cancelled_administrative_commit_is_resolved_by_retry",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::state_authority::native_state_preparation_administration_local",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::store_lifecycle::cancelled_administrative_commit_is_resolved_by_retry",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::state_authority::native_state_preparation_administration_local"
+        "test_id": "queue_recovery_pipeline::tests::store_lifecycle::cancelled_administrative_commit_is_resolved_by_retry"
       },
       {
         "exact_invocation": [
@@ -17888,53 +17628,13 @@
           "fireweed",
           "--all-features",
           "--lib",
-          "queue_recovery_pipeline::tests::state_authority::native_state_preparation_administration_real_s3",
+          "queue_recovery_pipeline::tests::store_lifecycle::ordinary_groups_pack_into_one_record",
           "--",
           "--exact"
         ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::state_authority::native_state_preparation_administration_real_s3",
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::store_lifecycle::ordinary_groups_pack_into_one_record",
         "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::state_authority::native_state_preparation_administration_real_s3"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::state_authority::native_state_preparation_source_cache_local",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::state_authority::native_state_preparation_source_cache_local",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::state_authority::native_state_preparation_source_cache_local"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
-          "--lib",
-          "queue_recovery_pipeline::tests::state_authority::native_state_preparation_source_cache_real_s3",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::state_authority::native_state_preparation_source_cache_real_s3",
-        "target": "fireweed",
-        "test_id": "queue_recovery_pipeline::tests::state_authority::native_state_preparation_source_cache_real_s3"
+        "test_id": "queue_recovery_pipeline::tests::store_lifecycle::ordinary_groups_pack_into_one_record"
       },
       {
         "exact_invocation": [
@@ -119769,7 +119469,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "4ade83f9da92e29cd3ed049a051b9371a5c4a316b2d2c0d091752538e17557f6",
+  "source_inventory_sha256": "6676b83323527c337472ddb21a508eaaa7f486fe55d963e09c2630b0aca5ae27",
   "workspaces": [
     {
       "listing_error_sha256": "",

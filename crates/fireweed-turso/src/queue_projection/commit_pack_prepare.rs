@@ -3,10 +3,8 @@
 use super::*;
 use fireweed_engine::{
     Clock,
-    queue_group_state_authority::AdmittedGroupStateSet,
     queue_log_record::{checked_publication_record_len, encode_checked_publication_record},
     queue_memory::{group_expansion_budget, incoming_headers},
-    queue_original_authority::AdmittedOriginalAuthority,
     queue_planner::{CommitDelta, combine_deltas, plan_commit_group, prospective_unique_probes},
     queue_publication::{PublicationError, PublicationReceipt, encode_publication_pinned},
 };
@@ -15,8 +13,6 @@ pub struct CommitPackPreparationInput {
     pub request: Arc<CommitBatch>,
     /// Strict caller-order positions; administration is an external barrier.
     pub positions: Vec<usize>,
-    pub originals: Arc<AdmittedOriginalAuthority>,
-    pub states: Arc<AdmittedGroupStateSet>,
     pub genesis: OwnedQueueLogRecord,
     pub limits: QueueLimits,
     pub required_progress: (u64, u64, u64),
@@ -78,15 +74,6 @@ impl QueueProjection {
         fireweed_engine::queue_memory::administrative_envelope_preflight(
             &input.request,
             &input.limits,
-        )?;
-        input
-            .originals
-            .validate(&input.request, &input.genesis, input.required_progress, job)?;
-        input.states.validate_batch(
-            &input.request,
-            &input.genesis,
-            input.required_progress,
-            job,
         )?;
         if epoch == 0
             || max_record_bytes == 0
@@ -190,7 +177,6 @@ impl NativeTransactionWork for Worker {
             &native,
             super::commit_batch_replay::BatchRead {
                 request: &self.input.request,
-                originals: &self.input.originals,
                 limits: &self.input.limits,
                 response_max_bytes: self.input.limits.max_response_bytes,
             },
@@ -220,20 +206,12 @@ impl NativeTransactionWork for Worker {
                     .ok_or(QueueError::TooLarge)?,
             )?,
         );
-        let states = self
-            .input
-            .positions
-            .iter()
-            .map(|&position| self.input.states.group(position))
-            .collect::<QueueResult<Vec<_>>>()?;
         let reads = self
             .input
             .positions
             .iter()
-            .zip(&states)
-            .map(|(&position, states)| super::group_authority::GroupRead {
+            .map(|&position| super::group_authority::GroupRead {
                 group: &self.input.request.groups[position],
-                states: Some(states),
                 sequence: native.insertion_sequence,
             })
             .collect::<Vec<_>>();

@@ -2,8 +2,7 @@ use super::super::tests::{address, bootstrap, group, inspect, seed_record};
 use super::*;
 use fireweed_conformance::queue_contract::TestClock;
 use fireweed_engine::{
-    queue_admission::QueueAdmission, queue_group_state_authority::ColdGroupStateTracker,
-    queue_log_record::encode_checked_genesis, queue_original_authority::ColdOriginalTracker,
+    queue_admission::QueueAdmission, queue_log_record::encode_checked_genesis,
     queue_recovery::ColdQueueHistory,
 };
 fn input(
@@ -13,34 +12,18 @@ fn input(
     job: &Arc<QueueReservation>,
 ) -> CommitPackPreparationInput {
     let mut history = ColdQueueHistory::new(&request.queue, job).unwrap();
-    let mut originals = ColdOriginalTracker::new(&request, job).unwrap();
-    let mut states = ColdGroupStateTracker::with_work(
-        &request.queue,
-        fireweed_engine::queue_group_state_authority::GroupDeclarations::Batch(request.clone()),
-        job,
-    )
-    .unwrap();
     for (offset, record) in records.iter().enumerate() {
         let checked = record.checked().unwrap();
         history.observe_record(offset as u64, &checked).unwrap();
-        if offset == 0 {
-            states.initialize_work(&history, &checked, job).unwrap();
-        }
-        originals.observe_record(offset as u64, &checked).unwrap();
-        states.observe_record(offset as u64, &checked).unwrap();
     }
     let progress = (
         history.next_offset(),
         history.insertion_sequence(),
         history.historical_epoch(),
     );
-    let originals = Arc::new(originals.finish(&history, &records[0], progress).unwrap());
-    let states = Arc::new(states.finish(&history, &records[0], progress).unwrap());
     CommitPackPreparationInput {
         positions: (0..request.groups.len()).collect(),
         request,
-        originals,
-        states,
         genesis: encode_checked_genesis(1, &address(), definition, &[31; 32], 16 << 20, job)
             .unwrap(),
         limits: QueueLimits::default(),
@@ -623,117 +606,6 @@ async fn check_sibling_cannot_suppress_mutation_field_hydration() {
 }
 
 #[tokio::test]
-async fn later_state_check_cannot_hide_corrupt_old_fields_but_unused_body_is_ignored() {
-    let mut fixture = Fixture::new(false).await;
-    let clock = Arc::new(TestClock::default());
-    clock.set(100);
-    let mut seed = patch("seed-state", 1, 7);
-    state(
-        &mut seed,
-        StateExpect::Absent,
-        StateChange::Put {
-            fields: [("phase".into(), FieldValue::Text("old".into()))].into(),
-            value: bytes::Bytes::from_static(b"old"),
-        },
-    );
-    let result = fixture
-        .projection
-        .prepare_ordinary_pack(
-            fixture.input(vec![seed]),
-            2,
-            65536,
-            clock.clone(),
-            &fixture.job,
-            &fixture.workers,
-        )
-        .await
-        .unwrap();
-    let OrdinaryPackPreparation::Prepared(prepared) = result else {
-        panic!("seed")
-    };
-    let (record, provisional, head) = prepared.into_parts();
-    let frozen = OwnedQueueLogRecord::from_admitted_bytes(
-        bytes::Bytes::copy_from_slice(record.bytes()),
-        fixture
-            .job
-            .owned_buffer(record.bytes().len() as u64 * 4 + 4096)
-            .unwrap(),
-        &fixture.job,
-    )
-    .unwrap();
-    fixture
-        .projection
-        .apply(record, head, &fixture.job, &fixture.workers)
-        .await
-        .unwrap();
-    fixture.records.push(frozen);
-    drop(provisional);
-    super::super::tests::execute_for_test(&fixture.projection,
-        "UPDATE q7_fields SET value=?1 WHERE record_id IN (SELECT id FROM q7_records WHERE collection=1 AND key=?2)",
-        vec![blob(&encode(&FieldValue::Text("bad".into())).unwrap()),blob(b"run")]).await;
-    super::super::tests::execute_for_test(&fixture.projection,
-        "UPDATE q7_bodies SET value='unneeded-corrupt-body' WHERE record_id IN (SELECT id FROM q7_records WHERE collection=1 AND key=?1)",vec![blob(b"run")]).await;
-    let mut replace = patch("replace", 2, 8);
-    state(
-        &mut replace,
-        StateExpect::Version(1),
-        StateChange::Put {
-            fields: [("phase".into(), FieldValue::Text("new".into()))].into(),
-            value: bytes::Bytes::from_static(b"new"),
-        },
-    );
-    let mut check = patch("later-check", 3, 9);
-    state(&mut check, StateExpect::Version(2), StateChange::Check);
-    let result = fixture
-        .projection
-        .prepare_ordinary_pack(
-            fixture.input(vec![replace.clone(), check.clone()]),
-            3,
-            65536,
-            clock.clone(),
-            &fixture.job,
-            &fixture.workers,
-        )
-        .await;
-    assert!(matches!(result, Err(QueueError::OutcomeUnknown(_))));
-    super::super::tests::execute_for_test(&fixture.projection,
-        "UPDATE q7_fields SET value=?1 WHERE record_id IN (SELECT id FROM q7_records WHERE collection=1 AND key=?2)",
-        vec![blob(&encode(&FieldValue::Text("old".into())).unwrap()),blob(b"run")]).await;
-    let result = fixture
-        .projection
-        .prepare_ordinary_pack(
-            fixture.input(vec![replace, check]),
-            3,
-            65536,
-            clock,
-            &fixture.job,
-            &fixture.workers,
-        )
-        .await
-        .unwrap();
-    let OrdinaryPackPreparation::Prepared(prepared) = result else {
-        panic!("replacement")
-    };
-    assert!(
-        prepared
-            .response()
-            .receipts()
-            .iter()
-            .all(|receipt| matches!(receipt.outcome, GroupOutcome::Committed { .. }))
-    );
-    let (record, provisional, head) = prepared.into_parts();
-    fixture
-        .projection
-        .apply(record, head, &fixture.job, &fixture.workers)
-        .await
-        .unwrap();
-    let row=inspect(&fixture.projection,"SELECT b.value FROM q7_bodies b JOIN q7_records r ON r.id=b.record_id WHERE r.collection=1 AND r.key=?1",vec![blob(b"run")],1).await;
-    assert_eq!(bytes(&row[0]).unwrap(), b"new");
-    drop(provisional);
-    fixture.finish().await;
-}
-
-#[tokio::test]
 async fn known_conflicting_prefix_classifies_before_unused_current_state_fields() {
     let mut fixture = Fixture::new(false).await;
     let clock = Arc::new(TestClock::default());
@@ -803,102 +675,6 @@ async fn known_conflicting_prefix_classifies_before_unused_current_state_fields(
     drop(prepared);
     fixture.finish().await;
 }
-#[tokio::test]
-async fn pack_proof_owners_survive_cancel_and_panic_until_owned_transaction_cleanup() {
-    let fixture = Fixture::new(false).await;
-    let baseline = fixture.admission.usage().unwrap();
-    for panic in [true, false] {
-        let terminal = Arc::new(tokio::sync::Notify::new());
-        let signal = terminal.clone();
-        let owned_job = Arc::new(
-            fixture
-                .admission
-                .reserve(0)
-                .unwrap()
-                .with_terminal_callback(move || signal.notify_one())
-                .unwrap(),
-        );
-        let definition =
-            AdmittedQueueDefinition::from_raw(fixture.definition.raw(), &owned_job).unwrap();
-        let records = fixture
-            .records
-            .iter()
-            .map(|record| {
-                OwnedQueueLogRecord::from_admitted_bytes(
-                    bytes::Bytes::copy_from_slice(record.bytes()),
-                    owned_job
-                        .owned_buffer(record.bytes().len() as u64 * 4 + 4096)
-                        .unwrap(),
-                    &owned_job,
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>();
-        let input = input(
-            Arc::new(CommitBatch {
-                queue: address(),
-                groups: vec![patch("one", 1, 7), patch("two", 2, 8)],
-            }),
-            &definition,
-            &records,
-            &owned_job,
-        );
-        let weak = Arc::downgrade(&input.states);
-        drop(records);
-        drop(definition);
-        let pause = Arc::new(ApplyPause {
-            after_commit: false,
-            fail_reply: false,
-            entered: tokio::sync::Notify::new(),
-            release: tokio::sync::watch::channel(false).0,
-        });
-        *fixture.projection.pause.lock().await = Some(pause.clone());
-        fixture
-            .projection
-            .panic_after_command
-            .store(panic, std::sync::atomic::Ordering::Release);
-        let caller = tokio::spawn({
-            let projection = fixture.projection.clone();
-            let workers = fixture.workers.clone();
-            async move {
-                let clock = Arc::new(TestClock::default());
-                clock.set(100);
-                projection
-                    .prepare_ordinary_pack(input, 2, 65536, clock, &owned_job, &workers)
-                    .await
-            }
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(30), pause.entered.notified())
-            .await
-            .unwrap();
-        assert!(weak.upgrade().is_some());
-        if panic {
-            pause.release.send(true).unwrap();
-            assert!(matches!(
-                caller.await.unwrap(),
-                Err(QueueError::OutcomeUnknown(_))
-            ));
-        } else {
-            caller.abort();
-            assert!(matches!(caller.await,Err(error) if error.is_cancelled()));
-            assert!(weak.upgrade().is_some());
-            pause.release.send(true).unwrap();
-        }
-        tokio::time::timeout(std::time::Duration::from_secs(30), terminal.notified())
-            .await
-            .unwrap();
-        assert!(weak.upgrade().is_none());
-        assert_eq!(fixture.admission.usage().unwrap(), baseline);
-        let writer = fixture.projection.writer.lock().await;
-        assert!(
-            writer
-                .as_ref()
-                .is_none_or(|connection| matches!(connection.is_autocommit(), Ok(true)))
-        );
-    }
-    fixture.finish().await;
-}
-
 struct ExpiryClock(std::sync::atomic::AtomicUsize);
 impl Clock for ExpiryClock {
     fn now(&self) -> fireweed_core::UtcTimestamp {
@@ -916,7 +692,6 @@ async fn each_group_samples_its_own_clock_across_real_lease_expiry() {
         .projection
         .prepare_claim(
             ClaimReplayInput {
-                original: None,
                 genesis: encode_checked_genesis(
                     1,
                     &address(),
@@ -1122,154 +897,4 @@ async fn administration_is_a_barrier_and_late_fallback_fit_precedes_any_pack() {
     assert_eq!(integer(&row[0]).unwrap(), 2);
     assert_eq!(integer(&row[1]).unwrap(), 1);
     fixture.finish().await;
-}
-
-#[tokio::test]
-async fn source_work_metadata_and_selected_field_corruption_fail_before_pack_planning() {
-    use super::super::tests::execute_for_test;
-    for case in [
-        "priority",
-        "version",
-        "active",
-        "missing",
-        "schedule",
-        "attempts",
-        "selected-value",
-        "unindexed-value",
-        "selected-type",
-        "selected-length",
-    ] {
-        let directory = tempfile::tempdir().unwrap();
-        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
-        let job = Arc::new(admission.reserve(0).unwrap());
-        let workers = ScratchWorkers::new(1, 1).unwrap();
-        let (projection, definition) =
-            bootstrap(&directory.path().join("projection.db"), &job, &workers).await;
-        let genesis =
-            encode_checked_genesis(1, &address(), &definition, &[31; 32], 16 << 20, &job).unwrap();
-        let (mut source_snapshot, seed) = seed_record(&definition, &job, false);
-        let mut records = vec![genesis, seed];
-        projection
-            .apply(
-                OwnedQueueLogRecord::from_admitted_bytes(
-                    bytes::Bytes::copy_from_slice(records[1].bytes()),
-                    job.owned_buffer((records[1].bytes().len() as u64) * 4 + 4096)
-                        .unwrap(),
-                    &job,
-                )
-                .unwrap(),
-                1,
-                &job,
-                &workers,
-            )
-            .await
-            .unwrap();
-        if case == "unindexed-value" {
-            let mut source_group = patch("seed-unindexed", 1, 0);
-            source_group.work_updates[0].change = UnclaimedChange::Patch(WorkPatch {
-                fields: [("meta/note".into(), Some(FieldValue::Text("old".into())))].into(),
-                ..Default::default()
-            });
-            let source = super::super::tests::group_record(
-                &definition,
-                &mut source_snapshot,
-                &source_group,
-                &job,
-            );
-            let copy = OwnedQueueLogRecord::from_admitted_bytes(
-                bytes::Bytes::copy_from_slice(source.bytes()),
-                job.owned_buffer((source.bytes().len() as u64) * 4 + 4096)
-                    .unwrap(),
-                &job,
-            )
-            .unwrap();
-            projection.apply(copy, 2, &job, &workers).await.unwrap();
-            records.push(source);
-        }
-        let mut group = patch("source-work", 1, 7);
-        group.work_updates[0].change = UnclaimedChange::Patch(WorkPatch {
-            fields: [("u".into(), Some(FieldValue::Integer(3)))].into(),
-            ..Default::default()
-        });
-        if case == "unindexed-value" {
-            group.work_updates[0].expect = StateExpect::Version(2);
-            group.work_updates[0].change = UnclaimedChange::Patch(WorkPatch {
-                fields: [("meta/note".into(), Some(FieldValue::Text("new".into())))].into(),
-                ..Default::default()
-            });
-        }
-        let request = Arc::new(CommitBatch {
-            queue: address(),
-            groups: vec![group],
-        });
-        let prepared_input = input(request, &definition, &records, &job);
-        let (sql, params) = match case {
-            "priority" => (
-                "UPDATE q7_records SET priority=12 WHERE key=?1",
-                vec![blob(b"a")],
-            ),
-            "version" => (
-                "UPDATE q7_records SET version=?2 WHERE key=?1",
-                vec![blob(b"a"), number(2)],
-            ),
-            "active" => (
-                "UPDATE q7_records SET active=0 WHERE key=?1",
-                vec![blob(b"a")],
-            ),
-            "missing" => ("DELETE FROM q7_records WHERE key=?1", vec![blob(b"a")]),
-            "schedule" => (
-                "UPDATE q7_records SET available_at=17 WHERE key=?1",
-                vec![blob(b"a")],
-            ),
-            "attempts" => (
-                "UPDATE q7_records SET attempts=2 WHERE key=?1",
-                vec![blob(b"a")],
-            ),
-            "selected-value" => (
-                "UPDATE q7_fields SET value=?2 WHERE field=1 AND record_id=(SELECT id FROM q7_records WHERE key=?1)",
-                vec![blob(b"a"), blob(&encode(&FieldValue::Integer(4)).unwrap())],
-            ),
-            "unindexed-value" => (
-                "UPDATE q7_additional SET value=?2 WHERE name=?3 AND record_id=(SELECT id FROM q7_records WHERE key=?1)",
-                vec![
-                    blob(b"a"),
-                    blob(&encode(&FieldValue::Text("bad".into())).unwrap()),
-                    blob(b"meta/note"),
-                ],
-            ),
-            "selected-type" => (
-                "UPDATE q7_fields SET value=?2 WHERE field=1 AND record_id=(SELECT id FROM q7_records WHERE key=?1)",
-                vec![
-                    blob(b"a"),
-                    blob(&encode(&FieldValue::Boolean(true)).unwrap()),
-                ],
-            ),
-            "selected-length" => (
-                "UPDATE q7_fields SET value=zeroblob(4194304) WHERE field=1 AND record_id=(SELECT id FROM q7_records WHERE key=?1)",
-                vec![blob(b"a")],
-            ),
-            _ => unreachable!(),
-        };
-        execute_for_test(&projection, sql, params).await;
-        let result = projection
-            .prepare_ordinary_pack(
-                prepared_input,
-                2,
-                16 << 20,
-                Arc::new(TestClock::default()),
-                &job,
-                &workers,
-            )
-            .await;
-        assert!(
-            matches!(result, Err(QueueError::OutcomeUnknown(_))),
-            "{case}"
-        );
-        drop(source_snapshot);
-        drop(records);
-        drop(definition);
-        drop(projection);
-        drop(job);
-        assert_eq!(admission.usage().unwrap(), (0, 0), "{case} drains");
-    }
 }

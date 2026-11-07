@@ -54,7 +54,7 @@ pub use compose_log::{
 };
 pub use log_engine_store::{
     AdmittedApi007Append, AdmittedApi007Read, AdmittedApi007State, Api007GenesisRequest,
-    Api007ReadPlan, ApplyPublish, LockWaitStats, NativeLogOptions,
+    Api007NamespaceIdentity, Api007ReadPlan, ApplyPublish, LockWaitStats, NativeLogOptions,
     OBJECT_LOG_POST_POSITION_TIMEOUT, OBJECT_LOG_PRE_POSITION_TIMEOUT, ObjectLogEngineStore,
     PackedAppendError, PackedAppendOutcome, PackedApplyBatch, PackerStats,
     ProvisionedApi007Genesis, VerifiedApi007Namespace, flush_config_from_segment,

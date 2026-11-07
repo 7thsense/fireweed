@@ -1,17 +1,14 @@
-//! Indexed query adapter for the shared covered-read completion protocol.
-use super::read::CoveredRead;
+//! Indexed query served from the projection.
+use super::owner::{Exit, Plan, Tenure, settle};
+use super::stats::read_input_charge;
 use super::*;
 use fireweed_core::queue_contract::{QueryRequest, QueueLimits, RequestPreflight, encoded_len};
-use fireweed_engine::{Clock, queue_contract::QueueFuture, queue_memory::IncomingHeaders};
+use fireweed_engine::{Clock, queue_memory::IncomingHeaders};
 use fireweed_turso::queue_projection::{AdmittedQueryPage, QueryReadInput};
-struct QueryRead {
+use futures::future::BoxFuture;
+
+struct QueryPlan {
     request: QueryRequest,
-    clock: Arc<dyn Clock>,
-}
-impl IncomingHeaders for QueryRead {
-    fn headers(&self) -> QueueResult<u64> {
-        self.request.headers()
-    }
 }
 impl QueueRecoveryPipeline {
     pub async fn query(
@@ -21,52 +18,49 @@ impl QueueRecoveryPipeline {
         clock: Arc<dyn Clock>,
         job: Arc<QueueReservation>,
     ) -> QueueResult<AdmittedQueryPage> {
-        self.covered_read(QueryRead { request, clock }, limits, job)
+        request.preflight(&limits)?;
+        let input = read_input_charge(encoded_len(&request)?, request.headers()?, &job)?;
+        self.submit(QueryPlan { request }, limits, clock, job, input)
             .await
     }
 }
-impl CoveredRead for QueryRead {
+impl Plan for QueryPlan {
     type Output = AdmittedQueryPage;
+    const MUTATION: bool = false;
     fn address(&self) -> &QueueAddress {
         &self.request.queue
     }
-    fn encoded_size(&self) -> QueueResult<u64> {
-        encoded_len(&self.request)
-    }
-    fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
-        self.request.preflight(limits)
-    }
-    fn read<'a>(
+    fn run<'a>(
         &'a self,
-        pipeline: &'a Arc<QueueRecoveryPipeline>,
-        recovered: &'a RecoveredQueue,
+        p: &'a QueueRecoveryPipeline,
+        t: &'a mut Tenure,
         limits: QueueLimits,
+        clock: &'a Arc<dyn Clock>,
         job: &'a Arc<QueueReservation>,
-    ) -> QueueFuture<'a, Self::Output> {
+    ) -> BoxFuture<'a, Result<QueueResult<Self::Output>, Exit>> {
         Box::pin(async move {
-            pipeline
-                .projection
-                .read_query_page(
-                    QueryReadInput {
-                        genesis: pipeline.original_genesis(&self.request.queue, recovered, job)?,
-                        request: self.request.clone(),
-                        limits,
-                        required_next_offset: recovered.target_next_offset,
-                        required_insertion_sequence: recovered.history.insertion_sequence(),
-                        required_last_record_epoch: recovered.history.historical_epoch(),
-                    },
-                    self.clock.clone(),
-                    job,
-                    &pipeline.workers,
-                )
-                .await
+            let (next, sequence, epoch) = t.point();
+            let genesis = match t.genesis_record(p, &self.request.queue, job) {
+                Ok(genesis) => genesis,
+                Err(error) => return Ok(Err(error)),
+            };
+            settle(
+                p.projection
+                    .read_query_page(
+                        QueryReadInput {
+                            genesis,
+                            request: self.request.clone(),
+                            limits,
+                            required_next_offset: next,
+                            required_insertion_sequence: sequence,
+                            required_last_record_epoch: epoch,
+                        },
+                        clock.clone(),
+                        job,
+                        &p.workers,
+                    )
+                    .await,
+            )
         })
-    }
-    #[cfg(test)]
-    fn pause(
-        &self,
-        pipeline: &QueueRecoveryPipeline,
-    ) -> Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)> {
-        pipeline.after_query_read.lock().unwrap().take()
     }
 }

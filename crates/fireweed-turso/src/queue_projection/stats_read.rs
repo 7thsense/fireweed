@@ -681,7 +681,6 @@ mod tests {
         let prepared = projection
             .prepare_insert(
                 InsertReplayInput {
-                    original: None,
                     genesis: encode_checked_genesis(
                         1,
                         &address(),

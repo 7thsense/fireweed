@@ -35,7 +35,7 @@ mod namespace;
 mod queue_append;
 mod queue_provision;
 mod queue_replay;
-pub use namespace::VerifiedApi007Namespace;
+pub use namespace::{Api007NamespaceIdentity, VerifiedApi007Namespace};
 pub use queue_append::AdmittedApi007Append;
 pub use queue_provision::{Api007GenesisRequest, ProvisionedApi007Genesis};
 pub use queue_replay::{AdmittedApi007Read, AdmittedApi007State, Api007ReadPlan};

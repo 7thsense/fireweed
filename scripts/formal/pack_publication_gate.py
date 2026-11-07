@@ -51,8 +51,8 @@ def run(max_states=100000):
         'production_mapping':'documentary_unexecuted','public_backend_correspondence':'not run',
         'excluded':['global work/state/index integrity','unbounded concurrent callers',
                     'fair progress/deadlines','wire/cryptographic implementation','memory/provider durability']},
-        'production_mappings':[{'symbols':['BatchTask::pack','BatchTask::classify_after','CommitExecution::execute_batch_covered','resolve_submission_after'],
-          'tests':['one_permit_batch_validates_all_siblings_replays_before_fresh_and_finishes_after_caller_drop','confirmed_batch_handoff_recovers_head_and_fence_races_local','confirmed_batch_handoff_recovers_head_and_fence_races_real_s3','packed_submission_refreshes_middle_outside_and_fp4_originals_local','packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3','packed_replay_head_advancement_retains_checked_floor_local','packed_replay_head_advancement_retains_checked_floor_real_s3'],
+        'production_mappings':[{'symbols':['BatchPlan::pack','BatchPlan::run','Tenure::publish'],
+          'tests':['native_store_runs_identical_contract_local','publish_failure_drops_projection_and_exits'],
           'status':'documentary_unexecuted'}]}
 
 

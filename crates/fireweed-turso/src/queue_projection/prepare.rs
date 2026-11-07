@@ -136,14 +136,9 @@ impl NativeTransactionWork for PrepareWorker {
         if self.epoch < snapshot.last_record_epoch {
             return Err(unknown("prepare writer epoch precedes recovered history"));
         }
-        if super::replay::claim_receipt_size(
-            connection,
-            snapshot.queue_id,
-            &self.input.request,
-            self.input.original_descriptor(&self.job)?,
-        )
-        .await?
-        .is_some()
+        if super::replay::claim_receipt_size(connection, snapshot.queue_id, &self.input.request)
+            .await?
+            .is_some()
         {
             return Ok(None);
         }
@@ -433,7 +428,6 @@ mod tests {
         }
         fn input(&self, request: ClaimRequest, offset: u64, epoch: u64) -> ClaimReplayInput {
             ClaimReplayInput {
-                original: None,
                 genesis: encode_checked_genesis(
                     1,
                     &address(),
@@ -554,7 +548,7 @@ mod tests {
         );
         let path = f.directory.path().join("prepare.db");
         drop(f.projection);
-        f.projection = QueueProjection::open(&path, &f.job, &f.workers)
+        f.projection = QueueProjection::open_keeping_files(&path, &f.job, &f.workers)
             .await
             .unwrap();
         let replay = f
@@ -885,7 +879,6 @@ mod tests {
         );
         let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
         let input = ClaimReplayInput {
-            original: None,
             genesis: encode_checked_genesis(1, &address(), &definition, &[31; 32], 16 << 20, &job)
                 .unwrap(),
             request,
@@ -1028,7 +1021,6 @@ mod tests {
             let job = Arc::new(admission.reserve(0).unwrap());
             let definition = AdmittedQueueDefinition::from_raw(f.definition.raw(), &job).unwrap();
             let input = ClaimReplayInput {
-                original: None,
                 genesis: encode_checked_genesis(
                     1,
                     &address(),
