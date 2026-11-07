@@ -5,7 +5,7 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::ObjectLogEngineStore;
 use crate::SegmentConfig;
@@ -47,45 +47,120 @@ pub(crate) fn objectlog_shared_runtime() -> &'static tokio::runtime::Runtime {
 /// and cannot complete `tokio::fs` / LogEngine I/O.
 #[derive(Default)]
 pub struct ObjectLogTaskDispatcher {
-    closed: AtomicBool,
+    state: Arc<DispatcherState>,
 }
-
+#[derive(Default)]
+struct DispatcherState {
+    admission: Mutex<(bool, usize)>,
+    changed: tokio::sync::Notify,
+}
+struct AcceptedTask(Arc<DispatcherState>);
+impl Drop for AcceptedTask {
+    fn drop(&mut self) {
+        self.0
+            .admission
+            .lock()
+            .expect("object-log dispatcher poisoned")
+            .1 -= 1;
+        self.0.changed.notify_waiters();
+    }
+}
 impl ObjectLogTaskDispatcher {
     pub fn new() -> Self {
         Self::default()
     }
 }
-
 impl OwnedTaskDispatcher for ObjectLogTaskDispatcher {
     fn submit<T: Send + 'static>(
         &self,
         factory: OwnedTaskFactory<T>,
     ) -> Result<TaskOutcome<T>, DispatchError> {
-        if self.closed.load(Ordering::SeqCst) {
+        let mut state = self
+            .state
+            .admission
+            .lock()
+            .expect("object-log dispatcher poisoned");
+        if state.0 {
             return Err(DispatchError::Closed);
         }
+        state.1 += 1;
+        let accepted = AcceptedTask(self.state.clone());
+        drop(state);
         let (sender, outcome) = task_outcome_channel();
-        // Spawn on the shared multi-thread runtime so LogEngine I/O has a reactor and stays
-        // on the same runtime that opened the store.
         objectlog_shared_runtime().spawn(async move {
+            let _accepted = accepted;
             sender.send(factory().await);
         });
         Ok(outcome)
     }
-
     fn close(&self) {
-        self.closed.store(true, Ordering::SeqCst);
+        self.state
+            .admission
+            .lock()
+            .expect("object-log dispatcher poisoned")
+            .0 = true;
     }
-
     fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::SeqCst)
+        self.state
+            .admission
+            .lock()
+            .expect("object-log dispatcher poisoned")
+            .0
     }
-
     fn drain(&self) -> TaskOutcome<()> {
         let (sender, outcome) = task_outcome_channel();
-        // Best-effort: resolve immediately. Accepted tasks complete independently on the runtime.
-        sender.send(());
+        let state = self.state.clone();
+        objectlog_shared_runtime().spawn(async move {
+            loop {
+                let changed = state.changed.notified();
+                if state
+                    .admission
+                    .lock()
+                    .expect("object-log dispatcher poisoned")
+                    .1
+                    == 0
+                {
+                    break;
+                }
+                changed.await;
+            }
+            sender.send(());
+        });
         outcome
+    }
+}
+
+#[cfg(test)]
+mod dispatcher_drain_tests {
+    use super::*;
+    #[tokio::test]
+    async fn drain_waits_for_accepted_work_even_when_caller_drops() {
+        let dispatcher = ObjectLogTaskDispatcher::new();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let outcome = dispatcher
+            .submit(Box::new(move || {
+                Box::pin(async move {
+                    entered.send(()).unwrap();
+                    released.await.unwrap();
+                })
+            }))
+            .unwrap();
+        started.await.unwrap();
+        drop(outcome);
+        dispatcher.close();
+        assert!(dispatcher.submit(Box::new(|| Box::pin(async {}))).is_err());
+        let mut drain = Box::pin(dispatcher.drain());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut drain)
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
 

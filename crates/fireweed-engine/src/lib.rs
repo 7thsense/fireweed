@@ -214,8 +214,8 @@ pub use command::{
     UpdateFieldsCommand, WriteSideRecordsCommand, admit_push_item_indexes,
     admit_push_items_indexes, build_push_items, command_envelope_change_records,
     selection_fence_disposition, selection_fence_disposition_for_commands, stage_unique_push_keys,
-    unique_index_keys_for_push_item, validate_gate_command, validate_gate_push,
-    validate_request_replay_metadata,
+    unique_index_keys_for_push_item, unique_index_keys_for_push_spec, validate_gate_command,
+    validate_gate_push, validate_request_replay_metadata,
 };
 pub use commit::{AppendAdmissionClass, RawCommitFault, RawCommitOutcome, RawCommitRequest};
 pub use error::{CommitRejection, DurableIntegrityStage, EngineError, EngineResult};
@@ -242,11 +242,11 @@ pub use port::{
     PendingSummary, ProjectionRead, ProjectionSnapshot, PurgePort, PushBatchOutcome,
     PushDisposition, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver,
     ReclaimPort, RecoveryReadPort, RenewLeasePort, RequestIdReplayProbe, ReschedulePort,
-    RetainedItemView, SelectedMutation, SetGatesPort, SideRecordPage, SnapshotRef, SnapshotStore,
-    TerminalEmissionMetrics, TickReport, TimestampComparison, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort, generate_query_lease_token, is_api001_reserved_write_field,
-    validate_api001_reserved_write_fields, validate_distinct_commit_claims,
-    validate_instance_fence,
+    RetainedItemView, SIDE_RECORD_BATCH_MAX_KEYS, SelectedMutation, SetGatesPort, SideRecordPage,
+    SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport, TimestampComparison,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, generate_query_lease_token,
+    is_api001_reserved_write_field, validate_api001_reserved_write_fields,
+    validate_distinct_commit_claims, validate_instance_fence,
 };
 pub use schema_validation::{compile_entity_schema, validate_entity};
 pub use types::{CommandPosition, DurabilityClass, QueueKey};

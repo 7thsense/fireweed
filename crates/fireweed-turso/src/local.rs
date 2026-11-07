@@ -3480,6 +3480,28 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
 async fn migrate_connection(connection: &mut Connection) -> Result<()> {
     connection.execute_batch(RELATIONAL_SCHEMA).await?;
     crate::metrics::migrate(connection).await?;
+    // New stores cluster index membership by item, making replacement/purge
+    // bounded by the addressed IDs. Existing stores retain their primary-key
+    // order and get a compatible covering index instead of a table rebuild.
+    let mut columns = connection
+        .query("PRAGMA table_info(fireweed_item_index)", ())
+        .await?;
+    let mut legacy_order = false;
+    while let Some(row) = columns.next().await? {
+        if row.get::<String>(1)? == "item_id" {
+            legacy_order = row.get::<i64>(5)? == 4;
+        }
+    }
+    drop(columns);
+    if legacy_order {
+        connection
+            .execute(
+                "CREATE INDEX IF NOT EXISTS fireweed_item_index_item_idx \
+            ON fireweed_item_index(tenant_id,queue_id,item_id,index_name)",
+                (),
+            )
+            .await?;
+    }
     if let Err(error) = connection
         .execute(
             "ALTER TABLE queues ADD COLUMN pause_drain_intake INTEGER NOT NULL DEFAULT 0",
@@ -4055,4 +4077,88 @@ pub struct MetricsMembershipSnapshot {
     pub metrics: QueueMetrics,
     pub position: Option<CommandPosition>,
     pub rows: std::collections::HashMap<ItemId, MetricsMembershipRow>,
+}
+
+#[cfg(test)]
+mod item_index_lookup_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Capture(std::cell::RefCell<Option<(String, Vec<fireweed_relational::RelValue>)>>);
+    impl fireweed_relational::RelTx for Capture {
+        fn prefer_point_updates(&self) -> bool {
+            true
+        }
+        fn execute(
+            &self,
+            sql: &str,
+            params: &[fireweed_relational::RelValue],
+        ) -> fireweed_engine::EngineResult<usize> {
+            *self.0.borrow_mut() = Some((sql.to_owned(), params.to_vec()));
+            Ok(0)
+        }
+        fn query(
+            &self,
+            _: &str,
+            _: &[fireweed_relational::RelValue],
+        ) -> fireweed_engine::EngineResult<Vec<fireweed_relational::RelRow>> {
+            panic!("cleanup must not fetch the queue")
+        }
+    }
+
+    #[tokio::test]
+    async fn item_index_cleanup_seeks_addressed_ids_on_new_and_legacy_stores() {
+        for legacy in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("projection.db");
+            if legacy {
+                let database = Builder::new_local(path.to_str().unwrap())
+                    .build()
+                    .await
+                    .unwrap();
+                let connection = database.connect().unwrap();
+                connection.execute("CREATE TABLE fireweed_item_index(tenant_id TEXT NOT NULL,queue_id TEXT NOT NULL,\
+                    index_name TEXT NOT NULL,index_key BLOB NOT NULL,item_id TEXT NOT NULL,\
+                    PRIMARY KEY(tenant_id,queue_id,index_name,item_id))", ()).await.unwrap();
+            }
+            let store = TursoRelational::open(TursoConfig::local(&path))
+                .await
+                .unwrap();
+            let capture = Capture::default();
+            fireweed_relational::delete_typed_index_rows(
+                &capture,
+                "tenant",
+                "queue",
+                &["1".into(), "2".into()],
+            )
+            .unwrap();
+            let (sql, params) = capture.0.into_inner().unwrap();
+            let params: Vec<Value> = params
+                .into_iter()
+                .map(|value| match value {
+                    fireweed_relational::RelValue::Text(value) => Value::Text(value),
+                    _ => panic!("unexpected cleanup parameter"),
+                })
+                .collect();
+            let writer = store.writer.lock().await;
+            let mut rows = writer
+                .query(format!("EXPLAIN QUERY PLAN {sql}"), params)
+                .await
+                .unwrap();
+            let mut details = Vec::new();
+            while let Some(row) = rows.next().await.unwrap() {
+                details.push(row.get::<String>(3).unwrap());
+            }
+            assert!(
+                details.iter().any(|detail| detail.contains("item_id=?")),
+                "legacy={legacy}: {details:?}"
+            );
+            assert!(
+                !details
+                    .iter()
+                    .any(|detail| detail.contains("SCAN fireweed_item_index")),
+                "{details:?}"
+            );
+        }
+    }
 }

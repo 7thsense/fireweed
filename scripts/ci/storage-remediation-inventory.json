@@ -488,9 +488,9 @@
           "P2f"
         ],
         "detail": "explicit_sql_timing_diagnostic; historical_run=tests/fixtures/diagnostics/fireweed-retained-point-diagnostic.log; evidence_sha256=93d74f63c0fbaabb2e7a712df938eb489894f6f8a7bce04c780dd2387035d6bd; not_current_execution; not_capacity_qualification",
-        "id": "bc453a6f02110498b6a6",
+        "id": "7341efa7afb90be165c3",
         "identity": "#[ignore = \"explicit retained-VM SQL diagnostic, not workflow qualification\"]",
-        "line": 6089,
+        "line": 6106,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-turso/src/projection.rs",
         "status": "discovery_negative"
@@ -502,9 +502,9 @@
           "P2f"
         ],
         "detail": "explicit_sql_timing_diagnostic; historical_run=tests/fixtures/diagnostics/fireweed-direct-analyzed-diagnostic.log; evidence_sha256=48c8c73d9c61165b21428e3ad8bb51bab775a21d65ca98baddb29784caa971f9; not_current_execution; not_capacity_qualification",
-        "id": "86afba489d3ded299afe",
+        "id": "36e061a266e511fa12e8",
         "identity": "#[ignore = \"explicit retained-VM SQL diagnostic, not workflow qualification\"]",
-        "line": 6095,
+        "line": 6112,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-turso/src/projection.rs",
         "status": "discovery_negative"
@@ -3024,9 +3024,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "25d899ce01e70ea6142f",
+        "id": "337e18cf08752b28d12a",
         "identity": "/// prefix instead of restarting at sequence 0 (which would be skipped/gapped by the projection).",
-        "line": 1566,
+        "line": 1581,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-projection/src/lib.rs",
         "status": "discovery_negative"
@@ -3038,23 +3038,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "d41e469d03cc5c5b0bbc",
+        "id": "67f1f2dfea7df38db308",
         "identity": "/// `claim_by_query` walks this map so cost is O(claimed + skipped not-yet-due pending), not",
-        "line": 1693,
-        "owner": "P3-P9/P15",
-        "path": "crates/fireweed-projection/src/lib.rs",
-        "status": "discovery_negative"
-      },
-      {
-        "category": "loud_skip",
-        "dependency_chain": [
-          "P3-P9/P15",
-          "P2f"
-        ],
-        "detail": "early_success=false",
-        "id": "f0be28bd2e9765d26705",
-        "identity": "/// index in declared order. Cost is O(claimed + skipped not-yet-due pending), independent of",
-        "line": 4862,
+        "line": 1708,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-projection/src/lib.rs",
         "status": "discovery_negative"
@@ -3500,9 +3486,9 @@
           "P2f"
         ],
         "detail": "fail_closed=true",
-        "id": "4ba2035dc1539f5da5c6",
+        "id": "e5c1f2d15acbc7b1cf3a",
         "identity": "\"FIREWEED_PG_TEST_URL or PQUEUE_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)\",",
-        "line": 6464,
+        "line": 6648,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -3514,9 +3500,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "138efeae494197b8b7f6",
+        "id": "935513018c331b2f834a",
         "identity": "\"Turso packed apply skipped sequence: expected {expected}, first {}\",",
-        "line": 2956,
+        "line": 3074,
         "owner": "P10pf",
         "path": "crates/fireweed/src/turso_compose.rs",
         "status": "discovery_negative"
@@ -4964,9 +4950,9 @@
           "P2f"
         ],
         "detail": "rustdoc fence must have a listed exact behavioral route; compile-only/ignored is debt; rustdoc_route_or_fence",
-        "id": "af7bf5e2ff727e8eb0a3",
+        "id": "4b0c0c9e7f0d83dd3087",
         "identity": "no_run",
-        "line": 457,
+        "line": 459,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -4978,9 +4964,9 @@
           "P2f"
         ],
         "detail": "rustdoc fence must have a listed exact behavioral route; compile-only/ignored is debt; rustdoc_route_or_fence",
-        "id": "a984eaeace59ca1bc772",
+        "id": "cf3bf4842658ee0793b1",
         "identity": "no_run",
-        "line": 3118,
+        "line": 3120,
         "owner": "P10pf",
         "path": "crates/fireweed/src/lib.rs",
         "status": "discovery_negative"
@@ -16116,7 +16102,7 @@
     "cargo_status": "listed",
     "errors": [],
     "generated_by": "scripts/ci/fireweed_test_placement.py",
-    "input_sha256": "3123c60b0c13f3f816fba8856aa790030b4686d08bbcf459bcfc4b00b4f889b2",
+    "input_sha256": "68115a98c560b82273ce21d4dcb3f9fbbfe46bbefdaabea8d685194e3cfae29e",
     "private_surface": [
       {
         "declaration_kind": "fn",
@@ -16125,7 +16111,7 @@
         "id": "function:derived_postgres_schema_name",
         "item": "derived_postgres_schema_name",
         "kind": "function",
-        "line": 868,
+        "line": 870,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16137,7 +16123,7 @@
         "id": "function:open_composed_postgres",
         "item": "open_composed_postgres",
         "kind": "function",
-        "line": 5958,
+        "line": 6029,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16149,7 +16135,7 @@
         "id": "function:open_composed_postgres_async",
         "item": "open_composed_postgres_async",
         "kind": "function",
-        "line": 5989,
+        "line": 6060,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16161,7 +16147,7 @@
         "id": "type:CommitResponseBarrier",
         "item": "CommitResponseBarrier",
         "kind": "type",
-        "line": 811,
+        "line": 813,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16173,7 +16159,7 @@
         "id": "type:ComposedProjectionConfig",
         "item": "ComposedProjectionConfig",
         "kind": "type",
-        "line": 785,
+        "line": 787,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16185,7 +16171,7 @@
         "id": "type:ComposedRuntime",
         "item": "ComposedRuntime",
         "kind": "type",
-        "line": 2613,
+        "line": 2615,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16197,7 +16183,7 @@
         "id": "type:ComposedStorageConfig",
         "item": "ComposedStorageConfig",
         "kind": "type",
-        "line": 884,
+        "line": 886,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16209,7 +16195,7 @@
         "id": "type:LibBackend",
         "item": "LibBackend",
         "kind": "type",
-        "line": 2981,
+        "line": 2983,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16221,7 +16207,7 @@
         "id": "type:ObjectLogAuthorityConfig",
         "item": "ObjectLogAuthorityConfig",
         "kind": "type",
-        "line": 896,
+        "line": 898,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16233,7 +16219,7 @@
         "id": "type:ObjectLogConfig",
         "item": "ObjectLogConfig",
         "kind": "type",
-        "line": 719,
+        "line": 721,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16245,7 +16231,7 @@
         "id": "type:ProjectionLifecycleCapabilities",
         "item": "ProjectionLifecycleCapabilities",
         "kind": "type",
-        "line": 2503,
+        "line": 2505,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16257,7 +16243,7 @@
         "id": "type:ProjectionLifecycleHandle",
         "item": "ProjectionLifecycleHandle",
         "kind": "type",
-        "line": 2557,
+        "line": 2559,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16269,7 +16255,7 @@
         "id": "type:ProjectionRebuildState",
         "item": "ProjectionRebuildState",
         "kind": "type",
-        "line": 2517,
+        "line": 2519,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16281,7 +16267,7 @@
         "id": "type:ProjectionRecoveryAction",
         "item": "ProjectionRecoveryAction",
         "kind": "type",
-        "line": 838,
+        "line": 840,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16293,7 +16279,7 @@
         "id": "type:ProjectionRecoveryPolicy",
         "item": "ProjectionRecoveryPolicy",
         "kind": "type",
-        "line": 846,
+        "line": 848,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16305,7 +16291,7 @@
         "id": "type:ProjectionVerificationState",
         "item": "ProjectionVerificationState",
         "kind": "type",
-        "line": 2510,
+        "line": 2512,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16317,7 +16303,7 @@
         "id": "type:RuntimeCore",
         "item": "RuntimeCore",
         "kind": "type",
-        "line": 3640,
+        "line": 3644,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16329,7 +16315,7 @@
         "id": "type:SecretValue",
         "item": "SecretValue",
         "kind": "type",
-        "line": 699,
+        "line": 701,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -16341,7 +16327,7 @@
         "id": "type:SegmentSettings",
         "item": "SegmentSettings",
         "kind": "type",
-        "line": 817,
+        "line": 819,
         "observed_diagnostic": "E0603",
         "observed_rejected": true,
         "path": "crates/fireweed/src/lib.rs"
@@ -18309,6 +18295,126 @@
         "id": "Cargo.toml::fireweed::fireweed::test::storage_config_open_tests::open_rejects_retired_postgres_and_s3_memory_cells_before_io",
         "target": "fireweed",
         "test_id": "storage_config_open_tests::open_rejects_retired_postgres_and_s3_memory_cells_before_io"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "terminal_purge_tests::ephemeral_disk_opens_a_usable_fireweed",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::terminal_purge_tests::ephemeral_disk_opens_a_usable_fireweed",
+        "target": "fireweed",
+        "test_id": "terminal_purge_tests::ephemeral_disk_opens_a_usable_fireweed"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "terminal_purge_tests::non_forced_purge_refuses_leased_items_but_removes_pending_ones",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::terminal_purge_tests::non_forced_purge_refuses_leased_items_but_removes_pending_ones",
+        "target": "fireweed",
+        "test_id": "terminal_purge_tests::non_forced_purge_refuses_leased_items_but_removes_pending_ones"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "terminal_purge_tests::purge_tombstone_survives_log_replay_and_expires_on_its_original_clock",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::terminal_purge_tests::purge_tombstone_survives_log_replay_and_expires_on_its_original_clock",
+        "target": "fireweed",
+        "test_id": "terminal_purge_tests::purge_tombstone_survives_log_replay_and_expires_on_its_original_clock"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "terminal_purge_tests::purge_tombstone_survives_s3_projection_rebuild",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::terminal_purge_tests::purge_tombstone_survives_s3_projection_rebuild",
+        "target": "fireweed",
+        "test_id": "terminal_purge_tests::purge_tombstone_survives_s3_projection_rebuild"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "terminal_purge_tests::retained_items_page_returns_terminal_payloads_in_item_id_order",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::terminal_purge_tests::retained_items_page_returns_terminal_payloads_in_item_id_order",
+        "target": "fireweed",
+        "test_id": "terminal_purge_tests::retained_items_page_returns_terminal_payloads_in_item_id_order"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "terminal_purge_tests::terminal_items_stay_until_purged",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::terminal_purge_tests::terminal_items_stay_until_purged",
+        "target": "fireweed",
+        "test_id": "terminal_purge_tests::terminal_items_stay_until_purged"
       },
       {
         "exact_invocation": [
@@ -20342,6 +20448,46 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "tests::cold_owner_session_tests::cold_owner_first_touch_acquires_once_for_concurrent_same_queue",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::tests::cold_owner_session_tests::cold_owner_first_touch_acquires_once_for_concurrent_same_queue",
+        "target": "fireweed",
+        "test_id": "tests::cold_owner_session_tests::cold_owner_first_touch_acquires_once_for_concurrent_same_queue"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "tests::cold_owner_session_tests::cold_owner_first_touch_keeps_independent_queues_concurrent",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::tests::cold_owner_session_tests::cold_owner_first_touch_keeps_independent_queues_concurrent",
+        "target": "fireweed",
+        "test_id": "tests::cold_owner_session_tests::cold_owner_first_touch_keeps_independent_queues_concurrent"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "tests::dropping_final_coordinated_handle_never_joins_blocked_control_plane_worker",
           "--",
           "--exact"
@@ -20962,6 +21108,26 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "turso_compose::generation_identity_tests::unapplied_identity_carries_whole_unique_keys_into_the_next_generation",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::turso_compose::generation_identity_tests::unapplied_identity_carries_whole_unique_keys_into_the_next_generation",
+        "target": "fireweed",
+        "test_id": "turso_compose::generation_identity_tests::unapplied_identity_carries_whole_unique_keys_into_the_next_generation"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "turso_compose::ownership_hydrate_tests::hydrate_projection_replays_log_tail_after_high_water",
           "--",
           "--exact"
@@ -21249,6 +21415,46 @@
         "id": "Cargo.toml::fireweed::fireweed::test::turso_compose::s3v_after_append::after_append_before_apply_poisons_then_recovers_authoritatively",
         "target": "fireweed",
         "test_id": "turso_compose::s3v_after_append::after_append_before_apply_poisons_then_recovers_authoritatively"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "turso_compose::s3v_after_append::claims_run_ahead_of_paused_apply_and_retire_their_replay_memo",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::turso_compose::s3v_after_append::claims_run_ahead_of_paused_apply_and_retire_their_replay_memo",
+        "target": "fireweed",
+        "test_id": "turso_compose::s3v_after_append::claims_run_ahead_of_paused_apply_and_retire_their_replay_memo"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "turso_compose::s3v_after_append::completed_claim_replay_consults_current_durable_lease",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::turso_compose::s3v_after_append::completed_claim_replay_consults_current_durable_lease",
+        "target": "fireweed",
+        "test_id": "turso_compose::s3v_after_append::completed_claim_replay_consults_current_durable_lease"
       },
       {
         "exact_invocation": [
@@ -119563,7 +119769,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "cdacd9ee5fc2fd915b1eef9f4456e0210a51e06477a2defb1f6521018864c3c1",
+  "source_inventory_sha256": "4ade83f9da92e29cd3ed049a051b9371a5c4a316b2d2c0d091752538e17557f6",
   "workspaces": [
     {
       "listing_error_sha256": "",

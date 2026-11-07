@@ -14,7 +14,7 @@ mod parity;
 
 #[cfg(feature = "objectlog")]
 use std::collections::HashMap;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(feature = "objectlog")]
@@ -379,8 +379,14 @@ fn identity_for_generation(
                     {
                         snapshot.client_keys.insert(key.as_str().to_string());
                     }
-                    for (name, value) in &item.index_fields {
-                        let encoded = format!("{name}={value:?}");
+                    // A key that cannot be derived is rejected by generation validation.
+                    let unique_keys = fireweed_engine::unique_index_keys_for_push_spec(
+                        &snapshot.definition,
+                        item,
+                    )
+                    .unwrap_or_default();
+                    for (name, key) in unique_keys {
+                        let encoded = format!("{name}={key:?}");
                         if existing.unique_index_values.contains(&encoded) {
                             snapshot.unique_index_values.insert(encoded);
                         }
@@ -407,6 +413,118 @@ fn identity_for_generation(
         }
     }
     snapshot
+}
+
+#[cfg(all(test, feature = "objectlog"))]
+mod generation_identity_tests {
+    use std::collections::BTreeMap;
+
+    use fireweed_core::{
+        BodyHash, ClientItemKey, CompoundIndexDef, CompoundIndexField, IndexDeclaration, IndexType,
+        QueueId, QueueIndex, RequestId, TenantId, TypedValue, UtcTimestamp,
+    };
+    use fireweed_engine::{
+        AsyncPushRequest, MutationGenerationMemberOutcome, PushFingerprint, PushSpec,
+        validate_inert_mutation_generation, validate_inert_mutation_generation_folding,
+    };
+
+    use super::*;
+
+    fn definition() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("tenant").unwrap(),
+            queue_id: QueueId::new("queue").unwrap(),
+            priority_model: fireweed_core::PriorityModel {
+                kind: fireweed_core::PriorityModelKind::Int64,
+                direction: fireweed_core::PriorityDirection::Ascending,
+                tie_breaker: fireweed_core::PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: fireweed_core::OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: fireweed_core::EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: fireweed_core::RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: fireweed_core::RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: Vec::new(),
+            entity_schema: None,
+            typed_indexes: vec![QueueIndex {
+                name: "by_run_target".into(),
+                declaration: IndexDeclaration::Compound(CompoundIndexDef {
+                    fields: ["run_id", "target_key"]
+                        .into_iter()
+                        .map(|field| CompoundIndexField {
+                            field: field.into(),
+                            index_type: IndexType::String,
+                        })
+                        .collect(),
+                    unique: true,
+                }),
+            }],
+            emit_change_records: false,
+        }
+    }
+
+    fn push(index: u8, target_key: &str) -> MutationGenerationWork {
+        let shard = QueueKey::new(
+            TenantId::new("tenant").unwrap(),
+            QueueId::new("queue").unwrap(),
+        );
+        let string = |value: &str| TypedValue::String(value.to_string());
+        let item = PushSpec {
+            client_item_key: Some(ClientItemKey::new(format!("key-{index}")).unwrap()),
+            index_fields: BTreeMap::from([
+                ("action_type".to_string(), string("message.send")),
+                ("run_id".to_string(), string("run")),
+                ("target_key".to_string(), string(target_key)),
+            ]),
+            ..PushSpec::default()
+        };
+        MutationGenerationWork::Push {
+            request: AsyncPushRequest {
+                shard,
+                request_id: Some(RequestId::new(format!("req-{index}")).unwrap()),
+                items: vec![item],
+                now: UtcTimestamp::new(1, 0).unwrap(),
+                expected_epoch: Some(1),
+            },
+            fingerprint: Some(PushFingerprint {
+                canonical_sha256: [index; 32],
+                legacy_body_hash: BodyHash(u64::from(index)),
+            }),
+        }
+    }
+
+    #[test]
+    fn unapplied_identity_carries_whole_unique_keys_into_the_next_generation() {
+        let (_, unapplied) = validate_inert_mutation_generation_folding(
+            &identity_base(definition()),
+            &[push(1, "target")],
+        )
+        .unwrap();
+
+        let duplicate = [push(2, "target")];
+        let snapshot = identity_for_generation(&unapplied, definition(), &duplicate);
+        assert!(matches!(
+            validate_inert_mutation_generation(&snapshot, &duplicate).unwrap()[0].outcome,
+            MutationGenerationMemberOutcome::Rejected(EngineError::Conflict)
+        ));
+
+        let distinct = [push(3, "other")];
+        let snapshot = identity_for_generation(&unapplied, definition(), &distinct);
+        assert!(snapshot.unique_index_values.is_empty());
+        assert!(matches!(
+            validate_inert_mutation_generation(&snapshot, &distinct).unwrap()[0].outcome,
+            MutationGenerationMemberOutcome::PushAccepted
+        ));
+    }
 }
 
 fn command_kind(command: &QueueCommand) -> &'static str {
@@ -3132,9 +3250,34 @@ type ObjectLogEngine = AsyncComposedBackend<
 
 #[cfg(feature = "objectlog")]
 type GenerationJoins = Arc<Mutex<HashMap<(QueueKey, u64), Arc<GenerationJoin>>>>;
-/// Same-process claim replays keyed by request id: the claim work id and its leased set.
+/// Claims whose responses apply has not covered yet, per queue, oldest first.
+///
+/// A retry can arrive while apply is behind, before the durable receipt is readable, so the
+/// leased set is held until apply covers it. The durable receipt answers after that, which keeps
+/// this bounded by apply debt instead of growing with claim history.
 #[cfg(feature = "objectlog")]
-type ClaimReplays = Arc<Mutex<HashMap<(QueueKey, fireweed_core::RequestId), (u64, Claimed)>>>;
+#[derive(Default)]
+struct UnappliedClaims {
+    order: VecDeque<(CommandPosition, fireweed_core::RequestId)>,
+    entries: HashMap<fireweed_core::RequestId, (u64, Claimed)>,
+}
+
+#[cfg(feature = "objectlog")]
+impl UnappliedClaims {
+    fn retire_covered(&mut self, applied: Option<&CommandPosition>) {
+        while let Some((position, request_id)) = self.order.front() {
+            if !position_covers(applied, position) {
+                break;
+            }
+            self.entries.remove(request_id);
+            self.order.pop_front();
+        }
+    }
+}
+
+#[cfg(feature = "objectlog")]
+type ClaimReplays = Arc<Mutex<HashMap<QueueKey, UnappliedClaims>>>;
+#[cfg(feature = "objectlog")]
 #[cfg(all(feature = "objectlog", test))]
 type MetricsSnapshotHook = Arc<Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>>;
 
@@ -4671,18 +4814,12 @@ impl DerivedObjectLogTursoBackend {
         let Some(request_id) = &request.request_id else {
             return Ok(None);
         };
-        let fingerprint = fireweed_engine::batch_claim_body_hash(
-            request.max_items,
-            batch_claim_lease_ms(request.now, request.lease_expires_at),
-            &request.compatibility,
-        );
-        if let Some((stored, claimed)) = self
-            .claim_replays
-            .lock()
-            .expect("claim replay")
-            .get(&(request.shard.clone(), request_id.clone()))
-            .cloned()
-        {
+        if let Some((stored, claimed)) = self.unapplied_claim(&request.shard, request_id).await {
+            let fingerprint = fireweed_engine::batch_claim_body_hash(
+                request.max_items,
+                batch_claim_lease_ms(request.now, request.lease_expires_at),
+                &request.compatibility,
+            );
             if stored != fingerprint {
                 return Err(EngineError::RequestIdConflict);
             }
@@ -4695,22 +4832,57 @@ impl DerivedObjectLogTursoBackend {
             }
             return Ok(Some(claimed));
         }
+        // Never wait for coverage here: a first claim must keep running ahead of apply.
         replay_recorded_batch_claim(self.projection.as_ref(), request).await
     }
 
-    fn remember_batch_claim(&self, request: &ClaimRequest, claimed: &Claimed) {
-        let Some(request_id) = &request.request_id else {
+    async fn unapplied_claim(
+        &self,
+        shard: &QueueKey,
+        request_id: &fireweed_core::RequestId,
+    ) -> Option<(u64, Claimed)> {
+        let applied = self
+            .async_apply
+            .as_ref()?
+            .snapshot(shard)
+            .await
+            .applied_high_water;
+        let mut claims = self.claim_replays.lock().expect("claim replay");
+        let queue = claims.get_mut(shard)?;
+        queue.retire_covered(applied.as_ref());
+        queue.entries.get(request_id).cloned()
+    }
+
+    /// The claim is already durable, so a failed position read only skips this memo. The
+    /// durable receipt still answers a retry once apply covers the claim.
+    async fn remember_batch_claim(&self, request: &ClaimRequest, claimed: &Claimed) {
+        let (Some(request_id), Some(coordinator)) = (&request.request_id, &self.async_apply) else {
             return;
         };
+        let Ok(Some(position)) =
+            AsyncLogStore::high_water(self.log.as_ref(), request.shard.clone()).await
+        else {
+            return;
+        };
+        let applied = coordinator
+            .snapshot(&request.shard)
+            .await
+            .applied_high_water;
         let fingerprint = fireweed_engine::batch_claim_body_hash(
             request.max_items,
             batch_claim_lease_ms(request.now, request.lease_expires_at),
             &request.compatibility,
         );
-        self.claim_replays.lock().expect("claim replay").insert(
-            (request.shard.clone(), request_id.clone()),
-            (fingerprint, claimed.clone()),
-        );
+        let mut claims = self.claim_replays.lock().expect("claim replay");
+        let queue = claims.entry(request.shard.clone()).or_default();
+        queue.retire_covered(applied.as_ref());
+        if position_covers(applied.as_ref(), &position) {
+            return;
+        }
+        queue
+            .entries
+            .insert(request_id.clone(), (fingerprint, claimed.clone()));
+        queue.order.push_back((position, request_id.clone()));
     }
 
     async fn dispatch_claim(&self, request: ClaimRequest) -> EngineResult<Claimed> {
@@ -4731,7 +4903,7 @@ impl DerivedObjectLogTursoBackend {
         };
         match self.drive_candidate_mutation(work).await? {
             MutationGenerationMemberOutcome::Claim { claimed, .. } => {
-                self.remember_batch_claim(&remembered, &claimed);
+                self.remember_batch_claim(&remembered, &claimed).await;
                 Ok(claimed)
             }
             MutationGenerationMemberOutcome::Rejected(error) => Err(error),
@@ -5808,6 +5980,171 @@ mod s3v_after_append {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_claim_replay_consults_current_durable_lease() {
+        let root = std::env::temp_dir().join(format!(
+            "fw-claim-replay-{}-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let backend = open(&root).await;
+        let definition = qdef();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        let ids = backend
+            .push(
+                &queue,
+                vec![PushSpec {
+                    client_item_key: Some(ClientItemKey::new("claim-replay-probe").unwrap()),
+                    priority: Some(PriorityValue::Int64(1)),
+                    payload: Some(Bytes::from_static(b"bounded-claim-payload")),
+                    ..PushSpec::default()
+                }],
+                UtcTimestamp::new(1, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let request = ClaimRequest {
+            shard: queue.clone(),
+            worker_id: fireweed_core::WorkerId::new("claim-probe").unwrap(),
+            max_items: 1,
+            lease_token: fireweed_core::LeaseToken::new("claim-probe-token").unwrap(),
+            lease_expires_at: UtcTimestamp::new(62, 0).unwrap(),
+            now: UtcTimestamp::new(2, 0).unwrap(),
+            eligibility_time: None,
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+            request_id: Some(fireweed_core::RequestId::new("claim-probe-request").unwrap()),
+        };
+        let claimed = backend.claim(request.clone()).await.unwrap();
+        assert_eq!(
+            claimed
+                .items
+                .iter()
+                .map(|item| item.item_id)
+                .collect::<Vec<_>>(),
+            ids
+        );
+        let replay = backend.claim(request.clone()).await.unwrap();
+        assert_eq!(
+            replay
+                .items
+                .iter()
+                .map(|item| item.item_id)
+                .collect::<Vec<_>>(),
+            ids
+        );
+        assert_eq!(replay.items[0].lease_token, claimed.items[0].lease_token);
+        assert_eq!(
+            replay.items[0].lease_expires_at,
+            claimed.items[0].lease_expires_at
+        );
+        assert_eq!(replay.items[0].payload, claimed.items[0].payload);
+        backend.close_and_drain().await.unwrap();
+        drop(backend);
+        let backend = open(&root).await;
+        let cold_replay = backend.claim(request.clone()).await.unwrap();
+        assert_eq!(cold_replay.items.len(), 1);
+        assert_eq!(cold_replay.items[0].item_id, ids[0]);
+        assert_eq!(cold_replay.items[0].payload, claimed.items[0].payload);
+        assert_eq!(
+            cold_replay.items[0].lease_token,
+            claimed.items[0].lease_token
+        );
+        backend
+            .finalize(
+                &queue,
+                vec![fireweed_engine::FinalizeOutcome::new(
+                    ids[0],
+                    fireweed_engine::FinalizeKind::Complete,
+                )],
+                UtcTimestamp::new(3, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        // The durable lease check answers once apply has covered the finalize.
+        backend.wait_request_entry_coverage(&queue).await.unwrap();
+        let replay = backend.claim(request).await;
+        assert!(
+            matches!(replay, Err(EngineError::RequestExpired)),
+            "completed leases must never be replayed from retained record copies"
+        );
+        backend.close_and_drain().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn claims_run_ahead_of_paused_apply_and_retire_their_replay_memo() {
+        let root = std::env::temp_dir().join(format!(
+            "fw-claim-memo-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let backend = open(&root).await;
+        let definition = qdef();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        let spec = |key: &str| PushSpec {
+            client_item_key: Some(ClientItemKey::new(key).unwrap()),
+            priority: Some(PriorityValue::Int64(1)),
+            payload: Some(Bytes::from_static(b"memo-payload")),
+            ..PushSpec::default()
+        };
+        backend
+            .push(
+                &queue,
+                vec![spec("memo-a"), spec("memo-b")],
+                UtcTimestamp::new(1, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        backend.wait_request_entry_coverage(&queue).await.unwrap();
+        let request = |name: &str| ClaimRequest {
+            shard: queue.clone(),
+            worker_id: fireweed_core::WorkerId::new("memo-worker").unwrap(),
+            max_items: 1,
+            lease_token: fireweed_core::LeaseToken::new(format!("{name}-token")).unwrap(),
+            lease_expires_at: UtcTimestamp::new(62, 0).unwrap(),
+            now: UtcTimestamp::new(2, 0).unwrap(),
+            eligibility_time: None,
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+            request_id: Some(fireweed_core::RequestId::new(name).unwrap()),
+        };
+        let memo_count = |backend: &DerivedObjectLogTursoBackend| {
+            backend
+                .claim_replays
+                .lock()
+                .unwrap()
+                .get(&queue)
+                .map_or(0, |claims| claims.entries.len())
+        };
+
+        let coordinator = backend.async_apply.as_ref().unwrap();
+        coordinator.pause();
+        let first = backend.claim(request("memo-first")).await.unwrap();
+        let second = backend.claim(request("memo-second")).await.unwrap();
+        assert_ne!(first.items[0].item_id, second.items[0].item_id);
+        let replay = backend.claim(request("memo-first")).await.unwrap();
+        assert_eq!(replay.items[0].item_id, first.items[0].item_id);
+        assert_eq!(replay.items[0].lease_token, first.items[0].lease_token);
+        assert_eq!(memo_count(&backend), 2);
+
+        coordinator.resume();
+        backend.wait_request_entry_coverage(&queue).await.unwrap();
+        let durable = backend.claim(request("memo-first")).await.unwrap();
+        assert_eq!(durable.items[0].lease_token, first.items[0].lease_token);
+        assert_eq!(durable.items[0].payload, first.items[0].payload);
+        assert_eq!(memo_count(&backend), 0, "applied claims must leave memory");
+        backend.close_and_drain().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

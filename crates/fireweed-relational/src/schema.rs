@@ -260,7 +260,7 @@ CREATE TABLE IF NOT EXISTS fireweed_item_index (
     index_name TEXT NOT NULL,
     index_key BLOB NOT NULL,
     item_id TEXT NOT NULL,
-    PRIMARY KEY (tenant_id, queue_id, index_name, item_id)
+    PRIMARY KEY (tenant_id, queue_id, item_id, index_name)
 );
 -- Prefix lookups on (tenant, queue, index_name, index_key) use the ASC keyset
 -- index below. A separate key-only index doubled insert cost (19×batch rows).

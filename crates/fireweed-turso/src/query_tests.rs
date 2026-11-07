@@ -2101,3 +2101,147 @@ async fn native_compound_strings_stream_variable_length_headers_without_deep_exp
         .unwrap();
     assert_eq!(metrics.pending, 2);
 }
+
+#[tokio::test]
+async fn sparse_membership_uses_all_primary_key_components() {
+    let db = turso::Builder::new_local(":memory:").build().await.unwrap();
+    let connection = db.connect().unwrap();
+    connection.execute_batch("CREATE TABLE fireweed_items (tenant_id TEXT,queue_id TEXT,item_id TEXT,superseded INTEGER,index_fields BLOB,entity_document TEXT,lifecycle_state TEXT,PRIMARY KEY(tenant_id,queue_id,item_id));").await.unwrap();
+    for primary in [
+        "tenant_id,queue_id,index_name,item_id",
+        "tenant_id,queue_id,item_id,index_name",
+    ] {
+        connection.execute_batch(&format!("DROP TABLE IF EXISTS fireweed_item_index; CREATE TABLE fireweed_item_index (tenant_id TEXT,queue_id TEXT,index_name TEXT,index_key BLOB,item_id TEXT,PRIMARY KEY ({primary})); CREATE INDEX keys_asc ON fireweed_item_index(tenant_id,queue_id,index_name,index_key ASC,length(item_id),item_id); CREATE INDEX keys_desc ON fireweed_item_index(tenant_id,queue_id,index_name,index_key DESC,length(item_id),item_id);")).await.unwrap();
+        let mut rows = connection
+            .query(
+                &format!("EXPLAIN QUERY PLAN {SPARSE_FIELDS_SQL}"),
+                ["tenant", "queue", "status"],
+            )
+            .await
+            .unwrap();
+        let mut detail = String::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            let plan = row.get::<String>(3).unwrap();
+            if plan.starts_with("SEARCH idx ") {
+                detail.push_str(&plan);
+            }
+        }
+        for field in ["tenant_id=?", "queue_id=?", "index_name=?", "item_id=?"] {
+            assert!(detail.contains(field), "{detail}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn addressed_claim_queries_seek_ids_and_preserve_due_tenant_and_duplicate_semantics() {
+    let mut first = recipient(1, "send", "first", Some(1), 0);
+    first.gate_keys = vec!["gate-a".into(), "gate-b".into()];
+    let mut future = recipient(2, "send", "future", Some(1), 0);
+    future.not_before = Some(ts(20));
+    let (store, shard, _) = fixture(vec![first, future]).await;
+    let mut other = definition();
+    other.tenant_id = TenantId::new("other-tenant").unwrap();
+    let other_key = QueueKey::new(other.tenant_id.clone(), other.queue_id.clone());
+    AsyncProjectionStore::ensure_shard(&store, other)
+        .await
+        .unwrap();
+    let mut sequence = 0;
+    apply(
+        &store,
+        &other_key,
+        &mut sequence,
+        QueueCommand::Push(PushCommand {
+            items: vec![recipient(1, "send", "other", Some(1), 0)],
+        }),
+        vec![ItemId::from_u64(1)],
+        1,
+    )
+    .await;
+    let writer = store.writer.lock().await;
+    let sql = crate::projection::addressed_rows_sql(
+        "fireweed_items",
+        "item_id,client_item_key",
+        " AND cohort_size IS NULL AND eligible_since IS NOT NULL AND (not_before IS NULL OR not_before<=?3)",
+        4,
+        4,
+    );
+    let mut params = vec![
+        shard.tenant_id.as_str().to_string().into(),
+        shard.queue_id.as_str().to_string().into(),
+        Value::Integer(ts_nanos(ts(10))),
+        "1".into(),
+        "1".into(),
+        "2".into(),
+        "999".into(),
+    ];
+    let mut plan = writer
+        .query(&format!("EXPLAIN QUERY PLAN {sql}"), params.clone())
+        .await
+        .unwrap();
+    let mut details = String::new();
+    while let Some(row) = plan.next().await.unwrap() {
+        details.push_str(&row.get::<String>(3).unwrap());
+    }
+    assert!(details.contains("SEARCH fireweed_items USING INDEX sqlite_autoindex_fireweed_items_1 (tenant_id=? AND queue_id=? AND item_id=?)"),"{details}");
+    drop(plan);
+    let mut rows = writer.query(&sql, params.clone()).await.unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "1"
+    );
+    assert!(rows.next().await.unwrap().is_none());
+    drop(rows);
+    params[2] = Value::Integer(ts_nanos(ts(30)));
+    let mut rows = writer.query(&sql, params.clone()).await.unwrap();
+    let mut ids = std::collections::BTreeSet::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        ids.insert(row.get::<String>(0).unwrap());
+    }
+    assert_eq!(
+        ids,
+        std::collections::BTreeSet::from(["1".to_owned(), "2".to_owned()])
+    );
+    drop(rows);
+    let gates = crate::projection::addressed_rows_sql(
+        "fireweed_item_gates",
+        "item_id,gate_key",
+        " ORDER BY item_id,gate_key",
+        4,
+        4,
+    );
+    let mut rows = writer.query(&gates, params).await.unwrap();
+    let mut gate_keys = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        gate_keys.push(row.get::<String>(1).unwrap());
+    }
+    assert_eq!(gate_keys, vec!["gate-a", "gate-b"]);
+    drop(rows);
+    let update = fireweed_relational::class_s_lease_update_sql(3, true);
+    let mut rows = writer
+        .query(
+            &format!("EXPLAIN QUERY PLAN {update}"),
+            vec![
+                Value::Blob(vec![0; 32]),
+                Value::Integer(100),
+                Value::Null,
+                Value::Integer(0),
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+                "1".into(),
+                "2".into(),
+                "999".into(),
+            ],
+        )
+        .await
+        .unwrap();
+    let mut details = String::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        details.push_str(&row.get::<String>(3).unwrap());
+    }
+    assert!(details.contains("SEARCH i USING INDEX sqlite_autoindex_fireweed_items_1 (tenant_id=? AND queue_id=? AND item_id=?)"),"{details}");
+}

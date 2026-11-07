@@ -22,6 +22,25 @@ const GATE_ANTI_JOIN: &str = " AND NOT EXISTS (SELECT 1 FROM fireweed_item_gates
      AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=fireweed_items.tenant_id \
      AND ig.queue_id=fireweed_items.queue_id AND ig.item_id=fireweed_items.item_id)";
 
+/// Lease exactly the selected IDs while retaining state and supersession guards.
+pub fn class_s_lease_update_sql(count: usize, point_seeks: bool) -> String {
+    let placeholders = vec!["?"; count].join(",");
+    if point_seeks {
+        format!(
+            "{} UPDATE fireweed_items SET lifecycle_state='Leased',lease_token_hash=?1,lease_expires_at=?2,worker_id=?3,retry_count=retry_count+1,item_version=item_version+1,updated_at=?4 WHERE rowid IN (SELECT i.rowid FROM requested CROSS JOIN fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 WHERE i.tenant_id=?5 AND i.queue_id=?6 AND i.item_id=requested_item_id AND i.lifecycle_state='Pending' AND i.superseded=0)",
+            crate::addressed_item_ids_cte(count, 7)
+        )
+    } else {
+        format!(
+            "UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?, \
+         lease_expires_at=?, worker_id=?, retry_count=retry_count+1, \
+         item_version=item_version+1, updated_at=? \
+         WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Pending' AND superseded=0 \
+         AND item_id IN ({placeholders})"
+        )
+    }
+}
+
 pub const INSERT_CLAIM_OUTBOX: &str = "INSERT INTO fireweed_claim_outbox (\
      tenant_id, queue_id, outbox_id, item_ids, lease_token, lease_expires_at, \
      request_id, request_fingerprint, worker_id, claim_unit, cohort_id, created_at) \
@@ -137,14 +156,7 @@ pub fn class_s_claim(
         items.push(item);
     }
 
-    let placeholders = vec!["?"; ids.len()].join(",");
-    let update_sql = format!(
-        "UPDATE fireweed_items SET lifecycle_state='Leased', lease_token_hash=?, \
-         lease_expires_at=?, worker_id=?, retry_count=retry_count+1, \
-         item_version=item_version+1, updated_at=? \
-         WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Pending' AND superseded=0 \
-         AND item_id IN ({placeholders})"
-    );
+    let update_sql = class_s_lease_update_sql(ids.len(), tx.prefer_point_updates());
     let mut params = vec![
         RelValue::Blob(lease_hash(request.lease_token)),
         RelValue::Integer(request.lease_expires_at),
@@ -247,11 +259,18 @@ fn load_class_s_gate_keys(
     }
     let ids: Vec<String> = items.iter().map(|item| item.item_id.clone()).collect();
     let placeholders = vec!["?"; ids.len()].join(",");
-    let sql = format!(
-        "SELECT item_id, gate_key FROM fireweed_item_gates \
+    let sql = if tx.prefer_point_updates() {
+        format!(
+            "{} SELECT item_id,gate_key FROM requested CROSS JOIN fireweed_item_gates INDEXED BY sqlite_autoindex_fireweed_item_gates_1 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=requested_item_id ORDER BY item_id,gate_key",
+            crate::addressed_item_ids_cte(ids.len(), 3)
+        )
+    } else {
+        format!(
+            "SELECT item_id, gate_key FROM fireweed_item_gates \
          WHERE tenant_id=? AND queue_id=? AND item_id IN ({placeholders}) \
          ORDER BY item_id, gate_key"
-    );
+        )
+    };
     let mut params = vec![
         RelValue::Text(tenant_id.to_string()),
         RelValue::Text(queue_id.to_string()),

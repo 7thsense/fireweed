@@ -1704,6 +1704,47 @@ pub fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
     push_body_hash_canonical(&canonical)
 }
 
+/// Compute both unchanged request fingerprints from one canonical serialization.
+pub fn push_specs_fingerprint(items: &[PushSpec]) -> EngineResult<crate::PushFingerprint> {
+    #[derive(serde::Serialize)]
+    struct CanonicalPushSpec<'a> {
+        client_item_key: Option<&'a ClientItemKey>,
+        priority: &'a Option<PriorityValue>,
+        not_before: &'a Option<UtcTimestamp>,
+        group_key: &'a Option<GroupKey>,
+        payload: &'a Option<Bytes>,
+        fields: &'a BTreeMap<String, Bytes>,
+        metadata: &'a Metadata,
+        cohort_size: &'a Option<u64>,
+        gate_keys: &'a Vec<String>,
+        entity: &'a Option<serde_json::Value>,
+    }
+    let canonical: Vec<_> = items
+        .iter()
+        .map(|item| CanonicalPushSpec {
+            client_item_key: item.client_item_key.as_ref(),
+            priority: &item.priority,
+            not_before: &item.not_before,
+            group_key: &item.group_key,
+            payload: &item.payload,
+            fields: &item.fields,
+            metadata: &item.metadata,
+            cohort_size: &item.cohort_size,
+            gate_keys: &item.gate_keys,
+            entity: &item.entity,
+        })
+        .collect();
+    use sha2::{Digest, Sha256};
+    use std::hash::{Hash, Hasher};
+    let bytes = serde_json::to_vec(&canonical).map_err(|e| EngineError::Storage(e.to_string()))?;
+    let mut legacy = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut legacy);
+    Ok(crate::PushFingerprint {
+        canonical_sha256: Sha256::digest(&bytes).into(),
+        legacy_body_hash: BodyHash(legacy.finish()),
+    })
+}
+
 pub fn push_specs_fingerprint_sha256(items: &[PushSpec]) -> EngineResult<[u8; 32]> {
     #[derive(serde::Serialize)]
     struct Canonical<'a> {
@@ -2429,5 +2470,39 @@ pub fn validate_gate_command_definition(
             std::iter::once(command.replacement.gate_keys.as_slice()),
         ),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod paired_push_fingerprint_tests {
+    use super::*;
+
+    #[test]
+    fn one_serialization_matches_both_legacy_fingerprint_algorithms() {
+        for gates in [vec![], vec!["a"], vec!["a", "z"], vec!["z", "a", "a"]] {
+            let mut item = PushSpec {
+                client_item_key: Some(ClientItemKey::new("utf8-λ").unwrap()),
+                payload: Some(Bytes::from((0..=255).collect::<Vec<u8>>())),
+                gate_keys: gates.into_iter().map(str::to_owned).collect(),
+                entity: Some(
+                    serde_json::json!({"nested":{"unicode":"λ\n\\\"", "null":null, "array":[1,true,3.5]}}),
+                ),
+                ..Default::default()
+            };
+            item.fields
+                .insert("binary".into(), Bytes::from(vec![0, 255, 10, 34, 92]));
+            item.metadata.insert(
+                "label",
+                fireweed_core::MetadataValue::String("synthetic".into()),
+            );
+            for items in [vec![], vec![PushSpec::default()], vec![item]] {
+                let paired = push_specs_fingerprint(&items).unwrap();
+                assert_eq!(paired.legacy_body_hash, push_body_hash(&items).unwrap());
+                assert_eq!(
+                    paired.canonical_sha256,
+                    push_specs_fingerprint_sha256(&items).unwrap()
+                );
+            }
+        }
     }
 }

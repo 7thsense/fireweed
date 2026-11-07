@@ -95,14 +95,15 @@ struct ItemRecord {
     group_key: Option<GroupKey>,
     cohort_size: Option<u64>,
     payload: Option<Bytes>,
-    fields: BTreeMap<String, Bytes>,
-    metadata: Metadata,
+    fields: Arc<BTreeMap<String, Bytes>>,
+    metadata: Arc<Metadata>,
     gate_keys: Vec<String>,
     /// Native client-declared typed index field values (ADR-011). Source of truth for index keys.
-    index_fields: BTreeMap<String, TypedValue>,
-    /// Optional entity document for claim round-trip / schema. Not required for index keying when
-    /// `index_fields` is populated.
-    entity_document: Option<serde_json::Value>,
+    index_fields: Arc<BTreeMap<String, TypedValue>>,
+    /// Lossless JSON bytes for claim round-trip/schema. Keeping expanded JSON
+    /// trees for every retained item multiplies heap residency at million scale.
+    /// Native typed indexes avoid decoding this on index maintenance paths.
+    entity_document: Option<Bytes>,
     state: ItemState,
     item_version: u64,
     attempt_count: u32,
@@ -171,11 +172,11 @@ impl From<&ItemRecord> for ProjectionImageItem {
             group_key: rec.group_key.clone(),
             cohort_size: rec.cohort_size,
             payload: rec.payload.clone(),
-            fields: rec.fields.clone(),
-            metadata: rec.metadata.clone(),
+            fields: rec.fields.as_ref().clone(),
+            metadata: rec.metadata.as_ref().clone(),
             gate_keys: rec.gate_keys.clone(),
-            index_fields: rec.index_fields.clone(),
-            entity_document: rec.entity_document.clone(),
+            index_fields: rec.index_fields.as_ref().clone(),
+            entity_document: rec.entity_value(),
             state: rec.state,
             item_version: rec.item_version,
             attempt_count: rec.attempt_count,
@@ -211,11 +212,14 @@ impl From<ProjectionImageItem> for ItemRecord {
             group_key: item.group_key,
             cohort_size: item.cohort_size,
             payload: item.payload,
-            fields: item.fields,
-            metadata: item.metadata,
+            fields: Arc::new(item.fields),
+            metadata: Arc::new(item.metadata),
             gate_keys: item.gate_keys,
-            entity_document: rehydrate_entity_document(item.entity_document, &item.index_fields),
-            index_fields: item.index_fields,
+            entity_document: pack_entity_document(rehydrate_entity_document(
+                item.entity_document,
+                &item.index_fields,
+            )),
+            index_fields: Arc::new(item.index_fields),
             state: item.state,
             item_version: item.item_version,
             attempt_count: item.attempt_count,
@@ -263,7 +267,18 @@ impl ProjectionImage {
     }
 }
 
+fn pack_entity_document(entity: Option<Value>) -> Option<Bytes> {
+    entity
+        .map(|value| Bytes::from(serde_json::to_vec(&value).expect("valid entity JSON serializes")))
+}
+
 impl ItemRecord {
+    fn entity_value(&self) -> Option<Value> {
+        self.entity_document.as_ref().map(|bytes| {
+            serde_json::from_slice(bytes).expect("internally encoded entity JSON remains valid")
+        })
+    }
+
     fn client_item_key(&self) -> ClientItemKey {
         self.explicit_client_item_key
             .clone()
@@ -283,15 +298,15 @@ impl ItemRecord {
             attempt_count: self.attempt_count,
             max_attempts: self.max_attempts,
             payload: self.payload.clone(),
-            fields: self.fields.clone(),
-            metadata: self.metadata.clone(),
+            fields: self.fields.as_ref().clone(),
+            metadata: self.metadata.as_ref().clone(),
             gate_keys: self.gate_keys.clone(),
             entity: self.query_entity(),
         })
     }
 
     fn query_entity(&self) -> Option<serde_json::Value> {
-        rehydrate_entity_document(self.entity_document.clone(), &self.index_fields)
+        rehydrate_entity_document(self.entity_value(), &self.index_fields)
     }
 
     fn lease_view(&self) -> Option<LeaseView> {
@@ -320,7 +335,7 @@ impl ItemRecord {
             not_before: self.not_before,
             attempt_count: self.attempt_count,
             payload: self.payload.clone(),
-            fields: self.fields.clone(),
+            fields: self.fields.as_ref().clone(),
         })
     }
 }
@@ -1831,11 +1846,7 @@ impl ProjectionData {
                 if let Some(key) = rec.explicit_client_item_key.clone() {
                     projection.by_key.insert(key, rec.item_id);
                 }
-                let keys = projection.record_index_keys(
-                    &rec.fields,
-                    &rec.index_fields,
-                    rec.entity_document.as_ref(),
-                )?;
+                let keys = projection.record_entity_index_keys(&rec)?;
                 projection.index_insert_keys(rec.item_id, &keys);
                 if rec.state == ItemState::Pending {
                     projection.claim_index_insert_keys(rec.item_id, &keys);
@@ -1995,9 +2006,21 @@ impl ProjectionData {
         }
         let keys = {
             let rec = self.items.get(&item_id).ok_or(EngineError::NotFound)?;
-            self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?
+            self.record_entity_index_keys(rec)?
         };
         Ok(self.remember_framed_keys(item_id, keys))
+    }
+
+    fn record_entity_index_keys(
+        &self,
+        record: &ItemRecord,
+    ) -> EngineResult<Vec<(String, Vec<u8>)>> {
+        let entity = record
+            .index_fields
+            .is_empty()
+            .then(|| record.entity_value())
+            .flatten();
+        self.record_index_keys(&record.fields, &record.index_fields, entity.as_ref())
     }
 
     fn record_index_keys(
@@ -2046,11 +2069,11 @@ impl ProjectionData {
             group_key: item.group_key,
             cohort_size: item.cohort_size,
             payload: item.payload,
-            fields: item.fields,
-            metadata: item.metadata,
+            fields: Arc::new(item.fields),
+            metadata: Arc::new(item.metadata),
             gate_keys: item.gate_keys,
-            entity_document: item.entity_document,
-            index_fields: item.index_fields,
+            entity_document: pack_entity_document(item.entity_document),
+            index_fields: Arc::new(item.index_fields),
             state: ItemState::Pending,
             item_version: 1,
             attempt_count: 0,
@@ -2089,8 +2112,7 @@ impl ProjectionData {
                 .or_default()
                 .insert(rec.item_id);
         }
-        let keys =
-            self.record_index_keys(&rec.fields, &rec.index_fields, rec.entity_document.as_ref())?;
+        let keys = self.record_entity_index_keys(&rec)?;
         self.insert_keys_into_both(rec.item_id, &keys);
         self.remember_framed_keys(rec.item_id, keys);
         self.retained_ids.insert(rec.item_id);
@@ -2321,11 +2343,7 @@ impl ProjectionData {
                 || !c.field_ops.is_empty()
                 || c.set_entity_document.is_some();
             let old_keys = if index_inputs_changed {
-                self.record_index_keys(
-                    &rec.fields,
-                    &rec.index_fields,
-                    rec.entity_document.as_ref(),
-                )?
+                self.record_entity_index_keys(rec)?
             } else {
                 Vec::new()
             };
@@ -2338,7 +2356,10 @@ impl ProjectionData {
                 && !gate_keys_blocked(&self.blocked_gates, &rec.gate_keys))
             .then(|| EligibilityIndex::token(rec, &model));
 
-            let mut next_fields = c.set_fields.clone().unwrap_or_else(|| rec.fields.clone());
+            let mut next_fields = c
+                .set_fields
+                .clone()
+                .unwrap_or_else(|| rec.fields.as_ref().clone());
             for (k, op) in &c.field_ops {
                 match op {
                     Some(v) => {
@@ -2355,12 +2376,10 @@ impl ProjectionData {
                     doc,
                 )?
             } else {
-                rec.index_fields.clone()
+                rec.index_fields.as_ref().clone()
             };
-            let next_entity = c
-                .set_entity_document
-                .as_ref()
-                .or(rec.entity_document.as_ref());
+            let stored_entity = rec.entity_value();
+            let next_entity = c.set_entity_document.as_ref().or(stored_entity.as_ref());
             let new_keys = if index_inputs_changed {
                 self.record_index_keys(&next_fields, &next_index_fields, next_entity)?
             } else {
@@ -2369,10 +2388,10 @@ impl ProjectionData {
 
             let new_elig = if eligibility_changed && was_pending {
                 let mut next_rec = rec.clone();
-                next_rec.fields = next_fields;
-                next_rec.index_fields = next_index_fields.clone();
+                next_rec.fields = Arc::new(next_fields);
+                next_rec.index_fields = Arc::new(next_index_fields.clone());
                 if c.set_entity_document.is_some() {
-                    next_rec.entity_document = c.set_entity_document.clone();
+                    next_rec.entity_document = pack_entity_document(c.set_entity_document.clone());
                 }
                 if let Some(gate_keys) = &c.set_gate_keys {
                     next_rec.gate_keys = gate_keys.clone();
@@ -2405,15 +2424,15 @@ impl ProjectionData {
             .get_mut(&c.item_id)
             .ok_or(EngineError::NotFound)?;
         if let Some(fields) = &c.set_fields {
-            rec.fields = fields.clone();
+            rec.fields = Arc::new(fields.clone());
         }
         for (k, op) in &c.field_ops {
             match op {
                 Some(v) => {
-                    rec.fields.insert(k.clone(), v.clone());
+                    Arc::make_mut(&mut rec.fields).insert(k.clone(), v.clone());
                 }
                 None => {
-                    rec.fields.remove(k);
+                    Arc::make_mut(&mut rec.fields).remove(k);
                 }
             }
         }
@@ -2422,14 +2441,14 @@ impl ProjectionData {
             PayloadUpdate::Set(p) => rec.payload = p.clone(),
         }
         if let Some(metadata) = &c.set_metadata {
-            rec.metadata = metadata.clone();
+            rec.metadata = Arc::new(metadata.clone());
         }
         if let Some(gate_keys) = &c.set_gate_keys {
             rec.gate_keys = gate_keys.clone();
         }
-        rec.index_fields = next_index_fields;
+        rec.index_fields = Arc::new(next_index_fields);
         if c.set_entity_document.is_some() {
-            rec.entity_document = c.set_entity_document.clone();
+            rec.entity_document = pack_entity_document(c.set_entity_document.clone());
         }
         if let ScheduleUpdate::Set(p) = &c.set_priority {
             rec.priority = p.clone();
@@ -2637,11 +2656,7 @@ impl ProjectionData {
                                 .items
                                 .get(&mutation.item_id)
                                 .ok_or(EngineError::NotFound)?;
-                            let old_index_keys = self.record_index_keys(
-                                &old.fields,
-                                &old.index_fields,
-                                old.entity_document.as_ref(),
-                            )?;
+                            let old_index_keys = self.record_entity_index_keys(old)?;
                             if old.state == ItemState::Pending
                                 && !old.superseded
                                 && !gate_keys_blocked(&self.blocked_gates, &old.gate_keys)
@@ -2694,11 +2709,12 @@ impl ProjectionData {
                             if !mutation.action.keeps_payload() {
                                 record.payload = values.payload.clone();
                             }
-                            record.fields = values.fields.clone();
-                            record.metadata = values.metadata.clone();
+                            record.fields = Arc::new(values.fields.clone());
+                            record.metadata = Arc::new(values.metadata.clone());
                             record.gate_keys = values.gate_keys.clone();
-                            record.index_fields = values.index_fields.clone();
-                            record.entity_document = values.entity_document.clone();
+                            record.index_fields = Arc::new(values.index_fields.clone());
+                            record.entity_document =
+                                pack_entity_document(values.entity_document.clone());
                             if lease_ends {
                                 record.lease_token = None;
                                 record.lease_expires_at = None;
@@ -2866,13 +2882,7 @@ impl ProjectionData {
                 let superseded_keys = self
                     .items
                     .get(&c.superseded_item_id)
-                    .map(|rec| {
-                        self.record_index_keys(
-                            &rec.fields,
-                            &rec.index_fields,
-                            rec.entity_document.as_ref(),
-                        )
-                    })
+                    .map(|rec| self.record_entity_index_keys(rec))
                     .transpose()?;
                 let superseded_gate_keys = self
                     .items
@@ -3050,10 +3060,10 @@ fn mutation_snapshot(record: &ItemRecord) -> ItemMutationSnapshot {
         attempt_count: record.attempt_count,
         max_attempts: record.max_attempts,
         payload: record.payload.clone(),
-        fields: record.fields.clone(),
-        metadata: record.metadata.clone(),
+        fields: record.fields.as_ref().clone(),
+        metadata: record.metadata.as_ref().clone(),
         gate_keys: record.gate_keys.clone(),
-        entity: rehydrate_entity_document(record.entity_document.clone(), &record.index_fields),
+        entity: rehydrate_entity_document(record.entity_value(), &record.index_fields),
         lease_token: record.lease_token.clone(),
         lease_expires_at: record.lease_expires_at,
         lease_is_cohort: record.lease_is_cohort,
@@ -3106,17 +3116,9 @@ fn mutation_predicate_matches(
             if pointer_tokens(pointer).is_err() {
                 return false;
             }
-            // Compact pushes retain native index fields instead of duplicate JSON.
-            // Match the public entity view without materializing JSON on the insert path.
-            let materialized = record
-                .entity_document
-                .is_none()
-                .then(|| rehydrate_entity_document(None, &record.index_fields))
-                .flatten();
-            let actual = record
-                .entity_document
+            let document = record.query_entity();
+            let actual = document
                 .as_ref()
-                .or(materialized.as_ref())
                 .and_then(|document| document.pointer(pointer));
             match value {
                 EntityPredicateValue::Missing => actual.is_none(),
@@ -3291,11 +3293,7 @@ impl ProjectionData {
         // planning value never escapes this function or serves an actual query.
         for mutation in &plan.command.items {
             if let Some(old) = planning.items.get(&mutation.item_id) {
-                planning.record_index_keys(
-                    &old.fields,
-                    &old.index_fields,
-                    old.entity_document.as_ref(),
-                )?;
+                planning.record_entity_index_keys(old)?;
             } else if mutation.action.replacement_values().is_some() {
                 return Err(EngineError::NotFound);
             }
@@ -3648,7 +3646,7 @@ impl ProjectionData {
         {
             return Ok((ItemMutationOutcome::Invalid, None));
         }
-        let mut fields = record.fields.clone();
+        let mut fields = record.fields.as_ref().clone();
         for (name, value) in &patch.field_edits {
             if fireweed_engine::is_api001_reserved_write_field(name) {
                 return Ok((ItemMutationOutcome::Invalid, None));
@@ -3663,9 +3661,9 @@ impl ProjectionData {
             }
         }
         let original_entity = if patch.entity_edits.is_empty() {
-            record.entity_document.clone()
+            record.entity_value()
         } else {
-            rehydrate_entity_document(record.entity_document.clone(), &record.index_fields)
+            rehydrate_entity_document(record.entity_value(), &record.index_fields)
         };
         let mut entity = original_entity.clone();
         for edit in &patch.entity_edits {
@@ -3685,9 +3683,9 @@ impl ProjectionData {
             || priority != record.priority
             || not_before != record.not_before
             || payload != record.payload
-            || metadata != record.metadata
+            || metadata != *record.metadata
             || gate_keys != record.gate_keys
-            || fields != record.fields
+            || fields != *record.fields
             || entity != original_entity
             || invalidate_lease;
         if !changed {
@@ -3720,9 +3718,9 @@ impl ProjectionData {
                 &self.typed_index_specs,
                 doc,
             )
-            .unwrap_or_else(|_| record.index_fields.clone())
+            .unwrap_or_else(|_| record.index_fields.as_ref().clone())
         } else if patch.entity_edits.is_empty() {
-            record.index_fields.clone()
+            record.index_fields.as_ref().clone()
         } else {
             BTreeMap::new()
         };
@@ -4037,12 +4035,33 @@ impl ProjectionData {
 
     /// Filtered lifecycle metrics over the authoritative projection.
     pub fn metrics_by_query(&self, request: MetricsByQueryRequest) -> EngineResult<QueueMetrics> {
-        filtered_lifecycle_metrics(
+        let index = request
+            .index
+            .as_deref()
+            .or_else(|| {
+                self.typed_index_specs
+                    .first()
+                    .map(|spec| spec.name.as_str())
+            })
+            .ok_or(EngineError::Invalid("unknown secondary index"))?;
+        if request.filters.is_empty() {
+            filtered_lifecycle_metrics_by_index_key(
+                &self.typed_index_specs,
+                &request,
+                std::iter::empty(),
+            )?;
+            return Ok(self.metrics());
+        }
+        filtered_lifecycle_metrics_by_index_key(
             &self.typed_index_specs,
             &request,
-            self.items
-                .values()
-                .map(|rec| (rec.state, rec.superseded, rec.entity_document.as_ref())),
+            self.items.iter().filter_map(|(id, record)| {
+                self.framed_index_keys
+                    .get(id)?
+                    .iter()
+                    .find(|(name, _)| name == index)
+                    .map(|(_, key)| (record.state, record.superseded, key.as_slice()))
+            }),
         )
     }
 
@@ -4076,11 +4095,7 @@ impl ProjectionData {
         let keys = if let Some(keys) = self.framed_index_keys.remove(&rec.item_id) {
             keys
         } else {
-            Arc::from(self.record_index_keys(
-                &rec.fields,
-                &rec.index_fields,
-                rec.entity_document.as_ref(),
-            )?)
+            Arc::from(self.record_entity_index_keys(&rec)?)
         };
         self.index_remove_keys(rec.item_id, &keys);
         self.claim_index_remove_keys(rec.item_id, &keys);
@@ -4227,7 +4242,7 @@ impl ProjectionData {
                     not_before: record.not_before,
                     attempt_count: record.attempt_count,
                     payload: record.payload.clone(),
-                    metadata: record.metadata.clone(),
+                    metadata: record.metadata.as_ref().clone(),
                 })
             })
             .collect()
@@ -4316,7 +4331,7 @@ impl ProjectionData {
             let mut fields = command
                 .set_fields
                 .clone()
-                .unwrap_or_else(|| record.fields.clone());
+                .unwrap_or_else(|| record.fields.as_ref().clone());
             for (name, operation) in &command.field_ops {
                 match operation {
                     Some(value) => {
@@ -4327,10 +4342,11 @@ impl ProjectionData {
                     }
                 }
             }
+            let stored_entity = record.entity_value();
             let entity = command
                 .set_entity_document
                 .as_ref()
-                .or(record.entity_document.as_ref());
+                .or(stored_entity.as_ref());
             match self.index_validate_with_entity(&command.item_id, &fields, entity, None) {
                 Ok(()) => {}
                 Err(EngineError::Conflict) => {
@@ -4574,7 +4590,7 @@ impl ProjectionData {
         let stored = self
             .items
             .get(item_id)
-            .map(|record| record.index_fields.clone())
+            .map(|record| record.index_fields.as_ref().clone())
             .unwrap_or_default();
         let proposed = if let Some(doc) = entity {
             fireweed_engine::index_fields::extract_index_fields_from_entity(
@@ -4649,7 +4665,7 @@ impl ProjectionData {
         entity: Option<&Value>,
     ) -> EngineResult<()> {
         let rec = self.items.get(item_id).ok_or(EngineError::NotFound)?;
-        let mut merged = rec.fields.clone();
+        let mut merged = rec.fields.as_ref().clone();
         for (k, op) in field_ops {
             match op {
                 Some(v) => {
@@ -4663,7 +4679,7 @@ impl ProjectionData {
         self.index_validate_with_entity(
             item_id,
             &merged,
-            entity.or(rec.entity_document.as_ref()),
+            entity.or(rec.entity_value().as_ref()),
             None,
         )
     }
@@ -4858,9 +4874,9 @@ impl ProjectionData {
         Ok(Some(RangeScanRow { item_id, fields }))
     }
 
-    /// Select claimable item ids for `claim_by_query` by walking the **Pending-only** claim secondary
-    /// index in declared order. Cost is O(claimed + skipped not-yet-due pending), independent of
-    /// leased/terminal corpus size still occupying the full query secondary index (fireweed-cd0e5255).
+    /// Select pending claims without expanding entity JSON or sorting the retained corpus.
+    /// Equality prefixes seek directly into the pending index; semantic ordering is
+    /// applied to borrowed typed values because framed string keys sort by length.
     pub fn select_claim_by_query(
         &self,
         index_name: Option<&str>,
@@ -4880,77 +4896,121 @@ impl ProjectionData {
         {
             return Err(EngineError::Invalid("unindexed-field"));
         }
-        let descending = order_by.direction == fireweed_core::SortDirection::Descending;
+        let mut predicates = Vec::with_capacity(filters.len());
+        for filter in filters {
+            let ty = index_field_type(spec, &filter.field)
+                .ok_or(EngineError::Invalid("unindexed-field"))?;
+            predicates.push((
+                filter.field.as_str(),
+                filter.op,
+                typed_value_from_filter_value(&filter.value, ty)?,
+            ));
+        }
+        let mut prefix = Vec::new();
+        for (field, ty) in &fields {
+            let Some((_, _, value)) = predicates
+                .iter()
+                .find(|(name, op, _)| name == field && *op == FilterOp::Eq)
+            else {
+                break;
+            };
+            prefix.extend(fireweed_engine::index_fields::framed_typed_value(
+                value, ty,
+            )?);
+        }
         let Some(index) = self.claim_indexes.get(&spec.name) else {
             return Ok(Vec::new());
         };
-        let mut selected = Vec::with_capacity(max_items.min(64));
-        let consider = |item_id: ItemId, selected: &mut Vec<ItemId>| -> EngineResult<bool> {
-            let Some(rec) = self.items.get(&item_id) else {
-                return Ok(false);
-            };
-            if rec.state != ItemState::Pending || rec.superseded || rec.fenced {
-                return Ok(false);
-            }
-            if rec.cohort_size.is_some() {
-                return Ok(false);
-            }
-            if rec.not_before.is_some_and(|nb| nb > now) {
-                return Ok(false);
-            }
-            if gate_keys_blocked(&self.blocked_gates, &rec.gate_keys) {
-                return Ok(false);
-            }
-            let echoed = rec.query_entity();
-            let Some(entity) = echoed.as_ref() else {
-                return Ok(false);
-            };
-            let Some(row) = self.range_scan_row(spec, rec.item_id, entity)? else {
-                return Ok(false);
-            };
-            if !self.range_scan_matches(spec, filters, &row)? {
-                return Ok(false);
-            }
-            selected.push(item_id);
-            Ok(selected.len() >= max_items)
+        let ids: Box<dyn Iterator<Item = ItemId> + '_> = match index {
+            SecondaryIndex::Unique(map) => Box::new(
+                map.range(prefix.clone()..)
+                    .take_while(|(key, _)| key.starts_with(&prefix))
+                    .map(|(_, id)| *id),
+            ),
+            SecondaryIndex::NonUnique(map) => Box::new(
+                map.range(prefix.clone()..)
+                    .take_while(|(key, _)| key.starts_with(&prefix))
+                    .flat_map(|(_, ids)| ids.iter().copied()),
+            ),
         };
-        match index {
-            SecondaryIndex::Unique(map) => {
-                if descending {
-                    for item_id in map.values().rev() {
-                        if consider(*item_id, &mut selected)? {
-                            break;
-                        }
-                    }
-                } else {
-                    for item_id in map.values() {
-                        if consider(*item_id, &mut selected)? {
-                            break;
-                        }
-                    }
+        let mut candidates = Vec::new();
+        for item_id in ids {
+            let Some(rec) = self.items.get(&item_id) else {
+                continue;
+            };
+            if rec.state != ItemState::Pending
+                || rec.superseded
+                || rec.fenced
+                || rec.cohort_size.is_some()
+                || rec.not_before.is_some_and(|nb| nb > now)
+                || gate_keys_blocked(&self.blocked_gates, &rec.gate_keys)
+            {
+                continue;
+            }
+            // Compact admissions retain canonical typed values. Old snapshots may
+            // still need their original entity echo; only that fallback allocates.
+            let values = if fields
+                .iter()
+                .all(|(name, _)| rec.index_fields.contains_key(*name))
+            {
+                std::borrow::Cow::Borrowed(rec.index_fields.as_ref())
+            } else {
+                let Some(entity) = rec.query_entity() else {
+                    continue;
+                };
+                let Some(row) = self.range_scan_row(spec, item_id, &entity)? else {
+                    continue;
+                };
+                std::borrow::Cow::Owned(row.fields)
+            };
+            let mut matches = true;
+            for (field, op, expected) in &predicates {
+                let Some(value) = values.get(*field) else {
+                    matches = false;
+                    break;
+                };
+                let ordering = typed_value_compare(value, expected)?;
+                if !match op {
+                    FilterOp::Eq => ordering.is_eq(),
+                    FilterOp::Gte => ordering.is_ge(),
+                    FilterOp::Gt => ordering.is_gt(),
+                    FilterOp::Lte => ordering.is_le(),
+                    FilterOp::Lt => ordering.is_lt(),
+                } {
+                    matches = false;
+                    break;
                 }
             }
-            SecondaryIndex::NonUnique(map) => {
-                if descending {
-                    'outer_desc: for ids in map.values().rev() {
-                        for item_id in ids {
-                            if consider(*item_id, &mut selected)? {
-                                break 'outer_desc;
-                            }
-                        }
-                    }
-                } else {
-                    'outer_asc: for ids in map.values() {
-                        for item_id in ids {
-                            if consider(*item_id, &mut selected)? {
-                                break 'outer_asc;
-                            }
-                        }
-                    }
-                }
+            if !matches {
+                continue;
             }
+            let order = match values {
+                std::borrow::Cow::Borrowed(values) => {
+                    std::borrow::Cow::Borrowed(values.get(&order_by.field).expect("indexed order"))
+                }
+                std::borrow::Cow::Owned(mut values) => {
+                    std::borrow::Cow::Owned(values.remove(&order_by.field).expect("indexed order"))
+                }
+            };
+            candidates.push((item_id, order));
         }
-        Ok(selected)
+        let compare = |left: &(ItemId, std::borrow::Cow<'_, TypedValue>),
+                       right: &(ItemId, std::borrow::Cow<'_, TypedValue>)| {
+            let order = typed_value_compare(left.1.as_ref(), right.1.as_ref())
+                .expect("validated typed order");
+            let order = if order_by.direction == fireweed_core::SortDirection::Descending {
+                order.reverse()
+            } else {
+                order
+            };
+            order.then_with(|| left.0.cmp(&right.0))
+        };
+        if candidates.len() > max_items {
+            candidates.select_nth_unstable_by(max_items, compare);
+            candidates.truncate(max_items);
+        }
+        candidates.sort_unstable_by(compare);
+        Ok(candidates.into_iter().map(|(id, _)| id).collect())
     }
 
     /// Ordered scan over a declared typed index with stable cursor pagination.
@@ -5747,6 +5807,160 @@ mod tests {
         }
     }
     #[test]
+    fn retained_entities_share_bytes_and_preserve_unindexed_values_across_edits_and_images() {
+        use fireweed_core::RequestId;
+        use fireweed_engine::{AddressedMutation, EntityEdit};
+        let mut definition = qdef_with_emit_change_records(false);
+        definition.typed_indexes = vec![QueueIndex {
+            name: "by_kind".into(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: "kind".into(),
+                index_type: IndexType::String,
+                unique: false,
+            }),
+        }];
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        )
+        .with_typed_indexes(&definition.typed_indexes);
+        let mut entity = serde_json::json!({"kind":"red", "unindexed": {
+            "text":"retained unicode \u{03bb}".repeat(256),
+            "nested":{"label":"original","null":null,"enabled":true},
+            "max_u64":u64::MAX,"min_i64":i64::MIN,"fraction":0.125,
+            "instant":"2026-10-17T12:13:14.123456789Z", "array":[1,"two",null,false]
+        }});
+        let mut item = push_item("1", "one", 1);
+        item.fields
+            .insert("legacy".into(), Bytes::from_static(b"original"));
+        item.metadata.insert(
+            "note",
+            fireweed_core::MetadataValue::String("retained metadata".repeat(256)),
+        );
+        let old_fields = item.fields.clone();
+        let old_metadata = item.metadata.clone();
+        let mut next_metadata = old_metadata.clone();
+        next_metadata.insert(
+            "note",
+            fireweed_core::MetadataValue::String("edited metadata".into()),
+        );
+        item.entity_document = Some(entity.clone());
+        item.index_fields
+            .insert("kind".into(), TypedValue::String("red".into()));
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand { items: vec![item] }))
+            .unwrap();
+        let record = &projection.items[&iid("1")];
+        let copy = record.clone();
+        assert!(Arc::ptr_eq(&record.fields, &copy.fields));
+        assert!(Arc::ptr_eq(&record.metadata, &copy.metadata));
+        assert!(Arc::ptr_eq(&record.index_fields, &copy.index_fields));
+        assert_eq!(
+            record.entity_document.as_ref().unwrap().as_ptr(),
+            copy.entity_document.as_ref().unwrap().as_ptr(),
+            "retained-record clones must share the large entity, not duplicate its tree"
+        );
+        assert_eq!(record.query_entity(), Some(entity.clone()));
+        assert!(mutation_predicate_matches(
+            record,
+            &ItemPredicate::EntityEq {
+                pointer: "/unindexed/max_u64".into(),
+                value: EntityPredicateValue::Value(serde_json::json!(u64::MAX))
+            },
+            ts(1)
+        ));
+        let image = projection.to_image(None);
+        assert_eq!(image.items[0].entity_document, Some(entity.clone()));
+        let serialized = serde_json::to_vec(&image).unwrap();
+        let image: ProjectionImage = serde_json::from_slice(&serialized).unwrap();
+        let cold = ProjectionData::from_image(&definition, image).unwrap();
+        assert_eq!(cold.items[&iid("1")].query_entity(), Some(entity.clone()));
+        assert_eq!(cold.items[&iid("1")].fields.as_ref(), &old_fields);
+        assert_eq!(cold.items[&iid("1")].metadata.as_ref(), &old_metadata);
+        let mut restored = projection.clone();
+        assert!(Arc::ptr_eq(
+            &projection.items[&iid("1")].fields,
+            &restored.items[&iid("1")].fields
+        ));
+        assert_eq!(
+            restored.items[&iid("1")].query_entity(),
+            Some(entity.clone())
+        );
+        let request = ItemMutationRequest {
+            request_id: RequestId::new("packed-entity-edit").unwrap(),
+            evaluated_at: ts(2),
+            dry_run: false,
+            returning: ItemMutationReturning::BeforeSnapshot,
+            gate_changes: vec![],
+            operation: ItemMutationOperation::Addressed {
+                entries: vec![AddressedMutation {
+                    item_id: iid("1"),
+                    expected_item_version: Some(1),
+                    predicates: vec![],
+                    lease_guard: LeaseGuard::RejectActive,
+                    patch: ItemPatch {
+                        metadata: fireweed_engine::BatchUpdateValue::Replace(next_metadata.clone()),
+                        field_edits: BTreeMap::from([(
+                            "legacy".into(),
+                            Some(Bytes::from_static(b"edited")),
+                        )]),
+                        entity_edits: vec![
+                            EntityEdit {
+                                pointer: "/kind".into(),
+                                operation: EntityEditOperation::Set(serde_json::json!("blue")),
+                            },
+                            EntityEdit {
+                                pointer: "/unindexed/nested/label".into(),
+                                operation: EntityEditOperation::Set(serde_json::json!("edited")),
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                }],
+            },
+        };
+        let plan = restored.plan_item_mutation(&request).unwrap();
+        assert_eq!(
+            plan.response.results[0].before.as_ref().unwrap().entity,
+            Some(entity.clone())
+        );
+        restored
+            .apply_command(&QueueCommand::MutateItems(plan.command))
+            .unwrap();
+        assert_eq!(projection.items[&iid("1")].fields.as_ref(), &old_fields);
+        assert_eq!(projection.items[&iid("1")].metadata.as_ref(), &old_metadata);
+        assert_eq!(
+            projection.items[&iid("1")].query_entity(),
+            Some(entity.clone())
+        );
+        assert_eq!(restored.items[&iid("1")].metadata.as_ref(), &next_metadata);
+        assert_eq!(
+            restored.items[&iid("1")].fields["legacy"],
+            Bytes::from_static(b"edited")
+        );
+        assert!(!Arc::ptr_eq(
+            &projection.items[&iid("1")].index_fields,
+            &restored.items[&iid("1")].index_fields
+        ));
+        entity["kind"] = serde_json::json!("blue");
+        entity["unindexed"]["nested"]["label"] = serde_json::json!("edited");
+        assert_eq!(
+            restored.items[&iid("1")].query_entity(),
+            Some(entity.clone())
+        );
+        let restored = ProjectionData::from_image(&definition, restored.to_image(None)).unwrap();
+        assert_eq!(restored.items[&iid("1")].query_entity(), Some(entity));
+        assert_eq!(restored.items[&iid("1")].metadata.as_ref(), &next_metadata);
+        assert_eq!(
+            restored.items[&iid("1")].fields["legacy"],
+            Bytes::from_static(b"edited")
+        );
+    }
+
+    #[test]
     fn compact_index_entity_supports_selector_edits_snapshots_and_noops() {
         use fireweed_core::RequestId;
         use fireweed_engine::{AddressedMutation, EntityEdit, ItemSelector, SelectedMutation};
@@ -5776,6 +5990,29 @@ mod tests {
         assert!(
             projection.items[&iid("1")].entity_document.is_none(),
             "insert stays compact"
+        );
+        let metrics_query = MetricsByQueryRequest {
+            index: Some("by_kind".into()),
+            filters: vec![QueryFilter {
+                field: "kind".into(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("red".into()),
+            }],
+        };
+        assert_eq!(
+            projection
+                .metrics_by_query(metrics_query.clone())
+                .unwrap()
+                .pending,
+            1
+        );
+        let restored = ProjectionData::from_image(&definition, projection.to_image(None)).unwrap();
+        assert_eq!(
+            restored
+                .metrics_by_query(metrics_query.clone())
+                .unwrap()
+                .pending,
+            1
         );
         let compact_projection = projection.clone();
         for value in ["red", "blue"] {
@@ -5828,10 +6065,14 @@ mod tests {
             TypedValue::String("blue".into())
         );
         assert_eq!(
-            record.entity_document,
+            record.entity_value(),
             Some(serde_json::json!({"kind": "blue"}))
         );
 
+        assert_eq!(
+            projection.metrics_by_query(metrics_query).unwrap().pending,
+            0
+        );
         // Removing either a compact entity or a materialized one must also
         // remove its typed index membership and must remain absent on reads.
         for (mut projection, kind) in [(compact_projection, "red"), (projection, "blue")] {
@@ -6259,8 +6500,8 @@ mod tests {
             group_key: None,
             cohort_size: None,
             payload: None,
-            fields: BTreeMap::new(),
-            metadata: Metadata::default(),
+            fields: Arc::new(BTreeMap::new()),
+            metadata: Arc::new(Metadata::default()),
             gate_keys: Vec::new(),
             index_fields: Default::default(),
             entity_document: None,
@@ -6341,6 +6582,127 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(projection.lookup_by_key(&default_key), None);
+    }
+
+    #[test]
+    fn pending_query_selection_matches_semantic_range_order_and_eligibility() {
+        for compound in [false, true] {
+            let declaration = if compound {
+                IndexDeclaration::Compound(fireweed_core::CompoundIndexDef {
+                    fields: vec![
+                        fireweed_core::CompoundIndexField {
+                            field: "kind".into(),
+                            index_type: IndexType::String,
+                        },
+                        fireweed_core::CompoundIndexField {
+                            field: "sku".into(),
+                            index_type: IndexType::String,
+                        },
+                    ],
+                    unique: false,
+                })
+            } else {
+                IndexDeclaration::Single(IndexDef {
+                    field: "sku".into(),
+                    index_type: IndexType::String,
+                    unique: false,
+                })
+            };
+            let spec = QueueIndex {
+                name: "ordered".into(),
+                declaration,
+            };
+            let mut projection = ProjectionData::new(
+                model(),
+                OrderingMode::Strict,
+                0,
+                RecurrencePolicy::default(),
+                &[],
+            )
+            .with_typed_indexes(&[spec]);
+            for (offset, value) in ["z", "aa", "a", "aaaa", "a"].into_iter().enumerate() {
+                let mut item = push_item(&(offset + 1).to_string(), &format!("k{offset}"), 1);
+                item.index_fields
+                    .insert("kind".into(), TypedValue::String("work".into()));
+                item.index_fields
+                    .insert("sku".into(), TypedValue::String(value.into()));
+                item.entity_document =
+                    Some(serde_json::json!({"kind":"work","sku":value,"payload":"x".repeat(8192)}));
+                projection
+                    .apply_command(&QueueCommand::Push(PushCommand { items: vec![item] }))
+                    .unwrap();
+            }
+            let filters = if compound {
+                vec![QueryFilter {
+                    field: "kind".into(),
+                    op: FilterOp::Eq,
+                    value: TypedValue::String("work".into()),
+                }]
+            } else {
+                Vec::new()
+            };
+            for direction in [SortDirection::Ascending, SortDirection::Descending] {
+                let order = OrderField {
+                    field: "sku".into(),
+                    direction,
+                };
+                let rows = projection
+                    .range_scan(RangeScanRequest {
+                        index: Some("ordered".into()),
+                        filters: filters.clone(),
+                        order_by: vec![order.clone()],
+                        page_size: 100,
+                        cursor: None,
+                    })
+                    .unwrap()
+                    .rows;
+                for limit in [1, 3, 10] {
+                    assert_eq!(
+                        projection
+                            .select_claim_by_query(Some("ordered"), &filters, &order, limit, ts(10))
+                            .unwrap(),
+                        rows.iter()
+                            .take(limit)
+                            .map(|row| row.item_id)
+                            .collect::<Vec<_>>()
+                    );
+                }
+                let mut missing = filters.clone();
+                missing.push(QueryFilter {
+                    field: "sku".into(),
+                    op: FilterOp::Eq,
+                    value: TypedValue::String("absent".into()),
+                });
+                assert!(
+                    projection
+                        .select_claim_by_query(Some("ordered"), &missing, &order, 10, ts(10))
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            projection.items.get_mut(&iid("1")).unwrap().not_before = Some(ts(100));
+            projection.items.get_mut(&iid("2")).unwrap().fenced = true;
+            projection.items.get_mut(&iid("3")).unwrap().state = ItemState::Leased;
+            let order = OrderField {
+                field: "sku".into(),
+                direction: SortDirection::Ascending,
+            };
+            assert_eq!(
+                projection
+                    .select_claim_by_query(Some("ordered"), &filters, &order, 10, ts(10))
+                    .unwrap(),
+                vec![iid("5"), iid("4")]
+            );
+            let gate = projection.items.get_mut(&iid("4")).unwrap();
+            gate.gate_keys.push("blocked".to_string());
+            projection.blocked_gates.insert("blocked".to_string());
+            assert_eq!(
+                projection
+                    .select_claim_by_query(Some("ordered"), &filters, &order, 10, ts(10))
+                    .unwrap(),
+                vec![iid("5")]
+            );
+        }
     }
 
     #[test]
@@ -6643,8 +7005,8 @@ mod tests {
             group_key: None,
             cohort_size: None,
             payload: None,
-            fields: BTreeMap::new(),
-            metadata: Metadata::default(),
+            fields: Arc::new(BTreeMap::new()),
+            metadata: Arc::new(Metadata::default()),
             gate_keys: Vec::new(),
             index_fields: Default::default(),
             entity_document: None,
@@ -7742,7 +8104,7 @@ mod tests {
         assert_eq!(row.payload.as_deref(), Some(&b"payload"[..]));
         assert_eq!(row.item_version, 2);
         let stored = proj.items.get(&iid("1")).unwrap();
-        assert_eq!(stored.metadata, metadata);
+        assert_eq!(stored.metadata.as_ref(), &metadata);
         assert_eq!(stored.gate_keys, vec!["gate-a"]);
     }
 
