@@ -288,7 +288,6 @@ mod tests {
             workers,
             QueuePipelineOptions {
                 operations: 1,
-                metadata_bytes: 65536,
                 hard_record_bytes: 1 << 20,
             },
             scratch_root,

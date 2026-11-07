@@ -16,7 +16,6 @@ use ownership::TestOwnership;
 fn pipeline_configuration_rejects_semaphore_overflow_before_resource_construction() {
     let mut options = QueuePipelineOptions {
         operations: 1,
-        metadata_bytes: 65536,
         hard_record_bytes: 1 << 20,
     };
     options.validate().unwrap();
@@ -25,9 +24,6 @@ fn pipeline_configuration_rejects_semaphore_overflow_before_resource_constructio
         assert!(matches!(options.validate(), Err(QueueError::Invalid(_))));
     }
     options.operations = 1;
-    options.metadata_bytes = 0;
-    assert!(matches!(options.validate(), Err(QueueError::Invalid(_))));
-    options.metadata_bytes = 65536;
     options.hard_record_bytes = 0;
     assert!(matches!(options.validate(), Err(QueueError::Invalid(_))));
 }
@@ -152,7 +148,6 @@ async fn native_port_fixture_owned(
     drop(job);
     let options = QueuePipelineOptions {
         operations: 128,
-        metadata_bytes: 65536,
         hard_record_bytes: 256 << 20,
     };
     options.validate().unwrap();

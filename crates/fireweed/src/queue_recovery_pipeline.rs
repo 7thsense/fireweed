@@ -42,14 +42,12 @@ fn unknown(message: &str) -> QueueError {
 #[derive(Debug, Clone, Copy)]
 pub struct QueuePipelineOptions {
     pub operations: usize,
-    pub metadata_bytes: usize,
     pub hard_record_bytes: u64,
 }
 impl QueuePipelineOptions {
     pub fn validate(&self) -> QueueResult<()> {
         if self.operations == 0
             || self.operations > Semaphore::MAX_PERMITS
-            || self.metadata_bytes == 0
             || self.hard_record_bytes == 0
         {
             return Err(QueueError::Invalid(
