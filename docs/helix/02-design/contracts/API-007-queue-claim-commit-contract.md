@@ -233,9 +233,11 @@ object-log publication/apply/recovery remain implementation-specific.
 
 Each S3/Turso queue has one owner at a time, by a lease held in the control
 plane. The owner retains its queue position and fence for the tenure of that
-lease. Mutations plan against the local projection, publish conditionally on that
-fence and the exact expected offset, and apply the published record directly;
-they read no log records. Reads are served from the projection and read no log
+lease. Mutations plan against the local projection inside one projection
+transaction per owner iteration, so a later mutation sees the earlier ones. The
+iteration publishes one record carrying every mutation's entry, conditionally on
+that fence and the exact expected offset, and commits that transaction only once
+the record is stored; mutations read no log records. Reads are served from the projection and read no log
 records. The owner tracks a local lease deadline, measured from before each lease
 request was sent, and stops serving at it without contacting anything. A new
 owner serves nothing until the previous lease's full duration plus a skew
