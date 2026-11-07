@@ -9,6 +9,8 @@ pub(super) struct Env {
     pub(super) clock: Arc<TestClock>,
     pub(super) ownership: TestOwnership,
     pub(super) nonce: u128,
+    /// Set by `counted`: the S3 client goes through this proxy.
+    pub(super) proxy: Option<super::counting_proxy::CountingProxy>,
 }
 impl Env {
     pub(super) fn new(name: &str, s3: bool) -> Self {
@@ -24,7 +26,15 @@ impl Env {
             clock: Arc::new(TestClock::default()),
             ownership: TestOwnership::new(),
             nonce,
+            proxy: None,
         }
+    }
+    /// As `new(name, true)`, with every S3 request counted by a proxy on loopback.
+    pub(super) async fn counted(name: &str) -> Self {
+        let mut env = Self::new(name, true);
+        let upstream = &fireweed_objectlog::test_s3::shared_s3_test_env().endpoint;
+        env.proxy = Some(super::counting_proxy::CountingProxy::start(upstream).await);
+        env
     }
     /// A handle named after its projection file; every handle shares the control plane.
     pub(super) async fn open(&self, projection: &str) -> NativeQueueStore {
@@ -36,12 +46,14 @@ impl Env {
         projection: &str,
         ownership: QueueOwnership,
     ) -> NativeQueueStore {
-        native_port_fixture_owned(
+        super::native_port_fixture_routed(
             &self.root,
             projection,
             self.prefix.as_deref(),
             self.clock.clone(),
             ownership,
+            256 << 20,
+            self.proxy.as_ref().map(|proxy| proxy.endpoint.as_str()),
         )
         .await
     }

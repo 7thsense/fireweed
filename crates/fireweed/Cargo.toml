@@ -79,6 +79,11 @@ postgres = "0.19"
 # Integration tests use ManualClock. The memory feature stays off by default;
 # this dev-dependency is not a public projection.
 fireweed-memory = { path = "../fireweed-memory" }
+# The counting S3 proxy in the queue pipeline tests (already in the lockfile via the AWS SDK).
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
 
 [[test]]
 name = "transition_entry_validation"

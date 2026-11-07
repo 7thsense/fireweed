@@ -701,11 +701,16 @@ fn objects_under(root: &std::path::Path) -> u64 {
     count
 }
 /// After entry, a batch of any size is one conditional publish. On the local
-/// store the objects it writes are counted too. Requests to an S3 store cannot
-/// be counted by kind from here: the object-log SDK builds its store inside
-/// `NativeLog` and offers no way to wrap it.
+/// store the objects it writes are counted too. On S3 the requests are counted
+/// at the wire by a proxy between the SDK client and the endpoint (the SDK builds
+/// its store inside `NativeLog` and offers no hook): no GET, HEAD or LIST, and
+/// the same PUTs and round trips for every batch size.
 async fn publishes_per_batch_do_not_grow_with_batch_size(s3: bool, sizes: &[usize]) {
-    let env = Env::new("batch-sizes", s3);
+    let env = if s3 {
+        Env::counted("batch-sizes").await
+    } else {
+        Env::new("batch-sizes", false)
+    };
     let store = env.open("a.db").await;
     let queue = env.address("q");
     grow(&store, &queue, 2).await;
@@ -720,8 +725,12 @@ async fn publishes_per_batch_do_not_grow_with_batch_size(s3: bool, sizes: &[usiz
     .await
     .unwrap();
     let mut written = Vec::new();
+    let mut wire = Vec::new();
     for &size in sizes {
         let (published, staged) = counts(&store);
+        if let Some(proxy) = &env.proxy {
+            proxy.reset();
+        }
         let objects = objects_under(&env.root.join("log"));
         let operations = (0..size)
             .map(|n| {
@@ -736,12 +745,50 @@ async fn publishes_per_batch_do_not_grow_with_batch_size(s3: bool, sizes: &[usiz
             .collect();
         let results = together(&store, read_of(&store, &queue), operations).await;
         assert!(results.iter().all(inserted));
+        let window = env.proxy.as_ref().map(|proxy| proxy.snapshot());
         let (published_after, staged_after) = counts(&store);
         assert_eq!(
             published_after - published,
             1,
             "batch of {size}: one publish"
         );
+        if let Some(window) = window {
+            let (puts, gets, heads, lists) = (
+                window.count("PUT"),
+                window.count("GET"),
+                window.count("HEAD"),
+                window.count("LIST"),
+            );
+            eprintln!(
+                "batch={size} entries={} PUT={puts} (conditional={}) GET={gets} HEAD={heads} LIST={lists} other={} round_trips={}",
+                staged_after - staged,
+                window.cas_puts(),
+                window.other(),
+                window.round_trips
+            );
+            let reads: Vec<_> = window
+                .requests
+                .iter()
+                .filter(|r| r.method != "PUT")
+                .map(|r| (r.method.clone(), r.uri.clone(), r.status))
+                .collect();
+            assert_eq!(
+                (gets, heads, lists),
+                (0, 0, 0),
+                "batch of {size} read: {reads:?}"
+            );
+            assert_eq!(
+                window.cas_puts(),
+                1,
+                "batch of {size}: one conditional publish"
+            );
+            assert_eq!(
+                window.cas_puts() + window.create_only_puts(),
+                puts,
+                "batch of {size}: every PUT is conditional"
+            );
+            wire.push((puts, window.round_trips));
+        }
         assert_eq!(staged_after - staged, size as u64);
         let objects = objects_under(&env.root.join("log")) - objects;
         eprintln!(
@@ -751,6 +798,10 @@ async fn publishes_per_batch_do_not_grow_with_batch_size(s3: bool, sizes: &[usiz
         );
         written.push(objects);
     }
+    assert!(
+        wire.windows(2).all(|pair| pair[0] == pair[1]),
+        "PUTs and round trips per batch must not depend on its size: {wire:?}"
+    );
     if !s3 {
         assert!(
             written.windows(2).all(|pair| pair[0] == pair[1]),

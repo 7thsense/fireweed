@@ -6,6 +6,7 @@ use fireweed_objectlog::queue_native_log::{
 };
 
 mod batching;
+mod counting_proxy;
 mod native_transport;
 mod owner_safety;
 pub(super) mod ownership;
@@ -93,7 +94,11 @@ fn operation_completion_releases_permit_before_terminal_notification_on_every_dr
 /// The log every store in a test shares, through `prefix` on S3 or `root` on disk.
 /// `retained_bytes` is left to the default, which covers a retained spine for a
 /// thousand owned queues.
-fn native_log_fixture(root: &std::path::Path, s3_prefix: Option<&str>) -> QueueNativeLog {
+fn native_log_fixture(
+    root: &std::path::Path,
+    s3_prefix: Option<&str>,
+    endpoint: Option<&str>,
+) -> QueueNativeLog {
     let options =
         QueueNativeLogOptions::for_queue_limits(&QueueLimits::default(), 128, 2, 4096, None)
             .unwrap();
@@ -101,7 +106,7 @@ fn native_log_fixture(root: &std::path::Path, s3_prefix: Option<&str>) -> QueueN
         let env = fireweed_objectlog::test_s3::shared_s3_test_env();
         QueueNativeLog::s3(
             QueueNativeS3Connection {
-                endpoint: &env.endpoint,
+                endpoint: endpoint.unwrap_or(&env.endpoint),
                 region: &env.region,
                 bucket: &env.bucket,
                 access_key: &env.access_key,
@@ -158,7 +163,29 @@ async fn native_port_fixture_sized(
     ownership: QueueOwnership,
     hard_record_bytes: u64,
 ) -> NativeQueueStore {
-    let store = native_log_fixture(root, s3_prefix);
+    native_port_fixture_routed(
+        root,
+        projection_name,
+        s3_prefix,
+        clock,
+        ownership,
+        hard_record_bytes,
+        None,
+    )
+    .await
+}
+/// As `native_port_fixture_sized`, with the S3 client pointed at `endpoint` (a
+/// counting proxy) instead of the shared test endpoint.
+async fn native_port_fixture_routed(
+    root: &std::path::Path,
+    projection_name: &str,
+    s3_prefix: Option<&str>,
+    clock: Arc<fireweed_conformance::queue_contract::TestClock>,
+    ownership: QueueOwnership,
+    hard_record_bytes: u64,
+    endpoint: Option<&str>,
+) -> NativeQueueStore {
+    let store = native_log_fixture(root, s3_prefix, endpoint);
     let workers = ScratchWorkers::new(2, 8).unwrap();
     let admission = QueueAdmission::new(1, 512 << 20).unwrap();
     let job = Arc::new(admission.reserve(0).unwrap());
