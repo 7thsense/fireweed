@@ -73,24 +73,30 @@ contracts, designs and this execution plan concise and maintained in place.
 
 ## Native Owner Path Evidence
 
-Fixed phase totals partition elapsed recovery time into fresh authority, planned
-read/worker/transfer, checked history folding and native checkpoint/apply.
+Fixed phase totals partition elapsed owner-entry time into fresh authority,
+planned read/worker/transfer, checked record verification and native apply.
 Quiescent deltas reject saturation and inconsistent totals. Worker-side parsing
 is included in read time; elapsed buckets are not CPU or provider-request counts.
+Head reads, fence acquisitions and log records read are counted separately.
 
 Native writes publish to the immutable log and every read or query serves from
-the local projection, so healthy operation reads zero log records. A handle
-retains one owned position and fence per queue. A write plans against the
-projection under the queue mutex, publishes conditionally on epoch and exact
-offset, then applies the same record bytes. A read captures the head once and
-catches up under the mutex only when that head is past the retained position.
-A lost publish takes a newer fence, catches up and replans. An ambiguous publish
-takes a strictly newer fence, catches up and looks up the original identity;
-nothing is planned over it until then. A failed apply poisons that queue's
-projection on the handle until catch-up from genesis rebuilds it. A projection
-is trusted only if open finds the clean-shutdown sidecar; otherwise open deletes
-it and the queue rebuilds from genesis. `check_owner.py` bounds this path with a
-foreign writer, lost replies, a crash and an apply failure; its mapping is documentary.
+the local projection, so healthy operation reads zero log records and makes no
+object-store read. Each queue has one owner at a time, by a control-plane lease,
+and one loop through which every operation passes; a second handle receives
+`Busy`. Entry acquires the lease, waits the skew allowance `S`, takes a strictly
+newer fence and rebuilds the projection from the log. The owner plans a write
+against the projection, publishes conditionally on epoch and exact offset, then
+applies the same record bytes and replies from the projection. It tracks a local
+lease deadline, measured on a clock that counts suspend from before each lease
+request was sent, and releases a read only if it is still before the deadline
+after the read. Any failed or unconfirmed publish, passed deadline, rejected
+renewal or projection error drops the queue's projection and leaves owner state;
+re-entry rebuilds under a newer fence, so an original that did publish is found
+by its identity. The projection lives exactly as long as its process: open
+deletes whatever an earlier process left. `check_owner.py` bounds this path with
+two handles, skewed wall clocks, a reply window, a stall, a lost renewal reply
+and a crash, and its faulty controls name each safety rule; its mapping is
+documentary.
 
 Native ordinary-pack preparation uses one exact per-key read union and an
 evolving shared-planner snapshot. Whole-batch original classification precedes
@@ -100,9 +106,9 @@ Accepted deltas, receipts and clock decisions survive splitting at the first
 physical size overflow; physical receipts sort canonically without reordering logical
 outputs. Reservation or authority errors cannot masquerade as a size split.
 Root publishes the actual accepted contiguous prefix once, then resolves the
-complete declared batch from the projection. Absent submitted originals require a
-newer fence, catch-up and fresh planning. Finalized caller positions retain their
-admitted owners, including single/administrative conflict or expiry classifications.
+complete declared batch from the projection. Absent submitted originals are replanned only after the owner re-enters under a
+newer fence. Caller positions finalize from the projection, including
+single/administrative conflict or expiry classifications.
 `check_pack_preparation.py` bounds preparation; `check_pack_publication.py` bounds
 physical publication, contiguous remainder retries and source-confirmed receipts.
 Native final-transaction uniqueness checks seek the existing digest/range equality
@@ -112,15 +118,16 @@ Neither finite family establishes provider durability or performance readiness;
 public activation and the matched release workloads remain separate gates.
 
 The concrete PostgreSQL facade and mandatory suite are implemented. The hidden
-Linux native port assembles all ten operations from shared planners, native
+native port assembles all ten operations from shared planners, native
 filtered selection, stock-Turso atomic projection and conditional log publication.
 Owned response handoff retains admission through delivery or abandoned reply
 cleanup. Shared shutdown drains admission and workers and serializes final
 resource teardown. These internal operations do not activate the public backend.
 
-Native mutation retries require a strictly newer durable fence and catch-up to
-the log head. Insert, claim and commit then look up the original identity in the
-projection; immutable original replay precedes current-state validation.
+Native mutation retries happen only after the owner re-enters under a strictly
+newer durable fence and rebuilds from the log. Insert, claim and commit then look
+up the original identity in the projection; immutable original replay precedes
+current-state validation.
 Originals, receipt lookups, addressed state reads, commit, preview and pack
 preparation read the trusted projection directly. They bind no per-operation
 source descriptors and compare no projection bytes with the log. Complete

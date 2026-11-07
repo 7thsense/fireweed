@@ -47,17 +47,25 @@ attributed. They cannot qualify public S3 × Turso. A local RustFS/Turso test is
 public-cell conformance, not a production-cloud or process-kill qualification.
 The service-envelope fixture does not discharge the numeric PRD progress bound.
 
-## Retained-owner queue path
+## Lease-owner queue path
 
 `owner_models.py` bounds the native path where writes publish to the immutable
-log and reads serve from the local projection: one owner handle, a foreign
-writer, a lost or in-flight publish, a crash that leaves no sidecar, a clean
-shutdown and an apply failure. Its oracles require that acknowledged writes reach
-later reads, a superseded fence cannot commit, nothing is planned over an
-unresolved publish and an untrusted projection never serves. `check.py` runs the
-model and its faulty controls. `python3 scripts/formal/check_owner.py` adds the
-completed witnesses and writes `target/api007-formal/owner.json`; `test_owner.py`
-exercises that runner. Its production mapping is documentary and unexecuted.
+log and reads serve from the projection of one lease owner. Two handles share a
+control-plane lease; a handle's wall clock, which stamps its lease requests, runs
+ahead of real time by a tick; the lease clock is real time. The owner measures its
+deadline from before the request was sent, waits the skew allowance after
+acquiring, and exits on any failed publish, passed deadline, rejected renewal or
+crash. Four scenarios keep each graph complete: `base`, `crash`, `renew` and
+`lost` (a renewal whose reply is lost). Its oracles require that a read is not
+acknowledged after a write it misses (O-READ), a superseded fence cannot commit
+(O-FENCE), nothing is planned over an unresolved publish (O-UNRESOLVED), an
+untrusted projection never serves (O-TRUST) and no identity is published twice
+(O-UNIQUE). The faulty controls include `serve_past_deadline`,
+`deadline_from_after_send`, `new_owner_skips_skew`,
+`keep_projection_after_publish_failure` and `ack_without_recheck`. `check.py` runs
+the models and controls. `python3 scripts/formal/check_owner.py` adds the completed
+witnesses and writes `target/api007-formal/owner.json`; `test_owner.py` exercises
+that runner. Its production mapping is documentary and unexecuted.
 
 ## Generated model-to-S3/Turso replay
 

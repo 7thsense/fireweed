@@ -9,12 +9,12 @@ import sys
 
 from explorer import SearchLimit, explore
 from models import models, negative_controls
-from owner_models import FAULTS as OWNER_FAULTS, Owner
+from owner_models import FAULTS as OWNER_FAULTS, Owner, SCENARIOS as OWNER_SCENARIOS
 
 
 def run(max_states=100000):
     baseline = []
-    for model in models() + [Owner()]:
+    for model in models() + [Owner(scenario=scenario) for scenario in OWNER_SCENARIOS]:
         report, _ = explore(model, max_states)
         baseline.append(report)
         if report['status'] != 'PASS':
