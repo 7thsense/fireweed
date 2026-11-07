@@ -143,17 +143,6 @@ impl QueueRecoveryPipeline {
     ) -> QueueResult<AdmittedQueueCommitBatch> {
         request.preflight(&limits)?;
         administrative_envelope_preflight(&request, &limits)?;
-        #[cfg(not(target_os = "linux"))]
-        if request.groups.iter().any(|group| {
-            matches!(
-                group.administration.as_ref().map(|a| &a.intent.operation),
-                Some(fireweed_core::queue_administration::AdministrativeOperation::SelectFirst(_))
-            )
-        }) {
-            return Err(QueueError::Invalid(
-                "broad administrative commit not assembled".into(),
-            ));
-        }
         let headers = incoming_headers(&request)?;
         let input = job.owned_buffer(
             encoded_len(&request)?

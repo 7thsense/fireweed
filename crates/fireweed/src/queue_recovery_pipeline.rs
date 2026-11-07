@@ -18,7 +18,6 @@ mod read;
 mod receipts;
 mod state;
 mod stats;
-#[cfg(target_os = "linux")]
 mod store;
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
@@ -30,7 +29,6 @@ use fireweed_objectlog::ObjectLogEngineStore;
 use fireweed_queue_spool::ScratchWorkers;
 use fireweed_turso::queue_projection::{QueueProjection, QueueProjectionCheckpoint};
 use std::sync::{Arc, Weak};
-#[cfg(target_os = "linux")]
 pub use store::NativeQueueStore;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 fn unknown(message: &str) -> QueueError {

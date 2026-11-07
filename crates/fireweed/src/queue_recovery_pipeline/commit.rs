@@ -1,8 +1,6 @@
 //! Owned commit publication. Only covered immutable original-receipt replay
 //! returns an outcome; provisional planning never crosses the completion edge.
 use super::*;
-#[cfg(not(target_os = "linux"))]
-use fireweed_core::queue_administration::AdministrativeOperation;
 use fireweed_core::queue_contract::{CommitGroup, QueueLimits, ReceiptLookup, encoded_len};
 use fireweed_engine::{
     Clock,
@@ -81,15 +79,6 @@ impl CommitExecution {
     ) -> QueueResult<Self> {
         group.preflight_for(&queue, &limits)?;
         administrative_groups_preflight(&queue, std::slice::from_ref(&group), &limits)?;
-        #[cfg(not(target_os = "linux"))]
-        if matches!(
-            group.administration.as_ref().map(|a| &a.intent.operation),
-            Some(AdministrativeOperation::SelectFirst(_))
-        ) {
-            return Err(QueueError::Invalid(
-                "broad administrative commit not assembled".into(),
-            ));
-        }
         // Admit both input owners before native-stage cloning or any I/O.
         let headers = incoming_headers(&group)?
             .checked_mul(2)

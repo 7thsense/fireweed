@@ -1,8 +1,6 @@
 //! Administrative preview uses the common owned fresh-coverage read protocol.
 use super::read::CoveredRead;
 use super::*;
-#[cfg(not(target_os = "linux"))]
-use fireweed_core::queue_administration::AdministrativeOperation;
 use fireweed_core::queue_contract::{PreviewRequest, QueueLimits, RequestPreflight, encoded_len};
 use fireweed_engine::{
     Clock,
@@ -69,19 +67,6 @@ impl CoveredRead for PreviewRead {
             std::slice::from_ref(&self.request.group),
             limits,
         )?;
-        #[cfg(not(target_os = "linux"))]
-        if matches!(
-            self.request
-                .group
-                .administration
-                .as_ref()
-                .map(|a| &a.intent.operation),
-            Some(AdministrativeOperation::SelectFirst(_))
-        ) {
-            return Err(QueueError::Invalid(
-                "broad administrative preview not assembled".into(),
-            ));
-        }
         Ok(())
     }
     fn recover<'a>(

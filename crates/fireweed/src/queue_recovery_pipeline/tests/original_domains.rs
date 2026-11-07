@@ -1,6 +1,5 @@
 //! Paired immutable source-original integrity controls.
 use super::*;
-#[cfg(target_os = "linux")]
 async fn corrupt_single_originals_are_source_checked(s3: bool, only_domain: Option<i64>) {
     use fireweed_engine::{queue_contract::QueueStore, queue_storage_layout::discovery_digest};
     let nonce = std::time::SystemTime::now()
@@ -298,12 +297,10 @@ async fn corrupt_single_originals_are_source_checked(s3: bool, only_domain: Opti
         }
     }
 }
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn native_single_original_authority_rejects_corrupt_cache_local() {
     corrupt_single_originals_are_source_checked(false, None).await;
 }
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn native_single_original_authority_rejects_corrupt_cache_real_s3() {
     corrupt_single_originals_are_source_checked(true, None).await;

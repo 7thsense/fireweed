@@ -5,7 +5,6 @@ async fn addressed_commit_publishes_atomic_groups_and_resolves_originals_after_f
 {
     administrative_commit_case(false).await;
 }
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn broad_commit_publishes_atomic_groups_and_resolves_originals_after_fencing_and_rebuild() {
     administrative_commit_case(true).await;

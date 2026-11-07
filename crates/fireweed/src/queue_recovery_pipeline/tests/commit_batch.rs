@@ -382,7 +382,6 @@ async fn one_permit_batch_validates_all_siblings_replays_before_fresh_and_finish
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[cfg(target_os = "linux")]
 async fn confirmed_handoff_recovers_after_head_and_fence_changes(s3: bool) {
     for kind in ["head", "fence", "cancel"] {
         let nonce = std::time::SystemTime::now()
@@ -602,12 +601,10 @@ async fn confirmed_handoff_recovers_after_head_and_fence_changes(s3: bool) {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn confirmed_batch_handoff_recovers_head_and_fence_races_local() {
     confirmed_handoff_recovers_after_head_and_fence_changes(false).await;
 }
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn confirmed_batch_handoff_recovers_head_and_fence_races_real_s3() {
     confirmed_handoff_recovers_after_head_and_fence_changes(true).await;
@@ -1067,7 +1064,6 @@ fn split_group(id: &str, version: u64, priority: i64) -> CommitGroup {
     group
 }
 
-#[cfg(target_os = "linux")]
 async fn packed_original_races(s3: bool, cases: &[&str]) {
     use fireweed_core::queue_administration::*;
     for &kind in cases {
@@ -1308,7 +1304,6 @@ async fn packed_original_races(s3: bool, cases: &[&str]) {
     }
 }
 
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn packed_submission_refreshes_middle_outside_and_fp4_originals_local() {
     packed_original_races(
@@ -1322,7 +1317,6 @@ async fn packed_submission_refreshes_middle_outside_and_fp4_originals_local() {
     )
     .await;
 }
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3() {
     packed_original_races(
@@ -1337,12 +1331,10 @@ async fn packed_submission_refreshes_middle_outside_and_fp4_originals_real_s3() 
     .await;
 }
 
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn packed_replay_head_advancement_retains_checked_floor_local() {
     packed_original_races(false, &["post-replay-head"]).await;
 }
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn packed_replay_head_advancement_retains_checked_floor_real_s3() {
     packed_original_races(true, &["post-replay-head"]).await;

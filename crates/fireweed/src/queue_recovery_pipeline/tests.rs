@@ -2481,7 +2481,6 @@ fn operation_completion_releases_permit_before_terminal_notification_on_every_dr
     }
 }
 
-#[cfg(target_os = "linux")]
 async fn native_log_fixture(
     root: &std::path::Path,
     s3_prefix: Option<&str>,
@@ -2506,7 +2505,6 @@ async fn native_log_fixture(
             .unwrap()
     }
 }
-#[cfg(target_os = "linux")]
 async fn native_port_fixture(
     root: &std::path::Path,
     projection_name: &str,
@@ -2536,7 +2534,6 @@ async fn native_port_fixture(
     .unwrap();
     NativeQueueStore::new(pipeline, QueueLimits::default(), 512 << 20, clock).unwrap()
 }
-#[cfg(target_os = "linux")]
 async fn native_port_identical_contract(s3: bool) {
     use fireweed_conformance::queue_contract::{self as suite, TestClock};
     use fireweed_engine::queue_contract::QueueStore;
@@ -2678,18 +2675,15 @@ async fn native_port_identical_contract(s3: bool) {
     drop(queue);
     std::fs::remove_dir_all(root).unwrap();
 }
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn native_store_runs_identical_contract_local() {
     native_port_identical_contract(false).await;
 }
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn native_store_runs_identical_contract_real_s3() {
     native_port_identical_contract(true).await;
 }
 
-#[cfg(target_os = "linux")]
 async fn native_condition_checks_contract(s3: bool) {
     use fireweed_conformance::queue_contract::{self as suite, TestClock};
     use fireweed_engine::queue_contract::QueueStore;
@@ -2746,19 +2740,16 @@ async fn native_condition_checks_contract(s3: bool) {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn native_store_condition_checks_replay_and_rebuild_local() {
     native_condition_checks_contract(false).await;
 }
 
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn native_store_condition_checks_replay_and_rebuild_real_s3() {
     native_condition_checks_contract(true).await;
 }
 
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn missing_original_cache_cannot_duplicate_durable_claim() {
     use fireweed_engine::queue_contract::QueueStore;
@@ -2990,7 +2981,6 @@ async fn duplicate_original_witness_rejects_already_checkpointed_history() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[cfg(target_os = "linux")]
 async fn corrupt_batch_originals_do_not_publish_fresh_siblings(s3: bool) {
     use fireweed_engine::{queue_contract::QueueStore, queue_storage_layout::discovery_digest};
     let nonce = std::time::SystemTime::now()
@@ -3212,26 +3202,21 @@ async fn corrupt_batch_originals_do_not_publish_fresh_siblings(s3: bool) {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn native_batch_original_authority_rejects_corrupt_cache_local() {
     corrupt_batch_originals_do_not_publish_fresh_siblings(false).await;
 }
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn native_batch_original_authority_rejects_corrupt_cache_real_s3() {
     corrupt_batch_originals_do_not_publish_fresh_siblings(true).await;
 }
 
-#[cfg(target_os = "linux")]
 #[path = "tests/original_domains.rs"]
 mod original_domains;
 
-#[cfg(target_os = "linux")]
 #[path = "tests/receipt_authority.rs"]
 mod receipt_authority;
 
-#[cfg(target_os = "linux")]
 #[path = "tests/state_authority.rs"]
 mod state_authority;
 
