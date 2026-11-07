@@ -163,6 +163,9 @@ impl ColdQueueHistory {
                 }
                 self.insertion_sequence = summary.final_sequence;
             }
+            QueueLogPayload::Entries(_) => {
+                return Err(invalid("entry-list records are not source-indexed"));
+            }
         }
         self.epoch = record.epoch();
         self.next_offset = next;

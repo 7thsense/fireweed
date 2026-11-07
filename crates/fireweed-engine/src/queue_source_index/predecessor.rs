@@ -85,6 +85,9 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
             QueueLogPayload::Genesis(_) => {
                 return Err(unknown("genesis has no predecessor publication"));
             }
+            QueueLogPayload::Entries(_) => {
+                return Err(unknown("entry-list records are not source-indexed"));
+            }
             QueueLogPayload::Publication(_) => None,
             QueueLogPayload::Claim(claim) => Some(claim.bind(job)?),
         };
@@ -140,7 +143,9 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
         match self.checked.view().payload() {
             QueueLogPayload::Publication(publication) => publication,
             QueueLogPayload::Claim(claim) => claim.commands(),
-            QueueLogPayload::Genesis(_) => unreachable!("begin rejects genesis"),
+            QueueLogPayload::Genesis(_) | QueueLogPayload::Entries(_) => {
+                unreachable!("begin rejects genesis and entry lists")
+            }
         }
     }
     async fn fixed<T: DeserializeOwned + Copy>(

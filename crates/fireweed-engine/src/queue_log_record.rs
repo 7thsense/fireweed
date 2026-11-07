@@ -44,6 +44,12 @@ impl QueueLogFormat {
 const GENESIS: u8 = 0;
 const PUBLICATION: u8 = 1;
 const CLAIM: u8 = 2;
+const ENTRIES: u8 = 3;
+/// Bytes of an entry-list record that do not depend on its entries: the record
+/// header, the checksum trailer and the entry count.
+pub const ENTRIES_RECORD_FIXED_BYTES: u64 = RECORD_HEADER_BYTES as u64 + 32 + 8;
+/// Bytes each entry adds around its frame: a kind byte and a length.
+pub const ENTRY_FRAMING_BYTES: u64 = 9;
 fn invalid(message: &str) -> QueueError {
     QueueError::OutcomeUnknown(message.into())
 }
@@ -79,6 +85,64 @@ pub enum QueueLogPayload<'a> {
     Genesis(GenesisView<'a>),
     Publication(PublicationView<'a>),
     Claim(ClaimPublicationView<'a>),
+    /// One or more chained entries that share one log offset.
+    Entries(EntriesView<'a>),
+}
+/// What an entry of an entry-list record holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueLogEntryKind {
+    Publication,
+    Claim,
+}
+impl QueueLogEntryKind {
+    fn tag(self) -> u8 {
+        match self {
+            Self::Publication => PUBLICATION,
+            Self::Claim => CLAIM,
+        }
+    }
+}
+/// One structurally checked entry: an ordinary publication frame or a claim.
+pub enum QueueLogEntryView<'a> {
+    Publication(PublicationView<'a>),
+    Claim(ClaimPublicationView<'a>),
+}
+impl<'a> QueueLogEntryView<'a> {
+    pub fn kind(&self) -> QueueLogEntryKind {
+        match self {
+            Self::Publication(_) => QueueLogEntryKind::Publication,
+            Self::Claim(_) => QueueLogEntryKind::Claim,
+        }
+    }
+    /// The publication frame, which a claim wraps.
+    pub fn frame(&self) -> &PublicationView<'a> {
+        match self {
+            Self::Publication(frame) => frame,
+            Self::Claim(claim) => claim.commands(),
+        }
+    }
+    pub fn claim(&self) -> Option<&ClaimPublicationView<'a>> {
+        match self {
+            Self::Claim(claim) => Some(claim),
+            Self::Publication(_) => None,
+        }
+    }
+}
+/// The entries of one record, in the order they apply. All describe the same
+/// queue and definition, and each starts at the sequence the previous one ended.
+pub struct EntriesView<'a> {
+    entries: Vec<QueueLogEntryView<'a>>,
+}
+impl<'a> EntriesView<'a> {
+    pub fn entries(&self) -> &[QueueLogEntryView<'a>] {
+        &self.entries
+    }
+    pub fn first(&self) -> &QueueLogEntryView<'a> {
+        &self.entries[0]
+    }
+    pub fn last(&self) -> &QueueLogEntryView<'a> {
+        &self.entries[self.entries.len() - 1]
+    }
 }
 pub struct QueueLogRecordView<'a> {
     format: QueueLogFormat,
@@ -106,6 +170,10 @@ impl<'a> QueueLogRecordView<'a> {
                 tenant: publication.summary().queue.0,
                 queue: publication.summary().queue.1,
             },
+            QueueLogPayload::Entries(entries) => AddressRef {
+                tenant: entries.first().frame().summary().queue.0,
+                queue: entries.first().frame().summary().queue.1,
+            },
         }
     }
     pub fn definition_pin_bytes(&self) -> [u8; 32] {
@@ -122,6 +190,13 @@ impl<'a> QueueLogRecordView<'a> {
                 .definition_pin
                 .try_into()
                 .expect("validated publication pin"),
+            QueueLogPayload::Entries(entries) => entries
+                .first()
+                .frame()
+                .summary()
+                .definition_pin
+                .try_into()
+                .expect("validated entry pin"),
         }
     }
 }
@@ -230,6 +305,9 @@ pub fn view_queue_log_record(raw: &[u8]) -> QueueResult<QueueLogRecordView<'_>> 
             .validate()?;
             QueueLogPayload::Claim(claim)
         }
+        ENTRIES if format == QueueLogFormat::ChecksummedV2 => {
+            QueueLogPayload::Entries(view_entries(payload)?)
+        }
         _ => return Err(invalid("unknown queue-log record kind")),
     };
     Ok(QueueLogRecordView {
@@ -237,6 +315,56 @@ pub fn view_queue_log_record(raw: &[u8]) -> QueueResult<QueueLogRecordView<'_>> 
         epoch,
         payload,
     })
+}
+
+fn view_entry(kind: u8, raw: &[u8]) -> QueueResult<QueueLogEntryView<'_>> {
+    let (entry, summary_queue) = match kind {
+        PUBLICATION => {
+            let publication = view_resolved_publication(raw)
+                .map_err(|_| invalid("invalid embedded queue publication"))?;
+            let queue = publication.summary().queue;
+            (QueueLogEntryView::Publication(publication), queue)
+        }
+        CLAIM => {
+            let claim = view_claim_publication(raw)?;
+            let queue = claim.commands().summary().queue;
+            (QueueLogEntryView::Claim(claim), queue)
+        }
+        _ => return Err(invalid("unknown queue-log entry kind")),
+    };
+    AddressRef {
+        tenant: summary_queue.0,
+        queue: summary_queue.1,
+    }
+    .validate()?;
+    Ok(entry)
+}
+fn view_entries(payload: &[u8]) -> QueueResult<EntriesView<'_>> {
+    let mut reader = Reader(payload);
+    let count = usize::try_from(reader.u64()?).map_err(|_| invalid("queue-log entry count"))?;
+    // Each entry takes at least its framing, which bounds the allocation below.
+    if count == 0 || count > payload.len() / ENTRY_FRAMING_BYTES as usize {
+        return Err(invalid("queue-log entry count"));
+    }
+    let mut entries: Vec<QueueLogEntryView<'_>> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let kind = reader.take(1)?[0];
+        let entry = view_entry(kind, reader.blob()?)?;
+        if let Some(previous) = entries.last() {
+            let (before, after) = (previous.frame().summary(), entry.frame().summary());
+            if before.queue != after.queue
+                || before.definition_pin != after.definition_pin
+                || before.final_sequence != after.initial_sequence
+            {
+                return Err(invalid("queue-log entries are not one chain"));
+            }
+        }
+        entries.push(entry);
+    }
+    if !reader.0.is_empty() {
+        return Err(invalid("trailing queue-log entry bytes"));
+    }
+    Ok(EntriesView { entries })
 }
 
 /// One version-specific structurally checked view of the exact immutable owner.
@@ -319,6 +447,54 @@ impl OwnedQueueLogRecord {
     /// such a store would retain this operation's reservation indefinitely.
     pub fn into_admitted_bytes(self) -> Bytes {
         Bytes::from_owner(self)
+    }
+}
+impl OwnedQueueLogRecord {
+    /// Take the single publication or claim this record carries as an entry of a
+    /// larger record. The entry keeps this record's admission alive.
+    pub fn into_entry(self) -> QueueResult<OwnedQueueEntry> {
+        let (kind, range) = {
+            let checked = self.checked()?;
+            if checked.view().format() != QueueLogFormat::ChecksummedV2 {
+                return Err(invalid("entries come only from checksummed records"));
+            }
+            let kind = match checked.view().payload() {
+                QueueLogPayload::Publication(_) => QueueLogEntryKind::Publication,
+                QueueLogPayload::Claim(_) => QueueLogEntryKind::Claim,
+                _ => return Err(invalid("record is not a single publication or claim")),
+            };
+            (kind, checked.payload_interval()?)
+        };
+        let bytes = self.into_admitted_bytes().slice(range);
+        let entry = OwnedQueueEntry { kind, bytes };
+        entry.view()?;
+        Ok(entry)
+    }
+}
+/// One publication or claim, ready to be one entry of a record. It is not a
+/// record: it has no epoch, offset or checksum.
+#[derive(Clone)]
+pub struct OwnedQueueEntry {
+    kind: QueueLogEntryKind,
+    bytes: Bytes,
+}
+impl OwnedQueueEntry {
+    pub fn kind(&self) -> QueueLogEntryKind {
+        self.kind
+    }
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub fn view(&self) -> QueueResult<QueueLogEntryView<'_>> {
+        view_entry(self.kind.tag(), &self.bytes)
+    }
+}
+impl std::fmt::Debug for OwnedQueueEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedQueueEntry")
+            .field("kind", &self.kind)
+            .field("bytes", &self.bytes.len())
+            .finish()
     }
 }
 impl AsRef<[u8]> for OwnedQueueLogRecord {
@@ -557,6 +733,51 @@ pub fn encode_checked_claim_record(
     )?;
     out.bytes.extend_from_slice(claim.bytes());
     Ok(seal_record(out, QueueLogFormat::ChecksummedV2))
+}
+/// Exact size of the record that carries entries of these encoded sizes.
+pub fn checked_entries_record_len(entry_bytes: impl IntoIterator<Item = u64>) -> QueueResult<u64> {
+    entry_bytes
+        .into_iter()
+        .try_fold(ENTRIES_RECORD_FIXED_BYTES, |total, bytes| {
+            total
+                .checked_add(ENTRY_FRAMING_BYTES)
+                .and_then(|total| total.checked_add(bytes))
+                .ok_or(QueueError::TooLarge)
+        })
+}
+/// One record of chained entries. The entries are validated as a chain.
+pub fn encode_checked_entries_record(
+    epoch: u64,
+    entries: &[OwnedQueueEntry],
+    max_bytes: u64,
+    job: &Arc<QueueReservation>,
+) -> QueueResult<OwnedQueueLogRecord> {
+    if entries.is_empty() {
+        return Err(invalid("entry-list record has no entries"));
+    }
+    let size = usize::try_from(checked_entries_record_len(
+        entries.iter().map(|entry| entry.bytes.len() as u64),
+    )?)
+    .map_err(|_| QueueError::TooLarge)?;
+    let payload = size - RECORD_HEADER_BYTES - 32;
+    let mut out = admitted_output(size, max_bytes, job)?;
+    header(
+        &mut out.bytes,
+        epoch,
+        ENTRIES,
+        payload,
+        QueueLogFormat::ChecksummedV2,
+    )?;
+    out.bytes
+        .extend_from_slice(&(entries.len() as u64).to_le_bytes());
+    for entry in entries {
+        out.bytes.push(entry.kind.tag());
+        blob(&mut out.bytes, &entry.bytes)?;
+    }
+    let record = seal_record(out, QueueLogFormat::ChecksummedV2);
+    // Viewing re-checks every entry and that they chain.
+    record.view()?;
+    Ok(record)
 }
 fn seal_record(mut out: AdmittedOutput, format: QueueLogFormat) -> OwnedQueueLogRecord {
     if format == QueueLogFormat::ChecksummedV2 {
@@ -1022,5 +1243,118 @@ mod tests {
             matches!(encode_genesis(7,&address(),&definition,&[0xa5;32],4096,&job),Err(QueueError::OutcomeUnknown(ref message)) if message.contains("admitted buffer capacity exhausted"))
         );
         assert_eq!(admission.usage().unwrap(), before);
+    }
+
+    /// Empty frames chain at sequence zero; `at` moves a frame's sequence span.
+    fn empty_frame(definition: &AdmittedQueueDefinition, job: &Arc<QueueReservation>) -> Vec<u8> {
+        use crate::{
+            queue_planner::{RecordSnapshot, combine_deltas},
+            queue_publication::encode_publication_pinned,
+        };
+        encode_publication_pinned(
+            &address(),
+            definition.pin(),
+            &RecordSnapshot::default(),
+            &combine_deltas(&[], 0).unwrap(),
+            &[],
+            4096,
+            job,
+        )
+        .unwrap()
+        .as_bytes()
+        .to_vec()
+    }
+    fn entry_of(frame: &[u8], job: &Arc<QueueReservation>) -> OwnedQueueEntry {
+        encode_checked_publication_record(7, frame, 4096, job)
+            .unwrap()
+            .into_entry()
+            .unwrap()
+    }
+    #[test]
+    fn entry_list_round_trips_in_order_and_sizes_exactly() {
+        let job = job();
+        let raw = encode_definition(&schema()).unwrap();
+        let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+        let frame = empty_frame(&definition, &job);
+        let entries: Vec<_> = (0..3).map(|_| entry_of(&frame, &job)).collect();
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.kind() == QueueLogEntryKind::Publication
+                    && entry.bytes() == frame)
+        );
+        let size =
+            checked_entries_record_len(entries.iter().map(|e| e.bytes().len() as u64)).unwrap();
+        assert_eq!(
+            size,
+            ENTRIES_RECORD_FIXED_BYTES + 3 * (ENTRY_FRAMING_BYTES + frame.len() as u64)
+        );
+        let record = encode_checked_entries_record(7, &entries, size, &job).unwrap();
+        assert_eq!(record.bytes().len() as u64, size);
+        let view = record.view().unwrap();
+        assert_eq!(view.epoch(), 7);
+        assert_eq!(
+            view.address(),
+            view_address(&encode_address(&address()).unwrap()).unwrap()
+        );
+        let QueueLogPayload::Entries(list) = view.payload() else {
+            panic!("entry list expected");
+        };
+        assert_eq!(list.entries().len(), 3);
+        assert!(
+            list.entries()
+                .iter()
+                .all(|entry| entry.kind() == QueueLogEntryKind::Publication
+                    && entry.claim().is_none())
+        );
+        // One byte short of the exact size is refused.
+        assert!(matches!(
+            encode_checked_entries_record(7, &entries, size - 1, &job),
+            Err(QueueError::TooLarge)
+        ));
+        assert!(encode_checked_entries_record(7, &[], size, &job).is_err());
+        // Every single-bit change is caught by the checksum or the structure.
+        for bit in 0..record.bytes().len() * 8 {
+            let mut corrupt = record.bytes().to_vec();
+            corrupt[bit / 8] ^= 1 << (bit % 8);
+            assert!(view_queue_log_record(&corrupt).is_err(), "bit {bit}");
+        }
+    }
+    #[test]
+    fn entries_that_do_not_chain_are_refused() {
+        let job = job();
+        let raw = encode_definition(&schema()).unwrap();
+        let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+        let frame = empty_frame(&definition, &job);
+        // The summary's initial and final sequence follow the address, the pin
+        // and the fixed header: move both to one, so the frame no longer starts
+        // where the previous one ended.
+        let initial = 5 + 8 + address().tenant.len() + 8 + address().queue.len() + 32;
+        let mut shifted = frame.clone();
+        shifted[initial..initial + 8].copy_from_slice(&1u64.to_le_bytes());
+        shifted[initial + 8..initial + 16].copy_from_slice(&1u64.to_le_bytes());
+        let entries = vec![entry_of(&frame, &job), entry_of(&shifted, &job)];
+        let size =
+            checked_entries_record_len(entries.iter().map(|e| e.bytes().len() as u64)).unwrap();
+        assert!(encode_checked_entries_record(7, &entries, size, &job).is_err());
+        // A chain that does continue is accepted.
+        let entries = vec![entry_of(&shifted, &job), entry_of(&shifted, &job)];
+        assert!(encode_checked_entries_record(7, &entries, size, &job).is_ok());
+    }
+    #[test]
+    fn only_a_publication_or_claim_record_becomes_an_entry() {
+        let job = job();
+        let raw = encode_definition(&schema()).unwrap();
+        let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+        let genesis =
+            encode_checked_genesis(7, &address(), &definition, &[1; 32], 4096, &job).unwrap();
+        assert!(genesis.into_entry().is_err());
+        let frame = empty_frame(&definition, &job);
+        let legacy = encode_publication_record(7, &frame, 4096, &job).unwrap();
+        assert!(legacy.into_entry().is_err());
+        let entry = entry_of(&frame, &job);
+        let list =
+            encode_checked_entries_record(7, std::slice::from_ref(&entry), 4096, &job).unwrap();
+        assert!(list.into_entry().is_err());
     }
 }

@@ -348,6 +348,9 @@ impl ColdStateTracker {
                     return Err(unknown("claim before genesis"));
                 }
             }
+            QueueLogPayload::Entries(_) => {
+                return Err(unknown("entry-list records are not source-indexed"));
+            }
         }
         self.historical_epoch = view.epoch();
         self.next_offset = self

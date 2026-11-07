@@ -248,6 +248,9 @@ impl ColdGroupStateTracker {
                     QueueLogPayload::Genesis(_) => None,
                     QueueLogPayload::Publication(frame) => Some(frame.commands()),
                     QueueLogPayload::Claim(claim) => Some(claim.commands().commands()),
+                    QueueLogPayload::Entries(_) => {
+                        return Err(unknown("entry-list records are not source-indexed"));
+                    }
                 };
                 if let Some(commands) = commands {
                     for command in commands {
