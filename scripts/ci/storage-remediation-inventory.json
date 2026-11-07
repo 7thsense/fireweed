@@ -17034,6 +17034,26 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::native_transport::oversized_genesis_is_a_definite_error_and_leaves_the_queue_absent",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_transport::oversized_genesis_is_a_definite_error_and_leaves_the_queue_absent",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::native_transport::oversized_genesis_is_a_definite_error_and_leaves_the_queue_absent"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::native_transport::rebuild_crosses_several_leaves_local",
           "--",
           "--exact"
@@ -119615,7 +119635,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "d4979a4a27b50f2ae5cb2bd31a6fb325551958af54e71f97590d06a2da5807a1",
+  "source_inventory_sha256": "099d8cfd34bd54a34dc4970f88c341c7ccda7f758323a19031d91836a2486674",
   "workspaces": [
     {
       "listing_error_sha256": "",
