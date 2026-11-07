@@ -245,6 +245,7 @@ impl QueueRecoveryPipeline {
         job: &Arc<QueueReservation>,
     ) -> QueueResult<bool> {
         let namespace = self.store.bind_api007_namespace(address, job).await?;
+        self.diagnostics.head_read();
         let current = self
             .store
             .read_api007_state(namespace, job, &self.workers)
@@ -475,6 +476,7 @@ impl RecoveryTask {
         if let Some(notify) = pipeline.before_acquire.lock().unwrap().clone() {
             notify.notify_one();
         }
+        pipeline.diagnostics.head_read();
         let observed = pipeline
             .store
             .read_api007_state(namespace, &self.job, &pipeline.workers)
@@ -508,6 +510,7 @@ impl RecoveryTask {
             }
             return Err(unknown("authority changed during absence classification"));
         }
+        pipeline.diagnostics.fence_acquire();
         let acquired = pipeline
             .store
             .acquire_api007_state(observed.into_namespace(), &self.job, &pipeline.workers)

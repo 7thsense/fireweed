@@ -34,7 +34,7 @@ pub fn schema() -> QueueSchema {
         max_attempts: 3,
     }
 }
-fn item(key: &str, kind: &str, priority: i64, score: i64) -> NewWork {
+pub fn item(key: &str, kind: &str, priority: i64, score: i64) -> NewWork {
     NewWork {
         key: key.into(),
         priority,
@@ -47,7 +47,7 @@ fn item(key: &str, kind: &str, priority: i64, score: i64) -> NewWork {
         body: vec![0, 1, 255].into(),
     }
 }
-fn group(id: &str) -> CommitGroup {
+pub fn group(id: &str) -> CommitGroup {
     CommitGroup {
         administration: None,
         request_id: id.into(),
@@ -57,7 +57,7 @@ fn group(id: &str) -> CommitGroup {
         work_updates: vec![],
     }
 }
-fn filter(kind: &str) -> Filter {
+pub fn filter(kind: &str) -> Filter {
     Filter {
         fields: BTreeMap::from([(
             "kind".into(),
@@ -66,7 +66,7 @@ fn filter(kind: &str) -> Filter {
         ..Filter::default()
     }
 }
-fn claim(queue: &QueueAddress, id: &str, kind: &str) -> ClaimRequest {
+pub fn claim(queue: &QueueAddress, id: &str, kind: &str) -> ClaimRequest {
     ClaimRequest {
         queue: queue.clone(),
         request_id: id.into(),
@@ -80,7 +80,7 @@ fn claim(queue: &QueueAddress, id: &str, kind: &str) -> ClaimRequest {
         include_body: true,
     }
 }
-fn update(work: &ClaimedWork) -> ClaimedUpdate {
+pub fn update(work: &ClaimedWork) -> ClaimedUpdate {
     ClaimedUpdate {
         key: work.record.work.key.clone(),
         lease: work.lease.clone(),

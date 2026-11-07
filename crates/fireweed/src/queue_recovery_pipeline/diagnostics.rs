@@ -12,6 +12,8 @@ pub struct RecoveryCounters {
     abandoned: AtomicU64,
     records: AtomicU64,
     bytes: AtomicU64,
+    head_reads: AtomicU64,
+    fence_acquires: AtomicU64,
     elapsed_ns: AtomicU64,
     phase_ns: [AtomicU64; 4],
     overflow: AtomicBool,
@@ -24,6 +26,10 @@ pub struct RecoverySnapshot {
     pub abandoned: u64,
     pub admitted_raw_records: u64,
     pub admitted_raw_bytes: u64,
+    /// Head reads that were not part of acquiring a fence.
+    pub head_reads: u64,
+    /// Durable fence acquisitions.
+    pub fence_acquires: u64,
     pub summed_recovery_task_elapsed_ns: u64,
     pub fresh_authority_ns: u64,
     pub planned_read_ns: u64,
@@ -70,6 +76,8 @@ impl RecoverySnapshot {
             admitted_raw_bytes: self
                 .admitted_raw_bytes
                 .checked_sub(before.admitted_raw_bytes)?,
+            head_reads: self.head_reads.checked_sub(before.head_reads)?,
+            fence_acquires: self.fence_acquires.checked_sub(before.fence_acquires)?,
             summed_recovery_task_elapsed_ns: self
                 .summed_recovery_task_elapsed_ns
                 .checked_sub(before.summed_recovery_task_elapsed_ns)?,
@@ -92,6 +100,8 @@ impl RecoveryCounters {
             abandoned: self.abandoned.load(Ordering::Relaxed),
             admitted_raw_records: self.records.load(Ordering::Relaxed),
             admitted_raw_bytes: self.bytes.load(Ordering::Relaxed),
+            head_reads: self.head_reads.load(Ordering::Relaxed),
+            fence_acquires: self.fence_acquires.load(Ordering::Relaxed),
             summed_recovery_task_elapsed_ns: self.elapsed_ns.load(Ordering::Relaxed),
             fresh_authority_ns: self.phase_ns[0].load(Ordering::Relaxed),
             planned_read_ns: self.phase_ns[1].load(Ordering::Relaxed),
@@ -107,6 +117,12 @@ impl RecoveryCounters {
                 u64::MAX
             }))
         });
+    }
+    pub(super) fn head_read(&self) {
+        self.add(&self.head_reads, 1);
+    }
+    pub(super) fn fence_acquire(&self) {
+        self.add(&self.fence_acquires, 1);
     }
     pub(super) fn begin(self: &Arc<Self>) -> RecoverySpan {
         self.add(&self.attempts, 1);

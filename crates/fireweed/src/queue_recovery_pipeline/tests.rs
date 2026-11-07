@@ -3221,3 +3221,4 @@ mod receipt_authority;
 mod state_authority;
 
 mod single_continuation;
+mod record_counts;
