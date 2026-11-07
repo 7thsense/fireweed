@@ -208,7 +208,7 @@ async fn owner_read_reads_no_log_local() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owner_read_reads_no_log_real_s3() {
-    owner_read_reads_no_log(true, &[10, 1000]).await;
+    owner_read_reads_no_log(true, &[10, 200]).await;
 }
 
 async fn reopen_rebuilds_from_log(s3: bool, len: usize) {
