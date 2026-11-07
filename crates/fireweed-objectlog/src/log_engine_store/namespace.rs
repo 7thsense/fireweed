@@ -15,7 +15,23 @@ pub struct VerifiedApi007Namespace {
     origin: Weak<()>,
     _charge: OwnedQueueBufferCharge,
 }
+/// A verified namespace without any reservation. Binding the address to its
+/// discovery slot costs object-store I/O; an owner does that once and then
+/// rebinds this identity to each operation with no I/O.
+#[derive(Clone)]
+pub struct Api007NamespaceIdentity {
+    shard: QueueKey,
+    address: Bytes,
+    origin: Weak<()>,
+}
 impl VerifiedApi007Namespace {
+    pub fn identity(&self) -> Api007NamespaceIdentity {
+        Api007NamespaceIdentity {
+            shard: self.shard.clone(),
+            address: self.address.clone(),
+            origin: self.origin.clone(),
+        }
+    }
     /// Preserve the literal verified identity while a physical stage consumes
     /// another owner. The new reservation covers payload aliases and key clones.
     pub(super) fn duplicate_owned(&self, job: &Arc<QueueReservation>) -> QueueResult<Self> {
@@ -151,6 +167,35 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 .checked_add(1)
                 .ok_or_else(|| unknown("namespace collision slots exhausted"))?;
         }
+    }
+    /// No I/O: the identity was verified when it was bound. The store check
+    /// rejects an identity from another authority.
+    pub fn rebind_api007_namespace(
+        &self,
+        identity: &Api007NamespaceIdentity,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<VerifiedApi007Namespace> {
+        let capacity = [
+            identity.address.len(),
+            identity.shard.tenant_id.as_str().len(),
+            identity.shard.queue_id.as_str().len(),
+        ]
+        .into_iter()
+        .try_fold(512u64, |n, bytes| {
+            n.checked_add(u64::try_from(bytes).map_err(storage_queue)?)
+                .ok_or(QueueError::TooLarge)
+        })?
+        .checked_mul(16)
+        .ok_or(QueueError::TooLarge)?;
+        let namespace = VerifiedApi007Namespace {
+            shard: identity.shard.clone(),
+            address: identity.address.clone(),
+            origin: identity.origin.clone(),
+            _charge: job.owned_buffer(capacity)?,
+        };
+        self.validate_api007_namespace(&namespace)?;
+        namespace.address()?;
+        Ok(namespace)
     }
     pub fn validate_api007_namespace(
         &self,

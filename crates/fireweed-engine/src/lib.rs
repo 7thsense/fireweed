@@ -28,7 +28,9 @@ mod commit;
 pub mod commit_surface;
 mod compose;
 mod control_plane;
-pub use async_control_plane::{AsyncQueueControlPlane, acquire_and_fence_async};
+pub use async_control_plane::{
+    AsyncQueueControlPlane, InMemoryAsyncControlPlane, acquire_and_fence_async,
+};
 mod density;
 /// Entity document wire: natural JSON on human-readable; opaque JSON blob on native binary.
 mod entity_wire;

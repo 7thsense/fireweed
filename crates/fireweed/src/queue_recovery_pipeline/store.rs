@@ -7,10 +7,8 @@ use fireweed_engine::{
     queue_memory::{
         administrative_envelope_preflight, administrative_groups_preflight, incoming_headers,
     },
-    queue_schema_codec::{AdmittedQueueDefinition, encode_definition},
 };
 use fireweed_queue_spool::QueueOperationRuntime;
-use sha2::{Digest, Sha256};
 use std::{future::Future, sync::Mutex};
 struct StoreInner {
     pipeline: Mutex<Option<Arc<QueueRecoveryPipeline>>>,
@@ -130,36 +128,12 @@ impl QueueStore for NativeQueueStore {
         Box::pin(async move {
             request.validate(&self.inner.limits)?;
             let bytes = self.input(encoded_len(&request)?, incoming_headers(&request)?)?;
+            let limits = self.inner.limits;
             self.dispatch(bytes, move |pipeline, job| async move {
-                let token = fireweed_engine::generate_query_lease_token()
-                    .map_err(|e| unknown(&e.to_string()))?;
-                let candidate_secret = Sha256::digest(token.as_str().as_bytes()).into();
-                let raw = encode_definition(&request.schema)?;
-                let definition = AdmittedQueueDefinition::from_raw(&raw, &job)?;
-                let namespace = pipeline
-                    .store
-                    .bind_api007_namespace(&request.queue, &job)
-                    .await?;
+                let charge = job.owned_buffer(bytes)?;
                 let original = pipeline
-                    .store
-                    .provision_api007_genesis(
-                        fireweed_objectlog::Api007GenesisRequest {
-                            namespace,
-                            definition,
-                            candidate_secret,
-                            max_record_bytes: pipeline.hard_record_bytes,
-                            metadata_bytes: pipeline.metadata_bytes,
-                        },
-                        &job,
-                        &pipeline.workers,
-                    )
+                    .provision(request.clone(), limits, job.clone(), charge)
                     .await?;
-                if original.format() != QueueLogFormat::ChecksummedV2 {
-                    return Err(unknown("legacy genesis cannot provision native port"));
-                }
-                if original.definition().schema() != &request.schema {
-                    return Err(QueueError::DefinitionConflict);
-                }
                 Ok(OwnedQueueValue::new((), (original, request, job)))
             })
             .await
@@ -229,6 +203,16 @@ impl QueueStore for NativeQueueStore {
     fn shutdown(&self) -> QueueFuture<'_, ()> {
         Box::pin(async move {
             self.inner.runtime.close_and_drain().await?;
+            let queues = self
+                .inner
+                .pipeline
+                .lock()
+                .map_err(|_| unknown("store ownership poisoned"))?
+                .as_ref()
+                .cloned();
+            if let Some(queues) = queues {
+                queues.close_queues().await;
+            }
             let workers = self
                 .inner
                 .pipeline
@@ -251,6 +235,19 @@ impl QueueStore for NativeQueueStore {
             drop(ownership);
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+impl NativeQueueStore {
+    pub(super) fn pipeline_for_test(&self) -> Arc<QueueRecoveryPipeline> {
+        self.inner
+            .pipeline
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned()
+            .expect("open store")
     }
 }
 
@@ -294,6 +291,7 @@ mod tests {
             },
             scratch_root,
             fireweed_queue_spool::ScratchDiskQuota::new(1 << 20).unwrap(),
+            super::super::tests::ownership::TestOwnership::new().handle("only"),
         )
         .unwrap();
         assert!(matches!(

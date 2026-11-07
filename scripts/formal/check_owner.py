@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bootstrap the captured ordered lookup authority runner after invalidating prior evidence."""
+"""Bootstrap the captured retained-owner runner after invalidating prior evidence."""
 import argparse
 import hashlib
 import json
@@ -9,7 +9,7 @@ import sys
 import tempfile
 import types
 
-SCHEMA = 'fireweed-api007-lookups-formal-v1'
+SCHEMA = 'fireweed-api007-owner-formal-v1'
 
 
 def output_path(root, requested):
@@ -35,9 +35,9 @@ def write_report(path, report):
 
 
 def load_runtime():
-    path = Path(__file__).resolve().with_name('lookup_gate.py')
+    path = Path(__file__).resolve().with_name('owner_gate.py')
     source = path.read_bytes()
-    runtime = types.ModuleType('lookup_gate')
+    runtime = types.ModuleType('owner_gate')
     runtime.__file__ = str(path)
     sys.modules[runtime.__name__] = runtime
     exec(compile(source, str(path), 'exec'), runtime.__dict__)
@@ -48,14 +48,14 @@ def load_runtime():
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument('--max-states', type=int, default=100000)
-    parser.add_argument('--output', type=Path, default=Path('target/api007-formal/lookups.json'))
+    parser.add_argument('--output', type=Path, default=Path('target/api007-formal/owner.json'))
     arguments = list(sys.argv[1:] if argv is None else argv)
     root = Path(__file__).resolve().parents[2]
     path = None
     try:
         # Locate the destination before validating other CLI values, so a bad
         # bound cannot leave previous evidence marked PASS.
-        requested = Path('target/api007-formal/lookups.json')
+        requested = Path('target/api007-formal/owner.json')
         for index, argument in enumerate(arguments):
             if argument == '--output' and index + 1 < len(arguments):
                 requested = Path(arguments[index + 1])
@@ -68,7 +68,7 @@ def main(argv=None):
         except SystemExit as error:
             if error.code == 0:
                 return 0
-            raise ValueError('invalid ordered lookup authority CLI arguments') from error
+            raise ValueError('invalid owner CLI arguments') from error
         runtime = load_runtime()
         return runtime.main(args.max_states, path, root)
     except Exception as error:

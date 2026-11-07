@@ -1,7 +1,5 @@
 //! Original insert results, independent of current work versions/lifecycle.
-use super::receipt_metadata::{
-    ReceiptDomain, ReceiptMetadata, read_receipt_metadata_with_authority,
-};
+use super::receipt_metadata::{ReceiptDomain, ReceiptMetadata, read_receipt_metadata};
 use super::*;
 use fireweed_engine::{
     queue_memory::incoming_headers,
@@ -11,38 +9,12 @@ use fireweed_engine::{
     },
 };
 pub struct InsertReplayInput {
-    pub original: Option<fireweed_engine::queue_original_authority::AdmittedOriginalPosition>,
     pub genesis: OwnedQueueLogRecord,
     pub request: InsertRequest,
     pub limits: QueueLimits,
     pub required_next_offset: u64,
     pub required_insertion_sequence: u64,
     pub required_last_record_epoch: u64,
-}
-impl InsertReplayInput {
-    pub(super) fn original_descriptor(
-        &self,
-        job: &QueueReservation,
-    ) -> QueueResult<Option<Option<fireweed_engine::queue_original_authority::OriginalDescriptor>>>
-    {
-        self.original
-            .as_ref()
-            .map(|original| {
-                original.validate_domain(
-                    0,
-                    &self.request.queue,
-                    &self.request.request_id,
-                    &self.genesis,
-                    (
-                        self.required_next_offset,
-                        self.required_insertion_sequence,
-                        self.required_last_record_epoch,
-                    ),
-                    job,
-                )
-            })
-            .transpose()
-    }
 }
 pub struct AdmittedInsertReplay {
     outcomes: Vec<InsertOutcome>,
@@ -154,13 +126,12 @@ impl NativeTransactionWork for InsertReplayWorker {
             ),
         )?;
         let request = &self.input.request;
-        let (format, size) = match read_receipt_metadata_with_authority(
+        let (format, size) = match read_receipt_metadata(
             connection,
             snapshot.queue_id,
             ReceiptDomain::Insert,
             &request.request_id,
-            (3, fingerprint("insert", request)?),
-            self.input.original_descriptor(&self.job)?,
+            Some((3, fingerprint("insert", request)?)),
         )
         .await?
         {
@@ -180,9 +151,6 @@ impl NativeTransactionWork for InsertReplayWorker {
         let raw = bytes(&row[0])?;
         if raw.len() as u64 != size {
             return Err(unknown("insert receipt length changed in snapshot"));
-        }
-        if let Some(Some(authority)) = self.input.original_descriptor(&self.job)? {
-            authority.verify_outcome(raw)?;
         }
         let outcome = view_receipt_outcome(0, format, raw).map_err(publication_error)?;
         let ReceiptOutcomeRef::Insert(outcomes) = outcome else {
@@ -223,7 +191,6 @@ mod tests {
         sequence: u64,
     ) -> InsertReplayInput {
         InsertReplayInput {
-            original: None,
             genesis: encode_checked_genesis(1, &address(), definition, &[31; 32], 16 << 20, job)
                 .unwrap(),
             request,
@@ -460,7 +427,9 @@ mod tests {
             Err(QueueError::OutcomeUnknown(_))
         ));
         drop(projection);
-        let projection = QueueProjection::open(&path, &job, &workers).await.unwrap();
+        let projection = QueueProjection::open_keeping_files(&path, &job, &workers)
+            .await
+            .unwrap();
         let replay = projection
             .replay_insert(input(&definition, &job, request, 6, 4), &job, &workers)
             .await

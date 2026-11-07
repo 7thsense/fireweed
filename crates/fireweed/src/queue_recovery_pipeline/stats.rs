@@ -1,17 +1,13 @@
-//! Queue stats adapter for the shared covered-read completion protocol.
-use super::read::CoveredRead;
+//! Queue stats served from the projection.
+use super::owner::{Exit, Plan, Tenure, settle};
 use super::*;
 use fireweed_core::queue_contract::{QueueLimits, RequestPreflight, StatsRequest, encoded_len};
-use fireweed_engine::{Clock, queue_contract::QueueFuture, queue_memory::IncomingHeaders};
+use fireweed_engine::{Clock, queue_memory::IncomingHeaders};
 use fireweed_turso::queue_projection::{AdmittedQueueStats, StatsReadInput};
-struct StatsRead {
+use futures::future::BoxFuture;
+
+struct StatsPlan {
     request: StatsRequest,
-    clock: Arc<dyn Clock>,
-}
-impl IncomingHeaders for StatsRead {
-    fn headers(&self) -> QueueResult<u64> {
-        self.request.headers()
-    }
 }
 impl QueueRecoveryPipeline {
     pub async fn stats(
@@ -21,52 +17,63 @@ impl QueueRecoveryPipeline {
         clock: Arc<dyn Clock>,
         job: Arc<QueueReservation>,
     ) -> QueueResult<AdmittedQueueStats> {
-        self.covered_read(StatsRead { request, clock }, limits, job)
+        request.preflight(&limits)?;
+        let input = read_input_charge(encoded_len(&request)?, request.headers()?, &job)?;
+        self.submit(StatsPlan { request }, limits, clock, job, input)
             .await
     }
 }
-impl CoveredRead for StatsRead {
+/// Original input plus one native-stage clone, as every read admits it.
+pub(super) fn read_input_charge(
+    encoded: u64,
+    headers: u64,
+    job: &Arc<QueueReservation>,
+) -> QueueResult<OwnedQueueBufferCharge> {
+    job.owned_buffer(
+        encoded
+            .checked_mul(16)
+            .and_then(|n| n.checked_add(headers.checked_mul(2)?))
+            .and_then(|n| n.checked_add(65536))
+            .ok_or(QueueError::TooLarge)?,
+    )
+}
+impl Plan for StatsPlan {
     type Output = AdmittedQueueStats;
+    const MUTATION: bool = false;
     fn address(&self) -> &QueueAddress {
         &self.request.queue
     }
-    fn encoded_size(&self) -> QueueResult<u64> {
-        encoded_len(&self.request)
-    }
-    fn preflight(&self, limits: &QueueLimits) -> QueueResult<()> {
-        self.request.preflight(limits)
-    }
-    fn read<'a>(
+    fn run<'a>(
         &'a self,
-        pipeline: &'a Arc<QueueRecoveryPipeline>,
-        recovered: &'a RecoveredQueue,
+        p: &'a QueueRecoveryPipeline,
+        t: &'a mut Tenure,
         limits: QueueLimits,
+        clock: &'a Arc<dyn Clock>,
         job: &'a Arc<QueueReservation>,
-    ) -> QueueFuture<'a, Self::Output> {
+    ) -> BoxFuture<'a, Result<QueueResult<Self::Output>, Exit>> {
         Box::pin(async move {
-            pipeline
-                .projection
-                .read_queue_stats(
-                    StatsReadInput {
-                        genesis: pipeline.original_genesis(&self.request.queue, recovered, job)?,
-                        request: self.request.clone(),
-                        limits,
-                        required_next_offset: recovered.target_next_offset,
-                        required_insertion_sequence: recovered.history.insertion_sequence(),
-                        required_last_record_epoch: recovered.history.historical_epoch(),
-                    },
-                    self.clock.clone(),
-                    job,
-                    &pipeline.workers,
-                )
-                .await
+            let (next, sequence, epoch) = t.point();
+            let genesis = match t.genesis_record(p, &self.request.queue, job) {
+                Ok(genesis) => genesis,
+                Err(error) => return Ok(Err(error)),
+            };
+            settle(
+                p.projection
+                    .read_queue_stats(
+                        StatsReadInput {
+                            genesis,
+                            request: self.request.clone(),
+                            limits,
+                            required_next_offset: next,
+                            required_insertion_sequence: sequence,
+                            required_last_record_epoch: epoch,
+                        },
+                        clock.clone(),
+                        job,
+                        &p.workers,
+                    )
+                    .await,
+            )
         })
-    }
-    #[cfg(test)]
-    fn pause(
-        &self,
-        pipeline: &QueueRecoveryPipeline,
-    ) -> Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)> {
-        pipeline.after_stats_read.lock().unwrap().take()
     }
 }

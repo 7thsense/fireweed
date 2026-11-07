@@ -17449,7 +17449,7 @@
       "operations": [
         "constant"
       ],
-      "path": "scripts/formal/check_continuation.py",
+      "path": "scripts/formal/check_owner.py",
       "symbol": "<module>"
     },
     {
@@ -17467,151 +17467,7 @@
       "operations": [
         "constant"
       ],
-      "path": "scripts/formal/check_continuation.py",
-      "symbol": "main"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 2,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 2,
-      "line": 1,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/check_domains.py",
-      "symbol": "<module>"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 57,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 57,
-      "line": 46,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/check_domains.py",
-      "symbol": "main"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 2,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 2,
-      "line": 1,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/check_handoff.py",
-      "symbol": "<module>"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 57,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 57,
-      "line": 46,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/check_handoff.py",
-      "symbol": "main"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 2,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 2,
-      "line": 1,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/check_lookups.py",
-      "symbol": "<module>"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 57,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 57,
-      "line": 46,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/check_lookups.py",
-      "symbol": "main"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 2,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 2,
-      "line": 1,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/check_originals.py",
-      "symbol": "<module>"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 57,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 57,
-      "line": 46,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/check_originals.py",
+      "path": "scripts/formal/check_owner.py",
       "symbol": "main"
     },
     {
@@ -17684,78 +17540,6 @@
         "constant"
       ],
       "path": "scripts/formal/check_pack_publication.py",
-      "symbol": "main"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 2,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 2,
-      "line": 1,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/check_state_authority.py",
-      "symbol": "<module>"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 57,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 57,
-      "line": 46,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/check_state_authority.py",
-      "symbol": "main"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 2,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 2,
-      "line": 1,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/check_state_preparation.py",
-      "symbol": "<module>"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 57,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 57,
-      "line": 46,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/check_state_preparation.py",
       "symbol": "main"
     },
     {
@@ -17849,79 +17633,7 @@
       "operations": [
         "constant"
       ],
-      "path": "scripts/formal/test_continuation.py",
-      "symbol": "<module>"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 1,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 1,
-      "line": 1,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/test_domains.py",
-      "symbol": "<module>"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 1,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 1,
-      "line": 1,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/test_handoff.py",
-      "symbol": "<module>"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 1,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 1,
-      "line": 1,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/test_lookups.py",
-      "symbol": "<module>"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 1,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 1,
-      "line": 1,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/test_originals.py",
+      "path": "scripts/formal/test_owner.py",
       "symbol": "<module>"
     },
     {
@@ -17958,42 +17670,6 @@
         "constant"
       ],
       "path": "scripts/formal/test_pack_publication.py",
-      "symbol": "<module>"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 1,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 1,
-      "line": 1,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/test_state_authority.py",
-      "symbol": "<module>"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 1,
-      "groups": [
-        "script"
-      ],
-      "last_match_line": 1,
-      "line": 1,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "scripts/formal/test_state_preparation.py",
       "symbol": "<module>"
     },
     {
