@@ -3,8 +3,8 @@ use fireweed_core::queue_contract::*;
 use fireweed_engine::queue_admission::QueueAdmission;
 use fireweed_objectlog::FlushConfig;
 
-mod ownership;
 mod owner_safety;
+mod ownership;
 mod record_counts;
 use ownership::TestOwnership;
 
@@ -145,7 +145,7 @@ async fn native_port_fixture_owned(
         .unwrap();
     drop(job);
     let options = QueuePipelineOptions {
-        operations: 8,
+        operations: 128,
         metadata_bytes: 65536,
         hard_record_bytes: 256 << 20,
     };
@@ -229,7 +229,9 @@ async fn native_port_identical_contract(s3: bool) {
     // One owner per queue: the other handle is Busy until ownership moves.
     suite::competing_claims_with_handoff(&queue, &other, address("competition"), &|| {
         let ownership = ownership.clone();
-        Box::pin(async move { ownership.advance(ownership::TTL + std::time::Duration::from_secs(1)) })
+        Box::pin(
+            async move { ownership.advance(ownership::TTL + std::time::Duration::from_secs(1)) },
+        )
     })
     .await;
     eprintln!("native contract {s3}: expiry_and_administration");
@@ -257,8 +259,14 @@ async fn native_port_identical_contract(s3: bool) {
     eprintln!("native contract {s3}: administrative_size_siblings_and_preflight");
     suite::administrative_size_siblings_and_preflight(&queue, address("administration-sizes"))
         .await;
-    eprintln!("native contract {s3}: broad_administration_exceeds_input_chunk");
-    suite::broad_administration_exceeds_input_chunk(&queue, address("administration-broad")).await;
+    // Broad administration spools through Linux-only scratch (the projection
+    // rejects it elsewhere), so this one step is Linux-only.
+    #[cfg(target_os = "linux")]
+    {
+        eprintln!("native contract {s3}: broad_administration_exceeds_input_chunk");
+        suite::broad_administration_exceeds_input_chunk(&queue, address("administration-broad"))
+            .await;
+    }
     let acknowledged = suite::prepare_process_loss(&queue, address("acknowledged-reopen")).await;
     let receipts = |name: &str, ids: Vec<String>| ReceiptReadRequest {
         queue: address(name),
@@ -400,4 +408,3 @@ async fn native_store_condition_checks_replay_and_rebuild_local() {
 async fn native_store_condition_checks_replay_and_rebuild_real_s3() {
     native_condition_checks_contract(true).await;
 }
-

@@ -427,7 +427,9 @@ mod tests {
             Err(QueueError::OutcomeUnknown(_))
         ));
         drop(projection);
-        let projection = QueueProjection::open_keeping_files(&path, &job, &workers).await.unwrap();
+        let projection = QueueProjection::open_keeping_files(&path, &job, &workers)
+            .await
+            .unwrap();
         let replay = projection
             .replay_insert(input(&definition, &job, request, 6, 4), &job, &workers)
             .await

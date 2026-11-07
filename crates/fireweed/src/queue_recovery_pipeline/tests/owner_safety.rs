@@ -25,7 +25,11 @@ async fn stats(store: &NativeQueueStore, queue: &QueueAddress) -> QueueResult<Qu
 async fn pending_items(store: &NativeQueueStore, queue: &QueueAddress) -> u64 {
     stats(store, queue).await.unwrap().totals.pending
 }
-fn hook_once(store: &NativeQueueStore, stage: owner::Stage, action: impl Fn() + Send + Sync + 'static) {
+fn hook_once(
+    store: &NativeQueueStore,
+    stage: owner::Stage,
+    action: impl Fn() + Send + Sync + 'static,
+) {
     let fired = Arc::new(AtomicBool::new(false));
     *store.pipeline_for_test().on_stage.lock().unwrap() = Some(Arc::new(move |at| {
         if at == stage && !fired.swap(true, Ordering::SeqCst) {
@@ -104,7 +108,11 @@ async fn deadline_is_measured_from_before_the_request() {
     // later renewals from moving it.
     env.ownership.plane.down.store(true, Ordering::SeqCst);
     env.ownership.advance(4 * SECOND);
-    assert_eq!(pending_items(&a, &queue).await, 3, "t = 22 s is within 23 s");
+    assert_eq!(
+        pending_items(&a, &queue).await,
+        3,
+        "t = 22 s is within 23 s"
+    );
     env.ownership.advance(2 * SECOND);
     assert_eq!(
         stats(&a, &queue).await.err(),
@@ -158,9 +166,7 @@ async fn publish_failure_drops_projection_and_exits() {
         let pipeline = a.pipeline_for_test();
         let foreign = match case {
             "lost-reply" => {
-                pipeline
-                    .lose_append_reply
-                    .store(true, Ordering::SeqCst);
+                pipeline.lose_append_reply.store(true, Ordering::SeqCst);
                 None
             }
             "fence-bumped" => {
@@ -211,7 +217,11 @@ async fn publish_failure_drops_projection_and_exits() {
             // the published record whose reply was lost, or the foreign record
             _ => 5,
         };
-        assert_eq!((records, fences), (log, 1), "{case}: re-entry rebuilt from the log");
+        assert_eq!(
+            (records, fences),
+            (log, 1),
+            "{case}: re-entry rebuilt from the log"
+        );
         let expected = 3 + 1 + u64::from(case == "foreign-writer");
         assert_eq!(pending_items(&a, &queue).await, expected, "{case}");
         let before = now(&a);
@@ -267,7 +277,11 @@ async fn stalled_owner_rechecks_before_ack() {
         let before = now(&a);
         let result = stats(&a, &queue).await;
         if plane_down {
-            assert_eq!(result.err(), Some(QueueError::Busy), "{stage:?}: no stale read");
+            assert_eq!(
+                result.err(),
+                Some(QueueError::Busy),
+                "{stage:?}: no stale read"
+            );
         } else {
             // Answered only after re-entry rebuilt from the log.
             assert_eq!(result.unwrap().totals.pending, 3, "{stage:?}");

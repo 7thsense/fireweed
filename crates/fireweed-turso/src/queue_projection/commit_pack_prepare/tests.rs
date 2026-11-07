@@ -898,4 +898,3 @@ async fn administration_is_a_barrier_and_late_fallback_fit_precedes_any_pack() {
     assert_eq!(integer(&row[1]).unwrap(), 1);
     fixture.finish().await;
 }
-

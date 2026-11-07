@@ -559,8 +559,8 @@ impl fireweed_engine::Clock for TestClock {
 /// Ownership moves between the two stores. A backend with one owner per queue
 /// returns `Busy` from the store that does not own it; this step makes the other
 /// store the owner. A backend without an owner limit never needs it.
-pub type Handoff<'a> = &'a (dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-         + Sync);
+pub type Handoff<'a> =
+    &'a (dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Sync);
 
 pub async fn competing_claims(a: &dyn QueueStore, b: &dyn QueueStore, queue: QueueAddress) {
     competing_claims_with_handoff(a, b, queue, &|| Box::pin(async {})).await

@@ -453,7 +453,9 @@ mod tests {
         assert_eq!(result.receipts(), &expected[..1]);
         drop(result);
         drop(projection);
-        let projection = QueueProjection::open_keeping_files(&path, &job, &workers).await.unwrap();
+        let projection = QueueProjection::open_keeping_files(&path, &job, &workers)
+            .await
+            .unwrap();
         let result = projection
             .read_commit_receipts(input(&definition, &job, ids, exact, 5), &job, &workers)
             .await

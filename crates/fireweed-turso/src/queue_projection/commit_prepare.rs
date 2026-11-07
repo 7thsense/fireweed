@@ -965,7 +965,9 @@ mod tests {
         assert_eq!(unsigned(&state[0]).unwrap(), 2);
         assert_eq!(bytes(&state[1]).unwrap(), [9]);
         drop(projection);
-        let reopened = QueueProjection::open_keeping_files(&path, &job, &workers).await.unwrap();
+        let reopened = QueueProjection::open_keeping_files(&path, &job, &workers)
+            .await
+            .unwrap();
         assert!(
             reopened
                 .prepare_ordinary_commit(

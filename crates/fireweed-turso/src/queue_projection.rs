@@ -12,6 +12,7 @@ pub use commit_pack_prepare::{
     AdmittedPackReceipts, CommitPackPreparationInput, OrdinaryPackPreparation, PreparedOrdinaryPack,
 };
 pub use preview::AdmittedQueuePreview;
+mod drop_queue;
 mod filter_sql;
 mod group_authority;
 mod insert_prepare;
@@ -19,7 +20,6 @@ mod insert_replay;
 mod payload;
 mod preparation;
 mod prepare;
-mod drop_queue;
 mod preview;
 mod query_read;
 mod receipt_authority;
@@ -1637,7 +1637,9 @@ mod tests {
         drop(job);
         assert_eq!(admission.usage().unwrap(), (0, 0));
         let job = Arc::new(admission.reserve(0).unwrap());
-        let reopened = QueueProjection::open_keeping_files(&path, &job, &workers).await.unwrap();
+        let reopened = QueueProjection::open_keeping_files(&path, &job, &workers)
+            .await
+            .unwrap();
         let row=inspect(&reopened,"SELECT applied_next_offset,next_sequence,(SELECT COUNT(*) FROM q7_requests) FROM q7_queues",vec![],3).await;
         assert_eq!(integer(&row[0]).unwrap(), 3);
         assert_eq!(unsigned(&row[1]).unwrap(), 3);
@@ -2088,7 +2090,9 @@ mod tests {
         drop(job);
         assert_eq!(admission.usage().unwrap(), (0, 0));
         let job = Arc::new(admission.reserve(0).unwrap());
-        let reopened = QueueProjection::open_keeping_files(&path, &job, &workers).await.unwrap();
+        let reopened = QueueProjection::open_keeping_files(&path, &job, &workers)
+            .await
+            .unwrap();
         let recovered=inspect(&reopened,"SELECT fingerprint_format,fingerprint,outcome FROM q7_requests WHERE domain=2 AND identity=?1",vec![blob(b"lost-reply")],3).await;
         assert_eq!(recovered, original);
         let row = inspect(
@@ -2198,7 +2202,9 @@ mod tests {
             );
         }
         drop(projection);
-        let reopened = QueueProjection::open_keeping_files(&path, &job, &workers).await.unwrap();
+        let reopened = QueueProjection::open_keeping_files(&path, &job, &workers)
+            .await
+            .unwrap();
         let row = inspect(&reopened,"SELECT priority,(SELECT applied_next_offset FROM q7_queues) FROM q7_records WHERE key=?1",vec![blob(b"a")],2).await;
         assert_eq!(integer(&row[0]).unwrap(), 0);
         assert_eq!(integer(&row[1]).unwrap(), 2);
@@ -2401,7 +2407,9 @@ mod tests {
             4
         );
         drop(projection);
-        let reopened = QueueProjection::open_keeping_files(&path, &job, &workers).await.unwrap();
+        let reopened = QueueProjection::open_keeping_files(&path, &job, &workers)
+            .await
+            .unwrap();
         let row = inspect(&reopened,"SELECT applied_next_offset,(SELECT COUNT(*) FROM q7_requests),(SELECT priority FROM q7_records WHERE key=?1) FROM q7_queues",vec![blob(b"a")],3).await;
         assert_eq!(integer(&row[0]).unwrap(), 4);
         assert_eq!(integer(&row[1]).unwrap(), 3);
@@ -2536,7 +2544,9 @@ mod tests {
             .await;
         }
         drop(projection);
-        let reopened = QueueProjection::open_keeping_files(&path, &job, &workers).await.unwrap();
+        let reopened = QueueProjection::open_keeping_files(&path, &job, &workers)
+            .await
+            .unwrap();
         assert_eq!(
             reopened
                 .checkpoint(make_genesis(&[31; 32]), &job, &workers)
@@ -2888,7 +2898,9 @@ mod tests {
         .await
         .unwrap();
         drop(projection);
-        projection = QueueProjection::open_keeping_files(&path, &job, &workers).await.unwrap();
+        projection = QueueProjection::open_keeping_files(&path, &job, &workers)
+            .await
+            .unwrap();
         let renewed = read_claim_fixture(
             &projection,
             &definition,
@@ -3784,7 +3796,9 @@ mod tests {
         );
         projection.apply(record, 3, &job, &workers).await.unwrap();
         drop(projection);
-        let projection = QueueProjection::open_keeping_files(&path, &job, &workers).await.unwrap();
+        let projection = QueueProjection::open_keeping_files(&path, &job, &workers)
+            .await
+            .unwrap();
         for now in [11, i64::MAX] {
             let replay = read_claim_fixture(
                 &projection,
@@ -4001,7 +4015,9 @@ mod tests {
             Err(QueueError::OutcomeUnknown(_))
         ));
         drop(projection);
-        let reopened = QueueProjection::open_keeping_files(&path, &job, &workers).await.unwrap();
+        let reopened = QueueProjection::open_keeping_files(&path, &job, &workers)
+            .await
+            .unwrap();
         let receipt=inspect(&reopened,"SELECT fingerprint_format,fingerprint,outcome FROM q7_requests WHERE domain=1 AND identity=?1",vec![blob(b"claim")],3).await;
         assert_eq!(integer(&receipt[0]).unwrap(), 3);
         assert_eq!(bytes(&receipt[1]).unwrap(), fp);

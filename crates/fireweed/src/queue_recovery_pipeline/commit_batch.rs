@@ -193,8 +193,8 @@ impl Plan for GroupPlan {
         job: &'a Arc<QueueReservation>,
     ) -> BoxFuture<'a, Result<QueueResult<Self::Output>, Exit>> {
         Box::pin(async move {
-            if let Err(error) = publish_group(p, t, &self.queue, &self.group, limits, clock, job)
-                .await?
+            if let Err(error) =
+                publish_group(p, t, &self.queue, &self.group, limits, clock, job).await?
             {
                 return Ok(Err(error));
             }
@@ -251,16 +251,13 @@ impl BatchPlan {
         &self,
         p: &QueueRecoveryPipeline,
         t: &mut Tenure,
-        position: usize,
-        known: &[Option<CommitReceipt>],
+        positions: Vec<usize>,
         limits: QueueLimits,
         clock: &Arc<dyn Clock>,
         job: &Arc<QueueReservation>,
     ) -> Result<QueueResult<bool>, Exit> {
-        let end = (position..self.request.groups.len())
-            .find(|&q| known[q].is_some() || self.request.groups[q].administration.is_some())
-            .unwrap_or(self.request.groups.len());
-        let positions: Vec<usize> = (position..end).collect();
+        let position = positions[0];
+        let end = position + positions.len();
         let genesis = match t.genesis_record(p, &self.request.queue, job) {
             Ok(genesis) => genesis,
             Err(error) => return Ok(Err(error)),
@@ -293,7 +290,9 @@ impl BatchPlan {
                 let submitted = prepared.response().positions();
                 if submitted.first() != Some(&position)
                     || submitted.last().is_none_or(|&q| q >= end)
-                    || submitted.windows(2).any(|w| w[0].checked_add(1) != Some(w[1]))
+                    || submitted
+                        .windows(2)
+                        .any(|w| w[0].checked_add(1) != Some(w[1]))
                 {
                     return Err(Exit);
                 }
@@ -344,8 +343,14 @@ impl Plan for BatchPlan {
                 let group = &self.request.groups[position];
                 let mut published = false;
                 if group.administration.is_none() {
+                    let known = replay.known();
+                    let end = (position..count)
+                        .find(|&q| {
+                            known[q].is_some() || self.request.groups[q].administration.is_some()
+                        })
+                        .unwrap_or(count);
                     match self
-                        .pack(p, t, position, replay.known(), limits, clock, job)
+                        .pack(p, t, (position..end).collect(), limits, clock, job)
                         .await?
                     {
                         Ok(done) => published = done,
@@ -368,7 +373,8 @@ impl Plan for BatchPlan {
                 (count as u64)
                     .saturating_mul(
                         (std::mem::size_of::<CommitReceipt>()
-                            + std::mem::size_of::<Option<CommitReceipt>>()) as u64,
+                            + std::mem::size_of::<Option<CommitReceipt>>())
+                            as u64,
                     )
                     .saturating_mul(3),
             ) {

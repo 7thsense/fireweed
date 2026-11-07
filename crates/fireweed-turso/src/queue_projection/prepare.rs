@@ -136,13 +136,9 @@ impl NativeTransactionWork for PrepareWorker {
         if self.epoch < snapshot.last_record_epoch {
             return Err(unknown("prepare writer epoch precedes recovered history"));
         }
-        if super::replay::claim_receipt_size(
-            connection,
-            snapshot.queue_id,
-            &self.input.request,
-        )
-        .await?
-        .is_some()
+        if super::replay::claim_receipt_size(connection, snapshot.queue_id, &self.input.request)
+            .await?
+            .is_some()
         {
             return Ok(None);
         }

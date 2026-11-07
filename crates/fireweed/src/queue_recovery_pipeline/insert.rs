@@ -97,11 +97,7 @@ impl Plan for InsertPlan {
                 Ok(input) => input,
                 Err(error) => return Ok(Err(error)),
             };
-            match settle(
-                p.projection
-                    .replay_insert(input, job, &p.workers)
-                    .await,
-            )? {
+            match settle(p.projection.replay_insert(input, job, &p.workers).await)? {
                 Ok(Some(replay)) => Ok(Ok(replay)),
                 // The request is published or known; the projection must hold it.
                 Ok(None) => Err(Exit),

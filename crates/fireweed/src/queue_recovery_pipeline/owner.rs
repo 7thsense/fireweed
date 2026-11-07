@@ -638,8 +638,7 @@ impl QueueLoop {
             Ok(_) => {
                 t.deadline = started + own.ttl;
                 // A renewal that took longer than half a lease is not retried at once.
-                t.renew_at =
-                    (started + own.ttl / 2).max(own.lease_clock.now() + own.ttl / 10);
+                t.renew_at = (started + own.ttl / 2).max(own.lease_clock.now() + own.ttl / 10);
             }
             Err(fireweed_engine::EngineError::EpochFenced) => {
                 self.tenure = None;
@@ -752,8 +751,8 @@ impl QueueLoop {
                 return Err(unknown("complete genesis history unavailable"));
             }
             tenure.epoch = state.epoch;
-            let target = u64::try_from(state.next_offset)
-                .map_err(|_| unknown("invalid acquired head"))?;
+            let target =
+                u64::try_from(state.next_offset).map_err(|_| unknown("invalid acquired head"))?;
             if lease.state == LeaseState::PendingFence {
                 own.control
                     .confirm_queue_lease_fence(
@@ -790,13 +789,21 @@ impl QueueLoop {
                 span.phase(diagnostics::RecoveryPhase::NativeApply);
                 p.projection.apply(record, offset, job, &p.workers).await?;
                 chunk += 1;
-                if chunk % ENTRY_CHUNK == 0 && own.lease_clock.now() >= renewed_at + own.ttl / 2 {
+                if chunk.is_multiple_of(ENTRY_CHUNK)
+                    && own.lease_clock.now() >= renewed_at + own.ttl / 2
+                {
                     // A long rebuild keeps the lease it is building under.
                     let started = own.lease_clock.now();
-                    if let Ok(_) = own
+                    if own
                         .control
-                        .renew_queue_lease(&self.key, &own.owner, lease.assignment_epoch, own.stamp()?)
+                        .renew_queue_lease(
+                            &self.key,
+                            &own.owner,
+                            lease.assignment_epoch,
+                            own.stamp()?,
+                        )
                         .await
+                        .is_ok()
                     {
                         requested = started;
                         renewed_at = started;
@@ -809,7 +816,12 @@ impl QueueLoop {
         if lease.state == LeaseState::PendingFence && tenure.epoch == 0 {
             // Absent queue: the lease row is confirmed with nothing to fence.
             own.control
-                .confirm_queue_lease_fence(&self.key, &own.owner, lease.assignment_epoch, own.stamp()?)
+                .confirm_queue_lease_fence(
+                    &self.key,
+                    &own.owner,
+                    lease.assignment_epoch,
+                    own.stamp()?,
+                )
                 .await
                 .map_err(busy)?;
         }

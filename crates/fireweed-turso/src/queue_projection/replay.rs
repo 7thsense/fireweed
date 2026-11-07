@@ -132,13 +132,7 @@ impl NativeTransactionWork for ReplayWorker {
         let request = &self.input.request;
         let queue_id = snapshot.queue_id;
         let sequence = snapshot.insertion_sequence;
-        let Some(size) = claim_receipt_size(
-            connection,
-            queue_id,
-            request,
-        )
-        .await?
-        else {
+        let Some(size) = claim_receipt_size(connection, queue_id, request).await? else {
             return Ok(None);
         };
         let identity_hash = discovery_digest(request.request_id.as_bytes());
@@ -240,7 +234,6 @@ pub(super) async fn claim_receipt_size(
     connection: &Connection,
     queue_id: i64,
     request: &ClaimRequest,
-
 ) -> QueueResult<Option<u64>> {
     use super::receipt_metadata::{ReceiptDomain, ReceiptMetadata, read_receipt_metadata};
     match read_receipt_metadata(

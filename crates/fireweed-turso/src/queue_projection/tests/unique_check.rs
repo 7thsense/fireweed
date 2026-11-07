@@ -304,7 +304,9 @@ async fn missing_equality_index_rolls_back_effects_and_reopen_restores_the_check
     drop(projection);
     // Projection open executes the existing idempotent DDL. No durable log or
     // definition format migration is required to recreate this physical index.
-    let projection = QueueProjection::open_keeping_files(&path, &job, &workers).await.unwrap();
+    let projection = QueueProjection::open_keeping_files(&path, &job, &workers)
+        .await
+        .unwrap();
     assert_eq!(
         apply_group_record(
             &projection,

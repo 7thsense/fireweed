@@ -77,7 +77,7 @@ pub struct QueueRecoveryPipeline {
     #[cfg(test)]
     before_drop: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
-    on_stage: std::sync::Mutex<Option<Arc<dyn Fn(owner::Stage) + Send + Sync>>>,
+    on_stage: std::sync::Mutex<Option<StageHook>>,
 }
 #[cfg(test)]
 impl Drop for QueueRecoveryPipeline {
@@ -87,6 +87,8 @@ impl Drop for QueueRecoveryPipeline {
         }
     }
 }
+#[cfg(test)]
+type StageHook = Arc<dyn Fn(owner::Stage) + Send + Sync>;
 /// On return, cancellation or unwind, release the operation permit before the
 /// final task reservation owner can notify shutdown waiters.
 struct OperationCompletion {
