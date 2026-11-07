@@ -15,7 +15,8 @@ exec(compile(helper_bytes, str(helper_path), 'exec'), helper.__dict__)
 helper.LOADED_SOURCES[str(helper_path)] = hashlib.sha256(helper_bytes).hexdigest()
 model_path = helper_path.with_name('owner_models.py')
 model_bytes = model_path.read_bytes()
-model = types.ModuleType('owner_models')
+# check.py imports owner_models normally; a failed exec here must not shadow it.
+model = types.ModuleType('owner_gate_models')
 model.__file__ = str(model_path)
 sys.modules[model.__name__] = model
 exec(compile(model_bytes, str(model_path), 'exec'), model.__dict__)
