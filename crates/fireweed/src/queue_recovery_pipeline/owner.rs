@@ -732,8 +732,17 @@ impl QueueLoop {
         job: &Arc<QueueReservation>,
     ) -> QueueResult<Tenure> {
         let mut span = p.diagnostics.begin();
-        let result = self.enter_scanned(p, job, &mut span).await;
+        let mut acquired = None;
+        let result = self.enter_scanned(p, job, &mut span, &mut acquired).await;
         span.finish(result.is_ok());
+        if let (Err(_), Some(epoch)) = (&result, acquired) {
+            // Nothing was served under this lease: give it back, best effort, once.
+            let own = &p.ownership;
+            let _ = own
+                .control
+                .release_queue_lease(&self.key, &own.owner, epoch, own.stamp())
+                .await;
+        }
         result
     }
     async fn enter_scanned(
@@ -741,6 +750,7 @@ impl QueueLoop {
         p: &Arc<QueueRecoveryPipeline>,
         job: &Arc<QueueReservation>,
         span: &mut diagnostics::RecoverySpan,
+        acquired: &mut Option<u64>,
     ) -> QueueResult<Tenure> {
         let own = &p.ownership;
         let busy = |_: fireweed_engine::EngineError| QueueError::Busy;
@@ -762,6 +772,7 @@ impl QueueLoop {
             AcquireOutcome::Acquired(lease) => lease,
             AcquireOutcome::Rejected(_) => return Err(QueueError::Busy),
         };
+        *acquired = Some(lease.assignment_epoch);
         // Always wait, with no check of whether there was a previous owner.
         Self::wait_lease_clock(p, own.lease_clock.now() + own.skew).await;
         let namespace = p.store.bind_api007_namespace(&self.address, job).await?;

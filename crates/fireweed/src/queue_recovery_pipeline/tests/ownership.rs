@@ -51,6 +51,8 @@ pub(super) struct TestPlane {
     pub(super) down: AtomicBool,
     /// The next renewal lands but its reply is lost.
     pub(super) lose_renew_reply: AtomicBool,
+    /// Confirmation fails: an entry that acquired cannot finish.
+    pub(super) fail_confirm: AtomicBool,
     pub(super) renewals: AtomicU64,
     /// Runs inside a renewal call, before it returns: a slow control plane.
     pub(super) during_renew: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -61,6 +63,7 @@ impl TestPlane {
             inner: InMemoryControlPlane::new(ControlPlaneConfig::default()),
             down: AtomicBool::new(false),
             lose_renew_reply: AtomicBool::new(false),
+            fail_confirm: AtomicBool::new(false),
             renewals: AtomicU64::new(0),
             during_renew: std::sync::Mutex::new(None),
         })
@@ -132,6 +135,9 @@ impl AsyncQueueControlPlane for TestPlane {
         now: UtcTimestamp,
     ) -> EngineResult<QueueLease> {
         self.check()?;
+        if self.fail_confirm.load(Ordering::SeqCst) {
+            return Err(EngineError::Unavailable);
+        }
         self.inner
             .confirm_queue_lease_fence(queue, owner, expected_epoch, now)
     }

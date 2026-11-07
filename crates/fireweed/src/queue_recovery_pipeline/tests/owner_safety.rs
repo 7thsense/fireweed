@@ -478,3 +478,29 @@ async fn absent_queue_holds_nothing() {
     drop(pipeline);
     a.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_entry_releases_its_lease() {
+    let env = Env::new("failed-entry", false);
+    let queue = env.address("q");
+    let first = env.open("a.db").await;
+    grow(&first, &queue, 4).await;
+    env.ownership.advance(TTL + SECOND);
+    // The next owner acquires, then fails before it serves anything.
+    let failing = env.open("b.db").await;
+    env.ownership
+        .plane
+        .fail_confirm
+        .store(true, Ordering::SeqCst);
+    assert_eq!(stats(&failing, &queue).await.err(), Some(QueueError::Busy));
+    env.ownership
+        .plane
+        .fail_confirm
+        .store(false, Ordering::SeqCst);
+    // No wait for the TTL: the failed entry gave the lease back.
+    let third = env.open("c.db").await;
+    assert_eq!(pending_items(&third, &queue).await, 3);
+    first.shutdown().await.unwrap();
+    failing.shutdown().await.unwrap();
+    third.shutdown().await.unwrap();
+}
