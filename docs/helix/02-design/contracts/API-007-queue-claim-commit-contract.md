@@ -170,9 +170,9 @@ per item. Packing/logging groups together never changes their independence.
   admission may mean outcome unknown, explicitly distinguished from rejection.
   Retry the same request identity or read its receipt; never infer rollback.
   A native backend may internally prepare that same identity again only after
-  a strictly newer durable fence and a checked complete authoritative prefix
-  prove that the earlier identity is absent and cannot still publish. Cached
-  receipt absence alone is insufficient. Duplicate authoritative identities or
+  a strictly newer durable fence and a projection caught up to that fence
+  prove that the earlier identity is absent and cannot still publish. Receipt
+  absence in an untrusted projection is insufficient. Duplicate authoritative identities or
   cache/history disagreement return outcome unknown. Conditional writes use one
   transport attempt; a lost write reply cannot become a known rejection through
   an SDK retry.
@@ -231,13 +231,20 @@ are paged; no whole-queue hydration is required. Validation, DTOs, fingerprintin
 Snorri mapping and test scenarios are shared. SQL row locking/transactions and
 object-log publication/apply/recovery remain implementation-specific.
 
-Native insert, claim and commit-batch resolution may continue a sealed checked
-prefix only within the same owned operation. The declaration, source, genesis,
-full progress and prior presence bind before I/O; every continuation acquires a
-strictly newer fence and checks the suffix. Missing or behind projections rebuild
-under that same acquired target. Known-source regression and continuation failure
-remain Unknown; neither may reset the known floor. This permission does not grant
-cross-operation cache authority or qualify independent-operation scan costs.
+Each S3/Turso queue has one owner at a time, by a lease held in the control
+plane. The owner retains its queue position and fence for the tenure of that
+lease. Mutations plan against the local projection, publish conditionally on that
+fence and the exact expected offset, and apply the published record directly;
+they read no log records. Reads are served from the projection and read no log
+records. The owner tracks a local lease deadline, measured from before each lease
+request was sent, and stops serving at it without contacting anything. A new
+owner serves nothing until the previous lease's full duration plus a skew
+allowance has passed. After a passed deadline or any publication that does not
+confirm success, the owner drops its projection and leaves owner state. It may
+re-enter only through a new lease and a strictly newer fence, rebuilding from the
+log, so an original that did publish is found by its identity. Other handles
+return Busy without effects. PostgreSQL has no owner limit, and callers treat
+Busy as retryable on both backends.
 
 Throughput is settled useful work, not acknowledgments accumulating apply debt.
 Compare PostgreSQL and S3/Turso on the same source, host, workload, sizes and
@@ -304,7 +311,7 @@ Separate backend fault hooks may differ; assertions and consumer calls do not.
 | ClaimIdentityReplay | Changed request body conflicts; empty selection, partial settle, renewal, expiry, process restart and cleanup preserve identity |
 | VersionNeverReused | Delete/reinsert rejects stale state/work CAS and stale holder |
 | LegacyCutover | Current main durable fixtures reopen/migrate; interrupted migration resumes; old+new log genesis rebuild preserves state, leases and receipts |
-| ConcurrentClaims | Independent connections/processes yield disjoint live claims |
+| ConcurrentClaims | Concurrent claims through one owner are disjoint. A second handle receives Busy with no effects, or disjoint claims where the backend permits, and continues with disjoint work after handoff |
 | ProgressUnderSkew | Sustained higher-priority arrivals and near-bound old work preserve numeric progress and age within filter; stats agrees |
 | LeaseExpiryAndRenewal | Immediate stale-token rejection, bounded reclaim, explicit renewal, clock separation |
 | CommitStateAndNextWork | Input settlement, state/audit, acknowledgment and emitted work all commit or all reject |
@@ -341,7 +348,7 @@ properties and the bounds on any executable assurance.
 ### Stats classification time
 
 QueueStats.as_of is required signed Unix nanoseconds from the operational clock
-sampled after native authority acquisition. It is the same sample used for lease
+sampled when the result is read from the owner's projection. It is the same sample used for lease
 expiry classification across totals, groups and bins, independent of eligible_at.
 It is not a projection watermark or durable sequence. The injected/system clock
 may move backward; as_of records its actual sample rather than imposing monotonicity.

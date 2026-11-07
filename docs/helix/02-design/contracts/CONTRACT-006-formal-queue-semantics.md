@@ -22,6 +22,8 @@ PostgreSQL refines this witness through native atomic transactions over state an
 
 **F-FENCE**: conflicting writes have a valid serial order and cannot commit with superseded authority. PostgreSQL uses its native transaction/isolation preconditions. S3 publication atomically compares acquired authoritative writer epoch and expected head; recovery uses the matching acquisition result, original genesis and contiguous history. Hints, cached epochs and host placement credentials cannot authorize publication or initialize an empty replacement over known authority.
 
+**F-OWNER**: no read is served after a write it does not observe, assuming each node's lease clock counts all elapsed time and the skew allowance exceeds wall-clock skew between nodes plus lease clock drift over one lease duration. F-FENCE holds with no clock assumption.
+
 **F-LEASE**: each item has at most one active queue lease. A lease is active when
 its lifecycle permits leased work and its token/generation is current and its
 expiry exceeds logical now. Finalize/renew/reassign validate the exact
