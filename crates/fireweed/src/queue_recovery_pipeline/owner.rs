@@ -150,8 +150,8 @@ impl Tenure {
         self.identity = Some(identity);
         self.writer = Some(writer);
     }
-    pub(super) fn bound(&self) -> bool {
-        self.identity.is_some()
+    pub(super) fn has_writer(&self) -> bool {
+        self.writer.is_some()
     }
 
     pub(super) fn point(&self) -> (u64, u64, u64) {
@@ -828,21 +828,15 @@ impl QueueLoop {
             deadline: Duration::ZERO,
             renew_at: Duration::ZERO,
         };
-        // With no queue yet there is nothing to fence or read; provisioning fences.
-        // A namespace that was elected but never given a genesis holds nothing either.
-        let mut namespace = p.log.open(&self.address, job).await?;
-        if let Some(open) = &namespace
-            && p.log.capture(open).await?.head().bounds() == (0, 0)
-        {
-            tenure.identity = Some(open.identity());
-            namespace = None;
-        }
-        if let Some(namespace) = namespace {
+        // With no namespace there is nothing to fence or read; provisioning fences.
+        // An existing namespace is always fenced. An empty head means nothing to
+        // rebuild: the tenure keeps the writer for provisioning.
+        if let Some(namespace) = p.log.open(&self.address, job).await? {
             p.diagnostics.head_read();
             p.diagnostics.fence_acquire();
             let (writer, source) = p.log.acquire_bundle(namespace, job).await?.into_parts();
             let (log_start, target) = source.head().bounds();
-            if log_start != 0 || target < 1 {
+            if log_start != 0 {
                 return Err(unknown("complete genesis history unavailable"));
             }
             tenure.epoch = writer.epoch();

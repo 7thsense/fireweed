@@ -224,3 +224,49 @@ async fn runs_of_records_match_single_reads_local() {
 async fn runs_of_records_match_single_reads_real_s3() {
     runs_of_records_match_single_reads(true).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn namespace_elected_with_an_empty_head_is_absent_until_provisioned() {
+    // A crash between electing the namespace and publishing the genesis.
+    let env = Env::new("empty-head", false);
+    let queue = env.address("q");
+    let store = env.open("a.db").await;
+    {
+        let pipeline = store.pipeline_for_test();
+        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        pipeline
+            .log
+            .provision_namespace(&queue, &job)
+            .await
+            .unwrap();
+    }
+    let read = || {
+        store.read_commit(ReceiptReadRequest {
+            queue: queue.clone(),
+            request_ids: vec!["none".into()],
+            max_bytes: 1 << 20,
+        })
+    };
+    assert_eq!(read().await, Err(QueueError::QueueNotFound));
+    // Reading again re-enters and still finds nothing.
+    assert_eq!(read().await, Err(QueueError::QueueNotFound));
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: suite::schema(),
+        })
+        .await
+        .unwrap();
+    insert(&store, &queue, 1).await;
+    assert_eq!(pending_items(&store, &queue).await, 1);
+    // Provisioning again is a schema comparison.
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: suite::schema(),
+        })
+        .await
+        .unwrap();
+    store.shutdown().await.unwrap();
+}

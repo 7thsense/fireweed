@@ -63,32 +63,31 @@ impl Plan for ProvisionPlan {
                 Ok(definition) => definition,
                 Err(error) => return Ok(Err(error)),
             };
-            // The lease makes this the only writer. A queue this owner found
-            // empty has a namespace or none; a crash or a lost reply leaves an
-            // empty head, which provisioning completes, or a genesis, which
-            // re-entry rebuilds and compares above.
-            let namespace = if t.bound() {
-                t.namespace(p, job)
-            } else {
-                p.log.provision_namespace(&self.request.queue, job).await
-            };
-            let namespace = match settle(namespace)? {
-                Ok(namespace) => namespace,
-                Err(error) => return Ok(Err(error)),
-            };
-            let identity = namespace.identity();
-            let acquired = match settle(p.log.acquire_bundle(namespace, job).await)? {
-                Ok(acquired) => acquired,
-                Err(error) => return Ok(Err(error)),
-            };
-            let (writer, source) = acquired.into_parts();
-            // A namespace that already holds records is not what this owner
-            // believes: rebuild from it.
-            if source.head().bounds() != (0, 0) {
-                return Err(Exit);
+            // The lease makes this the only writer. A tenure that found the
+            // namespace empty already holds its fence; otherwise elect the
+            // namespace and fence it. A crash or a lost reply leaves an empty
+            // head, which this completes, or a genesis, which re-entry rebuilds
+            // and compares above.
+            if !t.has_writer() {
+                let namespace =
+                    match settle(p.log.provision_namespace(&self.request.queue, job).await)? {
+                        Ok(namespace) => namespace,
+                        Err(error) => return Ok(Err(error)),
+                    };
+                let identity = namespace.identity();
+                let acquired = match settle(p.log.acquire_bundle(namespace, job).await)? {
+                    Ok(acquired) => acquired,
+                    Err(error) => return Ok(Err(error)),
+                };
+                let (writer, source) = acquired.into_parts();
+                // A namespace that already holds records is not what this owner
+                // believes: rebuild from it.
+                if source.head().bounds() != (0, 0) {
+                    return Err(Exit);
+                }
+                drop(source);
+                t.install(identity, writer);
             }
-            drop(source);
-            t.install(identity, writer);
             let genesis = encode_checked_genesis(
                 t.epoch,
                 &self.request.queue,
