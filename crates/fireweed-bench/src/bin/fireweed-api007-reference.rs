@@ -276,7 +276,8 @@ async fn construct(c: &Config) -> QueueResult<Constructed> {
         ));
     }
     use fireweed::queue_recovery_pipeline::{
-        NativeQueueStore, QueuePipelineOptions, QueueRecoveryPipeline,
+        NativeQueueStore, QueueOwnership, QueuePipelineOptions, QueueRecoveryPipeline,
+        SystemLeaseClock,
     };
     use fireweed_engine::queue_admission::QueueAdmission;
     use fireweed_objectlog::{NativeLogOptions, ObjectLogEngineStore};
@@ -331,6 +332,20 @@ async fn construct(c: &Config) -> QueueResult<Constructed> {
             },
             scratch,
             quota,
+            // One process owns its queues; the in-memory plane resets with it.
+            QueueOwnership::new(
+                Arc::new(fireweed_engine::InMemoryAsyncControlPlane(Arc::new(
+                    fireweed_engine::InMemoryControlPlane::new(
+                        fireweed_engine::ControlPlaneConfig::default(),
+                    ),
+                ))),
+                fireweed_core::OwnerId::new("bench").map_err(|e| QueueError::Invalid(e.to_string()))?,
+                Arc::new(fireweed_bench::SystemClock),
+                Arc::new(SystemLeaseClock),
+                std::time::Duration::from_millis(
+                    fireweed_engine::ControlPlaneConfig::default().lease_ttl_ms,
+                ),
+            )?,
         )?;
         let store =
             NativeQueueStore::new(pipeline, limits(), c.runtime.retained_bytes.unwrap(), clock)?;

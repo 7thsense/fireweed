@@ -7,8 +7,10 @@ use crate::{
     LeaseRenewalOutcome, LeaseState, OwnedSession, OwnerEndpointAdvertisement, OwnerResolution,
     OwnershipOutcome, QueueKey, QueueLease,
 };
+use crate::{InMemoryControlPlane, QueueControlPlane};
 use async_trait::async_trait;
 use fireweed_core::{OwnerId, UtcTimestamp};
+use std::sync::Arc;
 
 /// Object-safe asynchronous queue ownership and worker registry.
 #[async_trait]
@@ -163,6 +165,107 @@ where
                 .await;
             Err(error)
         }
+    }
+}
+
+/// The in-memory control plane behind the async port. Its decisions are pure, so
+/// nothing is offloaded. Authority resets with the process (`is_ephemeral`).
+pub struct InMemoryAsyncControlPlane(pub Arc<InMemoryControlPlane>);
+
+#[async_trait]
+impl AsyncQueueControlPlane for InMemoryAsyncControlPlane {
+    async fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
+        self.0.register_owner(owner, now)
+    }
+    async fn advertise_owner_endpoint(
+        &self,
+        owner: &OwnerId,
+        endpoint: &str,
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        self.0.advertise_owner_endpoint(owner, endpoint, now)
+    }
+    async fn live_owner_endpoints(
+        &self,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<OwnerEndpointAdvertisement>> {
+        self.0.live_owner_endpoints(now)
+    }
+    async fn heartbeat(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
+        self.0.heartbeat(owner, now)
+    }
+    async fn resolve_queue_owner(
+        &self,
+        queue: &QueueKey,
+        now: UtcTimestamp,
+    ) -> EngineResult<OwnerResolution> {
+        self.0.resolve_queue_owner(queue, now)
+    }
+    async fn resolve_queue_owners(
+        &self,
+        queues: &[QueueKey],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<OwnerResolution>> {
+        self.0.resolve_queue_owners(queues, now)
+    }
+    async fn acquire_queue_lease(
+        &self,
+        queue: &QueueKey,
+        owner: &OwnerId,
+        now: UtcTimestamp,
+    ) -> EngineResult<AcquireOutcome> {
+        self.0.acquire_queue_lease(queue, owner, now)
+    }
+    async fn confirm_queue_lease_fence(
+        &self,
+        queue: &QueueKey,
+        owner: &OwnerId,
+        expected_epoch: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<QueueLease> {
+        self.0
+            .confirm_queue_lease_fence(queue, owner, expected_epoch, now)
+    }
+    async fn renew_queue_lease(
+        &self,
+        queue: &QueueKey,
+        owner: &OwnerId,
+        expected_epoch: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<QueueLease> {
+        self.0.renew_queue_lease(queue, owner, expected_epoch, now)
+    }
+    async fn renew_queue_leases(
+        &self,
+        renewals: &[LeaseRenewal],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<LeaseRenewalOutcome>> {
+        self.0.renew_queue_leases(renewals, now)
+    }
+    async fn begin_drain(
+        &self,
+        queue: &QueueKey,
+        expected_epoch: u64,
+        target_owner: &OwnerId,
+        now: UtcTimestamp,
+    ) -> EngineResult<QueueLease> {
+        self.0.begin_drain(queue, expected_epoch, target_owner, now)
+    }
+    async fn release_queue_lease(
+        &self,
+        queue: &QueueKey,
+        owner: &OwnerId,
+        expected_epoch: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        self.0
+            .release_queue_lease(queue, owner, expected_epoch, now)
+    }
+    async fn lease(&self, queue: &QueueKey) -> EngineResult<QueueLease> {
+        self.0.lease(queue)
+    }
+    fn is_ephemeral(&self) -> bool {
+        true
     }
 }
 
