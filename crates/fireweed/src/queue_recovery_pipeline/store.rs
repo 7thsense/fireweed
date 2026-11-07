@@ -7,10 +7,8 @@ use fireweed_engine::{
     queue_memory::{
         administrative_envelope_preflight, administrative_groups_preflight, incoming_headers,
     },
-    queue_schema_codec::{AdmittedQueueDefinition, encode_definition},
 };
 use fireweed_queue_spool::QueueOperationRuntime;
-use sha2::{Digest, Sha256};
 use std::{future::Future, sync::Mutex};
 struct StoreInner {
     pipeline: Mutex<Option<Arc<QueueRecoveryPipeline>>>,
@@ -130,36 +128,12 @@ impl QueueStore for NativeQueueStore {
         Box::pin(async move {
             request.validate(&self.inner.limits)?;
             let bytes = self.input(encoded_len(&request)?, incoming_headers(&request)?)?;
+            let limits = self.inner.limits;
             self.dispatch(bytes, move |pipeline, job| async move {
-                let token = fireweed_engine::generate_query_lease_token()
-                    .map_err(|e| unknown(&e.to_string()))?;
-                let candidate_secret = Sha256::digest(token.as_str().as_bytes()).into();
-                let raw = encode_definition(&request.schema)?;
-                let definition = AdmittedQueueDefinition::from_raw(&raw, &job)?;
-                let namespace = pipeline
-                    .store
-                    .bind_api007_namespace(&request.queue, &job)
-                    .await?;
+                let charge = job.owned_buffer(bytes)?;
                 let original = pipeline
-                    .store
-                    .provision_api007_genesis(
-                        fireweed_objectlog::Api007GenesisRequest {
-                            namespace,
-                            definition,
-                            candidate_secret,
-                            max_record_bytes: pipeline.hard_record_bytes,
-                            metadata_bytes: pipeline.metadata_bytes,
-                        },
-                        &job,
-                        &pipeline.workers,
-                    )
+                    .provision(request.clone(), limits, job.clone(), charge)
                     .await?;
-                if original.format() != QueueLogFormat::ChecksummedV2 {
-                    return Err(unknown("legacy genesis cannot provision native port"));
-                }
-                if original.definition().schema() != &request.schema {
-                    return Err(QueueError::DefinitionConflict);
-                }
                 Ok(OwnedQueueValue::new((), (original, request, job)))
             })
             .await
@@ -229,6 +203,16 @@ impl QueueStore for NativeQueueStore {
     fn shutdown(&self) -> QueueFuture<'_, ()> {
         Box::pin(async move {
             self.inner.runtime.close_and_drain().await?;
+            let queues = self
+                .inner
+                .pipeline
+                .lock()
+                .map_err(|_| unknown("store ownership poisoned"))?
+                .as_ref()
+                .cloned();
+            if let Some(queues) = queues {
+                queues.close_queues().await;
+            }
             let workers = self
                 .inner
                 .pipeline
@@ -255,122 +239,14 @@ impl QueueStore for NativeQueueStore {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn abandoned_dispatch_and_cancelled_shutdown_retain_final_ownership() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+impl NativeQueueStore {
+    pub(super) fn pipeline_for_test(&self) -> Arc<QueueRecoveryPipeline> {
+        self.inner
+            .pipeline
+            .lock()
             .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("fireweed-port-drain-{nonce}"));
-        std::fs::create_dir_all(&root).unwrap();
-        let log = Arc::new(
-            ObjectLogEngineStore::open_local(
-                root.join("log"),
-                fireweed_objectlog::FlushConfig::default(),
-            )
-            .await
-            .unwrap(),
-        );
-        let workers = ScratchWorkers::new(1, 1).unwrap();
-        let admission = fireweed_engine::queue_admission::QueueAdmission::new(1, 1 << 20).unwrap();
-        let init = Arc::new(admission.reserve(0).unwrap());
-        let projection = QueueProjection::open(&root.join("projection.db"), &init, &workers)
-            .await
-            .unwrap();
-        drop(init);
-        let scratch_root = fireweed_queue_spool::ScratchRoot::open(root.join("scratch"), &workers)
-            .await
-            .unwrap();
-        let pipeline = QueueRecoveryPipeline::new(
-            log,
-            projection,
-            workers,
-            QueuePipelineOptions {
-                operations: 1,
-                metadata_bytes: 65536,
-                hard_record_bytes: 1 << 20,
-            },
-            scratch_root,
-            fireweed_queue_spool::ScratchDiskQuota::new(1 << 20).unwrap(),
-        )
-        .unwrap();
-        assert!(matches!(
-            NativeQueueStore::new(
-                pipeline.clone(),
-                QueueLimits::default(),
-                1 << 20,
-                Arc::new(fireweed_conformance::queue_contract::TestClock::default())
-            ),
-            Err(QueueError::Invalid(_))
-        ));
-        let drop_entered = Arc::new(tokio::sync::Notify::new());
-        let drop_release = Arc::new(std::sync::Barrier::new(2));
-        let ready = drop_entered.clone();
-        let release = drop_release.clone();
-        *pipeline.before_drop.lock().unwrap() = Some(Box::new(move || {
-            ready.notify_one();
-            release.wait();
-        }));
-        let store = NativeQueueStore::new(
-            pipeline,
-            QueueLimits::default(),
-            1 << 20,
-            Arc::new(fireweed_conformance::queue_contract::TestClock::default()),
-        )
-        .unwrap();
-        let diagnostic_handle = store.recovery_diagnostics();
-        let entered = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let caller = store.clone();
-        let ready = entered.clone();
-        let unblock = release.clone();
-        let task = tokio::spawn(async move {
-            caller
-                .dispatch(7, move |_pipeline, job| async move {
-                    let charge = job.owned_buffer(11)?;
-                    ready.notify_one();
-                    unblock.notified().await;
-                    Ok(OwnedQueueValue::new(vec![1u8; 11], (charge, job)))
-                })
-                .await
-        });
-        entered.notified().await;
-        task.abort();
-        let _ = task.await;
-        assert_eq!(store.inner.runtime.usage().unwrap(), (1, 18));
-        let mut first = Box::pin(store.shutdown());
-        use std::{
-            future::Future,
-            task::{Context, Poll, Waker},
-        };
-        assert!(matches!(
-            first.as_mut().poll(&mut Context::from_waker(Waker::noop())),
-            Poll::Pending
-        ));
-        drop(first);
-        assert!(matches!(
-            store.inner.runtime.reserve(0),
-            Err(QueueError::Busy)
-        ));
-        let a = store.clone();
-        let b = store.clone();
-        let drain_a = tokio::spawn(async move { a.shutdown().await });
-        let drain_b = tokio::spawn(async move { b.shutdown().await });
-        release.notify_one();
-        drop_entered.notified().await;
-        assert!(!drain_a.is_finished());
-        assert!(!drain_b.is_finished());
-        drop_release.wait();
-        drain_a.await.unwrap().unwrap();
-        drain_b.await.unwrap().unwrap();
-        assert_eq!(store.inner.runtime.usage().unwrap(), (0, 0));
-        assert!(store.inner.pipeline.lock().unwrap().is_none());
-        store.shutdown().await.unwrap();
-        drop(store);
-        assert_eq!(Arc::strong_count(&diagnostic_handle), 1);
-        assert_eq!(diagnostic_handle.snapshot().attempts, 0);
-        std::fs::remove_dir_all(root).unwrap();
+            .as_ref()
+            .cloned()
+            .expect("open store")
     }
 }

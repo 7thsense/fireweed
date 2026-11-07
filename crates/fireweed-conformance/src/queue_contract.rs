@@ -556,7 +556,26 @@ impl fireweed_engine::Clock for TestClock {
     }
 }
 
+/// Ownership moves between the two stores. A backend with one owner per queue
+/// returns `Busy` from the store that does not own it; this step makes the other
+/// store the owner. A backend without an owner limit never needs it.
+pub type Handoff<'a> = &'a (dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+         + Sync);
+
 pub async fn competing_claims(a: &dyn QueueStore, b: &dyn QueueStore, queue: QueueAddress) {
+    competing_claims_with_handoff(a, b, queue, &|| Box::pin(async {})).await
+}
+
+/// Concurrent claims through one store are disjoint. A second store either claims
+/// disjoint work too or returns `Busy` with no effects, and after `handoff` it
+/// continues with disjoint work. `handoff` is called once more at the end so the
+/// first store can resume.
+pub async fn competing_claims_with_handoff(
+    a: &dyn QueueStore,
+    b: &dyn QueueStore,
+    queue: QueueAddress,
+    handoff: Handoff<'_>,
+) {
     a.provision(ProvisionRequest {
         queue: queue.clone(),
         schema: schema(),
@@ -574,21 +593,40 @@ pub async fn competing_claims(a: &dyn QueueStore, b: &dyn QueueStore, queue: Que
     })
     .await
     .unwrap();
+    let mut claimed = Vec::new();
+    // Through one owner the loop plans concurrent claims in order: disjoint.
+    let mut first = claim(&queue, "first-race", "race");
+    first.max_records = 25;
+    let mut second = first.clone();
+    second.request_id = "second-race".into();
+    let (first, second) = tokio::join!(a.claim(first), a.claim(second));
+    for result in [first, second] {
+        let result = result.unwrap();
+        assert_eq!(result.len(), 25);
+        claimed.extend(result);
+    }
+    // A second store: disjoint work or Busy without effects.
     let mut left = claim(&queue, "left-race", "race");
-    left.max_records = 50;
+    left.max_records = 25;
     let mut right = left.clone();
     right.request_id = "right-race".into();
-    let (left, right) = tokio::join!(a.claim(left), b.claim(right));
+    let (left, right_result) = tokio::join!(a.claim(left), b.claim(right.clone()));
     let left = left.unwrap();
-    let right = right.unwrap();
-    assert_eq!(left.len(), 50);
-    assert_eq!(right.len(), 50);
-    let keys: BTreeSet<_> = left
-        .iter()
-        .chain(&right)
-        .map(|w| w.record.work.key.clone())
-        .collect();
+    assert_eq!(left.len(), 25);
+    claimed.extend(left);
+    let right = match right_result {
+        Ok(right) => right,
+        Err(QueueError::Busy) => {
+            handoff().await;
+            b.claim(right).await.unwrap()
+        }
+        Err(error) => panic!("second store: {error:?}"),
+    };
+    assert_eq!(right.len(), 25);
+    claimed.extend(right);
+    let keys: BTreeSet<_> = claimed.iter().map(|w| w.record.work.key.clone()).collect();
     assert_eq!(keys.len(), 100);
+    handoff().await;
 }
 
 pub async fn expiry_and_administration(

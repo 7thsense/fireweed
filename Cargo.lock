@@ -1406,6 +1406,7 @@ checksum = "ef25905e51abafe4dcea6c15fec58c57b601cdbd0ee53d22ea1d3016c587d39b"
 name = "fireweed"
 version = "0.31.33"
 dependencies = [
+ "async-trait",
  "bytes",
  "fireweed-conformance",
  "fireweed-core",
@@ -1419,6 +1420,7 @@ dependencies = [
  "fireweed-turso",
  "futures",
  "postgres",
+ "rustix 1.1.5",
  "serde_json",
  "sha2 0.11.0",
  "tokio",

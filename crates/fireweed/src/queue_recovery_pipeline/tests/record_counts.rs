@@ -3,14 +3,15 @@ use super::*;
 use fireweed_conformance::queue_contract::{self as suite, TestClock};
 use fireweed_engine::queue_contract::QueueStore;
 
-struct Env {
-    root: std::path::PathBuf,
-    prefix: Option<String>,
-    clock: Arc<TestClock>,
-    nonce: u128,
+pub(super) struct Env {
+    pub(super) root: std::path::PathBuf,
+    pub(super) prefix: Option<String>,
+    pub(super) clock: Arc<TestClock>,
+    pub(super) ownership: TestOwnership,
+    pub(super) nonce: u128,
 }
 impl Env {
-    fn new(name: &str, s3: bool) -> Self {
+    pub(super) fn new(name: &str, s3: bool) -> Self {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -21,19 +22,30 @@ impl Env {
             root,
             prefix: s3.then(|| format!("api007-counts-{name}-{nonce}")),
             clock: Arc::new(TestClock::default()),
+            ownership: TestOwnership::new(),
             nonce,
         }
     }
-    async fn open(&self, projection: &str) -> NativeQueueStore {
-        native_port_fixture(
+    /// A handle named after its projection file; every handle shares the control plane.
+    pub(super) async fn open(&self, projection: &str) -> NativeQueueStore {
+        self.open_with(projection, self.ownership.handle(projection))
+            .await
+    }
+    pub(super) async fn open_with(
+        &self,
+        projection: &str,
+        ownership: QueueOwnership,
+    ) -> NativeQueueStore {
+        native_port_fixture_owned(
             &self.root,
             projection,
             self.prefix.as_deref(),
             self.clock.clone(),
+            ownership,
         )
         .await
     }
-    fn address(&self, name: &str) -> QueueAddress {
+    pub(super) fn address(&self, name: &str) -> QueueAddress {
         QueueAddress {
             tenant: "api007-counts".into(),
             queue: format!("{}-{name}", self.nonce),
@@ -45,11 +57,11 @@ impl Drop for Env {
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
-fn now(store: &NativeQueueStore) -> RecoverySnapshot {
+pub(super) fn now(store: &NativeQueueStore) -> RecoverySnapshot {
     store.recovery_diagnostics().snapshot()
 }
 /// (log records read, head reads, fences) since `before`.
-fn delta(store: &NativeQueueStore, before: RecoverySnapshot) -> (u64, u64, u64) {
+pub(super) fn delta(store: &NativeQueueStore, before: RecoverySnapshot) -> (u64, u64, u64) {
     let after = now(store);
     (
         after.admitted_raw_records - before.admitted_raw_records,
@@ -57,7 +69,7 @@ fn delta(store: &NativeQueueStore, before: RecoverySnapshot) -> (u64, u64, u64) 
         after.fence_acquires - before.fence_acquires,
     )
 }
-async fn insert(store: &NativeQueueStore, queue: &QueueAddress, n: usize) {
+pub(super) async fn insert(store: &NativeQueueStore, queue: &QueueAddress, n: usize) {
     let outcome = store
         .insert(InsertRequest {
             queue: queue.clone(),
@@ -69,7 +81,7 @@ async fn insert(store: &NativeQueueStore, queue: &QueueAddress, n: usize) {
         .unwrap();
     assert!(matches!(outcome[0], InsertOutcome::Inserted { .. }));
 }
-async fn commit(store: &NativeQueueStore, queue: &QueueAddress, n: usize) {
+pub(super) async fn commit(store: &NativeQueueStore, queue: &QueueAddress, n: usize) {
     let mut group = suite::group(&format!("commit-{n}"));
     group
         .work_inserts
@@ -87,7 +99,7 @@ async fn commit(store: &NativeQueueStore, queue: &QueueAddress, n: usize) {
     ));
 }
 /// Provision, then alternate inserts and commits until the log has `len` records.
-async fn grow(store: &NativeQueueStore, queue: &QueueAddress, len: usize) {
+pub(super) async fn grow(store: &NativeQueueStore, queue: &QueueAddress, len: usize) {
     store
         .provision(ProvisionRequest {
             queue: queue.clone(),
@@ -103,7 +115,7 @@ async fn grow(store: &NativeQueueStore, queue: &QueueAddress, len: usize) {
         }
     }
 }
-async fn reads(store: &NativeQueueStore, queue: &QueueAddress) {
+pub(super) async fn reads(store: &NativeQueueStore, queue: &QueueAddress) {
     store
         .stats(StatsRequest {
             buckets: None,
