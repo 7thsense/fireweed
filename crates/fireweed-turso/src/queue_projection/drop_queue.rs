@@ -64,16 +64,15 @@ impl QueueProjection {
             _input: input,
             _job: job.clone(),
         };
-        workers
-            .run(move || {
-                let projection = worker.projection.clone();
-                crate::tx::block_on_owned_apply(owned_native_transaction(
-                    &projection,
-                    TransactionBehavior::Immediate,
-                    &mut worker,
-                ))
-            })
-            .await
+        self.run_native(false, workers, move || {
+            let projection = worker.projection.clone();
+            crate::tx::block_on_owned_apply(owned_native_transaction(
+                &projection,
+                TransactionBehavior::Immediate,
+                &mut worker,
+            ))
+        })
+        .await
     }
 }
 

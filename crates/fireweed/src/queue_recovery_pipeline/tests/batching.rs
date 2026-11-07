@@ -767,3 +767,77 @@ async fn publishes_per_batch_do_not_grow_with_batch_size_local() {
 async fn publishes_per_batch_do_not_grow_with_batch_size_real_s3() {
     publishes_per_batch_do_not_grow_with_batch_size(true, &[1, 10, 100]).await;
 }
+
+/// The writer is one connection for every queue of the pipeline. While a batch
+/// holds it across its publish, operations of other queues that want it must
+/// wait without holding scratch workers, or the batch could not finish.
+async fn queues_waiting_for_the_writer_do_not_starve_a_batch_of_workers(s3: bool) {
+    let env = Env::new("starve", s3);
+    let store = env.open("a.db").await;
+    let queue = env.address("q");
+    grow(&store, &queue, 2).await;
+    let (entered_tx, entered) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel::<()>();
+    let (entered_tx, release_rx) = (Mutex::new(entered_tx), Mutex::new(release_rx));
+    let fired = AtomicBool::new(false);
+    *store.pipeline_for_test().on_stage.lock().unwrap() = Some(Arc::new(move |stage| {
+        // The batch is open and holds the writer when it is about to publish.
+        if stage == owner::Stage::BeforeAppend && !fired.swap(true, Ordering::SeqCst) {
+            entered_tx.lock().unwrap().send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+        }
+    }));
+    let writer = tokio::spawn(insert_of(
+        &store,
+        &queue,
+        "starve-1",
+        InsertMode::InsertOnly,
+        vec![keyed("starve-1", "starve-1", 0)],
+    ));
+    tokio::task::spawn_blocking(move || entered.recv().unwrap())
+        .await
+        .unwrap();
+    // More other-queue operations than the pool has workers.
+    let others: Vec<_> = (0..6)
+        .map(|n| {
+            let (store, queue) = (store.clone(), env.address(&format!("other-{n}")));
+            tokio::spawn(async move {
+                store
+                    .read_commit(ReceiptReadRequest {
+                        queue,
+                        request_ids: vec!["none".into()],
+                        max_bytes: 1 << 20,
+                    })
+                    .await
+            })
+        })
+        .collect();
+    while in_flight(&store) < 1 + others.len() {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    release.send(()).unwrap();
+    let limit = std::time::Duration::from_secs(60);
+    let written = tokio::time::timeout(limit, writer)
+        .await
+        .expect("the batch finishes")
+        .unwrap();
+    assert!(inserted(&written), "{written:?}");
+    for other in others {
+        let result = tokio::time::timeout(limit, other)
+            .await
+            .expect("the other queue is answered")
+            .unwrap();
+        assert_eq!(result.err(), Some(QueueError::QueueNotFound));
+    }
+    *store.pipeline_for_test().on_stage.lock().unwrap() = None;
+    store.shutdown().await.unwrap();
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queues_waiting_for_the_writer_do_not_starve_a_batch_of_workers_local() {
+    queues_waiting_for_the_writer_do_not_starve_a_batch_of_workers(false).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queues_waiting_for_the_writer_do_not_starve_a_batch_of_workers_real_s3() {
+    queues_waiting_for_the_writer_do_not_starve_a_batch_of_workers(true).await;
+}

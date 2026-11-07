@@ -48,23 +48,22 @@ impl QueueProjection {
             job: Arc::clone(job),
             charges: vec![job.owned_buffer(charge)?],
         };
-        workers
-            .run(move || {
-                Ok(crate::tx::block_on_owned_apply(async {
-                    let projection = Arc::clone(&worker.projection);
-                    let keys = owned_native_transaction(
-                        &projection,
-                        TransactionBehavior::Deferred,
-                        &mut worker,
-                    )
-                    .await?;
-                    Ok(AdmittedClaimSelection {
-                        keys,
-                        _charges: std::mem::take(&mut worker.charges),
-                    })
-                }))
-            })
-            .await?
+        self.run_native(false, workers, move || {
+            Ok(crate::tx::block_on_owned_apply(async {
+                let projection = Arc::clone(&worker.projection);
+                let keys = owned_native_transaction(
+                    &projection,
+                    TransactionBehavior::Deferred,
+                    &mut worker,
+                )
+                .await?;
+                Ok(AdmittedClaimSelection {
+                    keys,
+                    _charges: std::mem::take(&mut worker.charges),
+                })
+            }))
+        })
+        .await?
     }
 }
 impl NativeTransactionWork for SelectionWorker {

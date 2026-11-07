@@ -131,34 +131,34 @@ impl QueueProjection {
             job: job.clone(),
             charges: vec![job.owned_buffer(capacity)?],
         };
-        workers
-            .run(move || {
-                Ok(crate::tx::block_on_owned_apply(async {
-                    let projection = worker.projection.clone();
-                    let result = host_transaction(&projection, host, &mut worker).await?;
-                    Ok(match result {
-                        Parts::Reclassify => OrdinaryPackPreparation::Reclassify,
-                        Parts::SingleGroup => OrdinaryPackPreparation::SingleGroup,
-                        Parts::Prepared {
-                            record,
-                            receipts,
+        let in_batch = matches!(host, TxHost::Batch(_));
+        self.run_native(in_batch, workers, move || {
+            Ok(crate::tx::block_on_owned_apply(async {
+                let projection = worker.projection.clone();
+                let result = host_transaction(&projection, host, &mut worker).await?;
+                Ok(match result {
+                    Parts::Reclassify => OrdinaryPackPreparation::Reclassify,
+                    Parts::SingleGroup => OrdinaryPackPreparation::SingleGroup,
+                    Parts::Prepared {
+                        record,
+                        receipts,
+                        positions,
+                        head,
+                        epoch,
+                    } => OrdinaryPackPreparation::Prepared(PreparedOrdinaryPack::new(
+                        record,
+                        AdmittedPackReceipts {
                             positions,
-                            head,
-                            epoch,
-                        } => OrdinaryPackPreparation::Prepared(PreparedOrdinaryPack::new(
-                            record,
-                            AdmittedPackReceipts {
-                                positions,
-                                receipts,
-                                _charges: std::mem::take(&mut worker.charges),
-                            },
-                            head,
-                            epoch,
-                        )),
-                    })
-                }))
-            })
-            .await?
+                            receipts,
+                            _charges: std::mem::take(&mut worker.charges),
+                        },
+                        head,
+                        epoch,
+                    )),
+                })
+            }))
+        })
+        .await?
     }
 }
 impl NativeTransactionWork for Worker {

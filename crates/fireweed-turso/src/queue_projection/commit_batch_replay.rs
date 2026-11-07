@@ -91,18 +91,18 @@ impl QueueProjection {
             job: job.clone(),
             charges: vec![job.owned_buffer(capacity)?],
         };
-        workers
-            .run(move || {
-                Ok(crate::tx::block_on_owned_apply(async {
-                    let projection = worker.projection.clone();
-                    let known = host_transaction(&projection, host, &mut worker).await?;
-                    Ok(AdmittedCommitBatchReplay {
-                        known,
-                        _charges: std::mem::take(&mut worker.charges),
-                    })
-                }))
-            })
-            .await?
+        let in_batch = matches!(host, TxHost::Batch(_));
+        self.run_native(in_batch, workers, move || {
+            Ok(crate::tx::block_on_owned_apply(async {
+                let projection = worker.projection.clone();
+                let known = host_transaction(&projection, host, &mut worker).await?;
+                Ok(AdmittedCommitBatchReplay {
+                    known,
+                    _charges: std::mem::take(&mut worker.charges),
+                })
+            }))
+        })
+        .await?
     }
 }
 impl NativeTransactionWork for Worker {

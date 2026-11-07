@@ -115,6 +115,9 @@ CREATE INDEX IF NOT EXISTS q7_request_identity ON q7_requests(queue_id,domain,id
 /// This lower-level projector is not a QueueStore or a consumer transaction API.
 pub struct QueueProjection {
     writer: Arc<Mutex<Option<Connection>>>,
+    /// Taken before a worker is, so an operation that waits for the writer waits
+    /// without holding a worker, which a batch holding the writer needs.
+    turn: Arc<Mutex<()>>,
     #[cfg(test)]
     pause: Mutex<Option<Arc<ApplyPause>>>,
     #[cfg(test)]
@@ -327,6 +330,7 @@ impl QueueProjection {
                     connection.execute_batch(DDL).await.map_err(unknown)?;
                     Ok(Arc::new(QueueProjection {
                         writer: Arc::new(Mutex::new(Some(connection))),
+                        turn: Arc::new(Mutex::new(())),
                         #[cfg(test)]
                         pause: Mutex::new(None),
                         #[cfg(test)]
@@ -370,7 +374,8 @@ impl QueueProjection {
             genesis,
             output_charge: Some(job.owned_buffer(65536)?),
         };
-        workers.run(move || worker.execute()).await
+        self.run_native(false, workers, move || worker.execute())
+            .await
     }
     pub async fn apply(
         self: &Arc<Self>,
@@ -404,7 +409,8 @@ impl QueueProjection {
             _header_charge: header_charge,
             output_charge: Some(job.owned_buffer(4096)?),
         };
-        workers.run(move || worker.execute()).await
+        self.run_native(false, workers, move || worker.execute())
+            .await
     }
 }
 impl ApplyWorker {

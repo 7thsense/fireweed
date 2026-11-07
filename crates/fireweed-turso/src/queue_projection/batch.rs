@@ -33,11 +33,41 @@ pub(super) async fn host_transaction<W: NativeTransactionWork>(
     }
 }
 
+impl QueueProjection {
+    /// Run `operation` on a scratch worker, once it has its turn at the writer.
+    ///
+    /// The writer is one connection shared by every queue of the pipeline, and a
+    /// batch holds it across its publish. An operation that blocked for it on a
+    /// worker would hold that worker meanwhile; enough of them would leave the
+    /// batch no worker to finish with, and nothing could proceed. So every
+    /// operation waits for its turn first, holding nothing, and a batch holds
+    /// the turn for its whole life and runs its own work with `in_batch`.
+    pub(super) async fn run_native<T, F>(
+        self: &Arc<Self>,
+        in_batch: bool,
+        workers: &ScratchWorkers,
+        operation: F,
+    ) -> QueueResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> QueueResult<T> + Send + 'static,
+    {
+        let _turn = if in_batch {
+            None
+        } else {
+            Some(self.turn.lock().await)
+        };
+        workers.run(operation).await
+    }
+}
+
 pub struct QueueBatch {
     projection: Arc<QueueProjection>,
     writer: Option<tokio::sync::OwnedMutexGuard<Option<Connection>>>,
     /// The queue the staged entries belong to, once one is staged.
     queue_id: Option<i64>,
+    /// Declared last so it is released after the writer.
+    _turn: tokio::sync::OwnedMutexGuard<()>,
 }
 impl QueueProjection {
     /// Take the writer connection and open one write transaction on it.
@@ -45,13 +75,14 @@ impl QueueProjection {
         self: &Arc<Self>,
         workers: &ScratchWorkers,
     ) -> QueueResult<QueueBatch> {
+        let turn = Arc::clone(&self.turn).lock_owned().await;
         let mut writer = Arc::clone(&self.writer).lock_owned().await;
         let connection = writer
             .as_ref()
             .ok_or_else(|| unknown("projection connection is poisoned"))?
             .clone();
-        let begun = workers
-            .run({
+        let begun = self
+            .run_native(true, workers, {
                 let connection = connection.clone();
                 move || {
                     Ok(crate::tx::block_on_owned_apply(async move {
@@ -76,6 +107,7 @@ impl QueueProjection {
         }
         Ok(QueueBatch {
             projection: Arc::clone(self),
+            _turn: turn,
             writer: Some(writer),
             queue_id: None,
         })
@@ -197,8 +229,9 @@ impl QueueBatch {
         let entry = entry.clone();
         let job = Arc::clone(job);
         let offset = i64::try_from(offset).map_err(unknown)?;
-        let queue_id = workers
-            .run(move || {
+        let queue_id = self
+            .projection
+            .run_native(true, workers, move || {
                 Ok(crate::tx::block_on_owned_apply(async move {
                     catch_apply_panic(async {
                         let view = entry.view()?;
@@ -247,8 +280,9 @@ impl QueueBatch {
             .ok_or_else(|| unknown("batch committed with no staged entry"))?;
         let connection = self.connection()?;
         let offset = i64::try_from(offset).map_err(unknown)?;
-        let committed = workers
-            .run({
+        let committed = self
+            .projection
+            .run_native(true, workers, {
                 let connection = connection.clone();
                 move || {
                     Ok(crate::tx::block_on_owned_apply(async move {
@@ -283,8 +317,9 @@ impl QueueBatch {
             if matches!(connection.is_autocommit(), Ok(true)) {
                 return outcome;
             }
-            let rolled = workers
-                .run({
+            let rolled = self
+                .projection
+                .run_native(true, workers, {
                     let connection = connection.clone();
                     move || {
                         Ok(crate::tx::block_on_owned_apply(async move {

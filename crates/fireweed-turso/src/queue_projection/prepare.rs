@@ -105,25 +105,25 @@ impl QueueProjection {
             job: Arc::clone(job),
             charges: vec![job.owned_buffer(charge)?],
         };
-        workers
-            .run(move || {
-                Ok(crate::tx::block_on_owned_apply(async {
-                    let projection = Arc::clone(&worker.projection);
-                    let result = host_transaction(&projection, host, &mut worker).await?;
-                    Ok(result.map(|parts| {
-                        PreparedClaim::new(
-                            parts.record,
-                            AdmittedClaimReplay::from_records(
-                                parts.records,
-                                std::mem::take(&mut worker.charges),
-                            ),
-                            parts.expected_next_offset,
-                            parts.writer_epoch,
-                        )
-                    }))
+        let in_batch = matches!(host, TxHost::Batch(_));
+        self.run_native(in_batch, workers, move || {
+            Ok(crate::tx::block_on_owned_apply(async {
+                let projection = Arc::clone(&worker.projection);
+                let result = host_transaction(&projection, host, &mut worker).await?;
+                Ok(result.map(|parts| {
+                    PreparedClaim::new(
+                        parts.record,
+                        AdmittedClaimReplay::from_records(
+                            parts.records,
+                            std::mem::take(&mut worker.charges),
+                        ),
+                        parts.expected_next_offset,
+                        parts.writer_epoch,
+                    )
                 }))
-            })
-            .await?
+            }))
+        })
+        .await?
     }
 }
 impl NativeTransactionWork for PrepareWorker {

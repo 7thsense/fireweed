@@ -74,23 +74,22 @@ impl QueueProjection {
             job: job.clone(),
             charges: vec![job.owned_buffer(capacity)?],
         };
-        workers
-            .run(move || {
-                Ok(crate::tx::block_on_owned_apply(async {
-                    let projection = worker.projection.clone();
-                    let outcomes = owned_native_transaction(
-                        &projection,
-                        TransactionBehavior::Deferred,
-                        &mut worker,
-                    )
-                    .await?;
-                    Ok(outcomes.map(|outcomes| AdmittedInsertReplay {
-                        outcomes,
-                        _charges: std::mem::take(&mut worker.charges),
-                    }))
+        self.run_native(false, workers, move || {
+            Ok(crate::tx::block_on_owned_apply(async {
+                let projection = worker.projection.clone();
+                let outcomes = owned_native_transaction(
+                    &projection,
+                    TransactionBehavior::Deferred,
+                    &mut worker,
+                )
+                .await?;
+                Ok(outcomes.map(|outcomes| AdmittedInsertReplay {
+                    outcomes,
+                    _charges: std::mem::take(&mut worker.charges),
                 }))
-            })
-            .await?
+            }))
+        })
+        .await?
     }
 }
 impl NativeTransactionWork for InsertReplayWorker {

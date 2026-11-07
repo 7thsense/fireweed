@@ -92,25 +92,25 @@ impl QueueProjection {
             job: job.clone(),
             charges: vec![job.owned_buffer(capacity)?],
         };
-        workers
-            .run(move || {
-                Ok(crate::tx::block_on_owned_apply(async {
-                    let projection = worker.projection.clone();
-                    let parts = host_transaction(&projection, host, &mut worker).await?;
-                    Ok(parts.map(|parts| {
-                        PreparedInsert::new(
-                            parts.record,
-                            AdmittedInsertReplay::from_outcomes(
-                                parts.outcomes,
-                                std::mem::take(&mut worker.charges),
-                            ),
-                            parts.head,
-                            parts.epoch,
-                        )
-                    }))
+        let in_batch = matches!(host, TxHost::Batch(_));
+        self.run_native(in_batch, workers, move || {
+            Ok(crate::tx::block_on_owned_apply(async {
+                let projection = worker.projection.clone();
+                let parts = host_transaction(&projection, host, &mut worker).await?;
+                Ok(parts.map(|parts| {
+                    PreparedInsert::new(
+                        parts.record,
+                        AdmittedInsertReplay::from_outcomes(
+                            parts.outcomes,
+                            std::mem::take(&mut worker.charges),
+                        ),
+                        parts.head,
+                        parts.epoch,
+                    )
                 }))
-            })
-            .await?
+            }))
+        })
+        .await?
     }
 }
 impl NativeTransactionWork for Worker {

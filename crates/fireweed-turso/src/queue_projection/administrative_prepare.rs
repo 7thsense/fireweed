@@ -259,18 +259,18 @@ impl QueueProjection {
             job: job.clone(),
             charges: vec![job.owned_buffer(bytes)?],
         };
-        workers
-            .run(move || {
-                Ok(crate::tx::block_on_owned_apply(async {
-                    let projection = worker.projection.clone();
-                    let parts = host_transaction(&projection, host, &mut worker).await?;
-                    Ok(parts.map(|parts| Completed {
-                        parts,
-                        charges: std::mem::take(&mut worker.charges),
-                    }))
+        let in_batch = matches!(host, TxHost::Batch(_));
+        self.run_native(in_batch, workers, move || {
+            Ok(crate::tx::block_on_owned_apply(async {
+                let projection = worker.projection.clone();
+                let parts = host_transaction(&projection, host, &mut worker).await?;
+                Ok(parts.map(|parts| Completed {
+                    parts,
+                    charges: std::mem::take(&mut worker.charges),
                 }))
-            })
-            .await?
+            }))
+        })
+        .await?
     }
 }
 #[allow(clippy::too_many_arguments)]
