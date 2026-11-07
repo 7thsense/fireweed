@@ -303,6 +303,8 @@ struct Op<P: Plan> {
     result: Option<QueueResult<P::Output>>,
     reply: Option<tokio::sync::oneshot::Sender<QueueResult<P::Output>>>,
     attempts: u32,
+    /// A mutation that ran may be durable, whatever happened after.
+    ran: bool,
     _input: OwnedQueueBufferCharge,
     // Release the operation slot before the final reservation owner can
     // notify shutdown waiters.
@@ -325,6 +327,7 @@ impl<P: Plan> QueueOp for Op<P> {
     ) -> BoxFuture<'a, Result<(), Exit>> {
         Box::pin(async move {
             self.result = None;
+            self.ran = true;
             let result = self
                 .plan
                 .run(p, t, self.limits, &self.clock, &self.job)
@@ -344,6 +347,12 @@ impl<P: Plan> QueueOp for Op<P> {
     }
     fn fail(mut self: Box<Self>, error: QueueError) {
         self.result = None;
+        // Busy promises no effects; a mutation that ran cannot promise that.
+        let error = if P::MUTATION && self.ran && !matches!(error, QueueError::OutcomeUnknown(_)) {
+            unknown("mutation may be durable; resolve its request identity")
+        } else {
+            error
+        };
         if let Some(reply) = self.reply.take() {
             let _ = reply.send(Err(error));
         }
@@ -391,6 +400,7 @@ impl QueueRecoveryPipeline {
             result: None,
             reply: Some(reply),
             attempts: 0,
+            ran: false,
             _input: input,
             _completion: OperationCompletion {
                 _slot: slot,

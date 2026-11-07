@@ -354,3 +354,31 @@ async fn same_instance_id_restart_waits_for_expiry() {
     before.shutdown().await.unwrap();
     after.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requeued_mutation_is_never_busy() {
+    let env = Env::new("requeued", false);
+    let queue = env.address("q");
+    let a = env.open("a.db").await;
+    grow(&a, &queue, 4).await;
+    let request = || InsertRequest {
+        queue: queue.clone(),
+        request_id: "requeued".into(),
+        mode: InsertMode::InsertOnly,
+        items: vec![suite::item("requeued", "counts", 0, 0)],
+    };
+    // The append lands, its reply is lost, and re-entry cannot reach the control plane.
+    a.pipeline_for_test()
+        .lose_append_reply
+        .store(true, Ordering::SeqCst);
+    env.ownership.plane.down.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        a.insert(request()).await,
+        Err(QueueError::OutcomeUnknown(_))
+    ));
+    env.ownership.plane.down.store(false, Ordering::SeqCst);
+    let outcome = a.insert(request()).await.unwrap();
+    assert!(matches!(outcome[0], InsertOutcome::Inserted { .. }));
+    assert_eq!(pending_items(&a, &queue).await, 4, "published once");
+    a.shutdown().await.unwrap();
+}
