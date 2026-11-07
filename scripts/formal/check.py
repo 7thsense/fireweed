@@ -9,17 +9,19 @@ import sys
 
 from explorer import SearchLimit, explore
 from models import models, negative_controls
+from owner_models import FAULTS as OWNER_FAULTS, Owner
 
 
 def run(max_states=100000):
     baseline = []
-    for model in models():
+    for model in models() + [Owner()]:
         report, _ = explore(model, max_states)
         baseline.append(report)
         if report['status'] != 'PASS':
             raise AssertionError(json.dumps(report, indent=2))
     controls = []
-    for model, expected in negative_controls():
+    owner_controls = [(Owner(fault), expected) for fault, expected in OWNER_FAULTS.items()]
+    for model, expected in negative_controls() + owner_controls:
         report, _ = explore(model, max_states)
         if report['status'] != 'COUNTEREXAMPLE' or report['property'] != expected:
             raise AssertionError(f'Insensitive control {model.name}/{model.fault}: {report}')

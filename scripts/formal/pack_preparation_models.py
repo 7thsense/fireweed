@@ -57,8 +57,8 @@ class PackPreparation(Model):
             'bytes':'abstract explicit frame lengths plus ten-byte wrapper',
             'frontier':'all inputs end Prepared, SingleGroup, Reclassify, Invalid or Unknown'}
     properties=sorted(set(FAULTS.values()))
-    assumptions=['sealed exact full-batch source proof and schema; separate authority models',
-        'native cache reads verified for the declared fields; opaque field/receipt digests',
+    assumptions=['trusted projection and schema at the planned position; owner_models covers its trust boundary',
+        'projection reads return the declared fields; opaque field/receipt digests',
         'three-group sequential semantics explicitly enumerated in independent oracles',
         'no root publication/retry, wire encoding, provider durability, unbounded concurrency or RAM claim']
     def __init__(self,fault=None):

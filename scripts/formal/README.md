@@ -47,6 +47,18 @@ attributed. They cannot qualify public S3 × Turso. A local RustFS/Turso test is
 public-cell conformance, not a production-cloud or process-kill qualification.
 The service-envelope fixture does not discharge the numeric PRD progress bound.
 
+## Retained-owner queue path
+
+`owner_models.py` bounds the native path where writes publish to the immutable
+log and reads serve from the local projection: one owner handle, a foreign
+writer, a lost or in-flight publish, a crash that leaves no sidecar, a clean
+shutdown and an apply failure. Its oracles require that acknowledged writes reach
+later reads, a superseded fence cannot commit, nothing is planned over an
+unresolved publish and an untrusted projection never serves. `check.py` runs the
+model and its faulty controls. `python3 scripts/formal/check_owner.py` adds the
+completed witnesses and writes `target/api007-formal/owner.json`; `test_owner.py`
+exercises that runner. Its production mapping is documentary and unexecuted.
+
 ## Generated model-to-S3/Turso replay
 
 The legacy interpreter uses an independent combined model: 6,386 reachable states and
