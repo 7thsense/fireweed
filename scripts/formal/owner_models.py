@@ -31,7 +31,7 @@ FAULTS = {'serve_past_deadline': 'O-READ', 'deadline_from_after_send': 'O-READ',
           'keep_projection_after_publish_failure': 'O-UNRESOLVED',
           'ignore_fence': 'O-FENCE', 'reuse_fence': 'O-FENCE',
           'retain_projection_across_crash': 'O-TRUST',
-          'skip_identity_lookup': 'O-UNIQUE'}
+          'skip_identity_lookup': 'O-UNIQUE', 'reuse_owner_identity': 'O-READ'}
 FAULT_SCENARIO = {'retain_projection_across_crash': 'crash', 'deadline_from_after_send': 'renew'}
 
 
@@ -137,7 +137,8 @@ class Owner(Model):
             yield 'Fence' + tag, self.put(s, i, replace(h, phase='confirming', fence=epoch, proj=proj,
                                                         trusted=not keep), fence=epoch)
         if h.phase == 'confirming':
-            live = s.holder == i and wall < s.expires and s.now < h.candidate
+            live = ((s.holder == i or self.fault == 'reuse_owner_identity')
+                    and wall < s.expires and s.now < h.candidate)
             if live:
                 yield 'Confirm' + tag, self.put(s, i, replace(h, phase='serving', deadline=h.candidate))
             else:
@@ -155,7 +156,9 @@ class Owner(Model):
     def processed(self, s, i, wall):
         h = s.owners[i]
         if h.kind == 'acquire':
-            granted = s.holder in (-1, i) or wall >= s.expires
+            # Handles that share an owner identity re-affirm each other's live lease at once.
+            granted = (s.holder in (-1, i) or wall >= s.expires
+                       or self.fault == 'reuse_owner_identity')
             if granted:
                 return self.put(s, i, replace(h, answer='done', granted=True), holder=i, expires=wall + TTL)
         else:

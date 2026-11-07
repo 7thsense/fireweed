@@ -335,3 +335,22 @@ async fn handoff_reads_only_the_suffix() {
     a.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn same_instance_id_restart_waits_for_expiry() {
+    // A restart that reuses its instance id is still a different owner.
+    let env = Env::new("restart", false);
+    let queue = env.address("q");
+    let before = env
+        .open_with("a.db", env.ownership.handle("instance"))
+        .await;
+    grow(&before, &queue, 4).await;
+    let after = env
+        .open_with("b.db", env.ownership.handle("instance"))
+        .await;
+    assert_eq!(stats(&after, &queue).await.err(), Some(QueueError::Busy));
+    env.ownership.advance(TTL + SECOND);
+    assert_eq!(pending_items(&after, &queue).await, 3);
+    before.shutdown().await.unwrap();
+    after.shutdown().await.unwrap();
+}

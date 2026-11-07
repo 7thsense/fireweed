@@ -72,6 +72,16 @@ class OwnerGateTests(unittest.TestCase):
         reply = next(a for action, a in late.transitions(state) if action == 'Granted0')
         self.assertEqual(reply.owners[0].candidate, 4)
 
+    def test_a_shared_owner_identity_skips_the_lease_wait(self):
+        held = walk(['Acquire0', 'Process0'])
+        shared = model.Owner('reuse_owner_identity')
+        taken = walk(['Acquire1', 'Process1'], At(held, 'reuse_owner_identity'))
+        self.assertEqual(taken.owners[1].granted, True)
+        distinct = walk(['Acquire1', 'Process1'], At(held))
+        self.assertEqual(distinct.owners[1].granted, False)
+        self.assertIn('reuse_owner_identity', model.FAULTS)
+        self.assertIsNotNone(shared)
+
     def test_a_new_owner_waits_out_the_skew_allowance(self):
         state = walk(['Acquire0', 'Process0', 'Granted0'])
         self.assertNotIn('SkewDone0', enabled(state))

@@ -37,7 +37,10 @@ pub struct QueueOwnership {
 impl QueueOwnership {
     /// `clock` stamps control-plane calls. `lease_clock` measures deadlines and
     /// must count all elapsed time. `ttl` is the control plane's lease duration;
-    /// the skew allowance is `ttl / 5`.
+    /// the skew allowance is `ttl / 5`. The control-plane owner is `owner` plus a
+    /// random suffix, unique per handle: the control plane re-affirms a live lease
+    /// for the same owner at once, which would let a restarted process skip the
+    /// wait while the old one still believes its deadline.
     pub fn new(
         control: Arc<dyn AsyncQueueControlPlane>,
         owner: OwnerId,
@@ -49,6 +52,10 @@ impl QueueOwnership {
         if skew.is_zero() {
             return Err(QueueError::Invalid("lease ttl is too short".into()));
         }
+        let suffix = fireweed_engine::generate_query_lease_token()
+            .map_err(|error| unknown(&error.to_string()))?;
+        let owner = OwnerId::new(format!("{}-{}", owner.as_str(), suffix.as_str()))
+            .map_err(|error| QueueError::Invalid(error.to_string()))?;
         Ok(Self {
             control,
             owner,
