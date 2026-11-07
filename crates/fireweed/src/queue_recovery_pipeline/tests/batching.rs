@@ -578,7 +578,7 @@ async fn the_record_bound_splits_a_batch_without_loss_or_reorder_local() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_record_bound_splits_a_batch_without_loss_or_reorder_real_s3() {
-    the_record_bound_splits_a_batch_without_loss_or_reorder(true, 12, 6000).await;
+    the_record_bound_splits_a_batch_without_loss_or_reorder(true, 12, 3000).await;
 }
 
 async fn provision_runs_in_an_iteration_of_its_own(s3: bool) {
