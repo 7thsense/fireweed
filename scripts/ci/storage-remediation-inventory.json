@@ -17014,6 +17014,26 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::native_transport::namespace_elected_with_an_empty_head_is_absent_until_provisioned",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_transport::namespace_elected_with_an_empty_head_is_absent_until_provisioned",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::native_transport::namespace_elected_with_an_empty_head_is_absent_until_provisioned"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::native_transport::rebuild_crosses_several_leaves_local",
           "--",
           "--exact"
@@ -119595,7 +119615,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "941f33fb80ef26a213beded4619c0f1e9e9d7d8fbc452886ae9e8dd258215e8e",
+  "source_inventory_sha256": "78882c2d0cacbda0e415f47067e974feeb489c8080a2384454cdf0d4435b83a8",
   "workspaces": [
     {
       "listing_error_sha256": "",
