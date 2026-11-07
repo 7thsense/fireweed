@@ -5,6 +5,7 @@ use fireweed_objectlog::queue_native_log::{
     QueueNativeLog, QueueNativeLogOptions, QueueNativeS3Connection, QueueNativeS3TransportOptions,
 };
 
+mod native_transport;
 mod owner_safety;
 pub(super) mod ownership;
 mod record_counts;
