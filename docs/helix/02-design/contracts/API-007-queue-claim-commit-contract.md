@@ -233,20 +233,25 @@ object-log publication/apply/recovery remain implementation-specific.
 
 Each S3/Turso queue has one owner at a time, by a lease held in the control
 plane. The owner retains its queue position and fence for the tenure of that
-lease. Mutations plan against the local projection inside one projection
-transaction per owner iteration, so a later mutation sees the earlier ones. The
-iteration publishes one record carrying every mutation's entry, conditionally on
-that fence and the exact expected offset, and commits that transaction only once
-the record is stored; mutations read no log records. Reads are served from the projection and read no log
-records. The owner tracks a local lease deadline, measured from before each lease
-request was sent, and stops serving at it without contacting anything. A new
-owner serves nothing until the previous lease's full duration plus a skew
-allowance has passed. After a passed deadline or any publication that does not
-confirm success, the owner drops its projection and leaves owner state. It may
-re-enter only through a new lease and a strictly newer fence, rebuilding from the
-log, so an original that did publish is found by its identity. Other handles
-return Busy without effects. PostgreSQL has no owner limit, and callers treat
-Busy as retryable on both backends.
+lease, and keeps the queue's projection in a database of its own, one file per
+owned queue in a directory used by that process alone. The owner opens that
+database empty when its tenure begins and deletes it when the tenure ends; a
+file left by an earlier process is deleted, never read. Because no two queues
+share a projection writer, the batches of different queues proceed in parallel.
+Mutations plan against the local projection inside one projection transaction
+per owner iteration, so a later mutation sees the earlier ones. The iteration
+publishes one record carrying every mutation's entry, conditionally on that
+fence and the exact expected offset, and commits that transaction only once the
+record is stored; mutations read no log records. Reads are served from the
+projection and read no log records. The owner tracks a local lease deadline,
+measured from before each lease request was sent, and stops serving at it
+without contacting anything. A new owner serves nothing until the previous
+lease's full duration plus a skew allowance has passed. After a passed deadline
+or any publication that does not confirm success, the owner drops its projection
+and leaves owner state. It may re-enter only through a new lease and a strictly
+newer fence, rebuilding from the log, so an original that did publish is found
+by its identity. Other handles return Busy without effects. PostgreSQL has no
+owner limit, and callers treat Busy as retryable on both backends.
 
 Throughput is settled useful work, not acknowledgments accumulating apply debt.
 Compare PostgreSQL and S3/Turso on the same source, host, workload, sizes and
