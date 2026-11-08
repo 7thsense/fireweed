@@ -17094,6 +17094,86 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::batching::a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_local",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::batching::a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_local",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::batching::a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_local"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::batching::a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_real_s3",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::batching::a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_real_s3",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::batching::a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_real_s3"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::batching::a_lone_oversized_insert_frame_is_refused_without_leaving_the_owner_local",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::batching::a_lone_oversized_insert_frame_is_refused_without_leaving_the_owner_local",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::batching::a_lone_oversized_insert_frame_is_refused_without_leaving_the_owner_local"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::batching::a_lone_oversized_insert_frame_is_refused_without_leaving_the_owner_real_s3",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::batching::a_lone_oversized_insert_frame_is_refused_without_leaving_the_owner_real_s3",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::batching::a_lone_oversized_insert_frame_is_refused_without_leaving_the_owner_real_s3"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::batching::a_planned_insert_always_fits_its_wrapping_record_local",
           "--",
           "--exact"
@@ -104017,6 +104097,158 @@
         "--features",
         "default,memory,objectlog,postgres,turso",
         "--lib",
+        "queue_recovery_pipeline::tests::batching::a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_local",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "memory",
+        "objectlog",
+        "postgres",
+        "turso"
+      ],
+      "harness_id": "queue_recovery_pipeline::tests::batching::a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_local",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::batching::a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_local",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,memory,objectlog,postgres,turso",
+        "--lib",
+        "queue_recovery_pipeline::tests::batching::a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_real_s3",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "memory",
+        "objectlog",
+        "postgres",
+        "turso"
+      ],
+      "harness_id": "queue_recovery_pipeline::tests::batching::a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_real_s3",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::batching::a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_real_s3",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,memory,objectlog,postgres,turso",
+        "--lib",
+        "queue_recovery_pipeline::tests::batching::a_lone_oversized_insert_frame_is_refused_without_leaving_the_owner_local",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "memory",
+        "objectlog",
+        "postgres",
+        "turso"
+      ],
+      "harness_id": "queue_recovery_pipeline::tests::batching::a_lone_oversized_insert_frame_is_refused_without_leaving_the_owner_local",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::batching::a_lone_oversized_insert_frame_is_refused_without_leaving_the_owner_local",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,memory,objectlog,postgres,turso",
+        "--lib",
+        "queue_recovery_pipeline::tests::batching::a_lone_oversized_insert_frame_is_refused_without_leaving_the_owner_real_s3",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "memory",
+        "objectlog",
+        "postgres",
+        "turso"
+      ],
+      "harness_id": "queue_recovery_pipeline::tests::batching::a_lone_oversized_insert_frame_is_refused_without_leaving_the_owner_real_s3",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::batching::a_lone_oversized_insert_frame_is_refused_without_leaving_the_owner_real_s3",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,memory,objectlog,postgres,turso",
+        "--lib",
         "queue_recovery_pipeline::tests::batching::a_planned_insert_always_fits_its_wrapping_record_local",
         "--",
         "--exact"
@@ -120654,7 +120886,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "ee7fae600e958650e874185b4fe5added51ade0f710d1b6c1581cf32095ef058",
+  "source_inventory_sha256": "1eabeef025fd06d5b88b43f5f4ca0d3593788c8c4a3c426797b4768cb42e2fdc",
   "workspaces": [
     {
       "listing_error_sha256": "",
