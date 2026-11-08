@@ -42,12 +42,17 @@ fn is_projection_file(name: &str) -> bool {
     let Some(rest) = name.strip_prefix("q7-") else {
         return false;
     };
-    let (digest, tail) = rest.split_at(rest.len().min(64));
-    digest.len() == 64
-        && digest
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        && SUFFIXES.iter().any(|suffix| tail == format!(".db{suffix}"))
+    // Byte-wise so a multi-byte character straddling byte 64 cannot panic.
+    let bytes = rest.as_bytes();
+    let (Some(digest), Some(tail)) = (bytes.get(..64), bytes.get(64..)) else {
+        return false;
+    };
+    digest
+        .iter()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+        && SUFFIXES
+            .iter()
+            .any(|suffix| tail == format!(".db{suffix}").as_bytes())
 }
 
 fn remove(path: &Path) -> QueueResult<()> {
@@ -96,5 +101,38 @@ impl Drop for TenureProjection {
             // Best effort: the next pipeline discards leftovers at construction.
             let _ = remove(Path::new(&file));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_projection_file;
+
+    #[test]
+    fn projection_file_names_are_matched_exactly() {
+        let digest = "0123456789abcdef".repeat(4);
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            assert!(is_projection_file(&format!("q7-{digest}.db{suffix}")));
+        }
+        assert!(!is_projection_file(&format!("q7-{digest}.db-other")));
+        assert!(!is_projection_file(&format!("q7-{digest}")));
+        assert!(!is_projection_file(&format!("q8-{digest}.db")));
+        assert!(!is_projection_file(&format!("q7-{}.db", &digest[1..])));
+        assert!(!is_projection_file(&format!("q7-{digest}0.db")));
+        assert!(!is_projection_file(&format!(
+            "q7-{}.db",
+            digest.to_uppercase()
+        )));
+        assert!(!is_projection_file(&format!("q7-{}g.db", &digest[1..])));
+        assert!(!is_projection_file("q7-"));
+    }
+
+    #[test]
+    fn non_ascii_names_are_rejected_without_panicking() {
+        // 63 ASCII bytes then a 3-byte character: byte 64 is mid-character.
+        let straddling = format!("q7-{}\u{20ac}.db", "a".repeat(63));
+        assert!(!is_projection_file(&straddling));
+        assert!(!is_projection_file(&format!("q7-{}", "\u{e9}".repeat(40))));
+        assert!(!is_projection_file("q7-\u{1f600}\u{1f600}"));
     }
 }
