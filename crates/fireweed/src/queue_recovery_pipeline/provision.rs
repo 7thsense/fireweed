@@ -30,6 +30,7 @@ impl QueueRecoveryPipeline {
 impl Plan for ProvisionPlan {
     type Output = ();
     const MUTATION: bool = true;
+    const SOLO: bool = true;
     fn address(&self) -> &QueueAddress {
         &self.request.queue
     }

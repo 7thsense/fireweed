@@ -46,6 +46,9 @@ macro_rules! define_queue_source_oracle {
                         );
                         continue;
                     }
+                    QueueLogPayload::Entries(_) => {
+                        panic!("entry-list records are not source-indexed")
+                    }
                     QueueLogPayload::Publication(publication) => {
                         for receipt in publication.receipts() {
                             let receipt = receipt.unwrap();

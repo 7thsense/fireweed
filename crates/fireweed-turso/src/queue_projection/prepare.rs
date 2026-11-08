@@ -55,6 +55,28 @@ impl QueueProjection {
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
     ) -> QueueResult<Option<PreparedClaim>> {
+        self.prepare_claim_in(
+            TxHost::Own(TransactionBehavior::Deferred),
+            input,
+            epoch,
+            max_record_bytes,
+            clock,
+            job,
+            workers,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn prepare_claim_in(
+        self: &Arc<Self>,
+        host: TxHost,
+        input: ClaimReplayInput,
+        epoch: u64,
+        max_record_bytes: u64,
+        clock: Arc<dyn Clock>,
+        job: &Arc<QueueReservation>,
+        workers: &ScratchWorkers,
+    ) -> QueueResult<Option<PreparedClaim>> {
         if !input.genesis.belongs_to(job) {
             return Err(unknown("prepare genesis belongs to another operation"));
         }
@@ -83,30 +105,25 @@ impl QueueProjection {
             job: Arc::clone(job),
             charges: vec![job.owned_buffer(charge)?],
         };
-        workers
-            .run(move || {
-                Ok(crate::tx::block_on_owned_apply(async {
-                    let projection = Arc::clone(&worker.projection);
-                    let result = owned_native_transaction(
-                        &projection,
-                        TransactionBehavior::Deferred,
-                        &mut worker,
+        let in_batch = matches!(host, TxHost::Batch(_));
+        self.run_native(in_batch, workers, move || {
+            Ok(crate::tx::block_on_owned_apply(async {
+                let projection = Arc::clone(&worker.projection);
+                let result = host_transaction(&projection, host, &mut worker).await?;
+                Ok(result.map(|parts| {
+                    PreparedClaim::new(
+                        parts.record,
+                        AdmittedClaimReplay::from_records(
+                            parts.records,
+                            std::mem::take(&mut worker.charges),
+                        ),
+                        parts.expected_next_offset,
+                        parts.writer_epoch,
                     )
-                    .await?;
-                    Ok(result.map(|parts| {
-                        PreparedClaim::new(
-                            parts.record,
-                            AdmittedClaimReplay::from_records(
-                                parts.records,
-                                std::mem::take(&mut worker.charges),
-                            ),
-                            parts.expected_next_offset,
-                            parts.writer_epoch,
-                        )
-                    }))
                 }))
-            })
-            .await?
+            }))
+        })
+        .await?
     }
 }
 impl NativeTransactionWork for PrepareWorker {
@@ -343,7 +360,7 @@ impl NativeTransactionWork for PrepareWorker {
             self.max_record_bytes,
             &self.job,
         )
-        .map_err(|error| unknown(format!("{error:?}")))?;
+        .map_err(publication_error)?;
         let receipt = encode_claim_receipt(&leases, self.max_record_bytes, &self.job)?;
         let publication = encode_claim_publication(
             ClaimPublicationInput {

@@ -5,9 +5,12 @@ use fireweed_objectlog::queue_native_log::{
     QueueNativeLog, QueueNativeLogOptions, QueueNativeS3Connection, QueueNativeS3TransportOptions,
 };
 
+mod batching;
+mod counting_proxy;
 mod native_transport;
 mod owner_safety;
 pub(super) mod ownership;
+mod projection_directory;
 mod record_counts;
 mod store_lifecycle;
 use ownership::TestOwnership;
@@ -24,8 +27,16 @@ fn pipeline_configuration_rejects_semaphore_overflow_before_resource_constructio
         assert!(matches!(options.validate(), Err(QueueError::Invalid(_))));
     }
     options.operations = 1;
-    options.hard_record_bytes = 0;
-    assert!(matches!(options.validate(), Err(QueueError::Invalid(_))));
+    // A bound that leaves no room for a record inside an entry-list record.
+    let overhead = fireweed_engine::queue_log_record::standalone_record_bound(u64::MAX)
+        .map(|bound| u64::MAX - bound)
+        .unwrap();
+    for hard_record_bytes in [0, 1, overhead] {
+        options.hard_record_bytes = hard_record_bytes;
+        assert!(matches!(options.validate(), Err(QueueError::Invalid(_))));
+    }
+    options.hard_record_bytes = overhead + 1;
+    options.validate().unwrap();
 }
 
 #[test]
@@ -92,7 +103,11 @@ fn operation_completion_releases_permit_before_terminal_notification_on_every_dr
 /// The log every store in a test shares, through `prefix` on S3 or `root` on disk.
 /// `retained_bytes` is left to the default, which covers a retained spine for a
 /// thousand owned queues.
-fn native_log_fixture(root: &std::path::Path, s3_prefix: Option<&str>) -> QueueNativeLog {
+fn native_log_fixture(
+    root: &std::path::Path,
+    s3_prefix: Option<&str>,
+    endpoint: Option<&str>,
+) -> QueueNativeLog {
     let options =
         QueueNativeLogOptions::for_queue_limits(&QueueLimits::default(), 128, 2, 4096, None)
             .unwrap();
@@ -100,7 +115,7 @@ fn native_log_fixture(root: &std::path::Path, s3_prefix: Option<&str>) -> QueueN
         let env = fireweed_objectlog::test_s3::shared_s3_test_env();
         QueueNativeLog::s3(
             QueueNativeS3Connection {
-                endpoint: &env.endpoint,
+                endpoint: endpoint.unwrap_or(&env.endpoint),
                 region: &env.region,
                 bucket: &env.bucket,
                 access_key: &env.access_key,
@@ -117,13 +132,13 @@ fn native_log_fixture(root: &std::path::Path, s3_prefix: Option<&str>) -> QueueN
 }
 async fn native_port_fixture(
     root: &std::path::Path,
-    projection_name: &str,
+    projection_directory: &str,
     s3_prefix: Option<&str>,
     clock: Arc<fireweed_conformance::queue_contract::TestClock>,
 ) -> NativeQueueStore {
     native_port_fixture_owned(
         root,
-        projection_name,
+        projection_directory,
         s3_prefix,
         clock,
         TestOwnership::new().handle("only"),
@@ -133,14 +148,14 @@ async fn native_port_fixture(
 /// A handle that shares its control plane and time with others through `ownership`.
 async fn native_port_fixture_owned(
     root: &std::path::Path,
-    projection_name: &str,
+    projection_directory: &str,
     s3_prefix: Option<&str>,
     clock: Arc<fireweed_conformance::queue_contract::TestClock>,
     ownership: QueueOwnership,
 ) -> NativeQueueStore {
     native_port_fixture_sized(
         root,
-        projection_name,
+        projection_directory,
         s3_prefix,
         clock,
         ownership,
@@ -151,19 +166,38 @@ async fn native_port_fixture_owned(
 /// As `native_port_fixture_owned`, with the pipeline's hard record bound.
 async fn native_port_fixture_sized(
     root: &std::path::Path,
-    projection_name: &str,
+    projection_directory: &str,
     s3_prefix: Option<&str>,
     clock: Arc<fireweed_conformance::queue_contract::TestClock>,
     ownership: QueueOwnership,
     hard_record_bytes: u64,
 ) -> NativeQueueStore {
-    let store = native_log_fixture(root, s3_prefix);
+    native_port_fixture_routed(
+        root,
+        projection_directory,
+        s3_prefix,
+        clock,
+        ownership,
+        hard_record_bytes,
+        None,
+    )
+    .await
+}
+/// As `native_port_fixture_sized`, with the S3 client pointed at `endpoint` (a
+/// counting proxy) instead of the shared test endpoint.
+async fn native_port_fixture_routed(
+    root: &std::path::Path,
+    projection_directory: &str,
+    s3_prefix: Option<&str>,
+    clock: Arc<fireweed_conformance::queue_contract::TestClock>,
+    ownership: QueueOwnership,
+    hard_record_bytes: u64,
+    endpoint: Option<&str>,
+) -> NativeQueueStore {
+    let store = native_log_fixture(root, s3_prefix, endpoint);
     let workers = ScratchWorkers::new(2, 8).unwrap();
     let admission = QueueAdmission::new(1, 512 << 20).unwrap();
     let job = Arc::new(admission.reserve(0).unwrap());
-    let projection = QueueProjection::open(&root.join(projection_name), &job, &workers)
-        .await
-        .unwrap();
     drop(job);
     let options = QueuePipelineOptions {
         operations: 128,
@@ -176,7 +210,7 @@ async fn native_port_fixture_sized(
     let quota = fireweed_queue_spool::ScratchDiskQuota::new(64 << 20).unwrap();
     let pipeline = QueueRecoveryPipeline::new(
         Arc::new(store),
-        projection,
+        root.join(projection_directory),
         workers,
         options,
         scratch,
@@ -200,7 +234,7 @@ async fn native_port_identical_contract(s3: bool) {
     let ownership = TestOwnership::new();
     let queue = native_port_fixture_owned(
         &root,
-        "primary.db",
+        "primary-projections",
         prefix.as_deref(),
         clock.clone(),
         ownership.handle("primary"),
@@ -208,7 +242,7 @@ async fn native_port_identical_contract(s3: bool) {
     .await;
     let other = native_port_fixture_owned(
         &root,
-        "independent.db",
+        "independent-projections",
         prefix.as_deref(),
         clock.clone(),
         ownership.handle("other"),
@@ -317,7 +351,8 @@ async fn native_port_identical_contract(s3: bool) {
         Err(QueueError::Busy)
     );
     // Cold projection rebuild is part of the same suite, not cached DB reuse.
-    let reopened = native_port_fixture(&root, "cold-rebuild.db", prefix.as_deref(), clock).await;
+    let reopened =
+        native_port_fixture(&root, "cold-rebuild-projections", prefix.as_deref(), clock).await;
     assert_eq!(
         reopened
             .read_commit(receipts("contract", original_ids()))
@@ -374,7 +409,13 @@ async fn native_condition_checks_contract(s3: bool) {
     std::fs::create_dir_all(&root).unwrap();
     let prefix = s3.then(|| format!("api007-check-contract-{nonce}"));
     let clock = Arc::new(TestClock::default());
-    let queue = native_port_fixture(&root, "primary.db", prefix.as_deref(), clock.clone()).await;
+    let queue = native_port_fixture(
+        &root,
+        "primary-projections",
+        prefix.as_deref(),
+        clock.clone(),
+    )
+    .await;
     let address = QueueAddress {
         tenant: "api007-check-contract".into(),
         queue: nonce.to_string(),
@@ -407,7 +448,8 @@ async fn native_condition_checks_contract(s3: bool) {
     )
     .await;
     queue.shutdown().await.unwrap();
-    let rebuilt = native_port_fixture(&root, "cold-rebuild.db", prefix.as_deref(), clock).await;
+    let rebuilt =
+        native_port_fixture(&root, "cold-rebuild-projections", prefix.as_deref(), clock).await;
     assert_eq!(rebuilt.read_commit(receipts).await.unwrap(), expected);
     assert_eq!(
         rebuilt.commit(original).await.unwrap(),

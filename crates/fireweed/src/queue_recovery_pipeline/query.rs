@@ -45,7 +45,7 @@ impl Plan for QueryPlan {
                 Err(error) => return Ok(Err(error)),
             };
             settle(
-                p.projection
+                t.projection()
                     .read_query_page(
                         QueryReadInput {
                             genesis,

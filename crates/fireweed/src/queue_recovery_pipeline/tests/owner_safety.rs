@@ -171,7 +171,7 @@ async fn publish_failure_drops_projection_and_exits() {
         let env = Env::new(case, false);
         let queue = env.address("q");
         let a = env.open("a.db").await;
-        grow(&a, &queue, 4).await;
+        let log = grow(&a, &queue, 4).await;
         let pipeline = a.pipeline_for_test();
         let foreign = match case {
             "lost-reply" => {
@@ -215,9 +215,9 @@ async fn publish_failure_drops_projection_and_exits() {
         );
         let (records, _, fences) = delta(&a, before);
         let log = match case {
-            "fence-bumped" => 4,
+            "fence-bumped" => log,
             // the published record whose reply was lost, or the foreign record
-            _ => 5,
+            _ => log + 1,
         };
         assert_eq!(
             (records, fences),
@@ -267,7 +267,7 @@ async fn stalled_owner_rechecks_before_ack() {
         let env = Env::new("stall", false);
         let queue = env.address("q");
         let a = env.open("a.db").await;
-        grow(&a, &queue, 4).await;
+        let log = grow(&a, &queue, 4).await;
         let ownership = env.ownership.clone();
         hook_once(&a, stage, move || {
             // The batch was taken, or read, and then the process stalled past the deadline.
@@ -287,7 +287,7 @@ async fn stalled_owner_rechecks_before_ack() {
         } else {
             // Answered only after re-entry rebuilt from the log.
             assert_eq!(result.unwrap().totals.pending, 3, "{stage:?}");
-            assert_eq!(delta(&a, before), (4, 1, 1), "{stage:?}");
+            assert_eq!(delta(&a, before), (log, 1, 1), "{stage:?}");
         }
         env.ownership.plane.down.store(false, Ordering::SeqCst);
         a.shutdown().await.unwrap();
@@ -299,7 +299,7 @@ async fn lost_renewal_reply_is_safe() {
     let env = Env::new("lost-renewal", false);
     let queue = env.address("q");
     let a = env.open("a.db").await;
-    grow(&a, &queue, 4).await;
+    let log = grow(&a, &queue, 4).await;
     env.ownership.advance(8 * SECOND);
     env.ownership
         .plane
@@ -312,7 +312,11 @@ async fn lost_renewal_reply_is_safe() {
     env.ownership.lease_clock.advance(8 * SECOND);
     let before = now(&a);
     assert_eq!(pending_items(&a, &queue).await, 3);
-    assert_eq!(delta(&a, before), (4, 1, 1), "stopped at the old deadline");
+    assert_eq!(
+        delta(&a, before),
+        (log, 1, 1),
+        "stopped at the old deadline"
+    );
     a.shutdown().await.unwrap();
 }
 
@@ -322,13 +326,13 @@ async fn handoff_reads_only_the_suffix() {
     let queue = env.address("q");
     let a = env.open("a.db").await;
     let b = env.open("b.db").await;
-    grow(&a, &queue, 50).await;
+    let log = grow(&a, &queue, 50).await;
     commit(&a, &queue, 51).await;
     env.ownership.advance(TTL + SECOND);
     let before = now(&b);
     reads(&b, &queue).await;
     let (records, _, fences) = delta(&b, before);
-    assert_eq!((records, fences), (51, 1), "one rebuild from the log");
+    assert_eq!((records, fences), (log + 1, 1), "one rebuild from the log");
     let before = now(&b);
     reads(&b, &queue).await;
     assert_eq!(delta(&b, before), (0, 0, 0));
@@ -400,16 +404,10 @@ async fn long_batch_renews_instead_of_lapsing() {
         }
     }));
     let before = now(&a);
-    let mut tasks = Vec::new();
+    // One at a time: operations queued together share one record and one
+    // publish, so only separate iterations add up to more than a lease.
     for n in 0..6 {
-        let a = a.clone();
-        let queue = queue.clone();
-        tasks.push(tokio::spawn(
-            async move { insert(&a, &queue, 300 + n).await },
-        ));
-    }
-    for task in tasks {
-        task.await.unwrap();
+        insert(&a, &queue, 300 + n).await;
     }
     let (_, _, fences) = delta(&a, before);
     assert_eq!(fences, 1, "one entry; the batch renewed instead of lapsing");

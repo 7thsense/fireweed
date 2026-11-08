@@ -46,11 +46,11 @@ fn tick_during_rebuild(
 async fn rebuild_crosses_leaves(s3: bool, len: usize) {
     let env = Env::new("leaves", s3);
     let queue = env.address("q");
-    let first = env.open("a.db").await;
+    let first = env.open("a-projections").await;
     sequential(&first, &queue, len).await;
     first.shutdown().await.unwrap();
     drop(first);
-    let second = env.open("b.db").await;
+    let second = env.open("b-projections").await;
     // Each of the first two runs takes more than half a lease.
     let runs = tick_during_rebuild(&second, &env.ownership, 8 * SECOND, 2);
     let before = now(&second);
@@ -109,11 +109,11 @@ async fn rebuild_crosses_several_leaves_real_s3() {
 async fn rejected_renewal_during_rebuild_is_busy() {
     let env = Env::new("rejected-renewal", false);
     let queue = env.address("q");
-    let first = env.open("a.db").await;
+    let first = env.open("a-projections").await;
     grow(&first, &queue, 70).await;
     first.shutdown().await.unwrap();
     drop(first);
-    let second = env.open("b.db").await;
+    let second = env.open("b-projections").await;
     // The first run takes more than half a lease, and the renewal is refused.
     let runs = tick_during_rebuild(&second, &env.ownership, 8 * SECOND, 1);
     env.ownership
@@ -140,7 +140,7 @@ async fn rejected_renewal_during_rebuild_is_busy() {
 async fn runs_of_records_match_single_reads(s3: bool) {
     let env = Env::new("runs", s3);
     let queue = env.address("q");
-    let store = env.open("a.db").await;
+    let store = env.open("a-projections").await;
     sequential(&store, &queue, 50).await;
     let pipeline = store.pipeline_for_test();
     let log = &pipeline.log;
@@ -230,7 +230,7 @@ async fn namespace_elected_with_an_empty_head_is_absent_until_provisioned() {
     // A crash between electing the namespace and publishing the genesis.
     let env = Env::new("empty-head", false);
     let queue = env.address("q");
-    let store = env.open("a.db").await;
+    let store = env.open("a-projections").await;
     {
         let pipeline = store.pipeline_for_test();
         let admission = QueueAdmission::new(1, 64 << 20).unwrap();
@@ -278,7 +278,7 @@ async fn oversized_genesis_is_a_definite_error_and_leaves_the_queue_absent() {
     // The genesis record cannot fit a 64-byte bound.
     let small = super::native_port_fixture_sized(
         &env.root,
-        "small.db",
+        "small-projections",
         env.prefix.as_deref(),
         env.clock.clone(),
         env.ownership.handle("small"),
@@ -291,7 +291,7 @@ async fn oversized_genesis_is_a_definite_error_and_leaves_the_queue_absent() {
     };
     assert_eq!(small.provision(request()).await, Err(QueueError::TooLarge));
     // The owner did not loop on the error: the lease was given back.
-    let ordinary = env.open("ordinary.db").await;
+    let ordinary = env.open("ordinary-projections").await;
     assert_eq!(
         ordinary
             .read_commit(ReceiptReadRequest {

@@ -32,7 +32,9 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
         let expected = match self.checked.view().payload() {
             QueueLogPayload::Publication(publication) => publication.summary().receipts,
             QueueLogPayload::Claim(_) => 1,
-            QueueLogPayload::Genesis(_) => unreachable!("context rejects genesis"),
+            QueueLogPayload::Genesis(_) | QueueLogPayload::Entries(_) => {
+                unreachable!("context rejects genesis and entry lists")
+            }
         };
         if expected > limits.edits {
             return Err(unknown("original count exceeds admitted limits"));
@@ -68,7 +70,9 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
                 .await?;
                 processed = 1;
             }
-            QueueLogPayload::Genesis(_) => unreachable!("context rejects genesis"),
+            QueueLogPayload::Genesis(_) | QueueLogPayload::Entries(_) => {
+                unreachable!("context rejects genesis and entry lists")
+            }
         }
         if processed != expected {
             return Err(unknown("incomplete original receipt coverage"));

@@ -73,11 +73,11 @@ impl Plan for PreviewPlan {
                 required_last_record_epoch: epoch,
             };
             settle(if input.group.administration.is_none() {
-                p.projection
+                t.projection()
                     .preview_ordinary_commit(input, clock.clone(), job, &p.workers)
                     .await
             } else {
-                p.projection
+                t.projection()
                     .preview_administration(
                         AdministrativePreparationInput {
                             commit: input,

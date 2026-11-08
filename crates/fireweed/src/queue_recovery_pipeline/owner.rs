@@ -1,21 +1,29 @@
 //! One loop per queue; every operation, read or write, goes through it.
 //!
 //! The loop owns the queue's position, its storage fence, its lease deadline
-//! and its use of the local projection, and keeps `P = fold(log[0, p))`.
-//! A healthy iteration makes no object-store read: writes make one conditional
-//! publish and apply the same record to the projection; reads are served from
-//! the projection. Exit is the only failure path. Entry always rebuilds from
-//! the log under a strictly newer fence.
+//! and its own local projection database, and keeps `P = fold(log[0, p))`.
+//! A healthy iteration makes no object-store read. Its mutations are planned
+//! one after another against one open projection transaction, each staging its
+//! entry into it, so a later request sees the earlier ones. The iteration then
+//! makes one conditional publish of one record carrying every entry, commits the
+//! transaction, and answers each request from the projection. Reads are served
+//! from the projection. Exit is the only failure path: it rolls the transaction
+//! back. Entry always rebuilds from the log under a strictly newer fence.
 use super::*;
 use fireweed_core::OwnerId;
 use fireweed_engine::{
     AcquireOutcome, AsyncQueueControlPlane, Clock, LeaseState, QueueKey,
-    queue_log_record::{QueueLogPayload, QueueLogRecordView},
+    queue_log_record::{
+        OwnedQueueEntry, OwnedQueueLogRecord, QueueLogPayload, QueueLogRecordView,
+        checked_entries_record_len, encode_checked_entries_record,
+    },
 };
 use fireweed_objectlog::queue_native_log::{
     QueueNativeNamespace, QueueNativeNamespaceIdentity, QueueNativeSubmit, QueueNativeWriter,
 };
+use fireweed_turso::queue_projection::{QueueBatch, QueueProjection};
 use futures::future::BoxFuture;
+use projection_files::TenureProjection;
 use std::{collections::VecDeque, time::Duration};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -127,8 +135,14 @@ pub(super) struct Tenure {
     pub genesis: Option<Genesis>,
     deadline: Duration,
     renew_at: Duration,
+    /// This queue's projection database. Ending the tenure closes it and deletes
+    /// its files.
+    projection: TenureProjection,
 }
 impl Tenure {
+    pub(super) fn projection(&self) -> &Arc<QueueProjection> {
+        self.projection.get()
+    }
     pub(super) fn namespace(
         &self,
         p: &QueueRecoveryPipeline,
@@ -195,23 +209,85 @@ impl Tenure {
                 });
                 self.insertion_sequence = 0;
             }
-            QueueLogPayload::Publication(frame) => {
-                self.insertion_sequence = frame.summary().final_sequence;
+            QueueLogPayload::Entries(entries) => {
+                self.insertion_sequence = entries.last().frame().summary().final_sequence;
             }
-            QueueLogPayload::Claim(claim) => {
-                self.insertion_sequence = claim.commands().summary().final_sequence;
+            // The native pipeline writes and reads only genesis and entry lists.
+            QueueLogPayload::Publication(_) | QueueLogPayload::Claim(_) => {
+                return Err(unknown("record is not an entry list"));
             }
         }
         self.historical_epoch = view.epoch();
         self.next_offset = offset.checked_add(1).ok_or(QueueError::TooLarge)?;
         Ok(())
     }
-    /// Publish conditionally on the fence and the exact expected offset, then
-    /// apply the same bytes to the projection. Anything but `Stored` is `Exit`.
+    /// Publish the genesis conditionally on the fence and the exact expected
+    /// offset, then apply the same bytes to the projection. Genesis is alone in
+    /// its record, so it does not go through a batch. Anything but `Stored` is
+    /// `Exit`.
     pub(super) async fn publish(
         &mut self,
         p: &QueueRecoveryPipeline,
-        record: fireweed_engine::queue_log_record::OwnedQueueLogRecord,
+        record: OwnedQueueLogRecord,
+        expected_head: u64,
+        job: &Arc<QueueReservation>,
+    ) -> Result<(), Exit> {
+        let frozen = OwnedQueueLogRecord::from_admitted_bytes(
+            bytes::Bytes::copy_from_slice(record.bytes()),
+            job.owned_buffer((record.bytes().len() as u64) * 4 + 4096)
+                .map_err(|_| Exit)?,
+            job,
+        )
+        .map_err(|_| Exit)?;
+        self.append(p, &record, expected_head, job).await?;
+        drop(record);
+        self.apply(p, frozen, expected_head, job)
+            .await
+            .map_err(|_| Exit)
+    }
+    /// Publish one record of staged entries, then make the staged transaction
+    /// the projection. The projection changes only after the record is durable:
+    /// any failure rolls it back and is `Exit`.
+    pub(super) async fn publish_batch(
+        &mut self,
+        p: &QueueRecoveryPipeline,
+        staging: Batch,
+    ) -> Result<(), Exit> {
+        let Batch {
+            projection,
+            entries,
+            first_job,
+            ..
+        } = staging;
+        let (Some(projection), Some(job)) = (projection, first_job) else {
+            return Err(Exit);
+        };
+        let offset = self.next_offset;
+        let published = async {
+            let record =
+                encode_checked_entries_record(self.epoch, &entries, p.hard_record_bytes, &job)
+                    .map_err(|_| Exit)?;
+            self.append(p, &record, offset, &job).await?;
+            self.check(&record, offset).map_err(|_| Exit)
+        }
+        .await;
+        match published {
+            Ok(()) => projection
+                .commit(offset, self.epoch, &p.workers)
+                .await
+                .map_err(|_| Exit),
+            Err(exit) => {
+                projection.rollback(&p.workers).await;
+                Err(exit)
+            }
+        }
+    }
+    /// Append the record conditionally on the fence and the exact expected
+    /// offset. Only a stored direct successor is success.
+    async fn append(
+        &mut self,
+        p: &QueueRecoveryPipeline,
+        record: &OwnedQueueLogRecord,
         expected_head: u64,
         job: &Arc<QueueReservation>,
     ) -> Result<(), Exit> {
@@ -222,13 +298,6 @@ impl Tenure {
         if epoch != self.epoch {
             return Err(Exit);
         }
-        let frozen = fireweed_engine::queue_log_record::OwnedQueueLogRecord::from_admitted_bytes(
-            bytes::Bytes::copy_from_slice(record.bytes()),
-            job.owned_buffer((record.bytes().len() as u64) * 4 + 4096)
-                .map_err(|_| Exit)?,
-            job,
-        )
-        .map_err(|_| Exit)?;
         let namespace = self.namespace(p, job).map_err(|_| Exit)?;
         let writer = self.writer.as_mut().ok_or(Exit)?;
         if writer.epoch() != epoch || writer.next_offset() != expected_head {
@@ -237,7 +306,7 @@ impl Tenure {
         #[cfg(test)]
         p.stage(Stage::BeforeAppend);
         let publication = writer
-            .prepare_record(&p.log, &namespace, &record, job)
+            .prepare_record(&p.log, &namespace, record, job)
             .await
             .map_err(|_| Exit)?;
         let submitted = p.log.submit(&publication).await;
@@ -252,6 +321,9 @@ impl Tenure {
         } else {
             submitted
         };
+        #[cfg(test)]
+        p.published
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // Only a stored direct successor is success. A conflict, an error or any
         // other head leaves owner state.
         let Ok(QueueNativeSubmit::Stored(stored)) = submitted else {
@@ -268,10 +340,7 @@ impl Tenure {
         if advanced != stored {
             return Err(Exit);
         }
-        drop((publication, namespace, record));
-        self.apply(p, frozen, expected_head, job)
-            .await
-            .map_err(|_| Exit)
+        Ok(())
     }
     pub(super) async fn apply(
         &mut self,
@@ -281,7 +350,9 @@ impl Tenure {
         job: &Arc<QueueReservation>,
     ) -> QueueResult<()> {
         self.check(&record, offset)?;
-        p.projection.apply(record, offset, job, &p.workers).await?;
+        self.projection()
+            .apply(record, offset, job, &p.workers)
+            .await?;
         Ok(())
     }
     /// Verify the record and advance the position past it.
@@ -299,11 +370,142 @@ impl Tenure {
     }
 }
 
+/// What staging one mutation into an iteration's batch came to.
+pub(super) enum Staged {
+    /// Its entries, if any, are staged. Answer it from the projection after the
+    /// batch commits.
+    Pending,
+    /// A definite rejection. Nothing was staged for it and it is answered now.
+    Rejected(QueueError),
+    /// The record has no room for its next entry. It, and every operation after
+    /// it, stays queued. `progressed` says some of its entries are staged.
+    Full { progressed: bool },
+}
+/// What `Batch::stage` did with one planned entry.
+pub(super) enum StagedEntry {
+    Staged,
+    Full,
+    /// The entry cannot fit a record even alone.
+    TooLarge,
+}
+/// The mutations of one loop iteration, staged into one projection transaction
+/// and bound for one log record.
+pub(super) struct Batch {
+    projection: Option<QueueBatch>,
+    entries: Vec<OwnedQueueEntry>,
+    /// The insertion sequence after the staged entries.
+    sequence: Option<u64>,
+    first_job: Option<Arc<QueueReservation>>,
+}
+impl Batch {
+    fn new() -> Self {
+        Self {
+            projection: None,
+            entries: Vec::new(),
+            sequence: None,
+            first_job: None,
+        }
+    }
+    fn has_entries(&self) -> bool {
+        !self.entries.is_empty()
+    }
+    /// Where the projection stands for planning: the committed offset and epoch,
+    /// and the sequence after everything staged so far.
+    pub(super) fn point(&self, t: &Tenure) -> (u64, u64, u64) {
+        let (next, sequence, epoch) = t.point();
+        (next, self.sequence.unwrap_or(sequence), epoch)
+    }
+    /// The open projection transaction, begun on first use.
+    pub(super) async fn host(
+        &mut self,
+        p: &QueueRecoveryPipeline,
+        t: &Tenure,
+    ) -> Result<&mut QueueBatch, Exit> {
+        if self.projection.is_none() {
+            self.projection = Some(
+                t.projection()
+                    .begin_batch(&p.workers)
+                    .await
+                    .map_err(|_| Exit)?,
+            );
+        }
+        self.projection.as_mut().ok_or(Exit)
+    }
+    /// Stage an entry the planner produced from a record, unless the record
+    /// would then exceed the hard byte bound. Planning has no side effects, so
+    /// declining it needs no undo.
+    pub(super) async fn stage(
+        &mut self,
+        p: &QueueRecoveryPipeline,
+        t: &Tenure,
+        record: OwnedQueueLogRecord,
+        expected_head: u64,
+        job: &Arc<QueueReservation>,
+    ) -> Result<StagedEntry, Exit> {
+        if expected_head != t.next_offset {
+            return Err(Exit);
+        }
+        let entry = record.into_entry().map_err(|_| Exit)?;
+        let size = checked_entries_record_len(
+            self.entries
+                .iter()
+                .chain(std::iter::once(&entry))
+                .map(|entry| entry.bytes().len() as u64),
+        )
+        .map_err(|_| Exit)?;
+        if size > p.hard_record_bytes {
+            return Ok(if self.entries.is_empty() {
+                // Planners are bounded by `planner_bound`, so a planned record
+                // fits alone; this is a definite refusal, never reached.
+                #[cfg(test)]
+                p.lone_too_large
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                StagedEntry::TooLarge
+            } else {
+                StagedEntry::Full
+            });
+        }
+        let final_sequence = entry
+            .view()
+            .map_err(|_| Exit)?
+            .frame()
+            .summary()
+            .final_sequence;
+        let projection = self.projection.as_mut().ok_or(Exit)?;
+        projection
+            .stage(&entry, t.epoch, t.next_offset, job, &p.workers)
+            .await
+            .map_err(|_| Exit)?;
+        #[cfg(test)]
+        p.staged.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.sequence = Some(final_sequence);
+        self.first_job.get_or_insert_with(|| Arc::clone(job));
+        self.entries.push(entry);
+        Ok(StagedEntry::Staged)
+    }
+    /// Discard the open transaction, if any, and release the writer.
+    async fn rollback(self, p: &QueueRecoveryPipeline) {
+        if let Some(projection) = self.projection {
+            projection.rollback(&p.workers).await;
+        }
+    }
+}
+
 /// One operation as the loop sees it.
 pub(super) trait QueueOp: Send {
     fn mutation(&self) -> bool;
+    /// Runs in an iteration of its own, never in a batch.
+    fn solo(&self) -> bool;
     fn job(&self) -> &Arc<QueueReservation>;
     fn attempts(&mut self) -> &mut u32;
+    /// Plan a mutation against the batch and stage its entries.
+    fn stage<'a>(
+        &'a mut self,
+        p: &'a QueueRecoveryPipeline,
+        t: &'a Tenure,
+        batch: &'a mut Batch,
+    ) -> BoxFuture<'a, Result<Staged, Exit>>;
+    /// Answer from the projection; for a mutation, once its batch committed.
     fn run<'a>(
         &'a mut self,
         p: &'a QueueRecoveryPipeline,
@@ -318,7 +520,24 @@ pub(super) trait QueueOp: Send {
 pub(super) trait Plan: Send + Sync + 'static {
     type Output: Send + 'static;
     const MUTATION: bool;
+    /// Provisioning writes the genesis, which is alone in its record.
+    const SOLO: bool = false;
     fn address(&self) -> &QueueAddress;
+    /// Plan against the batch's staged state and stage the entries. A mutation
+    /// overrides this; nothing else stages.
+    fn stage<'a>(
+        &'a self,
+        _p: &'a QueueRecoveryPipeline,
+        _t: &'a Tenure,
+        _batch: &'a mut Batch,
+        _limits: QueueLimits,
+        _clock: &'a Arc<dyn Clock>,
+        _job: &'a Arc<QueueReservation>,
+    ) -> BoxFuture<'a, Result<Staged, Exit>> {
+        Box::pin(async { Ok(Staged::Pending) })
+    }
+    /// Answer from the projection. For a mutation this runs after its batch
+    /// committed; for a provision it also publishes.
     fn run<'a>(
         &'a self,
         p: &'a QueueRecoveryPipeline,
@@ -347,11 +566,37 @@ impl<P: Plan> QueueOp for Op<P> {
     fn mutation(&self) -> bool {
         P::MUTATION
     }
+    fn solo(&self) -> bool {
+        P::SOLO
+    }
     fn job(&self) -> &Arc<QueueReservation> {
         &self.job
     }
     fn attempts(&mut self) -> &mut u32 {
         &mut self.attempts
+    }
+    fn stage<'a>(
+        &'a mut self,
+        p: &'a QueueRecoveryPipeline,
+        t: &'a Tenure,
+        batch: &'a mut Batch,
+    ) -> BoxFuture<'a, Result<Staged, Exit>> {
+        Box::pin(async move {
+            self.result = None;
+            let ran = self.ran;
+            self.ran = true;
+            let staged = self
+                .plan
+                .stage(p, t, batch, self.limits, &self.clock, &self.job)
+                .await?;
+            match &staged {
+                Staged::Rejected(error) => self.result = Some(Err(error.clone())),
+                // Nothing of it ran, so a later failure may still say Busy.
+                Staged::Full { progressed: false } => self.ran = ran,
+                _ => {}
+            }
+            Ok(staged)
+        })
     }
     fn run<'a>(
         &'a mut self,
@@ -488,7 +733,8 @@ impl QueueRecoveryPipeline {
         sent
     }
     /// Stop accepting operations, let every loop finish what it holds, and
-    /// release the leases. The projection is not touched: it dies with the process.
+    /// release the leases. Each loop's tenure ends with it, which deletes its
+    /// projection file.
     pub(super) async fn close_queues(&self) {
         let slots = {
             let mut table = match self.queues.lock() {
@@ -509,7 +755,10 @@ impl QueueRecoveryPipeline {
     }
     #[cfg(test)]
     pub(super) fn stage(&self, stage: Stage) {
-        if let Some(hook) = self.on_stage.lock().unwrap().clone() {
+        // The lock is released before the hook runs: a hook that blocks one
+        // queue's loop must not block the other queues' loops at their stages.
+        let hook = self.on_stage.lock().unwrap().clone();
+        if let Some(hook) = hook {
             hook(stage);
         }
     }
@@ -645,10 +894,68 @@ impl QueueLoop {
         #[cfg(test)]
         p.stage(Stage::BatchTaken);
         let tenure = self.tenure.as_mut().expect("owner");
+        let mutations = batch.iter().take_while(|op| op.mutation()).count();
+        let mut staging = Batch::new();
         let mut leave = false;
         let mut started = 0;
-        while started < batch.len() {
+        // Mutations that staged, or found their request already stored, and are
+        // answered from the projection once the batch commits.
+        let mut answers = Vec::new();
+        let mut solo = false;
+        // One record per iteration: stage mutations in arrival order, until the
+        // lease needs renewing or the record is full.
+        while started < mutations {
             // A batch longer than half a lease stops starting work and renews first.
+            if started > 0 && p.ownership.lease_clock.now() >= tenure.renew_at {
+                break;
+            }
+            if batch[started].solo() {
+                // Genesis is alone in its record: nothing else shares the iteration.
+                if started > 0 {
+                    break;
+                }
+                solo = true;
+                if batch[started].run(p, tenure).await.is_err() {
+                    *batch[started].attempts() += 1;
+                    leave = true;
+                    break;
+                }
+                started += 1;
+                break;
+            }
+            match batch[started].stage(p, tenure, &mut staging).await {
+                Err(Exit) => {
+                    *batch[started].attempts() += 1;
+                    leave = true;
+                    break;
+                }
+                Ok(Staged::Full { .. }) => break,
+                Ok(Staged::Rejected(_)) => {}
+                Ok(Staged::Pending) => answers.push(started),
+            }
+            started += 1;
+        }
+        // One conditional publish for everything staged, or none if nothing was.
+        if leave || !staging.has_entries() {
+            staging.rollback(p).await;
+        } else if tenure.publish_batch(p, staging).await.is_err() {
+            // The whole batch was in the record: every staged operation counts.
+            for &at in &answers {
+                *batch[at].attempts() += 1;
+            }
+            leave = true;
+        }
+        if !leave {
+            for &at in &answers {
+                if batch[at].run(p, tenure).await.is_err() {
+                    *batch[at].attempts() += 1;
+                    leave = true;
+                    break;
+                }
+            }
+        }
+        // Reads follow their batch's mutations, from the projection.
+        while !leave && !solo && started == mutations && started < batch.len() {
             if started > 0 && p.ownership.lease_clock.now() >= tenure.renew_at {
                 break;
             }
@@ -674,7 +981,7 @@ impl QueueLoop {
                     *op.attempts() += 1;
                 }
             }
-            self.exit(p, batch.first().map(|op| op.job().clone())).await;
+            self.exit();
             batch.append(&mut unstarted);
             self.requeue(batch);
             return;
@@ -736,16 +1043,9 @@ impl QueueLoop {
             }
         }
     }
-    /// Drop this queue's projection and leave owner state. With no operation
-    /// to charge, the rows are dropped by the next entry.
-    async fn exit(&mut self, p: &Arc<QueueRecoveryPipeline>, job: Option<Arc<QueueReservation>>) {
+    /// Leave owner state. The tenure's projection is closed and its file deleted.
+    fn exit(&mut self) {
         self.tenure = None;
-        if let Some(job) = job {
-            let _ = p
-                .projection
-                .drop_queue(self.address.clone(), &job, &p.workers)
-                .await;
-        }
     }
     async fn release(&mut self) {
         if let Some(t) = self.tenure.take() {
@@ -795,10 +1095,6 @@ impl QueueLoop {
     ) -> QueueResult<Tenure> {
         let own = &p.ownership;
         let busy = |_: fireweed_engine::EngineError| QueueError::Busy;
-        // A previous tenure's rows are never reused.
-        p.projection
-            .drop_queue(self.address.clone(), job, &p.workers)
-            .await?;
         let mut requested = own.lease_clock.now();
         own.control
             .register_owner(&own.owner, own.stamp())
@@ -816,6 +1112,15 @@ impl QueueLoop {
         *acquired = Some(lease.assignment_epoch);
         // Always wait, with no check of whether there was a previous owner.
         Self::wait_lease_clock(p, own.lease_clock.now() + own.skew).await;
+        // The tenure's own database, empty, before anything is rebuilt into it. If
+        // entry fails below, dropping the tenure deletes the file.
+        let projection = TenureProjection::open(
+            &p.projection_directory,
+            self.key.queue_id.as_str(),
+            job,
+            &p.workers,
+        )
+        .await?;
         let mut tenure = Tenure {
             lease_epoch: lease.assignment_epoch,
             identity: None,
@@ -827,6 +1132,7 @@ impl QueueLoop {
             genesis: None,
             deadline: Duration::ZERO,
             renew_at: Duration::ZERO,
+            projection,
         };
         // With no namespace there is nothing to fence or read; provisioning fences.
         // An existing namespace is always fenced. An empty head means nothing to
@@ -880,7 +1186,10 @@ impl QueueLoop {
                     span.phase(diagnostics::RecoveryPhase::CheckedFold);
                     tenure.check(&record, at)?;
                     span.phase(diagnostics::RecoveryPhase::NativeApply);
-                    p.projection.apply(record, at, job, &p.workers).await?;
+                    tenure
+                        .projection()
+                        .apply(record, at, job, &p.workers)
+                        .await?;
                 }
                 #[cfg(test)]
                 p.stage(Stage::RebuildRun);

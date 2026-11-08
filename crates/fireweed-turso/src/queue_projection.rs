@@ -3,16 +3,17 @@
 mod administrative_prepare;
 #[cfg(target_os = "linux")]
 mod administrative_selection;
+mod batch;
 mod commit_batch_replay;
 mod commit_pack_prepare;
 mod commit_prepare;
 pub use administrative_prepare::AdministrativePreparationInput;
+pub use batch::QueueBatch;
 pub use commit_batch_replay::{AdmittedCommitBatchReplay, CommitBatchReplayInput};
 pub use commit_pack_prepare::{
     AdmittedPackReceipts, CommitPackPreparationInput, OrdinaryPackPreparation, PreparedOrdinaryPack,
 };
 pub use preview::AdmittedQueuePreview;
-mod drop_queue;
 mod filter_sql;
 mod group_authority;
 mod insert_prepare;
@@ -34,6 +35,7 @@ mod stats_group;
 mod stats_read;
 mod unique_authority;
 mod work;
+use batch::{TxHost, host_transaction};
 pub use commit_prepare::{AdmittedCommitReceipt, CommitPreparationInput, PreparedOrdinaryCommit};
 use fireweed_core::queue_contract::*;
 use fireweed_engine::{
@@ -63,7 +65,11 @@ pub use replay::{AdmittedClaimReplay, ClaimReplayInput};
 pub use selection::AdmittedClaimSelection;
 pub use state_read::{AdmittedStateRecords, StateReadInput};
 pub use stats_read::{AdmittedQueueStats, StatsReadInput};
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::sync::Mutex;
 use turso::{
     Builder, Connection, Database, Value,
@@ -73,7 +79,13 @@ fn unknown(error: impl std::fmt::Display) -> QueueError {
     QueueError::OutcomeUnknown(format!("API-007 projection: {error}"))
 }
 fn publication_error(error: fireweed_engine::queue_publication::PublicationError) -> QueueError {
-    unknown(format!("{error:?}"))
+    use fireweed_engine::queue_publication::PublicationError;
+    match error {
+        // The encoder measures the frame before it writes or publishes anything,
+        // so a frame over the caller's bound is a definite refusal.
+        PublicationError::FrameLimit => QueueError::TooLarge,
+        error => unknown(format!("{error:?}")),
+    }
 }
 async fn catch_apply_panic<F: std::future::Future>(future: F) -> QueueResult<F::Output> {
     let mut future = Box::pin(future);
@@ -109,9 +121,20 @@ CREATE INDEX IF NOT EXISTS q7_index_order ON q7_indexes(queue_id,collection,inde
 CREATE TABLE IF NOT EXISTS q7_requests(id INTEGER PRIMARY KEY,queue_id INTEGER NOT NULL,domain INTEGER NOT NULL,identity_hash BLOB NOT NULL,identity BLOB NOT NULL,fingerprint_format INTEGER NOT NULL,fingerprint BLOB NOT NULL,outcome BLOB NOT NULL,expired INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS q7_request_identity ON q7_requests(queue_id,domain,identity_hash);
 "#;
+/// Page cache of one projection database, in KiB (SQLite's negative `cache_size`).
+const CACHE_KIB: i64 = 1024;
+/// A write-ahead log larger than this is truncated after the commit that grew it.
+/// Turso checkpoints on its own but never shrinks the log file, and an untruncated
+/// log makes every later apply slower while it grows without bound.
+const WAL_TRUNCATE_BYTES: u64 = 1 << 20;
 /// This lower-level projector is not a QueueStore or a consumer transaction API.
 pub struct QueueProjection {
     writer: Arc<Mutex<Option<Connection>>>,
+    /// Taken before a worker is, so an operation that waits for the writer waits
+    /// without holding a worker, which a batch holding the writer needs.
+    turn: Arc<Mutex<()>>,
+    /// The write-ahead log file of this database.
+    wal: PathBuf,
     #[cfg(test)]
     pause: Mutex<Option<Arc<ApplyPause>>>,
     #[cfg(test)]
@@ -227,6 +250,22 @@ struct UniqueTouch {
 }
 const UNIQUE_PROBE_SQL: &str = "SELECT record_id FROM q7_indexes INDEXED BY q7_index_equal WHERE queue_id=?1 AND collection=?2 AND index_no=?3 AND hash=?4 AND is_unique=1 AND full_key=?5 LIMIT 2";
 
+/// Truncate the write-ahead log once a commit has left it over its bound. Call
+/// only with no transaction open on `connection`. A checkpoint that finds a
+/// reader busy (first column non-zero) is not an error: the next commit retries.
+async fn bound_wal(connection: &Connection, wal: &Path) -> QueueResult<()> {
+    match std::fs::metadata(wal) {
+        Ok(meta) if meta.len() > WAL_TRUNCATE_BYTES => {}
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(unknown(error)),
+    }
+    one(connection, "PRAGMA wal_checkpoint(TRUNCATE)", vec![], 3)
+        .await?
+        .ok_or_else(|| unknown("wal checkpoint has no result"))?;
+    Ok(())
+}
+
 async fn one(
     connection: &Connection,
     sql: &str,
@@ -306,7 +345,7 @@ impl QueueProjection {
                         .await
                         .map_err(unknown)?;
                     connection
-                        .execute("PRAGMA cache_size=-4096", ())
+                        .execute(&format!("PRAGMA cache_size=-{CACHE_KIB}"), ())
                         .await
                         .map_err(unknown)?;
                     let sync = one(&connection, "PRAGMA synchronous", vec![], 1)
@@ -318,12 +357,14 @@ impl QueueProjection {
                     let cache = one(&connection, "PRAGMA cache_size", vec![], 1)
                         .await?
                         .ok_or_else(|| unknown("cache size has no readback"))?;
-                    if integer(&cache[0])? != -4096 {
+                    if integer(&cache[0])? != -CACHE_KIB {
                         return Err(unknown("projection cache bound was not installed"));
                     }
                     connection.execute_batch(DDL).await.map_err(unknown)?;
                     Ok(Arc::new(QueueProjection {
                         writer: Arc::new(Mutex::new(Some(connection))),
+                        turn: Arc::new(Mutex::new(())),
+                        wal: PathBuf::from(format!("{}-wal", self.path)),
                         #[cfg(test)]
                         pause: Mutex::new(None),
                         #[cfg(test)]
@@ -367,7 +408,8 @@ impl QueueProjection {
             genesis,
             output_charge: Some(job.owned_buffer(65536)?),
         };
-        workers.run(move || worker.execute()).await
+        self.run_native(false, workers, move || worker.execute())
+            .await
     }
     pub async fn apply(
         self: &Arc<Self>,
@@ -401,7 +443,8 @@ impl QueueProjection {
             _header_charge: header_charge,
             output_charge: Some(job.owned_buffer(4096)?),
         };
-        workers.run(move || worker.execute()).await
+        self.run_native(false, workers, move || worker.execute())
+            .await
     }
 }
 impl ApplyWorker {
@@ -411,6 +454,13 @@ impl ApplyWorker {
     async fn execute_inner(&mut self) -> QueueResult<AppliedQueueRecord> {
         let projection = Arc::clone(&self.projection);
         owned_native_transaction(&projection, TransactionBehavior::Immediate, self).await?;
+        {
+            let writer = projection.writer.lock().await;
+            let connection = writer
+                .as_ref()
+                .ok_or_else(|| unknown("projection connection is poisoned"))?;
+            bound_wal(connection, &projection.wal).await?;
+        }
         #[cfg(test)]
         if self.projection.pause_apply(true).await {
             return Err(unknown("injected lost apply reply after commit"));
@@ -517,6 +567,56 @@ async fn owned_native_transaction<W: NativeTransactionWork>(
     }
 }
 
+const QUEUE_ROW_SQL: &str = "SELECT CASE WHEN typeof(id)='integer' THEN id ELSE NULL END,CASE WHEN typeof(definition)='blob' THEN length(definition) ELSE -1 END,CASE WHEN typeof(next_sequence)='blob' AND length(next_sequence)=8 THEN next_sequence ELSE NULL END,CASE WHEN typeof(applied_next_offset)='integer' THEN applied_next_offset ELSE NULL END,CASE WHEN typeof(last_record_epoch)='blob' AND length(last_record_epoch)=8 THEN last_record_epoch ELSE NULL END FROM q7_queues WHERE address_hash=?1 AND tenant=?2 AND name=?3";
+/// The queue's metadata row: id, definition length, next sequence, applied
+/// offset and last record epoch.
+async fn queue_row(
+    connection: &Connection,
+    tenant: &str,
+    queue: &str,
+) -> QueueResult<Option<Vec<Value>>> {
+    let address_hash = discovery_digest(&encode(&(tenant, queue))?);
+    one(
+        connection,
+        QUEUE_ROW_SQL,
+        vec![
+            blob(&address_hash),
+            blob(tenant.as_bytes()),
+            blob(queue.as_bytes()),
+        ],
+        5,
+    )
+    .await
+}
+/// One publication frame, with the claim that wraps it when it is a claim.
+type EntryParts<'a, 'b> = (
+    &'b fireweed_engine::queue_publication::PublicationView<'a>,
+    Option<&'b ClaimPublicationView<'a>>,
+);
+/// Check the record's place in the history once: the queue's applied cursor must
+/// be exactly `offset` and the record's epoch must not precede the last one.
+/// Returns the queue id.
+fn check_record_point(metadata: &[Value], offset: i64, epoch: u64) -> QueueResult<i64> {
+    let expected_offset = integer(&metadata[3])?;
+    if expected_offset < 1 || expected_offset != offset {
+        return Err(unknown("external applied cursor mismatch"));
+    }
+    if unsigned(&metadata[4])? == 0 || unsigned(&metadata[4])? > epoch {
+        return Err(unknown("historical record epoch regressed"));
+    }
+    integer(&metadata[0])
+}
+/// Move the applied cursor past the record once all of its entries are in.
+async fn advance_cursor(
+    connection: &Connection,
+    queue_id: i64,
+    offset: i64,
+    epoch: u64,
+) -> QueueResult<()> {
+    let next = offset.checked_add(1).ok_or(QueueError::TooLarge)?;
+    if connection.execute("UPDATE q7_queues SET applied_next_offset=?2,last_record_epoch=?3 WHERE id=?1 AND applied_next_offset=?4", vec![Value::Integer(queue_id),Value::Integer(next),number(epoch),Value::Integer(offset)]).await.map_err(unknown)?!=1 { return Err(unknown("external cursor publication lost authority")); }
+    Ok(())
+}
 async fn apply_transaction(
     connection: &Connection,
     record: &OwnedQueueLogRecord,
@@ -526,139 +626,178 @@ async fn apply_transaction(
 ) -> QueueResult<()> {
     let view = record.view()?;
     let address = view.address();
-    let address_hash = discovery_digest(&encode(&(address.tenant, address.queue))?);
-    let params = || {
-        vec![
-            blob(&address_hash),
-            blob(address.tenant.as_bytes()),
-            blob(address.queue.as_bytes()),
-        ]
-    };
-    let metadata=one(connection, "SELECT CASE WHEN typeof(id)='integer' THEN id ELSE NULL END,CASE WHEN typeof(definition)='blob' THEN length(definition) ELSE -1 END,CASE WHEN typeof(next_sequence)='blob' AND length(next_sequence)=8 THEN next_sequence ELSE NULL END,CASE WHEN typeof(applied_next_offset)='integer' THEN applied_next_offset ELSE NULL END,CASE WHEN typeof(last_record_epoch)='blob' AND length(last_record_epoch)=8 THEN last_record_epoch ELSE NULL END FROM q7_queues WHERE address_hash=?1 AND tenant=?2 AND name=?3", params(), 5).await?;
     match view.payload() {
         QueueLogPayload::Genesis(genesis) => {
+            let metadata = queue_row(connection, address.tenant, address.queue).await?;
             if offset != 0 || metadata.is_some() {
                 return Err(unknown("genesis is not the first external record"));
             }
+            let address_hash = discovery_digest(&encode(&(address.tenant, address.queue))?);
             let _definition = genesis.validate_definition(job)?;
             connection.execute("INSERT INTO q7_queues(address_hash,tenant,name,definition,cursor_secret,next_sequence,applied_next_offset,last_record_epoch) VALUES(?1,?2,?3,?4,?5,?6,1,?7)", vec![blob(&address_hash),blob(address.tenant.as_bytes()),blob(address.queue.as_bytes()),blob(genesis.definition_bytes()),blob(genesis.cursor_secret()),number(0),number(view.epoch())]).await.map_err(unknown)?;
         }
-        QueueLogPayload::Publication(_) | QueueLogPayload::Claim(_) => {
-            let (frame, claim) = match view.payload() {
-                QueueLogPayload::Publication(frame) => (frame, None),
-                QueueLogPayload::Claim(claim) => (claim.commands(), Some(claim)),
-                _ => unreachable!(),
+        payload => {
+            let entries: Vec<EntryParts<'_, '_>> = match payload {
+                QueueLogPayload::Publication(frame) => vec![(frame, None)],
+                QueueLogPayload::Claim(claim) => vec![(claim.commands(), Some(claim))],
+                QueueLogPayload::Entries(list) => list
+                    .entries()
+                    .iter()
+                    .map(|entry| (entry.frame(), entry.claim()))
+                    .collect(),
+                QueueLogPayload::Genesis(_) => unreachable!(),
             };
-            let binding = claim.map(|claim| claim.bind(job)).transpose()?;
-            let metadata =
-                metadata.ok_or_else(|| unknown("publication has no projected genesis"))?;
-            let queue_id = integer(&metadata[0])?;
-            let expected_offset = integer(&metadata[3])?;
-            if expected_offset < 1 || expected_offset != offset {
-                return Err(unknown("external applied cursor mismatch"));
-            }
-            if unsigned(&metadata[4])? == 0 || unsigned(&metadata[4])? > view.epoch() {
-                return Err(unknown("historical record epoch regressed"));
-            }
-            let summary = frame.summary();
-            if unsigned(&metadata[2])? != summary.initial_sequence {
-                return Err(unknown("insertion sequence predecessor mismatch"));
-            }
-            let definition_bytes = u64::try_from(integer(&metadata[1])?).map_err(unknown)?;
-            let _definition_fetch = job.owned_buffer(
-                definition_bytes
-                    .checked_mul(4)
-                    .and_then(|n| n.checked_add(4096))
-                    .ok_or(QueueError::TooLarge)?,
-            )?;
-            let raw = one(
-                connection,
-                "SELECT definition FROM q7_queues WHERE id=?1",
-                vec![Value::Integer(queue_id)],
-                1,
-            )
-            .await?
-            .ok_or_else(|| unknown("queue authority disappeared"))?;
-            let definition = AdmittedQueueDefinition::from_raw(bytes(&raw[0])?, job)?;
-            if summary.definition_pin != definition.pin().as_bytes() {
-                return Err(unknown("publication definition pin mismatch"));
-            }
-            let context = FrameContext {
-                offset,
-                initial_sequence: summary.initial_sequence,
-                job,
-                claim: claim.zip(binding.as_ref()),
-            };
-            let mut touched = Vec::new();
-            for command in frame.commands() {
-                apply_command(
+            let metadata = queue_row(connection, address.tenant, address.queue)
+                .await?
+                .ok_or_else(|| unknown("publication has no projected genesis"))?;
+            let queue_id = check_record_point(&metadata, offset, view.epoch())?;
+            for (frame, claim) in entries {
+                apply_entry(
                     connection,
                     queue_id,
-                    definition.schema(),
-                    command.map_err(publication_error)?,
-                    &context,
-                    &mut touched,
-                )
-                .await?;
-                #[cfg(test)]
-                if panic_after_command {
-                    panic!("injected panic after physical command");
-                }
-            }
-            // Native indexes are not individually constrained: atomic swaps are
-            // validated against the completed transaction's exact full values.
-            // Every earlier record passed this check, so the table has no
-            // duplicate before this one; only a unique entry this record wrote
-            // can create one, and each is probed by its equal-index position.
-            for touch in &touched {
-                let mut rows = connection
-                    .query(
-                        UNIQUE_PROBE_SQL,
-                        vec![
-                            Value::Integer(queue_id),
-                            Value::Integer(i64::from(touch.collection)),
-                            Value::Integer(i64::from(touch.number)),
-                            blob(&discovery_digest(&touch.key)),
-                            blob(&touch.key),
-                        ],
-                    )
-                    .await
-                    .map_err(unknown)?;
-                let mut owners = 0;
-                while rows.next().await.map_err(unknown)?.is_some() {
-                    owners += 1;
-                }
-                if owners > 1 {
-                    return Err(unknown("final projection unique ownership conflict"));
-                }
-            }
-            for receipt in frame.receipts() {
-                let receipt = receipt.map_err(publication_error)?;
-                let domain = match receipt.domain {
-                    0 | 2 => i64::from(receipt.domain),
-                    _ => return Err(unknown("unsupported receipt domain")),
-                };
-                let identity = discovery_digest(receipt.request_id.as_bytes());
-                if one(connection, "SELECT id FROM q7_requests WHERE queue_id=?1 AND domain=?2 AND identity_hash=?3 AND identity=?4", vec![Value::Integer(queue_id),Value::Integer(domain),blob(&identity),blob(receipt.request_id.as_bytes())], 1).await?.is_some() { return Err(unknown("publication receipt is not fresh immutable authority")); }
-                validate_receipt_versions(
-                    connection,
-                    queue_id,
-                    definition.schema(),
-                    receipt.outcome,
+                    (frame, claim),
                     offset,
+                    job,
+                    #[cfg(test)]
+                    panic_after_command,
                 )
                 .await?;
-                // These are fixed FWQP outcome bytes, explicitly not Postcard.
-                connection.execute("INSERT INTO q7_requests(queue_id,domain,identity_hash,identity,fingerprint_format,fingerprint,outcome) VALUES(?1,?2,?3,?4,?5,?6,?7)", vec![Value::Integer(queue_id),Value::Integer(domain),blob(&identity),blob(receipt.request_id.as_bytes()),Value::Integer(i64::from(receipt.fingerprint_format)),blob(receipt.fingerprint),blob(receipt.encoded_outcome())]).await.map_err(unknown)?;
             }
-            if let Some(claim) = claim {
-                let identity = discovery_digest(claim.request_id().as_bytes());
-                if one(connection,"SELECT id FROM q7_requests WHERE queue_id=?1 AND domain=1 AND identity_hash=?2 AND identity=?3",vec![Value::Integer(queue_id),blob(&identity),blob(claim.request_id().as_bytes())],1).await?.is_some() {return Err(unknown("claim receipt is not fresh immutable authority"));}
-                connection.execute("INSERT INTO q7_requests(queue_id,domain,identity_hash,identity,fingerprint_format,fingerprint,outcome) VALUES(?1,1,?2,?3,?4,?5,?6)",vec![Value::Integer(queue_id),blob(&identity),blob(claim.request_id().as_bytes()),Value::Integer(i64::from(claim.fingerprint_format())),blob(claim.fingerprint()),blob(claim.receipt_bytes())]).await.map_err(unknown)?;
-            }
-            let next = offset.checked_add(1).ok_or(QueueError::TooLarge)?;
-            if connection.execute("UPDATE q7_queues SET next_sequence=?2,applied_next_offset=?3,last_record_epoch=?4 WHERE id=?1 AND applied_next_offset=?5", vec![Value::Integer(queue_id),number(summary.final_sequence),Value::Integer(next),number(view.epoch()),Value::Integer(offset)]).await.map_err(unknown)?!=1 { return Err(unknown("external cursor publication lost authority")); }
+            advance_cursor(connection, queue_id, offset, view.epoch()).await?;
         }
+    }
+    Ok(())
+}
+/// Apply one entry: its commands, the unique-key check over what they touched
+/// and its receipts. The applied cursor is the record's business, not the
+/// entry's; the entry only moves the insertion sequence.
+async fn apply_entry(
+    connection: &Connection,
+    queue_id: i64,
+    (frame, claim): EntryParts<'_, '_>,
+    offset: i64,
+    job: &Arc<QueueReservation>,
+    #[cfg(test)] panic_after_command: bool,
+) -> QueueResult<()> {
+    let binding = claim.map(|claim| claim.bind(job)).transpose()?;
+    let summary = frame.summary();
+    let sequence = one(
+        connection,
+        "SELECT CASE WHEN typeof(next_sequence)='blob' AND length(next_sequence)=8 THEN next_sequence ELSE NULL END,CASE WHEN typeof(definition)='blob' THEN length(definition) ELSE -1 END FROM q7_queues WHERE id=?1",
+        vec![Value::Integer(queue_id)],
+        2,
+    )
+    .await?
+    .ok_or_else(|| unknown("queue authority disappeared"))?;
+    if unsigned(&sequence[0])? != summary.initial_sequence {
+        return Err(unknown("insertion sequence predecessor mismatch"));
+    }
+    let definition_bytes = u64::try_from(integer(&sequence[1])?).map_err(unknown)?;
+    let _definition_fetch = job.owned_buffer(
+        definition_bytes
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(4096))
+            .ok_or(QueueError::TooLarge)?,
+    )?;
+    let raw = one(
+        connection,
+        "SELECT definition FROM q7_queues WHERE id=?1",
+        vec![Value::Integer(queue_id)],
+        1,
+    )
+    .await?
+    .ok_or_else(|| unknown("queue authority disappeared"))?;
+    let definition = AdmittedQueueDefinition::from_raw(bytes(&raw[0])?, job)?;
+    if summary.definition_pin != definition.pin().as_bytes() {
+        return Err(unknown("publication definition pin mismatch"));
+    }
+    let context = FrameContext {
+        offset,
+        initial_sequence: summary.initial_sequence,
+        job,
+        claim: claim.zip(binding.as_ref()),
+    };
+    let mut touched = Vec::new();
+    for command in frame.commands() {
+        apply_command(
+            connection,
+            queue_id,
+            definition.schema(),
+            command.map_err(publication_error)?,
+            &context,
+            &mut touched,
+        )
+        .await?;
+        #[cfg(test)]
+        if panic_after_command {
+            panic!("injected panic after physical command");
+        }
+    }
+    // Native indexes are not individually constrained: atomic swaps are
+    // validated against the completed entry's exact full values. Every earlier
+    // entry passed this check, so the table has no duplicate before this one;
+    // only a unique entry this entry wrote can create one, and each is probed by
+    // its equal-index position.
+    for touch in &touched {
+        let mut rows = connection
+            .query(
+                UNIQUE_PROBE_SQL,
+                vec![
+                    Value::Integer(queue_id),
+                    Value::Integer(i64::from(touch.collection)),
+                    Value::Integer(i64::from(touch.number)),
+                    blob(&discovery_digest(&touch.key)),
+                    blob(&touch.key),
+                ],
+            )
+            .await
+            .map_err(unknown)?;
+        let mut owners = 0;
+        while rows.next().await.map_err(unknown)?.is_some() {
+            owners += 1;
+        }
+        if owners > 1 {
+            return Err(unknown("final projection unique ownership conflict"));
+        }
+    }
+    for receipt in frame.receipts() {
+        let receipt = receipt.map_err(publication_error)?;
+        let domain = match receipt.domain {
+            0 | 2 => i64::from(receipt.domain),
+            _ => return Err(unknown("unsupported receipt domain")),
+        };
+        let identity = discovery_digest(receipt.request_id.as_bytes());
+        if one(connection, "SELECT id FROM q7_requests WHERE queue_id=?1 AND domain=?2 AND identity_hash=?3 AND identity=?4", vec![Value::Integer(queue_id),Value::Integer(domain),blob(&identity),blob(receipt.request_id.as_bytes())], 1).await?.is_some() { return Err(unknown("publication receipt is not fresh immutable authority")); }
+        validate_receipt_versions(
+            connection,
+            queue_id,
+            definition.schema(),
+            receipt.outcome,
+            offset,
+        )
+        .await?;
+        // These are fixed FWQP outcome bytes, explicitly not Postcard.
+        connection.execute("INSERT INTO q7_requests(queue_id,domain,identity_hash,identity,fingerprint_format,fingerprint,outcome) VALUES(?1,?2,?3,?4,?5,?6,?7)", vec![Value::Integer(queue_id),Value::Integer(domain),blob(&identity),blob(receipt.request_id.as_bytes()),Value::Integer(i64::from(receipt.fingerprint_format)),blob(receipt.fingerprint),blob(receipt.encoded_outcome())]).await.map_err(unknown)?;
+    }
+    if let Some(claim) = claim {
+        let identity = discovery_digest(claim.request_id().as_bytes());
+        if one(connection,"SELECT id FROM q7_requests WHERE queue_id=?1 AND domain=1 AND identity_hash=?2 AND identity=?3",vec![Value::Integer(queue_id),blob(&identity),blob(claim.request_id().as_bytes())],1).await?.is_some() {return Err(unknown("claim receipt is not fresh immutable authority"));}
+        connection.execute("INSERT INTO q7_requests(queue_id,domain,identity_hash,identity,fingerprint_format,fingerprint,outcome) VALUES(?1,1,?2,?3,?4,?5,?6)",vec![Value::Integer(queue_id),blob(&identity),blob(claim.request_id().as_bytes()),Value::Integer(i64::from(claim.fingerprint_format())),blob(claim.fingerprint()),blob(claim.receipt_bytes())]).await.map_err(unknown)?;
+    }
+    if connection
+        .execute(
+            "UPDATE q7_queues SET next_sequence=?2 WHERE id=?1 AND next_sequence=?3",
+            vec![
+                Value::Integer(queue_id),
+                number(summary.final_sequence),
+                number(summary.initial_sequence),
+            ],
+        )
+        .await
+        .map_err(unknown)?
+        != 1
+    {
+        return Err(unknown("insertion sequence publication lost authority"));
     }
     Ok(())
 }
@@ -1409,6 +1548,7 @@ async fn validate_receipt_versions(
 
 #[cfg(test)]
 mod tests {
+    mod open;
     mod unique_check;
     use super::*;
     use bytes::Bytes;

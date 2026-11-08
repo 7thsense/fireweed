@@ -174,6 +174,9 @@ impl QueueNativeAcquired {
                 limits.compile,
                 job,
             )?,
+            QueueLogPayload::Entries(_) => {
+                return Err(unknown("entry-list records are not source-indexed"));
+            }
             QueueLogPayload::Publication(_) | QueueLogPayload::Claim(_) => {
                 fireweed_engine::queue_source_index::compile_publication(
                     &reader,

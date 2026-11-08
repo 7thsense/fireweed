@@ -94,23 +94,22 @@ impl QueueProjection {
             job: Arc::clone(job),
             charges: vec![job.owned_buffer(size)?],
         };
-        workers
-            .run(move || {
-                Ok(crate::tx::block_on_owned_apply(async {
-                    let projection = Arc::clone(&worker.projection);
-                    let result = owned_native_transaction(
-                        &projection,
-                        TransactionBehavior::Deferred,
-                        &mut worker,
-                    )
-                    .await?;
-                    Ok(result.map(|records| AdmittedClaimReplay {
-                        records,
-                        _charges: std::mem::take(&mut worker.charges),
-                    }))
+        self.run_native(false, workers, move || {
+            Ok(crate::tx::block_on_owned_apply(async {
+                let projection = Arc::clone(&worker.projection);
+                let result = owned_native_transaction(
+                    &projection,
+                    TransactionBehavior::Deferred,
+                    &mut worker,
+                )
+                .await?;
+                Ok(result.map(|records| AdmittedClaimReplay {
+                    records,
+                    _charges: std::mem::take(&mut worker.charges),
                 }))
-            })
-            .await?
+            }))
+        })
+        .await?
     }
 }
 impl NativeTransactionWork for ReplayWorker {

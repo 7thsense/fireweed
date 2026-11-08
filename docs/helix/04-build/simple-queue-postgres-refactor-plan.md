@@ -84,9 +84,20 @@ the local projection, so healthy operation reads zero log records and makes no
 object-store read. Each queue has one owner at a time, by a control-plane lease,
 and one loop through which every operation passes; a second handle receives
 `Busy`. Entry acquires the lease, waits the skew allowance `S`, takes a strictly
-newer fence and rebuilds the projection from the log. The owner plans a write
-against the projection, publishes conditionally on epoch and exact offset, then
-applies the same record bytes and replies from the projection. It tracks a local
+newer fence and rebuilds the projection from the log. One loop iteration makes
+one conditional publish, whatever number of writes it carries, and every request
+keeps its own outcome. The owner plans the queued writes in arrival order against
+one open projection transaction and stages each write's entry into it, so a
+later write sees the staged effects of the earlier ones. It ends the batch at
+the lease's `renew_at` or when the next entry would exceed the hard record
+bound; that entry and the rest stay queued. It then publishes one record
+carrying every entry, conditionally on epoch and exact offset, commits the
+transaction only once that record is stored, and replies to each request from the
+projection. A failed publish rolls the transaction back and leaves owner state.
+Genesis is alone in its record, so provisioning takes an iteration of its own,
+and a commit batch whose groups do not all fit continues in the next record.
+Rebuild applies each record's entries in order in one transaction, so
+`P = fold(log[0, p))` holds at every commit. It tracks a local
 lease deadline, measured on a clock that counts suspend from before each lease
 request was sent, and releases a read only if it is still before the deadline
 after the read. Any failed or unconfirmed publish, passed deadline, rejected

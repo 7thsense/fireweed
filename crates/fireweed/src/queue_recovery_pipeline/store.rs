@@ -275,16 +275,13 @@ mod tests {
         let workers = ScratchWorkers::new(1, 1).unwrap();
         let admission = fireweed_engine::queue_admission::QueueAdmission::new(1, 1 << 20).unwrap();
         let init = Arc::new(admission.reserve(0).unwrap());
-        let projection = QueueProjection::open(&root.join("projection.db"), &init, &workers)
-            .await
-            .unwrap();
         drop(init);
         let scratch_root = fireweed_queue_spool::ScratchRoot::open(root.join("scratch"), &workers)
             .await
             .unwrap();
         let pipeline = QueueRecoveryPipeline::new(
             log,
-            projection,
+            root.join("projections"),
             workers,
             QueuePipelineOptions {
                 operations: 1,

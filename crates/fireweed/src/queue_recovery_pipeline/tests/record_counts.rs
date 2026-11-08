@@ -9,6 +9,8 @@ pub(super) struct Env {
     pub(super) clock: Arc<TestClock>,
     pub(super) ownership: TestOwnership,
     pub(super) nonce: u128,
+    /// Set by `counted`: the S3 client goes through this proxy.
+    pub(super) proxy: Option<super::counting_proxy::CountingProxy>,
 }
 impl Env {
     pub(super) fn new(name: &str, s3: bool) -> Self {
@@ -24,7 +26,15 @@ impl Env {
             clock: Arc::new(TestClock::default()),
             ownership: TestOwnership::new(),
             nonce,
+            proxy: None,
         }
+    }
+    /// As `new(name, true)`, with every S3 request counted by a proxy on loopback.
+    pub(super) async fn counted(name: &str) -> Self {
+        let mut env = Self::new(name, true);
+        let upstream = &fireweed_objectlog::test_s3::shared_s3_test_env().endpoint;
+        env.proxy = Some(super::counting_proxy::CountingProxy::start(upstream).await);
+        env
     }
     /// A handle named after its projection file; every handle shares the control plane.
     pub(super) async fn open(&self, projection: &str) -> NativeQueueStore {
@@ -36,12 +46,30 @@ impl Env {
         projection: &str,
         ownership: QueueOwnership,
     ) -> NativeQueueStore {
-        native_port_fixture_owned(
+        super::native_port_fixture_routed(
             &self.root,
             projection,
             self.prefix.as_deref(),
             self.clock.clone(),
             ownership,
+            256 << 20,
+            self.proxy.as_ref().map(|proxy| proxy.endpoint.as_str()),
+        )
+        .await
+    }
+    /// As `open`, with a bound on the size of one log record.
+    pub(super) async fn open_bounded(
+        &self,
+        projection: &str,
+        hard_record_bytes: u64,
+    ) -> NativeQueueStore {
+        super::native_port_fixture_sized(
+            &self.root,
+            projection,
+            self.prefix.as_deref(),
+            self.clock.clone(),
+            self.ownership.handle(projection),
+            hard_record_bytes,
         )
         .await
     }
@@ -98,8 +126,13 @@ pub(super) async fn commit(store: &NativeQueueStore, queue: &QueueAddress, n: us
         GroupOutcome::Committed { .. }
     ));
 }
-/// Provision, then alternate inserts and commits until the log has `len` records.
-pub(super) async fn grow(store: &NativeQueueStore, queue: &QueueAddress, len: usize) {
+/// Provision, then alternate inserts and commits, `len` operations in all. Returns
+/// the number of log records that took: operations queued together share a
+/// record, so it is at most `len`.
+pub(super) async fn grow(store: &NativeQueueStore, queue: &QueueAddress, len: usize) -> u64 {
+    let pipeline = store.pipeline_for_test();
+    let published = &pipeline.published;
+    let before = published.load(std::sync::atomic::Ordering::SeqCst);
     store
         .provision(ProvisionRequest {
             queue: queue.clone(),
@@ -107,7 +140,7 @@ pub(super) async fn grow(store: &NativeQueueStore, queue: &QueueAddress, len: us
         })
         .await
         .unwrap();
-    // Queued together the operations share loop iterations; each is still one record.
+    // Queued together the operations share loop iterations and records.
     let numbers: Vec<usize> = (1..len).collect();
     for chunk in numbers.chunks(50) {
         futures::future::join_all(chunk.iter().map(|&n| async move {
@@ -119,6 +152,7 @@ pub(super) async fn grow(store: &NativeQueueStore, queue: &QueueAddress, len: us
         }))
         .await;
     }
+    published.load(std::sync::atomic::Ordering::SeqCst) - before
 }
 pub(super) async fn reads(store: &NativeQueueStore, queue: &QueueAddress) {
     store
@@ -247,14 +281,14 @@ async fn reopen_rebuilds_from_log(s3: bool, len: usize) {
     let env = Env::new("reopen", s3);
     let queue = env.address("q");
     let first = env.open("a.db").await;
-    grow(&first, &queue, len).await;
+    let log = grow(&first, &queue, len).await;
     first.shutdown().await.unwrap();
     drop(first);
     let second = env.open("a.db").await;
     let before = now(&second);
     reads(&second, &queue).await;
     let (records, _, _) = delta(&second, before);
-    assert_eq!(records, len as u64, "reopen reads the whole log once");
+    assert_eq!(records, log, "reopen reads the whole log once");
     let before = now(&second);
     reads(&second, &queue).await;
     insert(&second, &queue, 9999).await;

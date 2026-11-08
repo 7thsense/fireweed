@@ -132,6 +132,7 @@ async fn administration_splits_the_pack() {
     let queue = env.address("q");
     let a = env.open("a.db").await;
     grow(&a, &queue, 2).await;
+    let staged = a.pipeline_for_test().staged.load(Ordering::SeqCst);
     let receipts = a
         .commit(batch(
             &queue,
@@ -149,8 +150,11 @@ async fn administration_splits_the_pack() {
         "{receipts:?}"
     );
     assert!(committed(&receipts[2]) && committed(&receipts[3]));
-    // genesis, seed, [s1], admin, [s3, s4].
-    assert_eq!(log_length(&env, a, &queue).await, 5);
+    // The administrative group splits the packs into three entries: [s1], admin,
+    // [s3, s4]. They share one record: genesis, seed, and that record.
+    let staged = a.pipeline_for_test().staged.load(Ordering::SeqCst) - staged;
+    assert_eq!(staged, 3);
+    assert_eq!(log_length(&env, a, &queue).await, 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -169,13 +173,14 @@ async fn batch_interrupted_after_a_durable_prefix_resolves_by_identity() {
             ],
         )
     };
-    // The second append lands, its reply is lost, and the control plane goes away.
+    // The append lands, its reply is lost, and the control plane goes away. The
+    // three groups are three entries of this one record.
     let appends = Arc::new(AtomicUsize::new(0));
     let pipeline = a.pipeline_for_test();
     let plane = env.ownership.plane.clone();
     let flag = pipeline.clone();
     *pipeline.on_stage.lock().unwrap() = Some(Arc::new(move |stage| {
-        if stage == owner::Stage::BeforeAppend && appends.fetch_add(1, Ordering::SeqCst) == 1 {
+        if stage == owner::Stage::BeforeAppend && appends.fetch_add(1, Ordering::SeqCst) == 0 {
             flag.lose_append_reply.store(true, Ordering::SeqCst);
             plane.down.store(true, Ordering::SeqCst);
         }
@@ -193,8 +198,8 @@ async fn batch_interrupted_after_a_durable_prefix_resolves_by_identity() {
     let again = a.commit(request()).await.unwrap();
     assert_eq!(again, receipts);
     assert_eq!(pending_items(&a, &queue).await, 3, "c-1, ik1, ik3");
-    // genesis, seed, [i1], admin, [i3]: nothing was written twice.
-    assert_eq!(log_length(&env, a, &queue).await, 5);
+    // genesis, seed, and the one record: nothing was written twice.
+    assert_eq!(log_length(&env, a, &queue).await, 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

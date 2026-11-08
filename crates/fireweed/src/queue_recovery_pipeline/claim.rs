@@ -1,5 +1,6 @@
-//! Claim: plan against the projection, publish, apply, reply from the projection.
-use super::owner::{Exit, Plan, Tenure, settle};
+//! Claim: plan against the batch, stage the entry, reply from the projection
+//! once the batch is published and committed.
+use super::owner::{Batch, Exit, Plan, Staged, StagedEntry, Tenure, settle};
 use super::*;
 use fireweed_core::queue_contract::{ClaimRequest, QueueLimits, RequestPreflight, encoded_len};
 use fireweed_engine::{Clock, queue_memory::incoming_headers};
@@ -38,10 +39,11 @@ impl ClaimPlan {
         &self,
         p: &QueueRecoveryPipeline,
         t: &Tenure,
+        point: (u64, u64, u64),
         limits: QueueLimits,
         job: &Arc<QueueReservation>,
     ) -> QueueResult<ClaimReplayInput> {
-        let (next, sequence, epoch) = t.point();
+        let (next, sequence, epoch) = point;
         Ok(ClaimReplayInput {
             genesis: t.genesis_record(p, &self.request.queue, job)?,
             request: self.request.clone(),
@@ -59,6 +61,50 @@ impl Plan for ClaimPlan {
     fn address(&self) -> &QueueAddress {
         &self.request.queue
     }
+    fn stage<'a>(
+        &'a self,
+        p: &'a QueueRecoveryPipeline,
+        t: &'a Tenure,
+        batch: &'a mut Batch,
+        limits: QueueLimits,
+        clock: &'a Arc<dyn Clock>,
+        job: &'a Arc<QueueReservation>,
+    ) -> BoxFuture<'a, Result<Staged, Exit>> {
+        Box::pin(async move {
+            let input = match self.input(p, t, batch.point(t), limits, job) {
+                Ok(input) => input,
+                Err(error) => return Ok(Staged::Rejected(error)),
+            };
+            let prepared = settle(
+                batch
+                    .host(p, t)
+                    .await?
+                    .prepare_claim(
+                        input,
+                        t.epoch,
+                        p.planner_bound(),
+                        clock.clone(),
+                        job,
+                        &p.workers,
+                    )
+                    .await,
+            )?;
+            match prepared {
+                Err(error) => Ok(Staged::Rejected(error)),
+                // A known request id is just its stored outcome.
+                Ok(None) => Ok(Staged::Pending),
+                Ok(Some(prepared)) => {
+                    let (record, provisional, expected_head) = prepared.into_parts();
+                    drop(provisional);
+                    Ok(match batch.stage(p, t, record, expected_head, job).await? {
+                        StagedEntry::Staged => Staged::Pending,
+                        StagedEntry::TooLarge => Staged::Rejected(QueueError::TooLarge),
+                        StagedEntry::Full => Staged::Full { progressed: false },
+                    })
+                }
+            }
+        })
+    }
     fn run<'a>(
         &'a self,
         p: &'a QueueRecoveryPipeline,
@@ -68,38 +114,12 @@ impl Plan for ClaimPlan {
         job: &'a Arc<QueueReservation>,
     ) -> BoxFuture<'a, Result<QueueResult<Self::Output>, Exit>> {
         Box::pin(async move {
-            let input = match self.input(p, t, limits, job) {
-                Ok(input) => input,
-                Err(error) => return Ok(Err(error)),
-            };
-            let prepared = settle(
-                p.projection
-                    .prepare_claim(
-                        input,
-                        t.epoch,
-                        p.hard_record_bytes,
-                        clock.clone(),
-                        job,
-                        &p.workers,
-                    )
-                    .await,
-            )?;
-            match prepared {
-                Err(error) => return Ok(Err(error)),
-                // A known request id is just its stored outcome.
-                Ok(None) => {}
-                Ok(Some(prepared)) => {
-                    let (record, provisional, expected_head) = prepared.into_parts();
-                    drop(provisional);
-                    t.publish(p, record, expected_head, job).await?;
-                }
-            }
-            let input = match self.input(p, t, limits, job) {
+            let input = match self.input(p, t, t.point(), limits, job) {
                 Ok(input) => input,
                 Err(error) => return Ok(Err(error)),
             };
             match settle(
-                p.projection
+                t.projection()
                     .replay_claim_with_clock(input, clock.clone(), job, &p.workers)
                     .await,
             )? {

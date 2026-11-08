@@ -282,6 +282,9 @@ impl ColdOriginalTracker {
                     });
                 }
             }
+            QueueLogPayload::Entries(_) => {
+                return Err(unknown("entry-list records are not source-indexed"));
+            }
         }
         self.historical_epoch = view.epoch();
         self.next_offset = offset

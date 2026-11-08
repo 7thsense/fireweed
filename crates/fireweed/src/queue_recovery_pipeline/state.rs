@@ -55,7 +55,7 @@ impl Plan for StatePlan {
                 Err(error) => return Ok(Err(error)),
             };
             settle(
-                p.projection
+                t.projection()
                     .read_state_records(
                         StateReadInput {
                             genesis,
