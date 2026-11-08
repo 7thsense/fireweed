@@ -2421,7 +2421,8 @@ dependencies = [
 [[package]]
 name = "object-log"
 version = "0.4.0"
-source = "git+https://github.com/7thsense/object-log.git?rev=6a300a6463c88446b708b322ff16aeb8aa2ac332#6a300a6463c88446b708b322ff16aeb8aa2ac332"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2cac7ca4400de2dd9520619f7c38cc6cbbbbc205c9fbc0281b4217ce3eda6924"
 dependencies = [
  "async-trait",
  "aws-sdk-s3",
