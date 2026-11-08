@@ -5467,7 +5467,7 @@ pub fn open(config: StorageConfig, clock: Arc<dyn Clock>) -> EngineResult<Firewe
 }
 
 /// PostgreSQL ownership inputs for a native S3/Turso data plane.
-#[cfg(feature = "postgres")]
+#[cfg(any(feature = "postgres", feature = "s3-turso"))]
 #[derive(Clone)]
 pub struct ObjectLogPostgresControlPlaneConfig {
     /// Application-owned connection string; formatting is redacted.
@@ -5480,7 +5480,7 @@ pub struct ObjectLogPostgresControlPlaneConfig {
     pub ownership_clock: Option<Arc<dyn Clock>>,
 }
 
-#[cfg(feature = "postgres")]
+#[cfg(any(feature = "postgres", feature = "s3-turso"))]
 impl fmt::Debug for ObjectLogPostgresControlPlaneConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -5500,7 +5500,7 @@ impl fmt::Debug for ObjectLogPostgresControlPlaneConfig {
 ///
 /// # Errors
 /// Returns invalid configuration or storage/authority construction failures.
-#[cfg(all(feature = "objectlog", feature = "turso", feature = "postgres"))]
+#[cfg(all(feature = "objectlog", feature = "turso", feature = "s3-turso"))]
 pub async fn open_objectlog_turso_coordinated_async(
     storage: StorageConfig,
     control: ObjectLogPostgresControlPlaneConfig,

@@ -76,9 +76,11 @@ impl QueueOwnership {
             skew,
         })
     }
-    /// Zero is permitted only here, for tests that drive a manual lease clock.
-    #[cfg(test)]
-    pub(super) fn with_skew(mut self, skew: Duration) -> Self {
+    /// Replace the skew allowance. Zero is for ownership that cannot be skewed
+    /// against another process: tests that drive a manual lease clock, and a
+    /// handle whose control plane lives in its own process.
+    #[cfg(any(test, feature = "s3-turso"))]
+    pub(crate) fn with_skew(mut self, skew: Duration) -> Self {
         self.skew = skew;
         self
     }

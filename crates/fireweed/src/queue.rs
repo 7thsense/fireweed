@@ -1,8 +1,13 @@
 //! API-007's concrete consumer interface. Insert, filtered priority claim, atomic
 //! commit with state/new work, and stats use identical types on every backend.
 //! Supporting state/query/receipt operations carry no storage transaction handle.
-//! The native PostgreSQL constructor is available with the `postgres` feature;
-//! S3/Turso construction will use this same handle after its mandatory qualification.
+//! Two constructors are public. `Queue::s3_turso` (feature `s3-turso`, on by default)
+//! is production storage: an S3 object log, a disposable local Turso projection per
+//! owned queue, and queue leases in PostgreSQL. `Queue::ephemeral_disk` is a throwaway
+//! on-disk store for development and tests. `Queue::postgres` (feature `postgres`) is
+//! the PostgreSQL reference store that API-007 conformance compares the others against.
+#[cfg(feature = "s3-turso")]
+pub use crate::OwnerId;
 pub use crate::{Bytes, Clock, ConfigSecret, SystemClock, UtcTimestamp};
 pub use fireweed_core::queue_administration::*;
 pub use fireweed_core::queue_contract::*;
@@ -12,6 +17,10 @@ pub use fireweed_core::queue_json::{
 };
 pub use fireweed_core::queue_runtime::QueueRuntimeOptions;
 use fireweed_engine::queue_contract::QueueStore;
+#[cfg(feature = "s3-turso")]
+mod s3_turso;
+#[cfg(feature = "s3-turso")]
+pub use s3_turso::{PostgresControlPlaneOptions, S3LogOptions, S3TursoOptions, TursoCacheOptions};
 use std::{fmt, sync::Arc};
 /// Owned-operation future. Once admitted, dropping this caller future cannot
 /// cancel the underlying atomic storage operation or release its reservation.
