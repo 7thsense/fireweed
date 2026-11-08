@@ -23,13 +23,19 @@ fn stem(queue: &QueueAddress) -> String {
         .as_str()
         .to_owned()
 }
-/// Every file name in `directory`, sorted.
-fn names(directory: &Path) -> Vec<String> {
+/// Every file name in `directory`, sorted, with the directory lock's target.
+fn all_names(directory: &Path) -> Vec<String> {
     let mut names: Vec<_> = std::fs::read_dir(directory)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect();
     names.sort();
+    names
+}
+/// As `all_names`, without the `.lock` file, which is not a projection file.
+fn names(directory: &Path) -> Vec<String> {
+    let mut names = all_names(directory);
+    names.retain(|name| name != ".lock");
     names
 }
 fn projection_dir(env: &Env, name: &str) -> PathBuf {
@@ -327,4 +333,47 @@ async fn the_wal_stays_bounded_local() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_wal_stays_bounded_real_s3() {
     the_wal_stays_bounded(true).await;
+}
+
+/// A pipeline over `env`'s local log and the projection directory `name`.
+async fn pipeline_on(env: &Env, name: &str) -> QueueResult<Arc<QueueRecoveryPipeline>> {
+    let workers = ScratchWorkers::new(1, 1).unwrap();
+    let scratch = fireweed_queue_spool::ScratchRoot::open(env.root.join("scratch-lock"), &workers)
+        .await
+        .unwrap();
+    QueueRecoveryPipeline::new(
+        Arc::new(super::native_log_fixture(&env.root, None, None)),
+        env.root.join(name),
+        workers,
+        QueuePipelineOptions {
+            operations: 1,
+            hard_record_bytes: 1 << 20,
+        },
+        scratch,
+        fireweed_queue_spool::ScratchDiskQuota::new(1 << 20).unwrap(),
+        env.ownership.handle("second"),
+    )
+}
+
+#[tokio::test]
+async fn a_second_pipeline_on_a_directory_in_use_is_refused_until_the_first_shuts_down() {
+    let env = Env::new("directory-lock", false);
+    let first = env.open("shared").await;
+    let live = projection_dir(&env, "shared");
+    let before = all_names(&live);
+    assert!(before.contains(&".lock".to_owned()), "{before:?}");
+    assert!(matches!(
+        pipeline_on(&env, "shared").await,
+        Err(QueueError::Invalid(_))
+    ));
+    assert_eq!(
+        all_names(&live),
+        before,
+        "the refused pipeline changed the directory"
+    );
+    first.shutdown().await.unwrap();
+    // The lock goes with the pipeline, and the lock file itself stays.
+    let second = pipeline_on(&env, "shared").await.unwrap();
+    assert_eq!(all_names(&live), vec![".lock".to_owned()]);
+    drop(second);
 }

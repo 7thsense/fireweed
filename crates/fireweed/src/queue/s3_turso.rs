@@ -70,6 +70,8 @@ pub struct TursoCacheOptions {
     /// when the handle takes the queue's lease and deleted when the handle
     /// gives the lease up or shuts down. Files left by an earlier process are
     /// deleted, never read. The directory is created if it does not exist.
+    /// A second handle on the same directory is refused, and the lock is released
+    /// when the handle is dropped or the process exits.
     pub directory: PathBuf,
 }
 

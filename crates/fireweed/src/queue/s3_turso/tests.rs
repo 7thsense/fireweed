@@ -313,6 +313,10 @@ async fn ephemeral_disk_round_trips_and_shutdown_removes_its_directory() {
     let own = parent.join(&created[0]);
     round_trip(&queue, address(nonce(), "round-trip")).await;
     assert!(own.join("projections").exists());
+    assert!(
+        own.join("projections").join(".lock").exists(),
+        "the ephemeral cache takes the same directory lock"
+    );
     let clone = queue.clone();
     queue.shutdown().await.unwrap();
     assert!(!own.exists(), "shutdown left {:?}", entries(&parent));
@@ -511,6 +515,16 @@ async fn s3_turso_round_trips_and_leaves_no_cache_files() {
     )
     .await
     .unwrap();
+    let second = Queue::s3_turso(
+        fixture.options("two", &cache, 3_000, None),
+        Arc::new(TestClock::default()),
+    )
+    .await;
+    assert!(
+        matches!(second, Err(QueueError::Invalid(_))),
+        "a second handle on a directory in use is refused: {:?}",
+        second.err()
+    );
     round_trip(&queue, address(fixture.id, "round-trip")).await;
     assert!(
         entries(&cache).iter().any(|name| name.starts_with("q7-")),
@@ -522,6 +536,13 @@ async fn s3_turso_round_trips_and_leaves_no_cache_files() {
         "{:?}",
         entries(&cache)
     );
+    let again = Queue::s3_turso(
+        fixture.options("three", &cache, 3_000, None),
+        Arc::new(TestClock::default()),
+    )
+    .await
+    .expect("the directory is free once the first handle shut down");
+    again.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(cache.parent().unwrap());
 }
 
