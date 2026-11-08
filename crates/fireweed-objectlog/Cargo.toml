@@ -17,8 +17,8 @@ fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 fireweed-projection = { path = "../fireweed-projection" }
 fireweed-queue-spool = { path = "../fireweed-queue-spool" }
-# Vendored log implementation, including Fireweed fixes, for every consuming workspace.
-object-log = { version = "0.4.0", git = "https://github.com/7thsense/object-log.git", rev = "6a300a6463c88446b708b322ff16aeb8aa2ac332", features = ["s3", "native"] }
+# Published object-log release from crates.io, shared by every consuming workspace.
+object-log = { version = "0.4.0", features = ["s3", "native"] }
 # Create-only PutObject (If-None-Match: *) for queue-definition authority; object-log
 # BlobStore is overwrite-only put, so Fireweed owns the conditional create path.
 aws-sdk-s3 = { version = "1.152.0", default-features = false, features = ["default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
