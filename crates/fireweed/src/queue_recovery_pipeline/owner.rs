@@ -1118,6 +1118,7 @@ impl QueueLoop {
         // entry fails below, dropping the tenure deletes the file.
         let projection = TenureProjection::open(
             &p.projection_directory,
+            &p.directory_lock,
             self.key.queue_id.as_str(),
             job,
             &p.workers,

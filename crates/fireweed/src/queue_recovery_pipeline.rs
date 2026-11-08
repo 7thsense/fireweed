@@ -72,8 +72,9 @@ pub struct QueueRecoveryPipeline {
     hard_record_bytes: u64,
     diagnostics: Arc<RecoveryCounters>,
     ownership: QueueOwnership,
-    /// Holds the projection directory's exclusive lock for the pipeline's life.
-    _directory_lock: std::fs::File,
+    /// The projection directory's exclusive lock. Every tenure projection holds a
+    /// clone, so the OS lock outlives the pipeline until the last tenure is gone.
+    directory_lock: projection_files::DirectoryLock,
     queues: std::sync::Mutex<owner::QueueTable>,
     #[cfg(test)]
     lose_append_reply: std::sync::atomic::AtomicBool,
@@ -140,7 +141,7 @@ impl QueueRecoveryPipeline {
             hard_record_bytes: options.hard_record_bytes,
             diagnostics: Arc::new(RecoveryCounters::default()),
             ownership,
-            _directory_lock: directory_lock,
+            directory_lock,
             queues: std::sync::Mutex::new(owner::QueueTable::default()),
             #[cfg(test)]
             lose_append_reply: std::sync::atomic::AtomicBool::new(false),

@@ -11,16 +11,22 @@ const SUFFIXES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
 /// its name is not a projection file's, so cleanup leaves it alone.
 const LOCK_FILE: &str = ".lock";
 
+/// The directory's exclusive OS lock, shared by the pipeline and by every tenure
+/// projection. The OS lock is released when the last clone is dropped, so it
+/// outlives every projection file's deletion.
+#[derive(Clone, Debug)]
+pub(super) struct DirectoryLock(#[allow(dead_code)] Arc<std::fs::File>);
+
 /// Check the directory before any I/O, create it if missing, take the directory's
 /// exclusive lock, and delete every projection file an earlier process left in
-/// it. Nothing is read. The returned file holds the lock until it is dropped, and
+/// it. Nothing is read. The returned lock is held until its last clone is dropped, and
 /// the OS releases it when the process exits, however it exits, so a lock cannot
 /// outlive its holder. It relies on the OS's advisory file locks (`flock`), which
 /// need a local file system.
 ///
 /// The lock is taken before anything is deleted: a second handle on a directory
 /// in use is refused without touching the first handle's files.
-pub(super) fn prepare_directory(directory: &Path) -> QueueResult<std::fs::File> {
+pub(super) fn prepare_directory(directory: &Path) -> QueueResult<DirectoryLock> {
     if !directory.is_absolute() {
         return Err(QueueError::Invalid(
             "projection directory must be an absolute path".into(),
@@ -60,7 +66,7 @@ pub(super) fn prepare_directory(directory: &Path) -> QueueResult<std::fs::File> 
             remove(&entry.path())?;
         }
     }
-    Ok(lock)
+    Ok(DirectoryLock(Arc::new(lock)))
 }
 
 /// `q7-<64 lowercase hex>.db`, optionally followed by `-wal`, `-shm` or `-journal`.
@@ -90,16 +96,19 @@ fn remove(path: &Path) -> QueueResult<()> {
 }
 
 /// The open projection database of one tenure. This is the only place a queue's
-/// projection files are removed: dropping it closes the database, then deletes
-/// the files.
+/// projection files are removed: dropping it closes the database, deletes the
+/// files, then releases its clone of the directory lock, so no other handle can
+/// take the directory while this tenure's files may still exist.
 pub(super) struct TenureProjection {
     projection: Option<Arc<QueueProjection>>,
     path: PathBuf,
+    lock: Option<DirectoryLock>,
 }
 impl TenureProjection {
     /// Open `<directory>/<name>.db` with whatever it held discarded.
     pub(super) async fn open(
         directory: &Path,
+        lock: &DirectoryLock,
         name: &str,
         job: &Arc<QueueReservation>,
         workers: &ScratchWorkers,
@@ -109,6 +118,7 @@ impl TenureProjection {
         let mut owned = Self {
             projection: None,
             path,
+            lock: Some(lock.clone()),
         };
         owned.projection = Some(QueueProjection::open(&owned.path, job, workers).await?);
         Ok(owned)
@@ -127,6 +137,8 @@ impl Drop for TenureProjection {
             // Best effort: the next pipeline discards leftovers at construction.
             let _ = remove(Path::new(&file));
         }
+        // Last: the directory is released only after the files are gone.
+        drop(self.lock.take());
     }
 }
 
@@ -193,9 +205,9 @@ mod tests {
     }
 
     /// Run by `lock_dies_with_a_killed_process` in a child process: take the lock,
-    /// report it, and wait to be killed.
+    /// report it, and wait to be killed. Without the environment variable, as in a
+    /// plain run of the suite, it does nothing.
     #[test]
-    #[ignore = "child of lock_dies_with_a_killed_process"]
     fn lock_child_holder() {
         let Some(directory) = std::env::var_os("FIREWEED_LOCK_CHILD_DIRECTORY") else {
             return;
@@ -212,7 +224,6 @@ mod tests {
             .args([
                 "--exact",
                 "queue_recovery_pipeline::projection_files::tests::lock_child_holder",
-                "--ignored",
                 "--nocapture",
                 "--test-threads=1",
             ])
