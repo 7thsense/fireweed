@@ -586,20 +586,6 @@
           "P2f"
         ],
         "detail": "",
-        "id": "c1c72168e903e744abec",
-        "identity": "#[ignore = \"child of lock_dies_with_a_killed_process\"]",
-        "line": 198,
-        "owner": "P10pf",
-        "path": "crates/fireweed/src/queue_recovery_pipeline/projection_files.rs",
-        "status": "debt"
-      },
-      {
-        "category": "ignored_test",
-        "dependency_chain": [
-          "P10pf",
-          "P2f"
-        ],
-        "detail": "",
         "id": "7b9ca223abf3cf5e1475",
         "identity": "#[ignore = \"requires explicit limited-role PostgreSQL and RustFS fixture configuration\"]",
         "line": 36,
@@ -18706,6 +18692,26 @@
         "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::projection_directory::queues_publish_in_parallel_real_s3",
         "target": "fireweed",
         "test_id": "queue_recovery_pipeline::tests::projection_directory::queues_publish_in_parallel_real_s3"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::projection_directory::the_directory_stays_locked_until_every_tenure_has_ended",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::projection_directory::the_directory_stays_locked_until_every_tenure_has_ended",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::projection_directory::the_directory_stays_locked_until_every_tenure_has_ended"
       },
       {
         "exact_invocation": [
@@ -107562,6 +107568,45 @@
         "--features",
         "default,memory,objectlog,postgres,s3-turso,turso",
         "--lib",
+        "queue_recovery_pipeline::tests::projection_directory::the_directory_stays_locked_until_every_tenure_has_ended",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "memory",
+        "objectlog",
+        "postgres",
+        "s3-turso",
+        "turso"
+      ],
+      "harness_id": "queue_recovery_pipeline::tests::projection_directory::the_directory_stays_locked_until_every_tenure_has_ended",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::projection_directory::the_directory_stays_locked_until_every_tenure_has_ended",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,memory,objectlog,postgres,s3-turso,turso",
+        "--lib",
         "queue_recovery_pipeline::tests::projection_directory::the_projection_directory_is_validated_before_any_io",
         "--",
         "--exact"
@@ -121445,7 +121490,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "5b93f246f8f74359fb257717ba80dc966689ac1c1532ee0df725bb854e27538f",
+  "source_inventory_sha256": "ac1a7d588f77b0d5664aac0036428f722d5b2963aed700656babe59b1dd41ce1",
   "workspaces": [
     {
       "listing_error_sha256": "",
