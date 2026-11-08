@@ -79,7 +79,13 @@ fn unknown(error: impl std::fmt::Display) -> QueueError {
     QueueError::OutcomeUnknown(format!("API-007 projection: {error}"))
 }
 fn publication_error(error: fireweed_engine::queue_publication::PublicationError) -> QueueError {
-    unknown(format!("{error:?}"))
+    use fireweed_engine::queue_publication::PublicationError;
+    match error {
+        // The encoder measures the frame before it writes or publishes anything,
+        // so a frame over the caller's bound is a definite refusal.
+        PublicationError::FrameLimit => QueueError::TooLarge,
+        error => unknown(format!("{error:?}")),
+    }
 }
 async fn catch_apply_panic<F: std::future::Future>(future: F) -> QueueResult<F::Output> {
     let mut future = Box::pin(future);

@@ -1000,3 +1000,79 @@ async fn a_commit_pack_that_fills_the_bound_is_staged_local() {
 async fn a_commit_pack_that_fills_the_bound_is_staged_real_s3() {
     a_commit_pack_that_fills_the_bound_is_staged(true, 0..30).await;
 }
+
+/// What an operation cost the owner: recovery attempts (each is an owner entry,
+/// so each exit shows as one), fences taken, and conditional publishes.
+fn owner_cost(store: &NativeQueueStore, before: (RecoverySnapshot, u64)) -> (u64, u64, u64) {
+    let after = now(store);
+    (
+        after.attempts - before.0.attempts,
+        after.fence_acquires - before.0.fence_acquires,
+        counts(store).0 - before.1,
+    )
+}
+fn mark(store: &NativeQueueStore) -> (RecoverySnapshot, u64) {
+    (now(store), counts(store).0)
+}
+
+/// A frame that alone exceeds the bound is a definite `TooLarge`: the caller gets
+/// it at once, the owner is not left and nothing is published.
+async fn a_lone_oversized_frame_is_refused_without_leaving_the_owner(s3: bool, op: &str) {
+    let bound = 3000u64;
+    let env = Env::new(&format!("frame-over-{op}"), s3);
+    let store = env.open_bounded("a.db", bound).await;
+    let queue = env.address("q");
+    grow(&store, &queue, 1).await;
+    let before;
+    let outcome: QueueResult<()> = match op {
+        "insert" => {
+            before = mark(&store);
+            insert_of(
+                &store,
+                &queue,
+                "big",
+                InsertMode::InsertOnly,
+                vec![keyed("big", &"x".repeat(4 * bound as usize), 0)],
+            )
+            .await
+            .map(|_| ())
+        }
+        "commit" => {
+            let mut group = suite::group("big");
+            group
+                .work_inserts
+                .push(keyed("big", &"x".repeat(4 * bound as usize), 0));
+            before = mark(&store);
+            store
+                .commit(CommitBatch {
+                    queue: queue.clone(),
+                    groups: vec![group],
+                })
+                .await
+                .map(|_| ())
+        }
+        other => panic!("{other}"),
+    };
+    let cost = owner_cost(&store, before);
+    assert!(matches!(outcome, Err(QueueError::TooLarge)), "{outcome:?}");
+    // No owner exit (so no re-entry), and no publish.
+    assert_eq!(cost, (0, 0, 0), "attempts, fences, publishes");
+    assert_eq!(lone_too_large(&store), 0);
+    store.shutdown().await.unwrap();
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lone_oversized_insert_frame_is_refused_without_leaving_the_owner_local() {
+    a_lone_oversized_frame_is_refused_without_leaving_the_owner(false, "insert").await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lone_oversized_insert_frame_is_refused_without_leaving_the_owner_real_s3() {
+    a_lone_oversized_frame_is_refused_without_leaving_the_owner(true, "insert").await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_local() {
+    a_lone_oversized_frame_is_refused_without_leaving_the_owner(false, "commit").await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_real_s3() {
+    a_lone_oversized_frame_is_refused_without_leaving_the_owner(true, "commit").await;
+}

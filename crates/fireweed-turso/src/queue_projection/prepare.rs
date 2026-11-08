@@ -360,7 +360,7 @@ impl NativeTransactionWork for PrepareWorker {
             self.max_record_bytes,
             &self.job,
         )
-        .map_err(|error| unknown(format!("{error:?}")))?;
+        .map_err(publication_error)?;
         let receipt = encode_claim_receipt(&leases, self.max_record_bytes, &self.job)?;
         let publication = encode_claim_publication(
             ClaimPublicationInput {
