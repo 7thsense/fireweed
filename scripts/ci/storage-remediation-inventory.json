@@ -16914,6 +16914,46 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::projection_files::tests::non_ascii_names_are_rejected_without_panicking",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::projection_files::tests::non_ascii_names_are_rejected_without_panicking",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::projection_files::tests::non_ascii_names_are_rejected_without_panicking"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::projection_files::tests::projection_file_names_are_matched_exactly",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::projection_files::tests::projection_file_names_are_matched_exactly",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::projection_files::tests::projection_file_names_are_matched_exactly"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::store::tests::abandoned_dispatch_and_cancelled_shutdown_retain_final_ownership",
           "--",
           "--exact"
@@ -103525,6 +103565,82 @@
         "--features",
         "default,memory,objectlog,postgres,turso",
         "--lib",
+        "queue_recovery_pipeline::projection_files::tests::non_ascii_names_are_rejected_without_panicking",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "memory",
+        "objectlog",
+        "postgres",
+        "turso"
+      ],
+      "harness_id": "queue_recovery_pipeline::projection_files::tests::non_ascii_names_are_rejected_without_panicking",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::projection_files::tests::non_ascii_names_are_rejected_without_panicking",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,memory,objectlog,postgres,turso",
+        "--lib",
+        "queue_recovery_pipeline::projection_files::tests::projection_file_names_are_matched_exactly",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "memory",
+        "objectlog",
+        "postgres",
+        "turso"
+      ],
+      "harness_id": "queue_recovery_pipeline::projection_files::tests::projection_file_names_are_matched_exactly",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::projection_files::tests::projection_file_names_are_matched_exactly",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,memory,objectlog,postgres,turso",
+        "--lib",
         "queue_recovery_pipeline::store::tests::abandoned_dispatch_and_cancelled_shutdown_retain_final_ownership",
         "--",
         "--exact"
@@ -120276,7 +120392,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "0aed78fbd4ed072b52ecd22c1ecfbb252d40d9b79f64136881a540aad0f70b2d",
+  "source_inventory_sha256": "491feed28b4f4f96b76bc3aa9980bef1553d7097c201aa80a43215c32e7b32ba",
   "workspaces": [
     {
       "listing_error_sha256": "",
