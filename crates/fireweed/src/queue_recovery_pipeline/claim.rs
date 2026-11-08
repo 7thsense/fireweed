@@ -82,7 +82,7 @@ impl Plan for ClaimPlan {
                     .prepare_claim(
                         input,
                         t.epoch,
-                        p.hard_record_bytes,
+                        p.planner_bound(),
                         clock.clone(),
                         job,
                         &p.workers,

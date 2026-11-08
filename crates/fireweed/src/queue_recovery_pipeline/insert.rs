@@ -81,7 +81,7 @@ impl Plan for InsertPlan {
                     .prepare_insert(
                         input,
                         t.epoch,
-                        p.hard_record_bytes,
+                        p.planner_bound(),
                         clock.clone(),
                         job,
                         &p.workers,

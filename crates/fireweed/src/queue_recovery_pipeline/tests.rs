@@ -27,8 +27,16 @@ fn pipeline_configuration_rejects_semaphore_overflow_before_resource_constructio
         assert!(matches!(options.validate(), Err(QueueError::Invalid(_))));
     }
     options.operations = 1;
-    options.hard_record_bytes = 0;
-    assert!(matches!(options.validate(), Err(QueueError::Invalid(_))));
+    // A bound that leaves no room for a record inside an entry-list record.
+    let overhead = fireweed_engine::queue_log_record::standalone_record_bound(u64::MAX)
+        .map(|bound| u64::MAX - bound)
+        .unwrap();
+    for hard_record_bytes in [0, 1, overhead] {
+        options.hard_record_bytes = hard_record_bytes;
+        assert!(matches!(options.validate(), Err(QueueError::Invalid(_))));
+    }
+    options.hard_record_bytes = overhead + 1;
+    options.validate().unwrap();
 }
 
 #[test]

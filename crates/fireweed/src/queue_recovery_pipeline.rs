@@ -49,7 +49,8 @@ impl QueuePipelineOptions {
     pub fn validate(&self) -> QueueResult<()> {
         if self.operations == 0
             || self.operations > Semaphore::MAX_PERMITS
-            || self.hard_record_bytes == 0
+            || fireweed_engine::queue_log_record::standalone_record_bound(self.hard_record_bytes)
+                .is_none()
         {
             return Err(QueueError::Invalid(
                 "invalid queue pipeline capacities".into(),
@@ -80,6 +81,9 @@ pub struct QueueRecoveryPipeline {
     /// Entries staged into a batch's projection transaction.
     #[cfg(test)]
     staged: std::sync::atomic::AtomicU64,
+    /// Planned records `Batch::stage` declined as too large for an empty batch.
+    #[cfg(test)]
+    lone_too_large: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     before_drop: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -102,6 +106,14 @@ struct OperationCompletion {
     _job: Arc<QueueReservation>,
 }
 impl QueueRecoveryPipeline {
+    /// The bound a planner gets for the standalone record it produces. The owner
+    /// publishes that record as an entry of an entry-list record, which is larger
+    /// by a fixed overhead, so this is `hard_record_bytes` less that overhead.
+    /// `validate` guarantees it is positive.
+    fn planner_bound(&self) -> u64 {
+        fireweed_engine::queue_log_record::standalone_record_bound(self.hard_record_bytes)
+            .unwrap_or(0)
+    }
     /// `projection_directory` is an absolute path that does not exist or is a
     /// directory. It is created if missing, and the projection files an earlier
     /// process left in it are deleted, never read. The pipeline alone uses it.
@@ -133,6 +145,8 @@ impl QueueRecoveryPipeline {
             published: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             staged: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            lone_too_large: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             before_drop: std::sync::Mutex::new(None),
             #[cfg(test)]

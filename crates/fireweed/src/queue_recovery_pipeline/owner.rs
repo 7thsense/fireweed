@@ -455,6 +455,11 @@ impl Batch {
         .map_err(|_| Exit)?;
         if size > p.hard_record_bytes {
             return Ok(if self.entries.is_empty() {
+                // Planners are bounded by `planner_bound`, so a planned record
+                // fits alone; this is a definite refusal, never reached.
+                #[cfg(test)]
+                p.lone_too_large
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 StagedEntry::TooLarge
             } else {
                 StagedEntry::Full

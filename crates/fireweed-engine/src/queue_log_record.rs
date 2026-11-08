@@ -745,6 +745,22 @@ pub fn checked_entries_record_len(entry_bytes: impl IntoIterator<Item = u64>) ->
                 .ok_or(QueueError::TooLarge)
         })
 }
+/// The largest standalone checksummed publication or claim record that still
+/// fits `hard_record_bytes` once `into_entry` has made it the only entry of an
+/// entry-list record. A standalone record is the record header, the payload and
+/// the checksum trailer; its entry is the payload alone, and the wrapping record
+/// adds the entry-list fixed bytes and one entry's framing. So a record of
+/// `n` bytes wraps to `n + overhead`, where the overhead is
+/// `ENTRIES_RECORD_FIXED_BYTES + ENTRY_FRAMING_BYTES - (header + trailer)`.
+/// `None` when nothing positive is left. Planners are bounded by this, not by
+/// `hard_record_bytes`.
+pub fn standalone_record_bound(hard_record_bytes: u64) -> Option<u64> {
+    let wrapped = checked_entries_record_len([0]).ok()?;
+    let standalone = checked_publication_record_len(0).ok()?;
+    hard_record_bytes
+        .checked_sub(wrapped.checked_sub(standalone)?)
+        .filter(|bound| *bound > 0)
+}
 /// One record of chained entries. The entries are validated as a chain.
 pub fn encode_checked_entries_record(
     epoch: u64,
@@ -1269,6 +1285,22 @@ mod tests {
             .unwrap()
             .into_entry()
             .unwrap()
+    }
+    #[test]
+    fn standalone_bound_is_what_a_lone_entry_wraps_to() {
+        let job = job();
+        let raw = encode_definition(&schema()).unwrap();
+        let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+        let frame = empty_frame(&definition, &job);
+        let standalone = encode_checked_publication_record(7, &frame, 4096, &job).unwrap();
+        let len = standalone.bytes().len() as u64;
+        let entry = standalone.into_entry().unwrap();
+        let wrapped = checked_entries_record_len([entry.bytes().len() as u64]).unwrap();
+        // The bound for a hard limit equal to the wrapped size is exactly this record.
+        assert_eq!(standalone_record_bound(wrapped), Some(len));
+        assert_eq!(standalone_record_bound(wrapped - 1), Some(len - 1));
+        assert_eq!(standalone_record_bound(wrapped - len), None);
+        assert_eq!(standalone_record_bound(0), None);
     }
     #[test]
     fn entry_list_round_trips_in_order_and_sizes_exactly() {

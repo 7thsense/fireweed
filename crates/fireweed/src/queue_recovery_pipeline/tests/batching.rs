@@ -892,3 +892,111 @@ async fn queues_waiting_for_the_writer_do_not_starve_a_batch_of_workers_local() 
 async fn queues_waiting_for_the_writer_do_not_starve_a_batch_of_workers_real_s3() {
     queues_waiting_for_the_writer_do_not_starve_a_batch_of_workers(true).await;
 }
+
+fn lone_too_large(store: &NativeQueueStore) -> u64 {
+    store
+        .pipeline_for_test()
+        .lone_too_large
+        .load(Ordering::SeqCst)
+}
+/// A record the planner accepts must fit alone once it is wrapped as the only
+/// entry of an entry-list record. Sweep insert sizes across the bound: the
+/// planner refuses what is too large, and `Batch::stage` never has to.
+async fn a_planned_insert_always_fits_its_wrapping_record(s3: bool, bound: u64) {
+    let env = Env::new("planned-fits-insert", s3);
+    let store = env.open_bounded("a.db", bound).await;
+    let queue = env.address("q");
+    grow(&store, &queue, 1).await;
+    let attempt = |len: usize| {
+        insert_of(
+            &store,
+            &queue,
+            &format!("fit-{len:05}"),
+            InsertMode::InsertOnly,
+            vec![keyed(&format!("f-{len:05}"), &"x".repeat(len), 0)],
+        )
+    };
+    // A record that is too large is refused as `TooLarge`. A frame already over
+    // the bound, further up, is refused otherwise: the search treats any error as
+    // over, and the sweep below stays in the `TooLarge` band.
+    let refused = |outcome: &QueueResult<Vec<InsertOutcome>>| !inserted(outcome);
+    // The smallest size the store refuses.
+    let (mut fits, mut over) = (0usize, bound as usize);
+    assert!(!refused(&attempt(fits).await));
+    assert!(refused(&attempt(over).await));
+    while over - fits > 1 {
+        let mid = (fits + over) / 2;
+        if refused(&attempt(mid).await) {
+            over = mid;
+        } else {
+            fits = mid;
+        }
+    }
+    let mut refusals = 0;
+    for len in over.saturating_sub(3)..over + 40 {
+        let outcome = attempt(len).await;
+        if refused(&outcome) {
+            refusals += 1;
+            assert!(matches!(outcome, Err(QueueError::TooLarge)), "{outcome:?}");
+        }
+        assert_eq!(!inserted(&outcome), len >= over, "len {len}");
+    }
+    assert!(refusals > 0);
+    assert_eq!(lone_too_large(&store), 0);
+    store.shutdown().await.unwrap();
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_planned_insert_always_fits_its_wrapping_record_local() {
+    a_planned_insert_always_fits_its_wrapping_record(false, 3000).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_planned_insert_always_fits_its_wrapping_record_real_s3() {
+    a_planned_insert_always_fits_its_wrapping_record(true, 3000).await;
+}
+
+/// Commit packs that fill the bound are staged, never declined for size and
+/// replaced by single groups. The group size is swept so some pack lands in the
+/// bytes between the bound less the wrapping overhead and the bound.
+async fn a_commit_pack_that_fills_the_bound_is_staged(s3: bool, sizes: std::ops::Range<usize>) {
+    let env = Env::new("planned-fits-pack", s3);
+    let store = env.open_bounded("a.db", 3000).await;
+    let queue = env.address("q");
+    grow(&store, &queue, 1).await;
+    let groups = 24;
+    for pad in sizes {
+        let receipts = store
+            .commit(CommitBatch {
+                queue: queue.clone(),
+                groups: (0..groups)
+                    .map(|n| {
+                        let mut group = suite::group(&format!("p{pad:03}-{n:03}"));
+                        group.work_inserts.push(suite::item(
+                            &format!("p{pad:03}-{n:03}-{}", "x".repeat(pad)),
+                            "counts",
+                            0,
+                            0,
+                        ));
+                        group
+                    })
+                    .collect(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            receipts
+                .iter()
+                .all(|r| matches!(r.outcome, GroupOutcome::Committed { .. })),
+            "{receipts:?}"
+        );
+    }
+    assert_eq!(lone_too_large(&store), 0);
+    store.shutdown().await.unwrap();
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_commit_pack_that_fills_the_bound_is_staged_local() {
+    a_commit_pack_that_fills_the_bound_is_staged(false, 0..40).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_commit_pack_that_fills_the_bound_is_staged_real_s3() {
+    a_commit_pack_that_fills_the_bound_is_staged(true, 0..30).await;
+}
