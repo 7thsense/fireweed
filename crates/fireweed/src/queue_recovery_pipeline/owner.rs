@@ -1,7 +1,7 @@
 //! One loop per queue; every operation, read or write, goes through it.
 //!
 //! The loop owns the queue's position, its storage fence, its lease deadline
-//! and its use of the local projection, and keeps `P = fold(log[0, p))`.
+//! and its own local projection database, and keeps `P = fold(log[0, p))`.
 //! A healthy iteration makes no object-store read. Its mutations are planned
 //! one after another against one open projection transaction, each staging its
 //! entry into it, so a later request sees the earlier ones. The iteration then
@@ -21,8 +21,9 @@ use fireweed_engine::{
 use fireweed_objectlog::queue_native_log::{
     QueueNativeNamespace, QueueNativeNamespaceIdentity, QueueNativeSubmit, QueueNativeWriter,
 };
-use fireweed_turso::queue_projection::QueueBatch;
+use fireweed_turso::queue_projection::{QueueBatch, QueueProjection};
 use futures::future::BoxFuture;
+use projection_files::TenureProjection;
 use std::{collections::VecDeque, time::Duration};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -134,8 +135,14 @@ pub(super) struct Tenure {
     pub genesis: Option<Genesis>,
     deadline: Duration,
     renew_at: Duration,
+    /// This queue's projection database. Ending the tenure closes it and deletes
+    /// its files.
+    projection: TenureProjection,
 }
 impl Tenure {
+    pub(super) fn projection(&self) -> &Arc<QueueProjection> {
+        self.projection.get()
+    }
     pub(super) fn namespace(
         &self,
         p: &QueueRecoveryPipeline,
@@ -343,7 +350,9 @@ impl Tenure {
         job: &Arc<QueueReservation>,
     ) -> QueueResult<()> {
         self.check(&record, offset)?;
-        p.projection.apply(record, offset, job, &p.workers).await?;
+        self.projection()
+            .apply(record, offset, job, &p.workers)
+            .await?;
         Ok(())
     }
     /// Verify the record and advance the position past it.
@@ -410,10 +419,11 @@ impl Batch {
     pub(super) async fn host(
         &mut self,
         p: &QueueRecoveryPipeline,
+        t: &Tenure,
     ) -> Result<&mut QueueBatch, Exit> {
         if self.projection.is_none() {
             self.projection = Some(
-                p.projection
+                t.projection()
                     .begin_batch(&p.workers)
                     .await
                     .map_err(|_| Exit)?,
@@ -718,7 +728,8 @@ impl QueueRecoveryPipeline {
         sent
     }
     /// Stop accepting operations, let every loop finish what it holds, and
-    /// release the leases. The projection is not touched: it dies with the process.
+    /// release the leases. Each loop's tenure ends with it, which deletes its
+    /// projection file.
     pub(super) async fn close_queues(&self) {
         let slots = {
             let mut table = match self.queues.lock() {
@@ -739,7 +750,10 @@ impl QueueRecoveryPipeline {
     }
     #[cfg(test)]
     pub(super) fn stage(&self, stage: Stage) {
-        if let Some(hook) = self.on_stage.lock().unwrap().clone() {
+        // The lock is released before the hook runs: a hook that blocks one
+        // queue's loop must not block the other queues' loops at their stages.
+        let hook = self.on_stage.lock().unwrap().clone();
+        if let Some(hook) = hook {
             hook(stage);
         }
     }
@@ -962,7 +976,7 @@ impl QueueLoop {
                     *op.attempts() += 1;
                 }
             }
-            self.exit(p, batch.first().map(|op| op.job().clone())).await;
+            self.exit();
             batch.append(&mut unstarted);
             self.requeue(batch);
             return;
@@ -1024,16 +1038,9 @@ impl QueueLoop {
             }
         }
     }
-    /// Drop this queue's projection and leave owner state. With no operation
-    /// to charge, the rows are dropped by the next entry.
-    async fn exit(&mut self, p: &Arc<QueueRecoveryPipeline>, job: Option<Arc<QueueReservation>>) {
+    /// Leave owner state. The tenure's projection is closed and its file deleted.
+    fn exit(&mut self) {
         self.tenure = None;
-        if let Some(job) = job {
-            let _ = p
-                .projection
-                .drop_queue(self.address.clone(), &job, &p.workers)
-                .await;
-        }
     }
     async fn release(&mut self) {
         if let Some(t) = self.tenure.take() {
@@ -1083,10 +1090,6 @@ impl QueueLoop {
     ) -> QueueResult<Tenure> {
         let own = &p.ownership;
         let busy = |_: fireweed_engine::EngineError| QueueError::Busy;
-        // A previous tenure's rows are never reused.
-        p.projection
-            .drop_queue(self.address.clone(), job, &p.workers)
-            .await?;
         let mut requested = own.lease_clock.now();
         own.control
             .register_owner(&own.owner, own.stamp())
@@ -1104,6 +1107,15 @@ impl QueueLoop {
         *acquired = Some(lease.assignment_epoch);
         // Always wait, with no check of whether there was a previous owner.
         Self::wait_lease_clock(p, own.lease_clock.now() + own.skew).await;
+        // The tenure's own database, empty, before anything is rebuilt into it. If
+        // entry fails below, dropping the tenure deletes the file.
+        let projection = TenureProjection::open(
+            &p.projection_directory,
+            self.key.queue_id.as_str(),
+            job,
+            &p.workers,
+        )
+        .await?;
         let mut tenure = Tenure {
             lease_epoch: lease.assignment_epoch,
             identity: None,
@@ -1115,6 +1127,7 @@ impl QueueLoop {
             genesis: None,
             deadline: Duration::ZERO,
             renew_at: Duration::ZERO,
+            projection,
         };
         // With no namespace there is nothing to fence or read; provisioning fences.
         // An existing namespace is always fenced. An empty head means nothing to
@@ -1168,7 +1181,10 @@ impl QueueLoop {
                     span.phase(diagnostics::RecoveryPhase::CheckedFold);
                     tenure.check(&record, at)?;
                     span.phase(diagnostics::RecoveryPhase::NativeApply);
-                    p.projection.apply(record, at, job, &p.workers).await?;
+                    tenure
+                        .projection()
+                        .apply(record, at, job, &p.workers)
+                        .await?;
                 }
                 #[cfg(test)]
                 p.stage(Stage::RebuildRun);

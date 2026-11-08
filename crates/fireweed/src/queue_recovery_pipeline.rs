@@ -16,6 +16,7 @@ pub use lease_clock::{LeaseClock, SystemLeaseClock};
 mod owner;
 pub use owner::QueueOwnership;
 mod preview;
+mod projection_files;
 mod provision;
 mod query;
 mod receipts;
@@ -31,7 +32,7 @@ use fireweed_objectlog::queue_native_log::QueueNativeLog;
 use fireweed_queue_spool::ScratchWorkers;
 use fireweed_turso::queue_projection::QueueProjection;
 use sha2::Sha256;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 pub use store::NativeQueueStore;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 fn unknown(message: &str) -> QueueError {
@@ -60,7 +61,9 @@ impl QueuePipelineOptions {
 /// A pipeline owns its queues' loops; it has no blocking worker while awaiting stages.
 pub struct QueueRecoveryPipeline {
     log: Arc<QueueNativeLog>,
-    projection: Arc<QueueProjection>,
+    /// The directory that holds one projection database per owned queue. It is
+    /// used by this pipeline alone.
+    projection_directory: PathBuf,
     workers: ScratchWorkers,
     scratch_root: Arc<fireweed_queue_spool::ScratchRoot>,
     scratch_quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
@@ -99,9 +102,12 @@ struct OperationCompletion {
     _job: Arc<QueueReservation>,
 }
 impl QueueRecoveryPipeline {
+    /// `projection_directory` is an absolute path that does not exist or is a
+    /// directory. It is created if missing, and the projection files an earlier
+    /// process left in it are deleted, never read. The pipeline alone uses it.
     pub fn new(
         log: Arc<QueueNativeLog>,
-        projection: Arc<QueueProjection>,
+        projection_directory: PathBuf,
         workers: ScratchWorkers,
         options: QueuePipelineOptions,
         scratch_root: Arc<fireweed_queue_spool::ScratchRoot>,
@@ -109,9 +115,10 @@ impl QueueRecoveryPipeline {
         ownership: QueueOwnership,
     ) -> QueueResult<Arc<Self>> {
         options.validate()?;
+        projection_files::prepare_directory(&projection_directory)?;
         Ok(Arc::new(Self {
             log,
-            projection,
+            projection_directory,
             workers,
             scratch_root,
             scratch_quota,

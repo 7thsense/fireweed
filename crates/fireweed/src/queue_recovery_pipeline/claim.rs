@@ -77,7 +77,7 @@ impl Plan for ClaimPlan {
             };
             let prepared = settle(
                 batch
-                    .host(p)
+                    .host(p, t)
                     .await?
                     .prepare_claim(
                         input,
@@ -119,7 +119,7 @@ impl Plan for ClaimPlan {
                 Err(error) => return Ok(Err(error)),
             };
             match settle(
-                p.projection
+                t.projection()
                     .replay_claim_with_clock(input, clock.clone(), job, &p.workers)
                     .await,
             )? {

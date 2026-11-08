@@ -55,7 +55,7 @@ impl Plan for ReceiptPlan {
                 Err(error) => return Ok(Err(error)),
             };
             settle(
-                p.projection
+                t.projection()
                     .read_commit_receipts(
                         ReceiptReadInput {
                             genesis,

@@ -36,12 +36,12 @@ pub(super) async fn host_transaction<W: NativeTransactionWork>(
 impl QueueProjection {
     /// Run `operation` on a scratch worker, once it has its turn at the writer.
     ///
-    /// The writer is one connection shared by every queue of the pipeline, and a
-    /// batch holds it across its publish. An operation that blocked for it on a
-    /// worker would hold that worker meanwhile; enough of them would leave the
-    /// batch no worker to finish with, and nothing could proceed. So every
-    /// operation waits for its turn first, holding nothing, and a batch holds
-    /// the turn for its whole life and runs its own work with `in_batch`.
+    /// The writer is one connection, and a batch holds it across its publish. An
+    /// operation that blocked for it on a worker would hold that worker
+    /// meanwhile; enough of them would leave the batch no worker to finish with,
+    /// and nothing could proceed. So every operation waits for its turn first,
+    /// holding nothing, and a batch holds the turn for its whole life and runs
+    /// its own work with `in_batch`.
     pub(super) async fn run_native<T, F>(
         self: &Arc<Self>,
         in_batch: bool,
@@ -279,6 +279,7 @@ impl QueueBatch {
             .queue_id
             .ok_or_else(|| unknown("batch committed with no staged entry"))?;
         let connection = self.connection()?;
+        let wal = self.projection.wal.clone();
         let offset = i64::try_from(offset).map_err(unknown)?;
         let committed = self
             .projection
@@ -289,6 +290,7 @@ impl QueueBatch {
                         catch_apply_panic(async {
                             advance_cursor(&connection, queue_id, offset, epoch).await?;
                             connection.execute("COMMIT", ()).await.map_err(unknown)?;
+                            bound_wal(&connection, &wal).await?;
                             Ok(())
                         })
                         .await

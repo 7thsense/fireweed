@@ -819,9 +819,9 @@ async fn publishes_per_batch_do_not_grow_with_batch_size_real_s3() {
     publishes_per_batch_do_not_grow_with_batch_size(true, &[1, 10, 100]).await;
 }
 
-/// The writer is one connection for every queue of the pipeline. While a batch
-/// holds it across its publish, operations of other queues that want it must
-/// wait without holding scratch workers, or the batch could not finish.
+/// While a batch holds its queue's writer across its publish, more operations of
+/// other queues than the pool has scratch workers are answered without holding up
+/// the batch: none of them waits on a worker for the batch's writer.
 async fn queues_waiting_for_the_writer_do_not_starve_a_batch_of_workers(s3: bool) {
     let env = Env::new("starve", s3);
     let store = env.open("a.db").await;

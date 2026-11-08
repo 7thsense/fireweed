@@ -164,7 +164,7 @@ async fn stage_group(
     };
     let prepared = settle(if group.administration.is_some() {
         batch
-            .host(p)
+            .host(p, t)
             .await?
             .prepare_administration(
                 AdministrativePreparationInput {
@@ -181,7 +181,7 @@ async fn stage_group(
             .await
     } else {
         batch
-            .host(p)
+            .host(p, t)
             .await?
             .prepare_ordinary_commit(
                 input,
@@ -246,7 +246,7 @@ impl Plan for GroupPlan {
                 Ok(input) => input,
                 Err(error) => return Ok(Err(error)),
             };
-            match settle(p.projection.replay_commit(input, job, &p.workers).await)? {
+            match settle(t.projection().replay_commit(input, job, &p.workers).await)? {
                 Err(error) => Ok(Err(error)),
                 Ok(response) => match response.receipts() {
                     [ReceiptLookup::Found(_)] => Ok(Ok(response)),
@@ -301,7 +301,7 @@ impl BatchPlan {
         };
         settle(
             batch
-                .host(p)
+                .host(p, t)
                 .await?
                 .replay_commit_batch(input, job, &p.workers)
                 .await,
@@ -320,7 +320,7 @@ impl BatchPlan {
             Err(error) => return Ok(Err(error)),
         };
         settle(
-            p.projection
+            t.projection()
                 .replay_commit_batch(input, job, &p.workers)
                 .await,
         )
@@ -346,7 +346,7 @@ impl BatchPlan {
         let progress = batch.point(t);
         let prepared = settle(
             batch
-                .host(p)
+                .host(p, t)
                 .await?
                 .prepare_ordinary_pack(
                     CommitPackPreparationInput {

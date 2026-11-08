@@ -14,7 +14,6 @@ pub use commit_pack_prepare::{
     AdmittedPackReceipts, CommitPackPreparationInput, OrdinaryPackPreparation, PreparedOrdinaryPack,
 };
 pub use preview::AdmittedQueuePreview;
-mod drop_queue;
 mod filter_sql;
 mod group_authority;
 mod insert_prepare;
@@ -66,7 +65,11 @@ pub use replay::{AdmittedClaimReplay, ClaimReplayInput};
 pub use selection::AdmittedClaimSelection;
 pub use state_read::{AdmittedStateRecords, StateReadInput};
 pub use stats_read::{AdmittedQueueStats, StatsReadInput};
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::sync::Mutex;
 use turso::{
     Builder, Connection, Database, Value,
@@ -112,12 +115,20 @@ CREATE INDEX IF NOT EXISTS q7_index_order ON q7_indexes(queue_id,collection,inde
 CREATE TABLE IF NOT EXISTS q7_requests(id INTEGER PRIMARY KEY,queue_id INTEGER NOT NULL,domain INTEGER NOT NULL,identity_hash BLOB NOT NULL,identity BLOB NOT NULL,fingerprint_format INTEGER NOT NULL,fingerprint BLOB NOT NULL,outcome BLOB NOT NULL,expired INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS q7_request_identity ON q7_requests(queue_id,domain,identity_hash);
 "#;
+/// Page cache of one projection database, in KiB (SQLite's negative `cache_size`).
+const CACHE_KIB: i64 = 1024;
+/// A write-ahead log larger than this is truncated after the commit that grew it.
+/// Turso checkpoints on its own but never shrinks the log file, and an untruncated
+/// log makes every later apply slower while it grows without bound.
+const WAL_TRUNCATE_BYTES: u64 = 1 << 20;
 /// This lower-level projector is not a QueueStore or a consumer transaction API.
 pub struct QueueProjection {
     writer: Arc<Mutex<Option<Connection>>>,
     /// Taken before a worker is, so an operation that waits for the writer waits
     /// without holding a worker, which a batch holding the writer needs.
     turn: Arc<Mutex<()>>,
+    /// The write-ahead log file of this database.
+    wal: PathBuf,
     #[cfg(test)]
     pause: Mutex<Option<Arc<ApplyPause>>>,
     #[cfg(test)]
@@ -233,6 +244,22 @@ struct UniqueTouch {
 }
 const UNIQUE_PROBE_SQL: &str = "SELECT record_id FROM q7_indexes INDEXED BY q7_index_equal WHERE queue_id=?1 AND collection=?2 AND index_no=?3 AND hash=?4 AND is_unique=1 AND full_key=?5 LIMIT 2";
 
+/// Truncate the write-ahead log once a commit has left it over its bound. Call
+/// only with no transaction open on `connection`. A checkpoint that finds a
+/// reader busy (first column non-zero) is not an error: the next commit retries.
+async fn bound_wal(connection: &Connection, wal: &Path) -> QueueResult<()> {
+    match std::fs::metadata(wal) {
+        Ok(meta) if meta.len() > WAL_TRUNCATE_BYTES => {}
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(unknown(error)),
+    }
+    one(connection, "PRAGMA wal_checkpoint(TRUNCATE)", vec![], 3)
+        .await?
+        .ok_or_else(|| unknown("wal checkpoint has no result"))?;
+    Ok(())
+}
+
 async fn one(
     connection: &Connection,
     sql: &str,
@@ -312,7 +339,7 @@ impl QueueProjection {
                         .await
                         .map_err(unknown)?;
                     connection
-                        .execute("PRAGMA cache_size=-4096", ())
+                        .execute(&format!("PRAGMA cache_size=-{CACHE_KIB}"), ())
                         .await
                         .map_err(unknown)?;
                     let sync = one(&connection, "PRAGMA synchronous", vec![], 1)
@@ -324,13 +351,14 @@ impl QueueProjection {
                     let cache = one(&connection, "PRAGMA cache_size", vec![], 1)
                         .await?
                         .ok_or_else(|| unknown("cache size has no readback"))?;
-                    if integer(&cache[0])? != -4096 {
+                    if integer(&cache[0])? != -CACHE_KIB {
                         return Err(unknown("projection cache bound was not installed"));
                     }
                     connection.execute_batch(DDL).await.map_err(unknown)?;
                     Ok(Arc::new(QueueProjection {
                         writer: Arc::new(Mutex::new(Some(connection))),
                         turn: Arc::new(Mutex::new(())),
+                        wal: PathBuf::from(format!("{}-wal", self.path)),
                         #[cfg(test)]
                         pause: Mutex::new(None),
                         #[cfg(test)]
@@ -420,6 +448,13 @@ impl ApplyWorker {
     async fn execute_inner(&mut self) -> QueueResult<AppliedQueueRecord> {
         let projection = Arc::clone(&self.projection);
         owned_native_transaction(&projection, TransactionBehavior::Immediate, self).await?;
+        {
+            let writer = projection.writer.lock().await;
+            let connection = writer
+                .as_ref()
+                .ok_or_else(|| unknown("projection connection is poisoned"))?;
+            bound_wal(connection, &projection.wal).await?;
+        }
         #[cfg(test)]
         if self.projection.pause_apply(true).await {
             return Err(unknown("injected lost apply reply after commit"));
@@ -1507,6 +1542,7 @@ async fn validate_receipt_versions(
 
 #[cfg(test)]
 mod tests {
+    mod open;
     mod unique_check;
     use super::*;
     use bytes::Bytes;

@@ -58,7 +58,7 @@ impl Plan for StatsPlan {
                 Err(error) => return Ok(Err(error)),
             };
             settle(
-                p.projection
+                t.projection()
                     .read_queue_stats(
                         StatsReadInput {
                             genesis,
