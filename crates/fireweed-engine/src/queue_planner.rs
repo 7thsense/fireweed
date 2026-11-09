@@ -215,7 +215,12 @@ pub fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> QueueResult<Commi
         match value {
             Some(value) => out.work.push(value),
             None => out.deleted_work.push(DeletedWork {
-                deleted_at: deleted_at.get(&key).copied().unwrap_or_default(),
+                // Every deletion records its time and only a later insert of the
+                // same key clears it, so a missing time is a malformed delta, never
+                // an epoch deletion.
+                deleted_at: deleted_at.get(&key).copied().ok_or_else(|| {
+                    QueueError::OutcomeUnknown("packed deletion lacks its deletion time".into())
+                })?,
                 key,
             }),
         }
@@ -3036,6 +3041,36 @@ mod tests {
                 assert_eq!(snapshot.work, original);
             }
         }
+    }
+    #[test]
+    fn packed_deletion_keeps_its_group_time_and_never_defaults_to_zero() {
+        let s = unique_schema();
+        let mut snapshot = RecordSnapshot::default();
+        let mut seed = group();
+        seed.work_inserts.push(unique_work("a", "x"));
+        let inserted = probe_and_plan(&seed, &mut snapshot, &s);
+        let mut remove = group();
+        remove.issued_at = 777;
+        remove.work_updates.push(UnclaimedUpdate {
+            key: "a".into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Delete,
+        });
+        let deleted = probe_and_plan(&remove, &mut snapshot, &s);
+        let packed = combine_deltas(&[inserted.clone(), deleted.clone()], 0).unwrap();
+        assert_eq!(packed.deleted_work.len(), 1);
+        assert_eq!(packed.deleted_work[0].deleted_at, 777);
+        // One delta never carries a key as both written and deleted; if it did,
+        // the deletion's time would be lost, which is an error rather than epoch 0.
+        let mut malformed = inserted;
+        malformed.deleted_work.push(DeletedWork {
+            key: "a".into(),
+            deleted_at: 5,
+        });
+        assert!(matches!(
+            combine_deltas(&[malformed], 0),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
     }
     #[test]
     fn fresh_replacement_rejects_stored_lease_even_after_expiry() {
