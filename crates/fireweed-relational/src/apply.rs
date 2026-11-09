@@ -633,7 +633,6 @@ pub fn apply_committed_batch_sql_with_cursor_seeds(
                             &QueueCommand::Claim(remaining),
                         )?;
                     }
-                    crate::delete_claim_outbox(tx, &t, &q, &envelope.command_id.0)?;
                 } else {
                     apply_command_sql_with_claims(
                         tx,
@@ -684,7 +683,6 @@ pub fn apply_committed_batch_sql_with_cursor_seeds(
                 envelopes[i + 1].created_at,
                 claim,
             )?;
-            crate::delete_claim_outbox(tx, &t, &q, &env.command_id.0)?;
             persist_request_outcome_sql(tx, queues, &pos.queue, env, pos)?;
             persist_request_outcome_sql(
                 tx,
@@ -728,10 +726,6 @@ pub fn apply_committed_batch_sql_with_cursor_seeds(
                 .iter()
                 .zip(&envelopes[i..complete_end])
             {
-                if matches!(e.command, QueueCommand::Claim(_)) {
-                    let (tenant, queue) = parts(&p.queue);
-                    crate::delete_claim_outbox(tx, &tenant, &queue, &e.command_id.0)?;
-                }
                 persist_request_outcome_sql(tx, queues, &p.queue, e, p)?;
                 exp = (p.sequence as i64)
                     .checked_add(1)
@@ -761,8 +755,6 @@ pub fn apply_committed_batch_sql_with_cursor_seeds(
             )?;
             let mut exp = incoming;
             for (p, e) in positions[i..run_end].iter().zip(&envelopes[i..run_end]) {
-                let (tenant, queue) = parts(&p.queue);
-                crate::delete_claim_outbox(tx, &tenant, &queue, &e.command_id.0)?;
                 persist_request_outcome_sql(tx, queues, &p.queue, e, p)?;
                 exp = (p.sequence as i64)
                     .checked_add(1)
@@ -924,9 +916,6 @@ pub fn apply_committed_batch_sql_with_cursor_seeds(
             env.created_at,
             &env.command,
         )?;
-        if matches!(env.command, QueueCommand::Claim(_)) {
-            crate::delete_claim_outbox(tx, &t, &q, &env.command_id.0)?;
-        }
         persist_request_outcome_sql(tx, queues, &pos.queue, env, pos)?;
         let new_next = incoming
             .checked_add(1)

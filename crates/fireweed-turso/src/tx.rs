@@ -746,7 +746,7 @@ mod packed_authority_first_tests {
         let foreign = item("7", "k7", 7);
         let leftover = item("8", "k8", 8);
         let extra = item("9", "k9", 9);
-        let legacy = item("10", "k10", 10);
+        let replayed = item("10", "k10", 10);
         let all = vec![
             a.clone(),
             b.clone(),
@@ -757,7 +757,7 @@ mod packed_authority_first_tests {
             foreign.clone(),
             leftover.clone(),
             extra.clone(),
-            legacy.clone(),
+            replayed.clone(),
         ];
         let ids: Vec<ItemId> = all.iter().map(|item| item.item_id).collect();
 
@@ -965,8 +965,8 @@ mod packed_authority_first_tests {
             &shard,
             9,
             vec![claim_envelope(
-                vec![legacy.item_id],
-                "legacy-token",
+                vec![replayed.item_id],
+                "replay-token",
                 900,
                 "wl",
                 false,
@@ -979,28 +979,28 @@ mod packed_authority_first_tests {
             &shard,
             10,
             vec![claim_envelope(
-                vec![legacy.item_id],
-                "legacy-token",
+                vec![replayed.item_id],
+                "replay-token",
                 900,
                 "wl",
                 false,
             )],
         )
         .await
-        .expect("legacy outbox claim replay must not poison");
+        .expect("non-authority-first claim replay must not poison");
         apply(
             &packed,
             &shard,
             11,
             vec![
-                claim_envelope(vec![legacy.item_id], "legacy-token", 900, "wl", false),
-                complete_envelope(vec![legacy.item_id]),
+                claim_envelope(vec![replayed.item_id], "replay-token", 900, "wl", false),
+                complete_envelope(vec![replayed.item_id]),
             ],
         )
         .await
-        .expect("legacy fused already-this-token must not poison");
+        .expect("non-authority-first fused already-this-token must not poison");
         assert_eq!(
-            AsyncProjectionStore::item_state(&packed, shard.clone(), legacy.item_id)
+            AsyncProjectionStore::item_state(&packed, shard.clone(), replayed.item_id)
                 .await
                 .unwrap(),
             Some(ItemState::Complete)

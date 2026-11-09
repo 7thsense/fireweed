@@ -594,8 +594,8 @@ pub struct ClaimCommand {
     #[serde(default)]
     pub worker_id: Option<WorkerId>,
     /// When true, apply requires every named row to move from Pending before token/bearer
-    /// effects. Absent/false on historical and Class-S outbox envelopes retains recovery
-    /// semantics (already-this-token is a no-op; partial movement does not poison).
+    /// effects. When false, already-this-token is a no-op and partial movement does not
+    /// poison (grouped and cohort claims shape their own commands).
     #[serde(default)]
     pub authority_first: bool,
 }
@@ -1760,25 +1760,6 @@ mod serde_tests {
             let reencoded = serde_json::to_string(&decoded).expect("re-serialize");
             assert_eq!(json, reencoded, "round-trip mismatch for {json}");
         }
-    }
-
-    #[test]
-    fn claim_command_authority_first_defaults_false_for_legacy_outbox() {
-        let command = ClaimCommand::new(
-            vec![iid("a")],
-            LeaseToken::new("lease").unwrap(),
-            ts(100),
-            None,
-        )
-        .with_authority_first();
-        let mut value = serde_json::to_value(&command).expect("serialize");
-        value
-            .as_object_mut()
-            .expect("object")
-            .remove("authority_first");
-        let decoded: ClaimCommand = serde_json::from_value(value).expect("legacy default");
-        assert!(!decoded.authority_first);
-        assert!(command.authority_first);
     }
 
     #[test]

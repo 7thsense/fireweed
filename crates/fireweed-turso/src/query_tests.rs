@@ -2221,27 +2221,4 @@ async fn addressed_claim_queries_seek_ids_and_preserve_due_tenant_and_duplicate_
     }
     assert_eq!(gate_keys, vec!["gate-a", "gate-b"]);
     drop(rows);
-    let update = fireweed_relational::class_s_lease_update_sql(3, true);
-    let mut rows = writer
-        .query(
-            &format!("EXPLAIN QUERY PLAN {update}"),
-            vec![
-                Value::Blob(vec![0; 32]),
-                Value::Integer(100),
-                Value::Null,
-                Value::Integer(0),
-                shard.tenant_id.as_str().to_string().into(),
-                shard.queue_id.as_str().to_string().into(),
-                "1".into(),
-                "2".into(),
-                "999".into(),
-            ],
-        )
-        .await
-        .unwrap();
-    let mut details = String::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        details.push_str(&row.get::<String>(3).unwrap());
-    }
-    assert!(details.contains("SEARCH i USING INDEX sqlite_autoindex_fireweed_items_1 (tenant_id=? AND queue_id=? AND item_id=?)"),"{details}");
 }

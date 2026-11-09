@@ -800,7 +800,6 @@ async fn interleaved_claim_mutations_match_sequential_replay_and_rollback_late_c
             "fireweed_item_payloads",
             "fireweed_request_idempotency",
             "fireweed_claim_replay_items",
-            "fireweed_claim_outbox",
             "fireweed_lease_bearers",
         ] {
             result.push(rows(store, &format!("SELECT * FROM {table} ORDER BY rowid")).await);

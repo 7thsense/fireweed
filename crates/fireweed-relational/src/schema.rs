@@ -299,25 +299,6 @@ CREATE TABLE IF NOT EXISTS fireweed_checkpoint_lineage (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (tenant, queue)
 );
--- Legacy Claim outbox retained for one migration release. New object-log × Turso
--- serving is log-first and writes no rows; reopen still drains pre-upgrade leases.
-CREATE TABLE IF NOT EXISTS fireweed_claim_outbox (
-    tenant_id TEXT NOT NULL,
-    queue_id TEXT NOT NULL,
-    outbox_id TEXT NOT NULL,
-    item_ids TEXT NOT NULL,
-    lease_token TEXT NOT NULL,
-    lease_expires_at INTEGER NOT NULL,
-    request_id TEXT,
-    request_fingerprint INTEGER,
-    worker_id TEXT,
-    claim_unit TEXT NOT NULL DEFAULT 'item',
-    cohort_id TEXT,
-    created_at INTEGER NOT NULL,
-    PRIMARY KEY (tenant_id, queue_id, outbox_id)
-);
-CREATE INDEX IF NOT EXISTS fireweed_claim_outbox_queue_idx
-    ON fireweed_claim_outbox (tenant_id, queue_id, created_at);
 -- Bearer tokens for consumer listing. Not stored on fireweed_items (hash only there).
 CREATE TABLE IF NOT EXISTS fireweed_lease_bearers (
     tenant_id TEXT NOT NULL,
@@ -333,7 +314,6 @@ CREATE INDEX IF NOT EXISTS fireweed_lease_bearers_token_idx
 /// Application tables owned by a disposable relational projection, in dependency-safe drop order.
 pub const OWNED_PROJECTION_TABLES: &[&str] = &[
     "fireweed_lease_bearers",
-    "fireweed_claim_outbox",
     "fireweed_checkpoint_lineage",
     "fireweed_item_index",
     "fireweed_instance_fences",
