@@ -46,7 +46,7 @@ use fireweed_engine::{
         CheckedFields, FieldCoverage, ResolvedFields, affected_index_fields, resolve_index_effects,
     },
     queue_index::ordered_key,
-    queue_log_record::{OwnedQueueLogRecord, QueueLogFormat, QueueLogPayload},
+    queue_log_record::{OwnedQueueLogRecord, QueueLogPayload},
     queue_planner::StoredWork,
     queue_publication::{BodyCommandRef, CommandRef, EffectRef, FieldsCommandRef, ValueRef},
     queue_schema_codec::AdmittedQueueDefinition,
@@ -420,11 +420,6 @@ impl QueueProjection {
     ) -> QueueResult<AppliedQueueRecord> {
         if !record.belongs_to(job) {
             return Err(unknown("record belongs to another operation"));
-        }
-        if record.view()?.format() != QueueLogFormat::ChecksummedV2 {
-            return Err(unknown(
-                "unchecked legacy record requires explicit migration",
-            ));
         }
         let view = record.view()?;
         let address = view.address();

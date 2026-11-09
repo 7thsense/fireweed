@@ -3064,28 +3064,8 @@ mod tests {
     }
     #[tokio::test]
     #[ignore = "requires isolated FIREWEED_API007_PG_TEST_URL"]
-    async fn native_definition_pin_retains_original_legacy_and_framed_bytes() {
+    async fn native_definition_pin_covers_persisted_framed_bytes() {
         let _fixture = physical_fixture().await;
-        #[derive(Serialize)]
-        struct OldDefinition<'a> {
-            fields: &'a BTreeMap<String, FieldType>,
-            indexes: &'a BTreeMap<String, Vec<String>>,
-            unique_indexes: &'a BTreeSet<String>,
-        }
-        #[derive(Serialize)]
-        struct OldSchema<'a> {
-            work: OldDefinition<'a>,
-            state: BTreeMap<String, OldDefinition<'a>>,
-            progress_bound_nanos: u64,
-            max_attempts: u32,
-        }
-        fn old(def: &CollectionDefinition) -> OldDefinition<'_> {
-            OldDefinition {
-                fields: &def.fields,
-                indexes: &def.indexes,
-                unique_indexes: &def.unique_indexes,
-            }
-        }
         let url = std::env::var("FIREWEED_API007_PG_TEST_URL").unwrap();
         let schema = fireweed_conformance::queue_contract::schema();
         let store = PostgresQueueStore::connect(
@@ -3132,35 +3112,6 @@ mod tests {
         assert_eq!(
             framed.definition_pin,
             DefinitionPin::from_persisted_bytes(&raw)
-        );
-        let legacy = postcard::to_allocvec(&OldSchema {
-            work: old(&schema.work),
-            state: schema
-                .state
-                .iter()
-                .map(|(name, def)| (name.clone(), old(def)))
-                .collect(),
-            progress_bound_nanos: schema.progress_bound_nanos,
-            max_attempts: schema.max_attempts,
-        })
-        .unwrap();
-        assert_eq!(decode_definition(&legacy).unwrap(), schema);
-        tx.execute(
-            "UPDATE fireweed_api007.queues SET definition=$2 WHERE id=$1",
-            &[&framed.id, &legacy],
-        )
-        .await
-        .unwrap();
-        let unframed = queue_row(&tx, &queue, &job).await.unwrap();
-        assert_eq!(unframed.schema, framed.schema);
-        assert_eq!(
-            unframed.definition_pin,
-            DefinitionPin::from_persisted_bytes(&legacy)
-        );
-        assert_ne!(unframed.definition_pin, framed.definition_pin);
-        assert_ne!(
-            unframed.definition_pin,
-            DefinitionPin::from_persisted_bytes(&encode_definition(&unframed.schema).unwrap())
         );
         tx.rollback().await.unwrap();
         store.shutdown().await.unwrap();

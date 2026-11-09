@@ -2,7 +2,7 @@
 use super::*;
 use crate::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
-    queue_log_record::{CheckedQueueLogRecord, QueueLogFormat, QueueLogPayload},
+    queue_log_record::{CheckedQueueLogRecord, QueueLogPayload},
     queue_publication::EffectRef,
     queue_schema_codec::DefinitionPin,
 };
@@ -122,7 +122,6 @@ pub fn verify_source_state_values<'r>(
         if !member.cut.same_cut(&first.cut)
             || !member.cut.belongs_to(job)
             || !record.owner().belongs_to(job)
-            || record.view().format() != QueueLogFormat::ChecksummedV2
             || record.view().address() != member.cut.address()
             || record.view().epoch() > member.cut.epoch()
             || record.view().definition_pin_bytes() != *definition.as_bytes()

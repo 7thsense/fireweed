@@ -1,6 +1,6 @@
 //! Payload references bind the full checksummed queue record and exact byte span.
 //! They avoid copying unchanged body/state/result bytes into every index update.
-use crate::queue_log_record::{CheckedQueueLogRecord, QueueLogFormat};
+use crate::queue_log_record::CheckedQueueLogRecord;
 use fireweed_core::queue_contract::{QueueError, QueueResult};
 use serde::{Deserialize, Serialize};
 
@@ -21,9 +21,6 @@ pub struct QueueSourceSpan {
 }
 impl QueueSourceSpan {
     fn checksum(record: &CheckedQueueLogRecord<'_>) -> QueueResult<[u8; 32]> {
-        if record.view().format() != QueueLogFormat::ChecksummedV2 {
-            return Err(unknown("payload references require checked FWQL2"));
-        }
         let bytes = record.owner().bytes();
         bytes
             .get(

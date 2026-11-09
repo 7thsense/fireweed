@@ -93,7 +93,6 @@ impl QueueNativeCaptured {
             .map_err(|error| unknown(format!("invalid stored source record: {error:?}")))?;
         if record.base_offset() != offset
             || record.record_count() != 1
-            || view.format() != QueueLogFormat::ChecksummedV2
             || view.epoch() > self.head().epoch()
             || view.address() != view_address(&self.namespace.address)?
         {

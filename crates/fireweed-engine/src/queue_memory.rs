@@ -1030,67 +1030,6 @@ impl IncomingHeaders for ReceiptReadRequest {
     }
 }
 
-#[derive(Deserialize)]
-struct LegacyMeasuredSchema {
-    work: LegacyMeasuredDefinition,
-    state: LegacyMeasuredState,
-    progress_bound_nanos: u64,
-    max_attempts: u32,
-}
-#[derive(Deserialize)]
-struct LegacyMeasuredDefinition {
-    fields: MeasuredFields,
-    indexes: MeasuredIndexes,
-    unique_indexes: MeasuredNames,
-}
-impl LegacyMeasuredDefinition {
-    fn headers(&self) -> QueueResult<u64> {
-        self.fields
-            .0
-            .checked_add(self.indexes.0)
-            .and_then(|n| n.checked_add(self.unique_indexes.0))
-            .ok_or(QueueError::TooLarge)
-    }
-}
-struct LegacyMeasuredState(u64);
-impl<'de> Deserialize<'de> for LegacyMeasuredState {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct V;
-        impl<'de> serde::de::Visitor<'de> for V {
-            type Value = LegacyMeasuredState;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("legacy state definitions")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Self::Value, A::Error> {
-                let mut total = 0;
-                while map.next_key::<&'de str>()?.is_some() {
-                    measured_add::<A::Error>(&mut total, 512)?;
-                    let def = map.next_value::<LegacyMeasuredDefinition>()?;
-                    measured_add::<A::Error>(
-                        &mut total,
-                        def.headers().map_err(|_| {
-                            serde::de::Error::custom("legacy schema header count overflow")
-                        })?,
-                    )?;
-                }
-                Ok(LegacyMeasuredState(total))
-            }
-        }
-        d.deserialize_map(V)
-    }
-}
-pub fn persisted_legacy_schema_headers(raw: &[u8]) -> QueueResult<u64> {
-    let schema = decode::<LegacyMeasuredSchema>(raw)?;
-    let _ = (schema.progress_bound_nanos, schema.max_attempts);
-    schema
-        .work
-        .headers()?
-        .checked_add(schema.state.0)
-        .ok_or(QueueError::TooLarge)
-}
 pub fn persisted_schema_headers(raw: &[u8]) -> QueueResult<u64> {
     decode::<MeasuredSchema>(raw)?.headers()
 }

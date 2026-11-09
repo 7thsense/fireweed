@@ -1,12 +1,10 @@
-//! Versioned queue definition persistence. Legacy unframed definitions keep
-//! their strict fields/index ordinals; namespace support is an explicit new frame.
+//! Versioned queue definition persistence. Only the current framed definition
+//! is accepted; any other bytes are refused.
 use fireweed_core::queue_contract::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
 // Ten continuation bytes cannot begin a valid postcard usize/u64 collection
-// length, so this marker cannot be mistaken for a valid legacy definition.
-const SENTINEL: &[u8; 10] = &[255; 10];
+// length, so the frame cannot be mistaken for an unframed postcard value.
 const MAGIC: &[u8; 15] = b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xffFWQD4";
 fn unknown(error: impl std::fmt::Display) -> QueueError {
     QueueError::OutcomeUnknown(error.to_string())
@@ -18,32 +16,8 @@ fn take<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> QueueResult<T> {
     }
     Ok(value)
 }
-#[derive(Serialize, Deserialize)]
-struct LegacyDefinition {
-    fields: BTreeMap<String, FieldType>,
-    indexes: BTreeMap<String, Vec<String>>,
-    unique_indexes: BTreeSet<String>,
-}
-impl From<LegacyDefinition> for CollectionDefinition {
-    fn from(value: LegacyDefinition) -> Self {
-        Self {
-            fields: value.fields,
-            indexes: value.indexes,
-            unique_indexes: value.unique_indexes,
-            additional_field_prefixes: BTreeSet::new(),
-        }
-    }
-}
-#[derive(Serialize, Deserialize)]
-struct LegacySchema {
-    work: LegacyDefinition,
-    state: BTreeMap<String, LegacyDefinition>,
-    progress_bound_nanos: u64,
-    max_attempts: u32,
-}
 /// Exact persisted-definition identity for resolved publications. Hash the
-/// authority's original bytes, including framing; decoding and re-encoding an
-/// equivalent legacy schema would bind a different physical definition.
+/// authority's original bytes, including framing.
 /// This is an identity check, not schema validation or allocation admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DefinitionPin([u8; 32]);
@@ -63,57 +37,25 @@ impl DefinitionPin {
     }
 }
 
-/// Returns only borrowed framing information; measure allocation headers before
-/// calling decode_definition on either version.
-pub fn definition_payload(raw: &[u8]) -> QueueResult<(bool, &[u8])> {
-    if raw.starts_with(SENTINEL) {
-        if !raw.starts_with(MAGIC) {
-            return Err(unknown("unsupported queue definition frame"));
-        }
-        Ok((true, &raw[MAGIC.len()..]))
-    } else {
-        Ok((false, raw))
-    }
+/// Returns the payload after the definition frame; measure allocation headers
+/// before calling decode_definition.
+pub fn definition_payload(raw: &[u8]) -> QueueResult<&[u8]> {
+    raw.strip_prefix(MAGIC.as_slice())
+        .ok_or_else(|| unknown("unsupported queue definition frame"))
 }
 pub fn encode_definition(schema: &QueueSchema) -> QueueResult<Vec<u8>> {
     schema.validate()?;
     postcard::to_extend(schema, MAGIC.to_vec()).map_err(unknown)
 }
 pub fn decode_definition(raw: &[u8]) -> QueueResult<QueueSchema> {
-    let (modern, bytes) = definition_payload(raw)?;
-    let schema = if modern {
-        take(bytes)?
-    } else {
-        let old: LegacySchema = take(bytes)?;
-        QueueSchema {
-            work: old.work.into(),
-            state: old
-                .state
-                .into_iter()
-                .map(|(name, def)| (name, def.into()))
-                .collect(),
-            progress_bound_nanos: old.progress_bound_nanos,
-            max_attempts: old.max_attempts,
-            // Unframed definitions predate retention: they keep reusable keys and
-            // read as a one day request id window.
-            retention: QueueRetention {
-                request_id_nanos: 86_400_000_000_000,
-                deleted_keys: DeletedKeyPolicy::Reusable,
-            },
-        }
-    };
+    let schema: QueueSchema = take(definition_payload(raw)?)?;
     schema
         .validate()
         .map_err(|error| unknown(format!("invalid persisted queue schema: {error:?}")))?;
     Ok(schema)
 }
 pub fn definition_headers(raw: &[u8]) -> QueueResult<u64> {
-    let (modern, bytes) = definition_payload(raw)?;
-    if modern {
-        crate::queue_memory::persisted_schema_headers(bytes)
-    } else {
-        crate::queue_memory::persisted_legacy_schema_headers(bytes)
-    }
+    crate::queue_memory::persisted_schema_headers(definition_payload(raw)?)
 }
 /// Complete semantic validation of exact persisted bytes under an owned job.
 /// Never reconstruct the pin from an equivalent decoded/re-encoded schema.
@@ -162,38 +104,43 @@ impl AdmittedQueueDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn legacy_definition_retains_identity_and_modern_namespaces_are_framed() {
-        let old = LegacySchema {
-            work: LegacyDefinition {
+    use std::collections::{BTreeMap, BTreeSet};
+    fn schema() -> QueueSchema {
+        QueueSchema {
+            work: CollectionDefinition {
                 fields: BTreeMap::from([("kind".into(), FieldType::Text)]),
                 indexes: BTreeMap::from([("kind-index".into(), vec!["kind".into()])]),
                 unique_indexes: BTreeSet::new(),
+                additional_field_prefixes: BTreeSet::new(),
             },
             state: BTreeMap::new(),
             progress_bound_nanos: 1,
             max_attempts: 3,
-        };
-        let raw = postcard::to_allocvec(&old).unwrap();
-        let schema = decode_definition(&raw).unwrap();
-        assert!(schema.work.additional_field_prefixes.is_empty());
-        assert_eq!(
-            definition_headers(&raw).unwrap(),
-            crate::queue_memory::schema_headers(&schema).unwrap()
-        );
+            retention: QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: DeletedKeyPolicy::Reusable,
+            },
+        }
+    }
+    #[test]
+    fn framed_definition_round_trips_with_exact_identity() {
+        let schema = schema();
         let encoded = encode_definition(&schema).unwrap();
         assert_eq!(decode_definition(&encoded).unwrap(), schema);
-        let legacy_pin = DefinitionPin::from_persisted_bytes(&raw);
-        let modern_pin = DefinitionPin::from_persisted_bytes(&encoded);
-        assert_ne!(legacy_pin, modern_pin);
-        legacy_pin.verify(&raw).unwrap();
-        modern_pin.verify(&encoded).unwrap();
-        assert!(legacy_pin.verify(&encoded).is_err());
-        assert!(modern_pin.verify(&raw).is_err());
-        let wire_pin = postcard::to_allocvec(&legacy_pin).unwrap();
+        assert_eq!(
+            definition_headers(&encoded).unwrap(),
+            crate::queue_memory::schema_headers(&schema).unwrap()
+        );
+        let pin = DefinitionPin::from_persisted_bytes(&encoded);
+        pin.verify(&encoded).unwrap();
+        assert!(pin.verify(&encoded[1..]).is_err());
+        let wire_pin = postcard::to_allocvec(&pin).unwrap();
         assert_eq!(wire_pin.len(), 32);
-        assert_eq!(take::<DefinitionPin>(&wire_pin).unwrap(), legacy_pin);
-        assert!(definition_payload(&encoded).unwrap().0);
+        assert_eq!(take::<DefinitionPin>(&wire_pin).unwrap(), pin);
+        assert_eq!(
+            definition_payload(&encoded).unwrap(),
+            &encoded[MAGIC.len()..]
+        );
         let mut extra = schema;
         extra
             .work
@@ -222,5 +169,24 @@ mod tests {
         let mut unsupported = MAGIC.to_vec();
         unsupported[14] = b'5';
         assert!(decode_definition(&unsupported).is_err());
+    }
+    #[test]
+    fn unframed_definition_is_refused() {
+        let unframed = postcard::to_allocvec(&schema()).unwrap();
+        assert!(decode_definition(&unframed).is_err());
+        assert!(definition_headers(&unframed).is_err());
+        assert!(definition_payload(&unframed).is_err());
+        assert!(
+            AdmittedQueueDefinition::from_raw(
+                &unframed,
+                &std::sync::Arc::new(
+                    crate::queue_admission::QueueAdmission::new(1, 1 << 20)
+                        .unwrap()
+                        .reserve(0)
+                        .unwrap()
+                )
+            )
+            .is_err()
+        );
     }
 }

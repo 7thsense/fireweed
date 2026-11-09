@@ -11,7 +11,7 @@ ddx:
 
 # Durable queue representations
 
-**Type**: internal protocol and persistence compatibility. **Version**: v1.
+**Type**: internal protocol and persistence format. Fireweed is pre-release: formats from earlier builds are not read, migrated or accepted. **Version**: v1.
 
 ## Purpose
 
@@ -62,9 +62,8 @@ migration never silently resets definitions, versions, leases or request identit
   nonregressing historical epochs. The acquired writer epoch is distinct from
   the historical last-record epoch. Checksums detect corruption, not authenticated
   provenance or valid-record substitution/removal.
-- Legacy FWQL1 is identified explicitly and cannot masquerade as checked FWQL2
-  or admit its new claim kind. Any migration requires validated original genesis,
-  exact lineage and explicit qualification; writers do not reinterpret old bytes.
+- FWQL1 is not supported: there is no reader or writer. Data that is not checked
+  FWQL2 is refused; nothing reinterprets old bytes.
 - Parsing checks the complete structure and EOF, including rejected/false paths.
   Lengths, headers, duplicate identities and values are admitted before allocation.
   Charge ownership covers aliases, queued/native work and terminal cleanup.

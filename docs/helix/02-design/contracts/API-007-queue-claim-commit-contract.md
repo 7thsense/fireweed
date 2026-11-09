@@ -328,19 +328,12 @@ Rust DTOs and adapters.
 
 ## 7. Persisted-data adoption
 
-Existing namespaces and queue keys remain stable across cutover. Before enabling
-new writes, prove that current durable work, definitions, workflow state/audit,
-leases, receipts and rejects can be reopened through the new interface. Backend
-schema migration is explicit, versioned and crash-restartable; definition drift
-is never silently accepted. An approved migration may add declared collections
-or indexes with validation/backfill before activation; incompatible changes use
-an explicit new schema/queue and a checked conversion, not an implicit reset.
-Legacy record/command readers remain until old persisted data and new writes
-rebuild from genesis into equivalent state, with old live lease authority and
-receipt identities preserved. Converting old opaque state storage to named
-collections must not make it work or erase audit/replay history. Cutover is gated
-by fixtures from current main, migration restart/failure tests, and mixed-generation
-log replay. Do not delete old readers merely because new-data tests pass.
+Fireweed is pre-release. There is no compatibility with data or formats written
+by earlier builds: no legacy readers, shims, fallbacks or migration paths.
+Persisted data in a superseded format is refused or unreadable, and any change
+to a persisted format replaces the old one outright. Definition drift is never
+silently accepted. Converting old opaque state storage to named collections is
+not supported; use a new schema/queue.
 
 ## 8. One mandatory acceptance suite
 
@@ -355,7 +348,7 @@ Separate backend fault hooks may differ; assertions and consumer calls do not.
 | FilteredPriorityClaim | Mixed kinds/priorities/future schedules; only matching due items leased, exact order |
 | ClaimIdentityReplay | Changed request body conflicts; empty selection, partial settle, renewal, expiry, process restart and cleanup preserve identity |
 | VersionNeverReused | Delete/reinsert rejects stale state/work CAS and stale holder |
-| LegacyCutover | Current main durable fixtures reopen/migrate; interrupted migration resumes; old+new log genesis rebuild preserves state, leases and receipts |
+| OldFormatRefusal | Data in a superseded persisted format is refused with a typed error; no reader, migration or fallback exists |
 | ConcurrentClaims | Concurrent claims through one owner are disjoint. A second handle receives Busy with no effects, or disjoint claims where the backend permits, and continues with disjoint work after handoff |
 | ProgressUnderSkew | Sustained higher-priority arrivals and near-bound old work preserve numeric progress and age within filter; stats agrees |
 | LeaseExpiryAndRenewal | Immediate stale-token rejection, bounded reclaim, explicit renewal, clock separation |

@@ -53,9 +53,6 @@ pub(super) async fn read_snapshot(
         return Err(unknown("snapshot genesis belongs to another operation"));
     }
     let view = genesis.view()?;
-    if view.format() != QueueLogFormat::ChecksummedV2 {
-        return Err(unknown("snapshot requires checked genesis"));
-    }
     let QueueLogPayload::Genesis(genesis) = view.payload() else {
         return Err(unknown("snapshot authority is not genesis"));
     };

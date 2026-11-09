@@ -3,9 +3,7 @@
 use fireweed_core::queue_contract::{QueueAddress, QueueError, QueueResult};
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
-    queue_log_record::{
-        OwnedQueueLogRecord, QueueLogFormat, QueueLogPayload, view_queue_log_record,
-    },
+    queue_log_record::{OwnedQueueLogRecord, QueueLogPayload, view_queue_log_record},
     queue_namespace::{encode_address, framed_address_len, view_address},
     queue_schema_codec::AdmittedQueueDefinition,
 };
@@ -516,10 +514,7 @@ impl QueueNativeLog {
             return Err(unknown("writer belongs to another namespace"));
         }
         let view = record.view()?;
-        if view.epoch() != writer.epoch
-            || view.format() != QueueLogFormat::ChecksummedV2
-            || view.address() != view_address(&namespace.address)?
-        {
+        if view.epoch() != writer.epoch || view.address() != view_address(&namespace.address)? {
             return Err(unknown("record format or complete queue address differs"));
         }
         let genesis = matches!(view.payload(), QueueLogPayload::Genesis(_));
@@ -667,7 +662,6 @@ impl QueueNativeLog {
         if record.base_offset() != offset
             || record.record_count() != 1
             || view.epoch() > cut.head().epoch()
-            || view.format() != QueueLogFormat::ChecksummedV2
             || view.address() != view_address(&namespace.address)?
         {
             return Err(unknown(
@@ -796,7 +790,6 @@ impl QueueNativeLog {
         let view = view_queue_log_record(record.bytes())?;
         if record.base_offset() != offset
             || record.record_count() != 1
-            || view.format() != QueueLogFormat::ChecksummedV2
             || view.epoch() > cut.head().epoch()
             || view.address() != view_address(&namespace.address)?
         {

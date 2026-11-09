@@ -3,7 +3,7 @@
   "scope": "correctness_only_not_tp005",
   "entries": [
     {
-      "debt_id": "c8176d0f9261ce65ada1",
+      "debt_id": "e9079f5a23187f64e4f2",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::ordinary_commit_and_preview_sample_clock_after_prospective_unique_authority",
       "package": "fireweed-postgres",
@@ -13,7 +13,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "519d2e6724d93c7b997a",
+      "debt_id": "36b158fff3644267edfd",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::retained_ordinary_receipt_rejects_administrative_only_disposition",
       "package": "fireweed-postgres",
@@ -23,7 +23,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "48a35b455d5169e3cca6",
+      "debt_id": "03f19dc5f0ce8ea907da",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::replay_rejects_oversized_raw_lease_hash_before_payload_hydration",
       "package": "fireweed-postgres",
@@ -33,7 +33,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "ff0c384c8898562f3479",
+      "debt_id": "9e93d581c4f951fa9024",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::public_preview_never_allocates_ids_and_late_admin_failure_rolls_back_receipts",
       "package": "fireweed-postgres",
@@ -43,7 +43,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "1e730441020c3fef9207",
+      "debt_id": "a26c273a7319c9322962",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::shutdown_waits_for_final_worker_reservation_after_dispatch_root_returns",
       "package": "fireweed-postgres",
@@ -53,7 +53,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "890f5c1601886933fd7a",
+      "debt_id": "b255f857edaf7834aa64",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::selective_loader_and_writer_avoid_unrelated_payload",
       "package": "fireweed-postgres",
@@ -63,7 +63,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "00b2637ca57b9acb334c",
+      "debt_id": "707f0bc943d05461e2eb",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::selective_writer_disambiguates_colliding_names_and_values",
       "package": "fireweed-postgres",
@@ -73,7 +73,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "5a5541d1e12ffe55942a",
+      "debt_id": "e1cdf1ec11127d1b3de4",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::fresh_groups_read_prior_sql_writes_and_storage_failure_rolls_back",
       "package": "fireweed-postgres",
@@ -83,7 +83,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "830c23bc72b27828f34f",
+      "debt_id": "8aff5c90d4a010458911",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::admitted_caller_cancellation_drains_and_reopens_complete_group",
       "package": "fireweed-postgres",
@@ -93,7 +93,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "1537167747ba7675aa49",
+      "debt_id": "edcc7eb9f1fb1eb5a22c",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::full_values_disambiguate_all_discovery_hash_collisions",
       "package": "fireweed-postgres",
@@ -103,7 +103,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "5a622610fa690a86e716",
+      "debt_id": "eee817fec08a849e6b7c",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::reopening_schema_fences_writers_before_dependent_tables",
       "package": "fireweed-postgres",
@@ -113,7 +113,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "ded5c677800bdcadd68f",
+      "debt_id": "be44a93f6dbfed2d80e8",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::invalid_envelope_precedes_saturated_admission",
       "package": "fireweed-postgres",
@@ -175,7 +175,7 @@
     {
       "debt_id": "1d57940715be08622172",
       "path": "crates/fireweed-postgres/src/queue_store/administration.rs",
-      "test": "queue_store::administration::tests::native_definition_pin_retains_original_legacy_and_framed_bytes",
+      "test": "queue_store::administration::tests::native_definition_pin_covers_persisted_framed_bytes",
       "package": "fireweed-postgres",
       "target": [
         "--lib"
@@ -252,17 +252,6 @@
       "debt_id": "318ee59f9c5e74c286e0",
       "path": "crates/fireweed-postgres/tests/queue_contract.rs",
       "test": "mandatory_competition_expiry_and_long_ordering",
-      "package": "fireweed-postgres",
-      "target": [
-        "--test",
-        "queue_contract"
-      ],
-      "kind": "test"
-    },
-    {
-      "debt_id": "9082219717004b956b7c",
-      "path": "crates/fireweed-postgres/tests/queue_contract.rs",
-      "test": "legacy_api007_definition_reopens_work_state_and_receipt",
       "package": "fireweed-postgres",
       "target": [
         "--test",

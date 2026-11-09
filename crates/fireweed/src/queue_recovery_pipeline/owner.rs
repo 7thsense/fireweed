@@ -365,8 +365,8 @@ impl Tenure {
     ) -> QueueResult<()> {
         let checked = record.checked()?;
         let view = checked.view();
-        if view.format() != QueueLogFormat::ChecksummedV2 || view.epoch() > self.epoch {
-            return Err(unknown("record checksum policy or epoch mismatch"));
+        if view.epoch() > self.epoch {
+            return Err(unknown("record epoch mismatch"));
         }
         self.observe(view, offset)
     }
