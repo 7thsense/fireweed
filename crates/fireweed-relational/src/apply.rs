@@ -38,7 +38,7 @@ const IDEMPOTENCY_OPERATION_BATCH_UPDATE: &str = "batch_update";
 const IDEMPOTENCY_OPERATION_ITEM_MUTATION: &str = "item_mutation";
 const IDEMPOTENCY_OPERATION_COMMIT: &str = "commit";
 
-/// Sixteen row binds and four shared binds fit 56 replacements under the
+/// Fifteen row binds and four shared binds keep 56 replacements under the
 /// 900-bind ceiling. A 16-row cap increased measured campaign CPU and wall time.
 pub const CLEARING_ITEM_REPLACEMENT_BATCH: usize = 56;
 
@@ -47,14 +47,13 @@ pub const CLEARING_ITEM_REPLACEMENT_BATCH: usize = 56;
 /// an intermediate rowid list and a second index over the incoming values.
 /// Exposed for native query-plan qualification of the executed statement.
 pub fn clearing_item_replacements_sql(row_count: usize) -> String {
-    let values_sql = vec!["(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"; row_count].join(",");
+    let values_sql = vec!["(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"; row_count].join(",");
     format!(
         "WITH incoming(item_id,state,priority,priority_sort,not_before,eligible_since,fields,metadata,\
-             entity_document,index_fields,new_version,terminal_at,terminal_epoch,expected_version,claimed_here,keeps_payload) \
+             entity_document,index_fields,new_version,terminal_at,terminal_epoch,expected_version,claimed_here) \
              AS (VALUES {values_sql}) UPDATE fireweed_items SET \
              lifecycle_state=incoming.state,priority=incoming.priority,priority_sort=incoming.priority_sort,\
              not_before=incoming.not_before,eligible_since=incoming.eligible_since,\
-             payload=CASE WHEN incoming.keeps_payload THEN fireweed_items.payload ELSE NULL END,\
              fields=incoming.fields,metadata=incoming.metadata,entity_document=incoming.entity_document,\
              index_fields=incoming.index_fields,lease_token_hash=NULL,lease_expires_at=NULL,worker_id=NULL,fenced=0,\
              item_version=incoming.new_version,terminal_at=incoming.terminal_at,terminal_command_epoch=incoming.terminal_epoch,\
@@ -86,7 +85,7 @@ fn apply_clearing_item_replacements(
     items: &[fireweed_engine::ResolvedItemMutation],
     fused_claims: Option<&HashSet<ItemId>>,
 ) -> EngineResult<()> {
-    const ROW_BINDS: usize = 16;
+    const ROW_BINDS: usize = 15;
     let (tenant, queue) = parts(shard);
     let now_n = ts_nanos(now);
     for chunk in items.chunks(bind_chunk_size(ROW_BINDS, 4).min(CLEARING_ITEM_REPLACEMENT_BATCH)) {
@@ -124,7 +123,6 @@ fn apply_clearing_item_replacements(
                 terminal.then_some(position.backend_epoch as i64).into(),
                 (values.item_version.saturating_sub(1 + claimed_here as u64) as i64).into(),
                 claimed_here.into(),
-                item.action.keeps_payload().into(),
             ]);
         }
         params.extend([
@@ -1682,7 +1680,7 @@ pub fn typed_lookup_canonical_key(
     fireweed_engine::index_fields::typed_lookup_key(&qi.declaration, key_values)
 }
 
-/// Prefer native [`PushItem::index_fields`]; fall back to entity JSON for pre-native rows.
+/// Prefer native [`PushItem::index_fields`]; otherwise extract keys from the admission entity JSON.
 pub fn typed_index_keys_for_native(
     typed_indexes: &[QueueIndex],
     index_fields: &std::collections::BTreeMap<String, fireweed_core::TypedValue>,
@@ -2336,13 +2334,13 @@ pub fn insert_item_specs(
         return Ok(base_seq);
     }
     const ROW_PH: &str =
-        "(?,?,?,?,'Pending',?,?,?,?,?,?,?,?,?,?,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
+        "(?,?,?,?,'Pending',?,?,?,?,?,?,?,?,?,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
     for (chunk_idx, chunk) in specs.chunks(SQLITE_BATCH).enumerate() {
         let values = vec![ROW_PH; chunk.len()].join(",");
         let sql = format!(
             "INSERT INTO fireweed_items \
              (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-              not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,index_fields,retry_count,\
+              not_before,eligible_since,group_key,cohort_size,fields,metadata,entity_document,index_fields,retry_count,\
               item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
               updated_at,terminal_at,terminal_command_epoch,fenced,superseded,max_attempts,created_seq) VALUES {values}"
         );
@@ -2363,7 +2361,6 @@ pub fn insert_item_specs(
                 RelValue::Integer(not_before.unwrap_or(now_n)),
                 opt_text(item.group_key.as_ref().map(|g| g.as_str().to_string())),
                 opt_int(item.cohort_size.map(|s| s as i64)),
-                RelValue::Null,
                 RelValue::Text(fields_to_json(&item.fields)?),
                 RelValue::Text(metadata_to_json(&item.metadata)?),
                 opt_text(item.entity_document.as_ref().map(to_json).transpose()?),
@@ -2427,13 +2424,13 @@ pub fn insert_default_empty_item_specs(
     specs: &[InsertItemSpec<'_>],
     base_seq: i64,
 ) -> EngineResult<()> {
-    const ROW_PH: &str = "(?,?,?,?,'Pending',NULL,X'01',NULL,?,NULL,NULL,NULL,'{}','{}',NULL,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
+    const ROW_PH: &str = "(?,?,?,?,'Pending',NULL,X'01',NULL,?,NULL,NULL,'{}','{}',NULL,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
     for (chunk_idx, chunk) in specs.chunks(SQLITE_BATCH).enumerate() {
         let values = vec![ROW_PH; chunk.len()].join(",");
         let sql = format!(
             "INSERT INTO fireweed_items \
              (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-              not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,retry_count,\
+              not_before,eligible_since,group_key,cohort_size,fields,metadata,entity_document,retry_count,\
              item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
               updated_at,terminal_at,terminal_command_epoch,fenced,superseded,max_attempts,created_seq) VALUES {values}"
         );
@@ -2466,13 +2463,13 @@ pub fn insert_payload_index_item_specs(
     specs: &[InsertItemSpec<'_>],
     base_seq: i64,
 ) -> EngineResult<()> {
-    const ROW_PH: &str = "(?,?,?,?,'Pending',NULL,X'01',NULL,?,NULL,NULL,NULL, '{}','{}',NULL,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
+    const ROW_PH: &str = "(?,?,?,?,'Pending',NULL,X'01',NULL,?,NULL,NULL, '{}','{}',NULL,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
     for (chunk_idx, chunk) in specs.chunks(SQLITE_BATCH).enumerate() {
         let values = vec![ROW_PH; chunk.len()].join(",");
         let sql = format!(
             "INSERT INTO fireweed_items \
              (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-              not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,index_fields,retry_count,\
+              not_before,eligible_since,group_key,cohort_size,fields,metadata,entity_document,index_fields,retry_count,\
              item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
               updated_at,terminal_at,terminal_command_epoch,fenced,superseded,max_attempts,created_seq) VALUES {values}"
         );
@@ -5131,7 +5128,7 @@ fn apply_update_fields_batch_sql(
         let placeholders = vec!["?"; chunk.len()].join(",");
         let sql = if need_payload {
             format!(
-                "SELECT item_id,fields,lifecycle_state,priority,not_before,eligible_since,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,metadata,\
+                "SELECT item_id,fields,lifecycle_state,priority,not_before,eligible_since,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id),metadata,\
                         group_key,created_at,created_seq,item_version \
                  FROM fireweed_items WHERE tenant_id=? AND queue_id=? AND item_id IN ({placeholders}) \
                  AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0"
@@ -5629,7 +5626,7 @@ fn apply_command_sql_with_claims(
             // (a divergence) we apply nothing rather than fault, mirroring the in-memory `debug_assert`.
             let current: Option<UpdateFieldsRow> = crate::query_optional(
                 tx,
-                "SELECT fields,lifecycle_state,priority,not_before,eligible_since,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,metadata FROM fireweed_items \
+                "SELECT fields,lifecycle_state,priority,not_before,eligible_since,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id),metadata FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
                      AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0",
                 [
@@ -5702,8 +5699,8 @@ fn apply_command_sql_with_claims(
                 );
                 crate::rel_exec(
                     tx,
-                    "UPDATE fireweed_items SET fields=?4,payload=?5,metadata=?6,priority=?7,priority_sort=?8, \
-                     not_before=?9,eligible_since=?10,item_version=item_version+1,updated_at=?11,last_command_sequence=?12 \
+                    "UPDATE fireweed_items SET fields=?4,metadata=?5,priority=?6,priority_sort=?7, \
+                     not_before=?8,eligible_since=?9,item_version=item_version+1,updated_at=?10,last_command_sequence=?11 \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
                      AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0",
                     [
@@ -5711,7 +5708,6 @@ fn apply_command_sql_with_claims(
                         RelValue::Text(q.to_string()),
                         c.item_id.to_string().into(),
                         fields_json.into(),
-                        RelValue::Null,
                         metadata_json.into(),
                         priority_json.into(),
                         priority_sort.clone().into(),
@@ -6652,12 +6648,12 @@ fn apply_command_sql_with_claims(
                         let changed = crate::rel_exec(
                             tx,
                             "UPDATE fireweed_items SET lifecycle_state=?4,priority=?5,priority_sort=?6,not_before=?7,\
-                             eligible_since=?8,payload=CASE WHEN ?25 THEN payload ELSE ?9 END,fields=?10,metadata=?11,entity_document=?12,index_fields=?13,\
-                             lease_token_hash=?14,lease_expires_at=?15,worker_id=?16,fenced=?17,item_version=?18,\
-                             terminal_at=?19,terminal_command_epoch=?20,updated_at=?21,last_command_sequence=?22, \
-                             retry_count=retry_count+?24 \
-                             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 AND item_version=?23 \
-                             AND (?24=0 OR (lifecycle_state='Pending' AND superseded=0))",
+                             eligible_since=?8,fields=?9,metadata=?10,entity_document=?11,index_fields=?12,\
+                             lease_token_hash=?13,lease_expires_at=?14,worker_id=?15,fenced=?16,item_version=?17,\
+                             terminal_at=?18,terminal_command_epoch=?19,updated_at=?20,last_command_sequence=?21, \
+                             retry_count=retry_count+?23 \
+                             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 AND item_version=?22 \
+                             AND (?23=0 OR (lifecycle_state='Pending' AND superseded=0))",
                             [
                                 RelValue::Text(t.to_string()),
                                 RelValue::Text(q.to_string()),
@@ -6667,7 +6663,6 @@ fn apply_command_sql_with_claims(
                                 priority_sort.clone().into(),
                                 values.not_before.map(ts_nanos).into(),
                                 ts_nanos(values.eligible_since).into(),
-                                RelValue::Null,
                                 fields_to_json(&values.fields)?.into(),
                                 metadata_to_json(&values.metadata)?.into(),
                                 values
@@ -6693,7 +6688,6 @@ fn apply_command_sql_with_claims(
                                     as i64)
                                     .into(),
                                 claimed_here.into(),
-                                item.action.keeps_payload().into(),
                             ],
                         )?;
                         if changed != 1 {

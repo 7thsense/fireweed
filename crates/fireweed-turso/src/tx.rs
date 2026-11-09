@@ -1336,7 +1336,7 @@ mod packed_authority_first_tests {
         for id in &ids {
             let packed_rows = packed
                 .query(
-                    "SELECT item_version,payload,metadata,lifecycle_state FROM fireweed_items \
+                    "SELECT item_version,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id),metadata,lifecycle_state FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                     vec![
                         Value::Text(shard.tenant_id.as_str().to_string()),
@@ -1348,7 +1348,7 @@ mod packed_authority_first_tests {
                 .unwrap();
             let solo_rows = solo
                 .query(
-                    "SELECT item_version,payload,metadata,lifecycle_state FROM fireweed_items \
+                    "SELECT item_version,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id),metadata,lifecycle_state FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                     vec![
                         Value::Text(solo_shard.tenant_id.as_str().to_string()),

@@ -255,7 +255,9 @@ async fn turso_projection_image(store: &TursoRelational, shard: &QueueKey) -> Pr
 
     let rows = store
         .query(
-            "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,eligible_since,group_key,cohort_size,payload,\
+            "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,eligible_since,group_key,cohort_size,\
+             (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id \
+              AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id),\
              fields,metadata,entity_document,retry_count,item_version,lease_expires_at,worker_id,\
              fenced,superseded,max_attempts,created_seq,last_command_sequence,terminal_at,\
              terminal_command_epoch \

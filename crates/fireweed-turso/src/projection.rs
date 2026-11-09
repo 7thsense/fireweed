@@ -1596,7 +1596,7 @@ pub(crate) fn retained_items_sql(same_width: bool) -> String {
     };
     format!(
         "SELECT i.item_id,i.client_item_key,i.item_version,i.lifecycle_state,i.priority,i.not_before,i.retry_count,\
-         CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.metadata \
+         p.payload,i.metadata \
          FROM fireweed_items i INDEXED BY fireweed_items_retained_numeric_idx \
          LEFT JOIN fireweed_item_payloads p \
          ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
@@ -1653,7 +1653,7 @@ pub(crate) async fn server_retained_items_on(
 }
 
 const LIVE_ITEMS_SQL: &str = "SELECT i.item_id,i.client_item_key,i.item_version,i.lifecycle_state,i.priority,i.group_key,i.not_before,i.retry_count,\
-         CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.fields \
+         p.payload,i.fields \
          FROM fireweed_items i INDEXED BY fireweed_items_active_key \
          LEFT JOIN fireweed_item_payloads p \
            ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
@@ -1951,7 +1951,7 @@ fn class_s_item_from_driver_row(
 
 // Scan only index entries for eligibility, then materialize selected IDs. The
 // CROSS JOIN keeps the bounded candidate list outside full-row primary-key seeks.
-const ORDERED_ITEM_CLAIM_SQL: &str = "SELECT i.item_id,i.client_item_key,CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.item_version,i.retry_count,i.priority,i.group_key,\
+const ORDERED_ITEM_CLAIM_SQL: &str = "SELECT i.item_id,i.client_item_key,p.payload,i.item_version,i.retry_count,i.priority,i.group_key,\
      i.not_before,i.fields,i.metadata,i.max_attempts,i.entity_document,i.index_fields,i.eligible_since,i.cohort_size,t.priority_sort,t.created_seq \
      FROM (\
        SELECT item_id,priority_sort,created_seq \
@@ -2052,10 +2052,10 @@ pub async fn select_and_materialize_item_claims_on(
     let mut carriers = Vec::with_capacity(max);
     let mut next_floor = None;
     if let Some(mut floor) = scan.rowid_floor {
-        const FIFO_SQL: &str = "SELECT t.item_id,t.client_item_key,CASE WHEN p.item_id IS NULL THEN t.payload ELSE p.payload END,t.item_version,t.retry_count,t.priority,t.group_key,\
+        const FIFO_SQL: &str = "SELECT t.item_id,t.client_item_key,p.payload,t.item_version,t.retry_count,t.priority,t.group_key,\
              t.not_before,t.fields,t.metadata,t.max_attempts,t.entity_document,t.index_fields,t.eligible_since,t.cohort_size,t.rowid \
              FROM (\
-               SELECT item_id,client_item_key,item_version,retry_count,priority,group_key,payload,\
+               SELECT item_id,client_item_key,item_version,retry_count,priority,group_key,\
                 not_before,fields,metadata,max_attempts,entity_document,index_fields,eligible_since,cohort_size,rowid \
                FROM fireweed_items NOT INDEXED \
                WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
@@ -2280,7 +2280,7 @@ async fn materialize_claimed_on(
         params.extend(chunk.iter().map(|id| id.to_string().into()));
         let item_sql = addressed_rows_sql(
             "fireweed_items",
-            "item_id,client_item_key,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,item_version,retry_count,priority,group_key,\
+            "item_id,client_item_key,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id),item_version,retry_count,priority,group_key,\
              not_before,fields,metadata,max_attempts,entity_document,index_fields",
             due_clause,
             chunk.len(),
@@ -2324,11 +2324,7 @@ fn addressed_item_rows_sql(count: usize, with_payload: bool) -> String {
         .map(|i| format!("(?{})", i + 3))
         .collect::<Vec<_>>()
         .join(",");
-    let payload_sql = if with_payload {
-        "CASE WHEN p.item_id IS NOT NULL THEN p.payload ELSE i.payload END"
-    } else {
-        "NULL"
-    };
+    let payload_sql = if with_payload { "p.payload" } else { "NULL" };
     let payload_join = if with_payload {
         "LEFT JOIN fireweed_item_payloads p ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=i.item_id"
     } else {
@@ -2519,7 +2515,7 @@ pub(crate) async fn load_queue_image_on(
     for values in query_value_rows(
         connection,
         "SELECT i.item_id,i.client_item_key,i.priority,i.not_before,i.eligible_since,i.group_key,i.cohort_size,\
-         CASE WHEN p.item_id IS NOT NULL THEN p.payload ELSE i.payload END,\
+         p.payload,\
          i.fields,i.metadata,i.index_fields,i.entity_document,i.lifecycle_state,i.item_version,\
          i.retry_count,i.max_attempts,i.created_seq,b.lease_token,i.lease_expires_at,i.worker_id,\
          i.fenced,i.superseded,i.terminal_at,i.terminal_command_epoch,i.last_command_sequence \
@@ -2637,7 +2633,7 @@ fn lease_target_rows_sql(count: usize) -> String {
         "WITH incoming(item_id) AS (VALUES {values}) \
          SELECT i.item_id,i.client_item_key,i.item_version,i.priority,i.group_key,i.not_before,\
          i.lease_expires_at,i.retry_count,i.max_attempts,\
-         CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,\
+         p.payload,\
          i.fields,i.metadata,i.entity_document,i.index_fields \
          FROM incoming CROSS JOIN fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 \
          ON i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id=incoming.item_id \
@@ -4424,7 +4420,7 @@ impl AsyncProjectionStore for TursoRelational {
                 let item_sql = addressed_rows_sql(
                     "fireweed_items",
                     "item_id,client_item_key,item_version,priority,group_key,not_before,\
-                     lease_expires_at,retry_count,max_attempts,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,fields,metadata,entity_document,index_fields",
+                     lease_expires_at,retry_count,max_attempts,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id),fields,metadata,entity_document,index_fields",
                     " AND lifecycle_state='Leased'",
                     chunk.len(),
                     3,
@@ -4769,9 +4765,9 @@ mod committed_pool_helper_tests {
                 .expect("nonempty index fields");
         let insert = "INSERT INTO fireweed_items(\
              tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-             not_before,eligible_since,group_key,payload,fields,metadata,entity_document,index_fields,\
+             not_before,eligible_since,group_key,fields,metadata,entity_document,index_fields,\
              retry_count,item_version,last_command_sequence,created_at,updated_at,fenced,superseded,\
-             max_attempts,created_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+             max_attempts,created_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
         for (id, entity, native_indexes, created_seq) in [
             (
                 stored_id,
@@ -4802,7 +4798,6 @@ mod committed_pool_helper_tests {
                         Value::Integer(7),
                         Value::Integer(1),
                         Value::Text("group-a".to_string()),
-                        Value::Blob(vec![0xCA, 0xFE]),
                         Value::Text(r#"{"blob":[1,2,3]}"#.to_string()),
                         Value::Text(r#"{"attempt":7,"source":"class-s"}"#.to_string()),
                         entity,
@@ -4820,6 +4815,14 @@ mod committed_pool_helper_tests {
                 )
                 .await
                 .expect("insert pending full row");
+            store
+                .execute(
+                    "INSERT INTO fireweed_item_payloads(tenant_id,queue_id,item_id,payload) \
+                     VALUES('t','q',?1,X'CAFE')",
+                    vec![Value::Text(id.to_string())],
+                )
+                .await
+                .expect("insert payload");
         }
         store
             .execute(
@@ -6070,11 +6073,11 @@ mod item_mutation_tests {
         use std::time::Instant;
         const POINT: &str = "UPDATE fireweed_items SET \
             lifecycle_state=?2,priority=?3,priority_sort=?4,not_before=?5,eligible_since=?6,\
-            payload=CASE WHEN ?16 THEN payload ELSE NULL END,fields=?7,metadata=?8,\
+            fields=?7,metadata=?8,\
             entity_document=?9,index_fields=?10,lease_token_hash=NULL,lease_expires_at=NULL,\
             worker_id=NULL,fenced=0,item_version=?11,terminal_at=?12,terminal_command_epoch=?13,\
-            updated_at=?17,last_command_sequence=?18,retry_count=retry_count+?15 \
-            WHERE tenant_id=?19 AND queue_id=?20 AND item_id=?1 AND item_version=?14 \
+            updated_at=?16,last_command_sequence=?17,retry_count=retry_count+?15 \
+            WHERE tenant_id=?18 AND queue_id=?19 AND item_id=?1 AND item_version=?14 \
             AND (?15=0 OR (lifecycle_state='Pending' AND superseded=0))";
         fn query_for(shape: &str, rows: usize) -> String {
             if shape == "point" {
@@ -6140,7 +6143,7 @@ mod item_mutation_tests {
             let plan = store
                 .query(
                     format!("EXPLAIN QUERY PLAN {}", query_for(shape, batch)),
-                    vec![Value::Null; 16 * batch + 4],
+                    vec![Value::Null; 15 * batch + 4],
                 )
                 .await
                 .unwrap();
@@ -6198,7 +6201,6 @@ mod item_mutation_tests {
                                     terminal.then_some(0_i64).into(),
                                     (round as i64 + 1).into(),
                                     0_i64.into(),
-                                    1_i64.into(),
                                 ]);
                             }
                             params.extend([
@@ -6309,7 +6311,7 @@ mod item_mutation_tests {
                         fireweed_relational::CLEARING_ITEM_REPLACEMENT_BATCH,
                     )
                 ),
-                vec![Value::Null; 16 * fireweed_relational::CLEARING_ITEM_REPLACEMENT_BATCH + 4],
+                vec![Value::Null; 15 * fireweed_relational::CLEARING_ITEM_REPLACEMENT_BATCH + 4],
             )
             .await
             .unwrap();

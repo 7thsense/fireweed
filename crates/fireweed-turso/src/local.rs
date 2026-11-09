@@ -1594,9 +1594,9 @@ mod class_s_tests {
         format!(
             "INSERT INTO fireweed_items(\
              tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority_sort,\
-             eligible_since,payload,fields,metadata,retry_count,item_version,\
+             eligible_since,fields,metadata,retry_count,item_version,\
              last_command_sequence,created_at,updated_at,fenced,superseded,max_attempts,created_seq) \
-             VALUES('t','q','{item_id}','key-{item_id}','Pending',X'00',1,X'CAFE','{{}}','{{}}',0,1,1,1,1,0,0,3,{created_seq})"
+             VALUES('t','q','{item_id}','key-{item_id}','Pending',X'00',1,'{{}}','{{}}',0,1,1,1,1,0,0,3,{created_seq})"
         )
     }
 
@@ -1659,7 +1659,6 @@ mod class_s_tests {
                         Value::Integer(7),
                         Value::Integer(1),
                         Value::Text("group-a".to_string()),
-                        Value::Blob(vec![0xCA, 0xFE]),
                         Value::Text(r#"{"blob":[1,2,3]}"#.to_string()),
                         Value::Text(r#"{"attempt":7,"source":"class-s"}"#.to_string()),
                         entity,
@@ -1677,6 +1676,14 @@ mod class_s_tests {
                 )
                 .await
                 .expect("insert complete serving row");
+            store
+                .execute(
+                    "INSERT INTO fireweed_item_payloads(tenant_id,queue_id,item_id,payload) \
+                     VALUES('t','q',?1,X'CAFE')",
+                    vec![Value::Text(id.to_string())],
+                )
+                .await
+                .expect("insert payload");
         }
         // Gate-state rows contain only currently blocked keys. This membership therefore describes
         // a satisfied gate and must be echoed even though the optimized SELECT omits its anti-join.
@@ -1705,7 +1712,7 @@ mod class_s_tests {
         let claimed_items = &assigned[0].1;
         assert_eq!(claimed_items.len(), 2);
 
-        let stored = &claimed.items[0];
+        let stored = &claimed_items[0];
         assert_eq!(stored.item_id, stored_id);
         assert_eq!(stored.payload.as_deref(), Some(&[0xCA, 0xFE][..]));
         assert_eq!(
@@ -1734,7 +1741,7 @@ mod class_s_tests {
         assert_eq!(stored.attempt_count, 3);
         assert_eq!(stored.max_attempts, 9);
 
-        let compact = &claimed.items[1];
+        let compact = &claimed_items[1];
         assert_eq!(compact.item_id, compact_id);
         assert_eq!(
             compact.entity,

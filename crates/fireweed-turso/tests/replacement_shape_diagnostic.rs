@@ -9,14 +9,13 @@ use turso::Value;
 
 // Frozen pre-join statement: keep this control independent of production changes.
 fn baseline_sql(row_count: usize) -> String {
-    let values_sql = vec!["(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"; row_count].join(",");
+    let values_sql = vec!["(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"; row_count].join(",");
     format!(
         "WITH incoming(item_id,state,priority,priority_sort,not_before,eligible_since,fields,metadata,\
-             entity_document,index_fields,new_version,terminal_at,terminal_epoch,expected_version,claimed_here,keeps_payload) \
+             entity_document,index_fields,new_version,terminal_at,terminal_epoch,expected_version,claimed_here) \
              AS (VALUES {values_sql}) UPDATE fireweed_items SET \
              lifecycle_state=incoming.state,priority=incoming.priority,priority_sort=incoming.priority_sort,\
              not_before=incoming.not_before,eligible_since=incoming.eligible_since,\
-             payload=CASE WHEN incoming.keeps_payload THEN fireweed_items.payload ELSE NULL END,\
              fields=incoming.fields,metadata=incoming.metadata,entity_document=incoming.entity_document,\
              index_fields=incoming.index_fields,lease_token_hash=NULL,lease_expires_at=NULL,worker_id=NULL,fenced=0,\
              item_version=incoming.new_version,terminal_at=incoming.terminal_at,terminal_command_epoch=incoming.terminal_epoch,\
@@ -105,7 +104,7 @@ async fn compare_replacement_shapes_and_statement_sizes() {
         let plan = store
             .query(
                 format!("EXPLAIN QUERY PLAN {query}"),
-                vec![Value::Null; 16 * batch + 4],
+                vec![Value::Null; 15 * batch + 4],
             )
             .await;
         let plan = match plan {
@@ -124,7 +123,7 @@ async fn compare_replacement_shapes_and_statement_sizes() {
             let start = Instant::now();
             store.execute("BEGIN IMMEDIATE", vec![]).await.unwrap();
             for (chunk_index, chunk) in pushed.chunks(batch).enumerate() {
-                let mut params = Vec::with_capacity(chunk.len() * 16 + 4);
+                let mut params = Vec::with_capacity(chunk.len() * 15 + 4);
                 for (offset, row) in chunk.iter().enumerate() {
                     let terminal = (chunk_index * batch + offset + round) % 3 == 0;
                     params.extend([
@@ -154,7 +153,6 @@ async fn compare_replacement_shapes_and_statement_sizes() {
                         },
                         Value::Integer(round as i64 + 1),
                         Value::Integer(0),
-                        Value::Integer(1),
                     ]);
                 }
                 params.extend([

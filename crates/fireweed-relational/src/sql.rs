@@ -32,14 +32,6 @@ pub mod async_projection {
     pub const UPDATE_CURSOR: &str = "UPDATE relational_cursor SET next_seq=?3, \
         assignment_epoch=CASE WHEN assignment_epoch<?4 THEN ?4 ELSE assignment_epoch END \
         WHERE tenant=?1 AND queue=?2";
-    pub const INSERT_ITEM: &str = "INSERT INTO fireweed_items \
-        (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-         not_before,eligible_since,group_key,cohort_size,recurrence_until,payload,fields,metadata,\
-         entity_document,retry_count,item_version,lease_token_hash,lease_expires_at,worker_id,\
-         last_command_sequence,created_at,updated_at,terminal_at,terminal_command_epoch,fenced,\
-         superseded,max_attempts,created_seq) VALUES \
-        (?1,?2,?3,?4,'Pending',?5,?6,?7,?8,?9,?10,NULL,?11,?12,?13,?14,0,1,NULL,NULL,NULL,\
-         ?15,?16,?16,NULL,NULL,0,0,?17,?18)";
     pub const SELECT_ELIGIBLE: &str = "SELECT item_id FROM fireweed_items \
         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
         AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
@@ -98,7 +90,7 @@ pub mod async_projection {
     pub const SELECT_ITEM_VERSION: &str = "SELECT item_version FROM fireweed_items \
         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3";
     pub const SELECT_CLAIMED_ITEM: &str = "SELECT client_item_key,item_version,priority,group_key,\
-        not_before,lease_expires_at,retry_count,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,fields,metadata FROM fireweed_items \
+        not_before,lease_expires_at,retry_count,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id),fields,metadata FROM fireweed_items \
         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' AND item_id=?3";
     pub const SELECT_ITEM_GATES: &str = "SELECT gate_key FROM fireweed_item_gates \
         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 ORDER BY gate_key";
@@ -113,14 +105,6 @@ pub mod async_projection {
         (tenant_id,queue_id,item_id,gate_key) VALUES(?1,?2,?3,?4) \
         ON CONFLICT(tenant_id,queue_id,item_id,gate_key) DO NOTHING";
     pub const SELECT_LIVE_FIELDS: &str = "SELECT fields FROM fireweed_items WHERE tenant_id=?1 \
-        AND queue_id=?2 AND item_id=?3 AND lifecycle_state IN ('Pending','Leased') \
-        AND superseded=0 AND fenced=0";
-    pub const UPDATE_FIELDS_KEEP_PAYLOAD: &str = "UPDATE fireweed_items SET fields=?4,\
-        item_version=item_version+1,updated_at=?5,last_command_sequence=?6 WHERE tenant_id=?1 \
-        AND queue_id=?2 AND item_id=?3 AND lifecycle_state IN ('Pending','Leased') \
-        AND superseded=0 AND fenced=0";
-    pub const UPDATE_FIELDS_SET_PAYLOAD: &str = "UPDATE fireweed_items SET fields=?4,payload=?5,\
-        item_version=item_version+1,updated_at=?6,last_command_sequence=?7 WHERE tenant_id=?1 \
         AND queue_id=?2 AND item_id=?3 AND lifecycle_state IN ('Pending','Leased') \
         AND superseded=0 AND fenced=0";
     pub const UPDATE_ENTITY_DOCUMENT: &str = "UPDATE fireweed_items SET entity_document=?4,index_fields=?5 \
