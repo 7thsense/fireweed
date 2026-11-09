@@ -19,9 +19,9 @@ One concrete asynchronous Fireweed handle, selected at construction, provides:
 
 | Operation | Request | Result |
 |---|---|---|
-| `insert` | Queue, request id, keyed work batch; insert-only or upsert mode | Input-correlated ids, versions and outcomes |
-| `claim` | Queue, request id, filter, priority order, eligibility time, lease duration, maximum count/bytes | Ordered work records and lease credentials |
-| `commit` | Queue, batch of independently identified commit groups | Input-correlated committed/rejected group receipts |
+| `insert` | Queue, request id, `issued_at`, keyed work batch; insert-only or upsert mode | Input-correlated ids, versions and outcomes |
+| `claim` | Queue, request id, `issued_at`, filter, priority order, eligibility time, lease duration, maximum count/bytes | Ordered work records and lease credentials |
+| `commit` | Queue, batch of independently identified commit groups, each with `issued_at` | Input-correlated committed/rejected group receipts |
 | `stats` | Queue, filter, requested grouping | Pending, leased, completed, failed counts, oldest eligible age and operational as_of |
 | `read_state` | Queue, typed collection and keys | Input-correlated state values and versions |
 | `query` | Queue, declared work/state index, filter, order, opaque cursor, limits | Bounded page of records and next cursor |
@@ -29,7 +29,8 @@ One concrete asynchronous Fireweed handle, selected at construction, provides:
 | `preview` | Queue and administrative intent, including evaluated_at | Non-durable planned outcomes from the current covered snapshot; no identity retention |
 
 Queue provisioning declares work fields, an explicit mandatory-indexed additional
-field/property-bag policy where needed, state collections, and indexes once.
+field/property-bag policy where needed, state collections, indexes and the
+retention policy (below) once.
 Definitions retain declared unique indexes (including Snorri run/target identity).
 Commit validates complete resulting unique tuples atomically, including rekeys;
 missing components follow the existing NULLS DISTINCT rule. Definition drift is a deployment error. Construction and maintenance are not
@@ -40,6 +41,42 @@ No capability flag makes an operation in this table optional.
 A claim group means work claimed for processing, not API-006 WholeGroups or a
 new group-lock protocol. Lease credentials may be per item; callers treat them
 as opaque. A commit group may consume several claims from the same queue.
+
+### Retention policy and `issued_at`
+
+Provisioning declares `retention` with no default:
+
+- `request_id_nanos` is the replay window for insert, claim and commit request
+  ids, measured from the request's `issued_at`. It must be greater than 0.
+- `deleted_keys` is `Reusable` or `Retired { window_nanos }`. `Reusable` lets a
+  deleted work key be inserted again at once, with a higher version. `Retired`
+  returns `Rejection::AlreadyExists` from `insert` (both modes) and `work_inserts`
+  for a key deleted within `window_nanos`; after that the key may be used again,
+  with a higher version. `window_nanos` must be greater than 0 and at least
+  `request_id_nanos` plus 5 minutes. Provisioning refuses anything less with
+  `Invalid`.
+
+Every insert, claim and commit group carries `issued_at`, UTC nanoseconds in the
+unit of `eligible_at`, and it is covered by the request fingerprint.
+
+- Retry rule: the caller takes `issued_at` once, when it creates a request id,
+  stores it with that id, and resends both unchanged on every retry. The same id
+  with a different `issued_at` is `RequestConflict` while its receipt exists. A
+  caller that regenerates `issued_at` for a retry breaks this rule; the queue
+  cannot detect it once the receipt is gone.
+- Future skew: an `issued_at` more than 5 minutes ahead of the queue's clock is
+  refused with `Invalid` before any lookup or effect, and the same id may be
+  retried once the clock has caught up. The skew is fixed, not configurable. The
+  queue's clock is the owner's clock on S3/Turso and the store clock on
+  PostgreSQL. `preview` applies the same check as `commit`.
+- Deletion time: a deleted work key's time is the `issued_at` of the commit group
+  that deleted it, retained with the deleted row so a rebuild from the log
+  reaches the same state. Under `Retired`, whether a reinsert falls inside the
+  window is decided against the queue's clock when the inserting request is
+  planned. The decision is logged as an ordinary outcome, so a rebuild never reads
+  a clock.
+- Deleted rows are not removed under this policy, so a deleted key's version
+  high-water is unchanged and versions never repeat.
 
 ## 2. Records and selection
 
@@ -88,7 +125,8 @@ CommitGroup {
   state_updates: [{ collection, key, expect: Absent | Version(v), change: Put | Delete | Check }],
   work_inserts: [KeyedWork],
   work_updates: [{ key, expect: Version(v), change: Patch | Replace | Delete | Administrative }],
-  administration: optional Addressed(targets) | SelectFirst(ordered_clauses)
+  administration: optional Addressed(targets) | SelectFirst(ordered_clauses),
+  issued_at
 }
 ```
 
