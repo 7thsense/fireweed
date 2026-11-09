@@ -426,12 +426,16 @@ async fn contract(queue: &Queue, clock: &TestClock, id: u128) -> Prepared {
     }
 }
 
-#[tokio::test]
-async fn ephemeral_disk_runs_the_api007_contract() {
-    let clock = Arc::new(TestClock::default());
-    let queue = Queue::ephemeral_disk(clock.clone()).await.unwrap();
-    contract(&queue, &clock, nonce()).await;
-    queue.shutdown().await.unwrap();
+mod large {
+    use super::*;
+
+    #[tokio::test]
+    async fn ephemeral_disk_runs_the_api007_contract() {
+        let clock = Arc::new(TestClock::default());
+        let queue = Queue::ephemeral_disk(clock.clone()).await.unwrap();
+        contract(&queue, &clock, nonce()).await;
+        queue.shutdown().await.unwrap();
+    }
 }
 
 // ---- S3 + Turso + PostgreSQL ----------------------------------------------
