@@ -22,7 +22,8 @@ rustup run 1.99.0 cargo test --locked -p fireweed --features objectlog,turso \
 # Facade lib suite must compile (v0.24 process gap fireweed-c1dc998a). Ignored tests are
 # allowed only with an explicit #[ignore = "..."] reason on the incomplete product surface.
 # Large-scale tests live in `large` submodules and run in the separate large tier
-# (scripts/ci/large-tier-gate.sh), which never blocks a release.
+# (scripts/ci/large-tier-gate.sh, run daily by nightly.yml), which never blocks a
+# release and does not run on pull requests.
 echo "--- fireweed facade lib suite (fast tier) ---"
 rustup run 1.99.0 cargo test --locked -p fireweed --lib -- --skip ::large::
 
