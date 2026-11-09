@@ -56,8 +56,8 @@ product_validation_tests.rs	callback_cohort_e2e	Cargo.toml::fireweed::product_va
 product_validation_tests.rs	downstream_pacing_non_goal_e2e	Cargo.toml::fireweed::product_validation_tests::test::downstream_pacing_non_goal_e2e	P7
 product_validation_tests.rs	generic_priority_bounded_relaxed_e2e	Cargo.toml::fireweed::product_validation_tests::test::generic_priority_bounded_relaxed_e2e	P7
 product_validation_tests.rs	jobs_connectors_recurring_e2e	Cargo.toml::fireweed::product_validation_tests::test::jobs_connectors_recurring_e2e	P7
-product_validation_tests.rs	marketo_group_batching_e2e	Cargo.toml::fireweed::product_validation_tests::test::marketo_group_batching_e2e	P7
-product_validation_tests.rs	noisy_neighbor_scale_e2e	Cargo.toml::fireweed::product_validation_tests::test::noisy_neighbor_scale_e2e	P7
+product_validation_tests.rs	large::marketo_group_batching_e2e	Cargo.toml::fireweed::product_validation_tests::test::large::marketo_group_batching_e2e	P7
+product_validation_tests.rs	large::noisy_neighbor_scale_e2e	Cargo.toml::fireweed::product_validation_tests::test::large::noisy_neighbor_scale_e2e	P7
 product_validation_tests.rs	scheduled_action_delivery_e2e	Cargo.toml::fireweed::product_validation_tests::test::scheduled_action_delivery_e2e	P7
 product_validation_tests.rs	worker_crash_recovery_e2e	Cargo.toml::fireweed::product_validation_tests::test::worker_crash_recovery_e2e	P5a
 queue_template.rs	durable_public_constructors_reopen_idempotently	Cargo.toml::fireweed::queue_template::test::durable_public_constructors_reopen_idempotently	P5a

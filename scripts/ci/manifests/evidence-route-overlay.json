@@ -9,7 +9,7 @@
     {
       "requirement_id": "AC-E2E-2",
       "routes": [
-        "Cargo.toml::fireweed::fireweed::test::test_product_validation::marketo_group_batching_e2e"
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::large::marketo_group_batching_e2e"
       ]
     },
     {
@@ -33,7 +33,7 @@
     {
       "requirement_id": "AC-E2E-6",
       "routes": [
-        "Cargo.toml::fireweed::fireweed::test::test_product_validation::noisy_neighbor_scale_e2e"
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::large::noisy_neighbor_scale_e2e"
       ]
     },
     {
@@ -182,11 +182,11 @@
       "requirement_id": "PRODUCT-VALIDATION-AGGREGATE",
       "routes": [
         "Cargo.toml::fireweed::fireweed::test::test_product_validation::scheduled_action_delivery_e2e",
-        "Cargo.toml::fireweed::fireweed::test::test_product_validation::marketo_group_batching_e2e",
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::large::marketo_group_batching_e2e",
         "Cargo.toml::fireweed::fireweed::test::test_product_validation::callback_cohort_e2e",
         "Cargo.toml::fireweed::fireweed::test::test_product_validation::jobs_connectors_recurring_e2e",
         "Cargo.toml::fireweed::fireweed::test::test_product_validation::worker_crash_recovery_e2e",
-        "Cargo.toml::fireweed::fireweed::test::test_product_validation::noisy_neighbor_scale_e2e",
+        "Cargo.toml::fireweed::fireweed::test::test_product_validation::large::noisy_neighbor_scale_e2e",
         "Cargo.toml::fireweed::fireweed::test::test_product_validation::generic_priority_bounded_relaxed_e2e",
         "Cargo.toml::fireweed::fireweed::test::test_product_validation::downstream_pacing_non_goal_e2e"
       ]

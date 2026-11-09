@@ -992,14 +992,6 @@ async fn a_commit_pack_that_fills_the_bound_is_staged(s3: bool, sizes: std::ops:
     assert_eq!(lone_too_large(&store), 0);
     store.shutdown().await.unwrap();
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_commit_pack_that_fills_the_bound_is_staged_local() {
-    a_commit_pack_that_fills_the_bound_is_staged(false, 0..40).await;
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_commit_pack_that_fills_the_bound_is_staged_real_s3() {
-    a_commit_pack_that_fills_the_bound_is_staged(true, 0..30).await;
-}
 
 /// What an operation cost the owner: recovery attempts (each is an owner entry,
 /// so each exit shows as one), fences taken, and conditional publishes.
@@ -1075,4 +1067,19 @@ async fn a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_loca
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lone_oversized_commit_frame_is_refused_without_leaving_the_owner_real_s3() {
     a_lone_oversized_frame_is_refused_without_leaving_the_owner(true, "commit").await;
+}
+
+/// Large-scale tier: selected in CI by the `::large::` path segment.
+mod large {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_commit_pack_that_fills_the_bound_is_staged_local() {
+        a_commit_pack_that_fills_the_bound_is_staged(false, 0..40).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_commit_pack_that_fills_the_bound_is_staged_real_s3() {
+        a_commit_pack_that_fills_the_bound_is_staged(true, 0..30).await;
+    }
 }

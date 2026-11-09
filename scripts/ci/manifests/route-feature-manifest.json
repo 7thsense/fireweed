@@ -648,13 +648,13 @@
             "-p",
             "fireweed",
             "--lib",
-            "test_product_validation::marketo_group_batching_e2e",
+            "test_product_validation::large::marketo_group_batching_e2e",
             "--",
             "--exact"
           ],
           "expected_ran": 1,
-          "harness_id": "test_product_validation::marketo_group_batching_e2e",
-          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::marketo_group_batching_e2e"
+          "harness_id": "test_product_validation::large::marketo_group_batching_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::large::marketo_group_batching_e2e"
         },
         {
           "exact_invocation": [
@@ -732,13 +732,13 @@
             "-p",
             "fireweed",
             "--lib",
-            "test_product_validation::noisy_neighbor_scale_e2e",
+            "test_product_validation::large::noisy_neighbor_scale_e2e",
             "--",
             "--exact"
           ],
           "expected_ran": 1,
-          "harness_id": "test_product_validation::noisy_neighbor_scale_e2e",
-          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::noisy_neighbor_scale_e2e"
+          "harness_id": "test_product_validation::large::noisy_neighbor_scale_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::large::noisy_neighbor_scale_e2e"
         },
         {
           "exact_invocation": [
@@ -842,13 +842,13 @@
             "-p",
             "fireweed",
             "--lib",
-            "test_product_validation::marketo_group_batching_e2e",
+            "test_product_validation::large::marketo_group_batching_e2e",
             "--",
             "--exact"
           ],
           "expected_ran": 1,
-          "harness_id": "test_product_validation::marketo_group_batching_e2e",
-          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::marketo_group_batching_e2e"
+          "harness_id": "test_product_validation::large::marketo_group_batching_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::large::marketo_group_batching_e2e"
         }
       ],
       "name": "product_workflow_marketo_group_batching_e2e",
@@ -978,13 +978,13 @@
             "-p",
             "fireweed",
             "--lib",
-            "test_product_validation::noisy_neighbor_scale_e2e",
+            "test_product_validation::large::noisy_neighbor_scale_e2e",
             "--",
             "--exact"
           ],
           "expected_ran": 1,
-          "harness_id": "test_product_validation::noisy_neighbor_scale_e2e",
-          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::noisy_neighbor_scale_e2e"
+          "harness_id": "test_product_validation::large::noisy_neighbor_scale_e2e",
+          "leaf_id": "Cargo.toml::fireweed::fireweed::test::test_product_validation::large::noisy_neighbor_scale_e2e"
         }
       ],
       "name": "product_workflow_noisy_neighbor_scale_e2e",

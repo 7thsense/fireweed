@@ -21,3 +21,23 @@ jobs:
       - run: bash scripts/ci/verify-github-actions-policy.sh
       - name: Extended workspace library tests
         run: cargo +1.99.0 test --workspace --lib --locked
+
+  # The large-scale tier, the same job as in ci.yml: Rust `::large::` lib
+  # tests and scripts/formal large_test_*.py.
+  large:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUST_TEST_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Install pinned RustFS for S3 product tests
+        timeout-minutes: 3
+        run: echo "FIREWEED_RUSTFS_BIN=$(bash scripts/ci/s3-qualification-endpoint.sh install)" >> "$GITHUB_ENV"
+      - name: Large-scale tier (fails when a tier runs zero tests)
+        run: bash scripts/ci/large-tier-gate.sh

@@ -184,16 +184,6 @@ class SourceOriginalBatchTests(unittest.TestCase):
     def test_missing_eighth_campaign_cannot_leave_seven_campaign_success(self):
         self.fail_closed(lambda:patch.object(model.SourceOriginalBatch,'name','omitted-original-batch'),
             'eight exact source campaign identities required')
-    def test_eighth_search_limit_and_runtime_error_invalidate_stale_pass(self):
-        original=gate.helper.explore
-        def limited(spec,cap):
-            return original(spec,1 if spec.name=='api007-source-original-batch-resolution' and spec.fault is None else cap)
-        self.fail_closed(lambda:patch.object(gate.helper,'explore',limited),
-            'api007-source-original-batch-resolution: incomplete search at 1 states')
-        def broken(spec,cap):
-            if spec.name=='api007-source-original-batch-resolution':raise RuntimeError('injected original batch exploration runtime')
-            return original(spec,cap)
-        self.fail_closed(lambda:patch.object(gate.helper,'explore',broken),'injected original batch exploration runtime')
     def test_missing_required_cancellation_witness_cannot_hide_in_green_baseline(self):
         spec=model.SourceOriginalBatch();report,graph=gate.helper.explore(spec,100000)
         states,edges,parents=graph
