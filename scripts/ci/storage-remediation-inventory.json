@@ -474,9 +474,9 @@
           "P2f"
         ],
         "detail": "explicit_sql_timing_diagnostic; historical_run=tests/fixtures/diagnostics/fireweed-retained-point-diagnostic.log; evidence_sha256=93d74f63c0fbaabb2e7a712df938eb489894f6f8a7bce04c780dd2387035d6bd; not_current_execution; not_capacity_qualification",
-        "id": "7341efa7afb90be165c3",
+        "id": "f056ce51c64c9080edd0",
         "identity": "#[ignore = \"explicit retained-VM SQL diagnostic, not workflow qualification\"]",
-        "line": 6106,
+        "line": 6050,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-turso/src/projection.rs",
         "status": "discovery_negative"
@@ -488,9 +488,9 @@
           "P2f"
         ],
         "detail": "explicit_sql_timing_diagnostic; historical_run=tests/fixtures/diagnostics/fireweed-direct-analyzed-diagnostic.log; evidence_sha256=48c8c73d9c61165b21428e3ad8bb51bab775a21d65ca98baddb29784caa971f9; not_current_execution; not_capacity_qualification",
-        "id": "36e061a266e511fa12e8",
+        "id": "d1af2e24e2491d41b22d",
         "identity": "#[ignore = \"explicit retained-VM SQL diagnostic, not workflow qualification\"]",
-        "line": 6112,
+        "line": 6056,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-turso/src/projection.rs",
         "status": "discovery_negative"
@@ -502,9 +502,9 @@
           "P2f"
         ],
         "detail": "explicit_sql_timing_diagnostic; historical_run=tests/fixtures/diagnostics/fireweed-replacement-shape-diagnostic.log; evidence_sha256=d1896bf6659312d397f8983eeff4087c1ffde78bcfaab78d47d6e93eca8a4c6a; not_current_execution; not_capacity_qualification",
-        "id": "7dd425e47616ce104fd0",
+        "id": "da9057ed7453472489f9",
         "identity": "#[ignore = \"explicit native SQL timing diagnostic; not a workflow or capacity gate\"]",
-        "line": 67,
+        "line": 66,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-turso/tests/replacement_shape_diagnostic.rs",
         "status": "discovery_negative"
@@ -3094,9 +3094,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "155df5e02487814f4b89",
+        "id": "3e02c02713e50792dddf",
         "identity": "-- lookup for every candidate skipped by a priority claim.",
-        "line": 80,
+        "line": 77,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-relational/src/schema.rs",
         "status": "discovery_negative"
@@ -3486,9 +3486,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "c20b86814abfe766d946",
+        "id": "f2ef2dd6f19c56488b99",
         "identity": "let skipped = (1..4)",
-        "line": 840,
+        "line": 832,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-turso/tests/qualification.rs",
         "status": "discovery_negative"
@@ -3500,9 +3500,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "b27633c7b86ccb757751",
+        "id": "27d35a31c2b5528d4e59",
         "identity": "updates.extend(skipped);",
-        "line": 872,
+        "line": 864,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-turso/tests/qualification.rs",
         "status": "discovery_negative"
@@ -3528,9 +3528,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "935513018c331b2f834a",
+        "id": "132742d0e20ac8d1cd33",
         "identity": "\"Turso packed apply skipped sequence: expected {expected}, first {}\",",
-        "line": 3074,
+        "line": 3060,
         "owner": "P10pf",
         "path": "crates/fireweed/src/turso_compose.rs",
         "status": "discovery_negative"
@@ -22635,26 +22635,6 @@
           "-p",
           "fireweed",
           "--all-features",
-          "--lib",
-          "turso_compose::s8c_outbox_migration::preupgrade_claim_outbox_reopens_after_log_first_cutover",
-          "--",
-          "--exact"
-        ],
-        "id": "Cargo.toml::fireweed::fireweed::test::turso_compose::s8c_outbox_migration::preupgrade_claim_outbox_reopens_after_log_first_cutover",
-        "target": "fireweed",
-        "test_id": "turso_compose::s8c_outbox_migration::preupgrade_claim_outbox_reopens_after_log_first_cutover"
-      },
-      {
-        "exact_invocation": [
-          "rustup",
-          "run",
-          "1.99.0",
-          "cargo",
-          "test",
-          "--locked",
-          "-p",
-          "fireweed",
-          "--all-features",
           "--test",
           "functional_matrix_route_sources",
           "ac_txn_dry_run_async_invalid_enumerates_all_6_non_object_log_cells",
@@ -37901,36 +37881,6 @@
       "features": [],
       "harness_id": "command::serde_tests::change_record_synthesis_cohort_variants",
       "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::command::serde_tests::change_record_synthesis_cohort_variants",
-      "listed_kind": "test",
-      "package": "fireweed-engine",
-      "target": "fireweed_engine",
-      "target_kind": [
-        "lib"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-engine",
-        "--no-default-features",
-        "--lib",
-        "command::serde_tests::claim_command_authority_first_defaults_false_for_legacy_outbox",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "features": [],
-      "harness_id": "command::serde_tests::claim_command_authority_first_defaults_false_for_legacy_outbox",
-      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::command::serde_tests::claim_command_authority_first_defaults_false_for_legacy_outbox",
       "listed_kind": "test",
       "package": "fireweed-engine",
       "target": "fireweed_engine",
@@ -78735,36 +78685,6 @@
         "fireweed-relational",
         "--no-default-features",
         "--lib",
-        "claim::tests::class_s_sequential_claims_are_disjoint_and_write_outbox",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "features": [],
-      "harness_id": "claim::tests::class_s_sequential_claims_are_disjoint_and_write_outbox",
-      "id": "Cargo.toml::fireweed-relational::fireweed_relational::test::claim::tests::class_s_sequential_claims_are_disjoint_and_write_outbox",
-      "listed_kind": "test",
-      "package": "fireweed-relational",
-      "target": "fireweed_relational",
-      "target_kind": [
-        "lib"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-relational",
-        "--no-default-features",
-        "--lib",
         "tests::claim_by_query_replay_item_ids_ignore_other_response_fields",
         "--",
         "--exact"
@@ -94869,7 +94789,7 @@
         "--features",
         "default,local",
         "--lib",
-        "local::class_s_tests::class_s_claim_preserves_fields_metadata_and_entity",
+        "local::class_s_tests::claim_preserves_fields_metadata_and_entity",
         "--",
         "--exact"
       ],
@@ -94878,43 +94798,8 @@
         "default",
         "local"
       ],
-      "harness_id": "local::class_s_tests::class_s_claim_preserves_fields_metadata_and_entity",
-      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::local::class_s_tests::class_s_claim_preserves_fields_metadata_and_entity",
-      "listed_kind": "test",
-      "package": "fireweed-turso",
-      "target": "fireweed_turso",
-      "target_kind": [
-        "lib"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-turso",
-        "--no-default-features",
-        "--features",
-        "default,local",
-        "--lib",
-        "local::class_s_tests::class_s_sequential_claims_are_disjoint",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "features": [
-        "default",
-        "local"
-      ],
-      "harness_id": "local::class_s_tests::class_s_sequential_claims_are_disjoint",
-      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::local::class_s_tests::class_s_sequential_claims_are_disjoint",
+      "harness_id": "local::class_s_tests::claim_preserves_fields_metadata_and_entity",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::local::class_s_tests::claim_preserves_fields_metadata_and_entity",
       "listed_kind": "test",
       "package": "fireweed-turso",
       "target": "fireweed_turso",
@@ -95359,7 +95244,7 @@
         "--features",
         "default,local",
         "--lib",
-        "local::item_index_lookup_tests::item_index_cleanup_seeks_addressed_ids_on_new_and_legacy_stores",
+        "local::item_index_lookup_tests::item_index_cleanup_seeks_addressed_ids",
         "--",
         "--exact"
       ],
@@ -95368,8 +95253,8 @@
         "default",
         "local"
       ],
-      "harness_id": "local::item_index_lookup_tests::item_index_cleanup_seeks_addressed_ids_on_new_and_legacy_stores",
-      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::local::item_index_lookup_tests::item_index_cleanup_seeks_addressed_ids_on_new_and_legacy_stores",
+      "harness_id": "local::item_index_lookup_tests::item_index_cleanup_seeks_addressed_ids",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::local::item_index_lookup_tests::item_index_cleanup_seeks_addressed_ids",
       "listed_kind": "test",
       "package": "fireweed-turso",
       "target": "fireweed_turso",
@@ -95790,41 +95675,6 @@
       ],
       "harness_id": "projection::committed_pool_helper_tests::pre_position_outcome_helpers_accept_borrowed_connection",
       "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::projection::committed_pool_helper_tests::pre_position_outcome_helpers_accept_borrowed_connection",
-      "listed_kind": "test",
-      "package": "fireweed-turso",
-      "target": "fireweed_turso",
-      "target_kind": [
-        "lib"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-turso",
-        "--no-default-features",
-        "--features",
-        "default,local",
-        "--lib",
-        "projection::deterministic_cancellation_tests::legacy_push_fingerprint_repair_matches_exact_log_position_and_is_idempotent",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "features": [
-        "default",
-        "local"
-      ],
-      "harness_id": "projection::deterministic_cancellation_tests::legacy_push_fingerprint_repair_matches_exact_log_position_and_is_idempotent",
-      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::projection::deterministic_cancellation_tests::legacy_push_fingerprint_repair_matches_exact_log_position_and_is_idempotent",
       "listed_kind": "test",
       "package": "fireweed-turso",
       "target": "fireweed_turso",
@@ -96444,41 +96294,6 @@
         "--features",
         "default,local",
         "--lib",
-        "projection::metrics_query_tests::lifecycle_counts_handle_empty_terminal_and_superseded_rows",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "features": [
-        "default",
-        "local"
-      ],
-      "harness_id": "projection::metrics_query_tests::lifecycle_counts_handle_empty_terminal_and_superseded_rows",
-      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::projection::metrics_query_tests::lifecycle_counts_handle_empty_terminal_and_superseded_rows",
-      "listed_kind": "test",
-      "package": "fireweed-turso",
-      "target": "fireweed_turso",
-      "target_kind": [
-        "lib"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-turso",
-        "--no-default-features",
-        "--features",
-        "default,local",
-        "--lib",
         "projection::ordered_claim_query_tests::claim_membership_hydration_seeks_each_selected_item",
         "--",
         "--exact"
@@ -96840,41 +96655,6 @@
       ],
       "harness_id": "query::tests::native_legacy_exact_indexes_preserve_opaque_bytes_and_update_occupancy",
       "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::query::tests::native_legacy_exact_indexes_preserve_opaque_bytes_and_update_occupancy",
-      "listed_kind": "test",
-      "package": "fireweed-turso",
-      "target": "fireweed_turso",
-      "target_kind": [
-        "lib"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed-turso",
-        "--no-default-features",
-        "--features",
-        "default,local",
-        "--lib",
-        "query::tests::native_numeric_tie_indexes_migrate_once_and_preserve_existing_keys",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "features": [
-        "default",
-        "local"
-      ],
-      "harness_id": "query::tests::native_numeric_tie_indexes_migrate_once_and_preserve_existing_keys",
-      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::query::tests::native_numeric_tie_indexes_migrate_once_and_preserve_existing_keys",
       "listed_kind": "test",
       "package": "fireweed-turso",
       "target": "fireweed_turso",
@@ -100799,7 +100579,7 @@
         "default,local",
         "--test",
         "lease_index",
-        "lease_index_migration_preserves_scoped_expiry_and_pending_reads",
+        "lease_index_serves_scoped_expiry_and_pending_reads",
         "--",
         "--exact"
       ],
@@ -100808,8 +100588,8 @@
         "default",
         "local"
       ],
-      "harness_id": "lease_index_migration_preserves_scoped_expiry_and_pending_reads",
-      "id": "Cargo.toml::fireweed-turso::lease_index::test::lease_index_migration_preserves_scoped_expiry_and_pending_reads",
+      "harness_id": "lease_index_serves_scoped_expiry_and_pending_reads",
+      "id": "Cargo.toml::fireweed-turso::lease_index::test::lease_index_serves_scoped_expiry_and_pending_reads",
       "listed_kind": "test",
       "package": "fireweed-turso",
       "target": "lease_index",
@@ -115505,45 +115285,6 @@
         "--no-default-features",
         "--features",
         "default,memory,objectlog,postgres,s3-turso,turso",
-        "--lib",
-        "turso_compose::s8c_outbox_migration::preupgrade_claim_outbox_reopens_after_log_first_cutover",
-        "--",
-        "--exact"
-      ],
-      "expected_ran": 1,
-      "features": [
-        "default",
-        "memory",
-        "objectlog",
-        "postgres",
-        "s3-turso",
-        "turso"
-      ],
-      "harness_id": "turso_compose::s8c_outbox_migration::preupgrade_claim_outbox_reopens_after_log_first_cutover",
-      "id": "Cargo.toml::fireweed::fireweed::test::turso_compose::s8c_outbox_migration::preupgrade_claim_outbox_reopens_after_log_first_cutover",
-      "listed_kind": "test",
-      "package": "fireweed",
-      "target": "fireweed",
-      "target_kind": [
-        "lib"
-      ],
-      "workspace": "Cargo.toml"
-    },
-    {
-      "exact_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "--manifest-path",
-        "Cargo.toml",
-        "--locked",
-        "-p",
-        "fireweed",
-        "--no-default-features",
-        "--features",
-        "default,memory,objectlog,postgres,s3-turso,turso",
         "--test",
         "functional_matrix_route_sources",
         "ac_txn_dry_run_async_invalid_enumerates_all_6_non_object_log_cells",
@@ -122756,7 +122497,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "c6cb59c74c14991c45a5977c5af76462c2d6281125ae4445378b69ec4d9af933",
+  "source_inventory_sha256": "c27aee81affeea0b6492b99b0f0892ecea6c1504734e1ad0d1e3ad9ceb3e0054",
   "workspaces": [
     {
       "listing_error_sha256": "",
