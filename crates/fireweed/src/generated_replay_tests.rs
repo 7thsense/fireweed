@@ -953,118 +953,6 @@ async fn run_trace(
     Ok(edges)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn generated_s3_turso_model_traces_match_every_observation() {
-    let input = match std::env::var("FIREWEED_REPLAY_CORPUS") {
-        Ok(path) => std::fs::read_to_string(path).expect("read explicit corpus"),
-        Err(_) => BUILTIN.to_owned(),
-    };
-    let corpus: Json = serde_json::from_str(&input).expect("parse generated corpus");
-    validate_corpus(&corpus).expect("validate corpus envelope");
-    let mut report = json!({"schema":"fireweed-model-replay-evidence-v1","status":"PASS",
-        "corpus_sha256":digest_hex(input.as_bytes()),"model_sha256":corpus["model_sha256"],
-        "model_graph":corpus["graph"],"selection":corpus["selection"],"attempted":0,"passed":0,"cases":[],
-        "attribution":"real local-S3/Turso; one-process ephemeral CP; graceful reopen; simulated client nonreceipt"});
-    let workers = std::env::var("FIREWEED_REPLAY_WORKERS")
-        .map_or(Ok(1usize), |value| value.parse())
-        .expect("workers must be an integer");
-    assert!((1..=16).contains(&workers), "workers must be in 1..=16");
-    report["workers"] = json!(workers);
-    let progress_path = std::env::var("FIREWEED_REPLAY_PROGRESS").ok();
-    let mut progress =
-        progress_path.map(|path| std::fs::File::create(path).expect("create fresh progress"));
-    let traces = array(&corpus["traces"]).unwrap();
-    let execute = |index: usize| {
-        let corpus = &corpus;
-        let trace = &traces[index];
-        async move {
-            let started = std::time::Instant::now();
-            let mut observations = Vec::new();
-            let result = AssertUnwindSafe(tokio::time::timeout(
-                Duration::from_secs(20),
-                run_trace(corpus, trace, &mut observations),
-            ))
-            .catch_unwind()
-            .await;
-            let result = match result {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => Err("trace execution timed out".into()),
-                Err(panic) => Err(panic
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
-                    .unwrap_or("trace panicked".into())),
-            };
-            (index, observations, result, started.elapsed().as_millis())
-        }
-    };
-    let mut pending = futures::stream::FuturesUnordered::new();
-    let mut next = 0;
-    for _ in 0..workers.min(traces.len()) {
-        pending.push(execute(next));
-        next += 1;
-    }
-    let mut matched = BTreeSet::new();
-    let mut cases = std::collections::BTreeMap::new();
-    let mut failed = false;
-    while let Some((index, observations, result, elapsed_ms)) = pending.next().await {
-        let trace = &traces[index];
-        report["attempted"] = json!(number(&report["attempted"]).unwrap() + 1);
-        let error = match result {
-            Ok(edges) => {
-                matched.extend(edges);
-                None
-            }
-            Err(error) => Some(error),
-        };
-        if error.is_some() {
-            failed = true;
-            report["status"] = json!("FAIL");
-        } else {
-            report["passed"] = json!(number(&report["passed"]).unwrap() + 1);
-        }
-        let status = if error.is_some() { "FAIL" } else { "PASS" };
-        let event = json!({"schema":"fireweed-replay-progress-v1","index":index,"trace":trace["id"],
-            "status":status,"completed":report["attempted"],"passed":report["passed"],
-            "total":traces.len(),"elapsed_ms":elapsed_ms,"matched_edges":matched.len(),
-            "base_trace":trace["base_trace"],"schedule":trace["schedule"]});
-        if let Some(progress) = &mut progress {
-            serde_json::to_writer(&mut *progress, &event).expect("write progress event");
-            writeln!(progress).expect("write progress newline");
-            progress.flush().expect("flush progress");
-        }
-        cases.insert(index,json!({"index":index,"trace":trace["id"],"status":status,
-            "base_trace":trace["base_trace"],"schedule":trace["schedule"],
-            "intended_edges":trace["intended_edges"],"steps":observations,"error":error,"elapsed_ms":elapsed_ms}));
-        // After a failure launch nothing further, but drain already-owned traces.
-        if !failed && next < traces.len() {
-            pending.push(execute(next));
-            next += 1;
-        }
-    }
-    report["cases"] = json!(cases.into_values().collect::<Vec<_>>());
-    report["started"] = json!(next);
-    report["matched_edges"] = json!(matched);
-    report["sut_graph_edge_exhaustive"] =
-        json!(matched.len() == number(&corpus["graph"]["edges"]).unwrap() as usize);
-    report["all_selected_traces_executed"] =
-        json!(number(&report["passed"]).unwrap() == array(&corpus["traces"]).unwrap().len() as u64);
-    if let Ok(path) = std::env::var("FIREWEED_REPLAY_EVIDENCE") {
-        let mut output =
-            std::io::BufWriter::new(std::fs::File::create(path).expect("create replay evidence"));
-        serde_json::to_writer(&mut output, &report).expect("write replay evidence");
-        writeln!(output).expect("write evidence newline");
-        output.flush().expect("flush replay evidence");
-    }
-    assert_eq!(
-        report["status"],
-        "PASS",
-        "{}",
-        serde_json::to_string_pretty(&report).unwrap()
-    );
-    assert_eq!(report["all_selected_traces_executed"], true);
-}
-
 #[test]
 fn generated_replay_decoder_rejects_malformed_empty_and_stale_corpora() {
     let corpus: Json = serde_json::from_str(BUILTIN).unwrap();
@@ -1306,4 +1194,123 @@ fn generated_replay_claim_tail_guard_rejects_unproven_suffixes() {
     }
     let far = CommandPosition::new(queue, 2, 17);
     assert!(claim_poll_tail_exclusions(&applied, &far, valid, World::now()).is_none());
+}
+
+/// Large-scale tier: selected in CI by the `::large::` path segment.
+mod large {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn generated_s3_turso_model_traces_match_every_observation() {
+        let input = match std::env::var("FIREWEED_REPLAY_CORPUS") {
+            Ok(path) => std::fs::read_to_string(path).expect("read explicit corpus"),
+            Err(_) => BUILTIN.to_owned(),
+        };
+        let corpus: Json = serde_json::from_str(&input).expect("parse generated corpus");
+        validate_corpus(&corpus).expect("validate corpus envelope");
+        let mut report = json!({"schema":"fireweed-model-replay-evidence-v1","status":"PASS",
+            "corpus_sha256":digest_hex(input.as_bytes()),"model_sha256":corpus["model_sha256"],
+            "model_graph":corpus["graph"],"selection":corpus["selection"],"attempted":0,"passed":0,"cases":[],
+            "attribution":"real local-S3/Turso; one-process ephemeral CP; graceful reopen; simulated client nonreceipt"});
+        let workers = std::env::var("FIREWEED_REPLAY_WORKERS")
+            .map_or(Ok(1usize), |value| value.parse())
+            .expect("workers must be an integer");
+        assert!((1..=16).contains(&workers), "workers must be in 1..=16");
+        report["workers"] = json!(workers);
+        let progress_path = std::env::var("FIREWEED_REPLAY_PROGRESS").ok();
+        let mut progress =
+            progress_path.map(|path| std::fs::File::create(path).expect("create fresh progress"));
+        let traces = array(&corpus["traces"]).unwrap();
+        let execute = |index: usize| {
+            let corpus = &corpus;
+            let trace = &traces[index];
+            async move {
+                let started = std::time::Instant::now();
+                let mut observations = Vec::new();
+                let result = AssertUnwindSafe(tokio::time::timeout(
+                    Duration::from_secs(20),
+                    run_trace(corpus, trace, &mut observations),
+                ))
+                .catch_unwind()
+                .await;
+                let result = match result {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(_)) => Err("trace execution timed out".into()),
+                    Err(panic) => Err(panic
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                        .unwrap_or("trace panicked".into())),
+                };
+                (index, observations, result, started.elapsed().as_millis())
+            }
+        };
+        let mut pending = futures::stream::FuturesUnordered::new();
+        let mut next = 0;
+        for _ in 0..workers.min(traces.len()) {
+            pending.push(execute(next));
+            next += 1;
+        }
+        let mut matched = BTreeSet::new();
+        let mut cases = std::collections::BTreeMap::new();
+        let mut failed = false;
+        while let Some((index, observations, result, elapsed_ms)) = pending.next().await {
+            let trace = &traces[index];
+            report["attempted"] = json!(number(&report["attempted"]).unwrap() + 1);
+            let error = match result {
+                Ok(edges) => {
+                    matched.extend(edges);
+                    None
+                }
+                Err(error) => Some(error),
+            };
+            if error.is_some() {
+                failed = true;
+                report["status"] = json!("FAIL");
+            } else {
+                report["passed"] = json!(number(&report["passed"]).unwrap() + 1);
+            }
+            let status = if error.is_some() { "FAIL" } else { "PASS" };
+            let event = json!({"schema":"fireweed-replay-progress-v1","index":index,"trace":trace["id"],
+                "status":status,"completed":report["attempted"],"passed":report["passed"],
+                "total":traces.len(),"elapsed_ms":elapsed_ms,"matched_edges":matched.len(),
+                "base_trace":trace["base_trace"],"schedule":trace["schedule"]});
+            if let Some(progress) = &mut progress {
+                serde_json::to_writer(&mut *progress, &event).expect("write progress event");
+                writeln!(progress).expect("write progress newline");
+                progress.flush().expect("flush progress");
+            }
+            cases.insert(index,json!({"index":index,"trace":trace["id"],"status":status,
+                "base_trace":trace["base_trace"],"schedule":trace["schedule"],
+                "intended_edges":trace["intended_edges"],"steps":observations,"error":error,"elapsed_ms":elapsed_ms}));
+            // After a failure launch nothing further, but drain already-owned traces.
+            if !failed && next < traces.len() {
+                pending.push(execute(next));
+                next += 1;
+            }
+        }
+        report["cases"] = json!(cases.into_values().collect::<Vec<_>>());
+        report["started"] = json!(next);
+        report["matched_edges"] = json!(matched);
+        report["sut_graph_edge_exhaustive"] =
+            json!(matched.len() == number(&corpus["graph"]["edges"]).unwrap() as usize);
+        report["all_selected_traces_executed"] = json!(
+            number(&report["passed"]).unwrap() == array(&corpus["traces"]).unwrap().len() as u64
+        );
+        if let Ok(path) = std::env::var("FIREWEED_REPLAY_EVIDENCE") {
+            let mut output = std::io::BufWriter::new(
+                std::fs::File::create(path).expect("create replay evidence"),
+            );
+            serde_json::to_writer(&mut output, &report).expect("write replay evidence");
+            writeln!(output).expect("write evidence newline");
+            output.flush().expect("flush replay evidence");
+        }
+        assert_eq!(
+            report["status"],
+            "PASS",
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap()
+        );
+        assert_eq!(report["all_selected_traces_executed"], true);
+    }
 }

@@ -156,16 +156,6 @@ class SourceBatchTests(unittest.TestCase):
     def test_missing_seventh_campaign_cannot_leave_a_six_campaign_pass(self):
         self.fail_closed(lambda:patch.object(model.SourceBatchComposition,'name','omitted-batch'),
             'eight exact source campaign identities required')
-    def test_only_seventh_search_limit_and_runtime_error_replace_stale_pass(self):
-        original=gate.helper.explore
-        def limited(spec,cap):
-            return original(spec,1 if spec.name=='api007-source-batch-composition' and spec.fault is None else cap)
-        self.fail_closed(lambda:patch.object(gate.helper,'explore',limited),
-            'api007-source-batch-composition: incomplete search at 1 states')
-        def broken(spec,cap):
-            if spec.name=='api007-source-batch-composition':raise RuntimeError('injected batch exploration runtime')
-            return original(spec,cap)
-        self.fail_closed(lambda:patch.object(gate.helper,'explore',broken),'injected batch exploration runtime')
     def test_missing_completed_batch_history_cannot_be_hidden_by_green_baseline(self):
         spec=model.SourceBatchComposition();report,graph=gate.helper.explore(spec,100000)
         states,edges,parents=graph

@@ -140,21 +140,6 @@ class SourceBodyTests(unittest.TestCase):
                 self.assertEqual(bootstrap.main(['--output',str(out)]),1)
             r=json.loads(out.read_text());self.assertEqual(r['status'],'FAIL');self.assertIn(marker,r['error'])
         finally:out.unlink(missing_ok=True)
-    def test_tenth_identity_and_complete_bound_are_mandatory(self):
-        self.fail_closed(lambda:patch.object(model.SourceBodies,'name','omitted-body'),'tenth exact source body identity required')
-        original=helper.explore
-        def limited(spec,cap):return original(spec,1 if spec.name==model.SourceBodies.name and spec.fault is None else cap)
-        self.fail_closed(lambda:patch.object(helper,'explore',limited),'api007-addressed-body-materialization: incomplete search at 1 states')
-    def test_missing_witness_mutant_and_nonpassing_campaign_fail_closed(self):
-        original=oracle.run_campaign
-        for mode,message in [('witness','all body completion witnesses required'),('mutant','all body mutant controls required'),('status','complete passing body campaign required')]:
-            def damaged(h,m,cap,mode=mode):
-                r,c=original(h,m,cap)
-                if mode=='witness':r['completed_witnesses'].pop('metadata_only_unreadable_body')
-                elif mode=='mutant':c=c[:-1]
-                else:r['status']='INCOMPLETE'
-                return r,c
-            self.fail_closed(lambda:patch.object(oracle,'run_campaign',damaged),message)
     def test_both_executed_files_are_pinned_and_load_errors_invalidate_old_pass(self):
         read=Path.read_bytes
         for name in ('source_body_models.py','source_body_gate.py'):

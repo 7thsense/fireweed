@@ -320,11 +320,18 @@ async fn the_wal_stays_bounded(s3: bool) {
     assert!(wal_size(&dir, &queue) <= WAL_LIMIT);
     rebuilt.shutdown().await.unwrap();
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_wal_stays_bounded_local() {
-    the_wal_stays_bounded(false).await;
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_wal_stays_bounded_real_s3() {
-    the_wal_stays_bounded(true).await;
+
+/// Large-scale tier: selected in CI by the `::large::` path segment.
+mod large {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_wal_stays_bounded_local() {
+        the_wal_stays_bounded(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_wal_stays_bounded_real_s3() {
+        the_wal_stays_bounded(true).await;
+    }
 }

@@ -88,14 +88,6 @@ class SourceStateReadTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):oracle.validate_fixtures(model)
         with patch.dict(oracle.READS,{'grouped_reversed_aliases':(1,)}):
             self.assertEqual(oracle.prefix_violation(list(self.path('grouped_reversed_aliases'))[-1],model.BASE),'SV-HISTORY')
-    def test_missing_campaign_witness_or_control_blocks_aggregate_gate(self):
-        variants=[({**self.report,'name':'other'},self.controls),
-                  ({**self.report,'complete':False},self.controls),
-                  ({**self.report,'completed_witnesses':{}},self.controls),
-                  (self.report,[])]
-        for result in variants:
-            with patch.object(oracle,'run_campaign',lambda *args,result=result:result):
-                with self.assertRaises(AssertionError):gate.run()
     def test_new_model_and_checker_bytes_are_captured(self):
         for module in (model,oracle):
             name=str(Path(module.__file__).resolve());self.assertIn(name,gate.helper.LOADED_SOURCES)

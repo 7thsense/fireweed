@@ -214,10 +214,6 @@ async fn owner_write_reads_no_log(s3: bool, writes: usize) {
     store.shutdown().await.unwrap();
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn owner_write_reads_no_log_local() {
-    owner_write_reads_no_log(false, 1000).await;
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owner_write_reads_no_log_real_s3() {
     owner_write_reads_no_log(true, 20).await;
 }
@@ -248,10 +244,6 @@ async fn owner_writes_then_reads_cost_nothing(s3: bool, writes: usize) {
     store.shutdown().await.unwrap();
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn owner_writes_then_reads_cost_nothing_local() {
-    owner_writes_then_reads_cost_nothing(false, 100).await;
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owner_writes_then_reads_cost_nothing_real_s3() {
     owner_writes_then_reads_cost_nothing(true, 20).await;
 }
@@ -267,14 +259,6 @@ async fn owner_read_reads_no_log(s3: bool, lengths: &[usize]) {
         assert_eq!(delta(&store, before), (0, 0, 0), "log length {len}");
         store.shutdown().await.unwrap();
     }
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn owner_read_reads_no_log_local() {
-    owner_read_reads_no_log(false, &[10, 1000, 5000]).await;
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn owner_read_reads_no_log_real_s3() {
-    owner_read_reads_no_log(true, &[10, 5000]).await;
 }
 
 async fn reopen_rebuilds_from_log(s3: bool, len: usize) {
@@ -335,4 +319,29 @@ async fn concurrent_operations_share_one_iteration_local() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_operations_share_one_iteration_real_s3() {
     concurrent_operations_share_one_iteration(true, 8).await;
+}
+
+/// Large-scale tier: selected in CI by the `::large::` path segment.
+mod large {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn owner_write_reads_no_log_local() {
+        owner_write_reads_no_log(false, 1000).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn owner_writes_then_reads_cost_nothing_local() {
+        owner_writes_then_reads_cost_nothing(false, 100).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn owner_read_reads_no_log_local() {
+        owner_read_reads_no_log(false, &[10, 1000, 5000]).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn owner_read_reads_no_log_real_s3() {
+        owner_read_reads_no_log(true, &[10, 5000]).await;
+    }
 }

@@ -99,6 +99,36 @@ jobs:
             --evidence target/public-release-gate.json
 
 
+  # Large-scale tests: Rust lib tests under a `large` module and scripts/formal
+  # large_test_*.py. Same triggers as `functional`, but not listed in any
+  # public-release-gates*.json, so release.yml never waits for it.
+  large:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUST_TEST_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust 1.99.0
+        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt
+
+      - name: Reuse Cargo build state
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # The S3 tests start the checksum-pinned RustFS on loopback.
+      - name: Install pinned RustFS for S3 product tests
+        timeout-minutes: 3
+        run: echo "FIREWEED_RUSTFS_BIN=$(bash scripts/ci/s3-qualification-endpoint.sh install)" >> "$GITHUB_ENV"
+
+      - name: Large-scale tier (fails when a tier runs zero tests)
+        run: bash scripts/ci/large-tier-gate.sh
+
   api007-postgres:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
