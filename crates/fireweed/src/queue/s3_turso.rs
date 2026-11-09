@@ -35,11 +35,13 @@ const DEFAULT_SCRATCH_WORKERS: usize = 2;
 const NATIVE_VERSION_BYTES: usize = 4096;
 /// Lease timing of an ephemeral handle. Its control plane lives in this process
 /// and nothing else competes for its queues, so no other process's clock can skew
-/// against it and the skew allowance is zero (a queue is served at once). The
-/// lease must still outlast the slowest single operation, since renewal happens
-/// between batches: a loaded debug build takes seconds on large requests.
-const EPHEMERAL_LEASE_TTL_MS: u64 = 60_000;
-const EPHEMERAL_HEARTBEAT_TTL_MS: u64 = 20_000;
+/// against it and the skew allowance is zero (a queue is served at once). Nothing
+/// ever needs to take the lease over, so it is set to outlast any test: a single
+/// request is not interrupted by renewal, and a debug build on a slow CI runner
+/// needs well over a minute for one 5001-item administrative commit. A lease that
+/// expired mid-request made that commit an unknown outcome.
+const EPHEMERAL_LEASE_TTL_MS: u64 = 6 * 60 * 60 * 1000;
+const EPHEMERAL_HEARTBEAT_TTL_MS: u64 = EPHEMERAL_LEASE_TTL_MS;
 
 /// Production storage: S3 log, local Turso cache, PostgreSQL control plane.
 #[derive(Clone)]
