@@ -72,8 +72,9 @@ forbidden edges fail; supported allowed/forbidden controls exercise the actual
 checker. Rust visibility protects private ownership. Semantic review additionally
 checks invariant bypass, DTO/SDK leakage and policy duplication.
 
-Existing legacy facade, alternate-backend and migration-only modules require
-exact source/target exceptions with an owner and removal trigger. Exceptions
+Fireweed is pre-release and keeps no compatibility with data or formats from
+earlier builds; old data is refused. Existing legacy facade and alternate-backend
+modules require exact source/target exceptions with an owner and removal trigger. Exceptions
 cover only recorded debt; new violations and expanded baselines fail. Test-only
 adapter→facade edges may exercise public conformance; they do not permit a
 production cycle. Remove legacy consumer exports after the single-adapter cutover.

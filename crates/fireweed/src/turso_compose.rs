@@ -803,7 +803,7 @@ mod contention_mapping_tests {
         let class_s = between(
             derived,
             "async fn append_class_s_claim",
-            "async fn dispatch_claim_legacy",
+            "async fn dispatch_finalize",
         );
         assert!(class_s.contains("AppendAdmissionClass::ClaimCoordinatorLive"));
         assert!(class_s.contains(".packed_append_owned("));
@@ -5053,38 +5053,6 @@ impl DerivedObjectLogTursoBackend {
         )
         .await?;
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    async fn dispatch_claim_legacy(&self, request: ClaimRequest) -> EngineResult<Claimed> {
-        match self
-            .engine
-            .prepare_claim(request.clone())
-            .await
-            .map_err(map_claim)?
-        {
-            PreparedClaim::Empty => Ok(Claimed::default()),
-            PreparedClaim::Commit {
-                request: commit,
-                item_ids,
-                cohort_id,
-            } => {
-                self.commit_prepared(commit, AppendAdmissionClass::SharedSelectionLive)
-                    .await?;
-                self.catch_up_projection(&request.shard).await?;
-                // The default Class-S lane records this in-memory lease index
-                // before returning its already-materialized response. Legacy
-                // compatibility claims render from the projection after their
-                // commit, so they must establish the same token mapping first.
-                self.projection
-                    .remember_leases(&request.shard, &item_ids, request.lease_token.clone())
-                    .await;
-                self.engine
-                    .render_prepared_claim(request, item_ids, cohort_id)
-                    .await
-                    .map_err(map_claim)
-            }
-        }
     }
 
     async fn dispatch_finalize(
