@@ -1692,7 +1692,6 @@ where
             let high_water =
                 AsyncProjectionStore::recovery_high_water(self.projection.as_ref(), shard.clone())
                     .await?;
-            let repair_push_receipts = self.projection.has_legacy_push_fingerprints(&shard).await?;
             if projection_owns_catalog && let Some(position) = high_water.clone() {
                 AsyncLogStore::set_high_water(self.log.as_ref(), shard.clone(), position).await?;
             }
@@ -1712,11 +1711,6 @@ where
                         .await?;
                 if page.entries.is_empty() {
                     break;
-                }
-                if repair_push_receipts {
-                    self.projection
-                        .repair_legacy_push_fingerprints(&page.entries)
-                        .await?;
                 }
                 // Seed QueueCounters past every recovered item id so reopen never remints.
                 for (_, env) in &page.entries {
@@ -3529,7 +3523,6 @@ impl DerivedObjectLogTursoBackend {
             AsyncProjectionStore::ensure_shard(self.projection.as_ref(), definition.clone())
                 .await?;
             let high_water = self.projection.writer_recovery_high_water(&shard).await?;
-            let repair_push_receipts = self.projection.has_legacy_push_fingerprints(&shard).await?;
             if let Some(item_id) = self.projection.recovery_counter_high_water(&shard).await? {
                 self.counters.observe(&shard, item_id);
             }
@@ -3541,11 +3534,6 @@ impl DerivedObjectLogTursoBackend {
                         .await?;
                 if page.entries.is_empty() {
                     break;
-                }
-                if repair_push_receipts {
-                    self.projection
-                        .repair_legacy_push_fingerprints(&page.entries)
-                        .await?;
                 }
                 // Seed QueueCounters past every recovered item id so reopen never remints.
                 for (_, env) in &page.entries {

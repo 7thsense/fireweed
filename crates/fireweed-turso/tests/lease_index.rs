@@ -4,25 +4,12 @@ use turso::Value;
 // The index must support both ordinary expiry and the broader pending-lease
 // view. Fenced and cohort leases are visible to the latter, not the former.
 #[tokio::test]
-async fn lease_index_migration_preserves_scoped_expiry_and_pending_reads() {
+async fn lease_index_serves_scoped_expiry_and_pending_reads() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("projection.db");
     let store = TursoRelational::open(TursoConfig::local(&path).with_log_backed_projection())
         .await
         .unwrap();
-    store
-        .execute(
-            "DROP INDEX IF EXISTS fireweed_items_leased_scope_idx",
-            vec![],
-        )
-        .await
-        .unwrap();
-    for sql in [
-        "CREATE INDEX IF NOT EXISTS fireweed_items_expired_lease_idx ON fireweed_items(tenant_id,queue_id,lease_expires_at,item_id) WHERE lifecycle_state='Leased' AND cohort_size IS NULL AND fenced=0 AND superseded=0",
-        "CREATE INDEX IF NOT EXISTS fireweed_items_global_expired_lease_idx ON fireweed_items(lease_expires_at,tenant_id,queue_id,item_id) WHERE lifecycle_state='Leased'",
-    ] {
-        store.execute(sql, vec![]).await.unwrap();
-    }
     for (id, tenant, queue, state, expiry, cohort, fenced, superseded) in [
         (1, "a", "a", "Leased", 9, None, 0, 0),
         (2, "a", "a", "Leased", 10, None, 0, 0),
@@ -46,19 +33,12 @@ async fn lease_index_migration_preserves_scoped_expiry_and_pending_reads() {
         .await
         .unwrap();
     for _ in 0..2 {
-        let schema = store.migrate().await.unwrap();
+        let schema = store.ensure_schema().await.unwrap();
         assert!(
             schema
                 .indexes
                 .iter()
                 .any(|name| name == "fireweed_items_leased_scope_idx")
-        );
-        assert!(
-            !schema
-                .indexes
-                .iter()
-                .any(|name| name == "fireweed_items_expired_lease_idx"
-                    || name == "fireweed_items_global_expired_lease_idx")
         );
         assert_eq!(
             image,

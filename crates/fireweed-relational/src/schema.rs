@@ -10,6 +10,10 @@ CREATE TABLE IF NOT EXISTS queues (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, definition TEXT NOT NULL,
     paused INTEGER NOT NULL DEFAULT 0,
     pause_drain_intake INTEGER NOT NULL DEFAULT 0,
+    resident_pending INTEGER NOT NULL DEFAULT 0 CHECK(typeof(resident_pending)='integer' AND resident_pending>=0),
+    resident_leased INTEGER NOT NULL DEFAULT 0 CHECK(typeof(resident_leased)='integer' AND resident_leased>=0),
+    resident_complete INTEGER NOT NULL DEFAULT 0 CHECK(typeof(resident_complete)='integer' AND resident_complete>=0),
+    resident_failed INTEGER NOT NULL DEFAULT 0 CHECK(typeof(resident_failed)='integer' AND resident_failed>=0),
     PRIMARY KEY (tenant, queue)
 );
 CREATE TABLE IF NOT EXISTS fireweed_items (

@@ -8,14 +8,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use crate::tx::TursoRel;
 use bytes::Bytes;
 use fireweed_core::{
     ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, QueueDefinition, QueueId, RequestId,
     TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    BatchUpdateSnapshotItem, Claimed, ClaimedItem, CommandPosition, EngineError, EngineResult,
+    BatchUpdateSnapshotItem, ClaimedItem, CommandPosition, EngineError, EngineResult,
     IdempotencyDecision, ItemView, LeaseView, LiveItemView, MutationDriverSnapshot, PendingPage,
     PushFingerprint, QueueKey, QueueMetrics,
 };
@@ -596,7 +595,7 @@ impl TursoRelational {
         let database = builder.build().await?;
         let mut writer = database.connect()?;
         configure_connection(&writer, &config).await?;
-        migrate_connection(&mut writer).await?;
+        create_schema(&mut writer).await?;
         verify_connection_settings(&writer, &config).await?;
         verify_schema(&writer).await?;
         let reader = database.connect()?;
@@ -1133,70 +1132,6 @@ impl TursoRelational {
         .await
     }
 
-    /// Startup-only detection of receipts written by the old admitted-item hash path.
-    pub async fn has_legacy_push_fingerprints(&self, shard: &QueueKey) -> EngineResult<bool> {
-        let rows = self
-            .query(
-                "SELECT 1 FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
-             AND operation='push' AND length(request_fingerprint)=32 LIMIT 1",
-                vec![
-                    shard.tenant_id.as_str().to_string().into(),
-                    shard.queue_id.as_str().to_string().into(),
-                ],
-            )
-            .await
-            .map_err(|error| EngineError::Storage(error.to_string()))?;
-        Ok(!rows.is_empty())
-    }
-
-    /// Repair only the receipt for this exact logged request incarnation. A reused
-    /// request ID must never be overwritten by an older envelope during replay.
-    pub async fn repair_legacy_push_fingerprints(
-        &self,
-        entries: &[(CommandPosition, fireweed_engine::CommandEnvelope)],
-    ) -> EngineResult<u64> {
-        let mut statements = Vec::new();
-        for (position, envelope) in entries {
-            if !matches!(&envelope.command, fireweed_engine::QueueCommand::Push(_)) {
-                continue;
-            }
-            let (
-                Some(request_id),
-                Some(fingerprint),
-                Some(fireweed_engine::RequestOutcome::Push { .. }),
-            ) = (
-                &envelope.request_id,
-                envelope.request_fingerprint,
-                &envelope.request_outcome,
-            )
-            else {
-                continue;
-            };
-            let positions =
-                serde_json::to_string(&vec![(position.backend_epoch, position.sequence)])
-                    .map_err(|error| EngineError::Storage(error.to_string()))?;
-            statements.push(RelationalStatement::new(
-                "UPDATE fireweed_request_idempotency SET request_fingerprint=?1 \
-                 WHERE tenant_id=?2 AND queue_id=?3 AND operation='push' AND request_id=?4 \
-                 AND command_positions=?5 AND length(request_fingerprint)=32",
-                vec![
-                    fingerprint.to_be_bytes().to_vec().into(),
-                    position.queue.tenant_id.as_str().to_string().into(),
-                    position.queue.queue_id.as_str().to_string().into(),
-                    request_id.as_str().to_string().into(),
-                    positions.into(),
-                ],
-            ));
-        }
-        if statements.is_empty() {
-            return Ok(0);
-        }
-        self.execute_immediate(&statements)
-            .await
-            .map(|counts| counts.into_iter().sum())
-            .map_err(|error| EngineError::Storage(error.to_string()))
-    }
-
     pub async fn push_idempotency_committed(
         &self,
         shard: &QueueKey,
@@ -1388,10 +1323,10 @@ impl TursoRelational {
         Ok(connection)
     }
 
-    /// Reapply idempotent migrations and verify the resulting schema.
-    pub async fn migrate(&self) -> Result<SchemaReport> {
+    /// Re-run the idempotent schema statements and verify the resulting schema.
+    pub async fn ensure_schema(&self) -> Result<SchemaReport> {
         let mut connection = self.writer.lock().await;
-        migrate_connection(&mut connection).await?;
+        create_schema(&mut connection).await?;
         verify_schema(&connection).await
     }
 
@@ -3477,68 +3412,8 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
     Ok(())
 }
 
-async fn migrate_connection(connection: &mut Connection) -> Result<()> {
+async fn create_schema(connection: &mut Connection) -> Result<()> {
     connection.execute_batch(RELATIONAL_SCHEMA).await?;
-    crate::metrics::migrate(connection).await?;
-    // New stores cluster index membership by item, making replacement/purge
-    // bounded by the addressed IDs. Existing stores retain their primary-key
-    // order and get a compatible covering index instead of a table rebuild.
-    let mut columns = connection
-        .query("PRAGMA table_info(fireweed_item_index)", ())
-        .await?;
-    let mut legacy_order = false;
-    while let Some(row) = columns.next().await? {
-        if row.get::<String>(1)? == "item_id" {
-            legacy_order = row.get::<i64>(5)? == 4;
-        }
-    }
-    drop(columns);
-    if legacy_order {
-        connection
-            .execute(
-                "CREATE INDEX IF NOT EXISTS fireweed_item_index_item_idx \
-            ON fireweed_item_index(tenant_id,queue_id,item_id,index_name)",
-                (),
-            )
-            .await?;
-    }
-    if let Err(error) = connection
-        .execute(
-            "ALTER TABLE queues ADD COLUMN pause_drain_intake INTEGER NOT NULL DEFAULT 0",
-            (),
-        )
-        .await
-        && !error
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("duplicate column")
-    {
-        return Err(error.into());
-    }
-    if let Err(error) = connection
-        .execute(
-            "ALTER TABLE fireweed_group_summary ADD COLUMN rep_created_seq INTEGER",
-            (),
-        )
-        .await
-        && !error
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("duplicate column")
-    {
-        return Err(error.into());
-    }
-    connection
-        .execute(
-            "UPDATE fireweed_group_summary SET rep_created_seq=(\
-               SELECT created_seq FROM fireweed_items i \
-               WHERE i.tenant_id=fireweed_group_summary.tenant_id \
-                 AND i.queue_id=fireweed_group_summary.queue_id \
-                 AND i.item_id=fireweed_group_summary.rep_item_id) \
-             WHERE rep_created_seq IS NULL AND rep_item_id IS NOT NULL",
-            (),
-        )
-        .await?;
     Ok(())
 }
 
@@ -4107,20 +3982,10 @@ mod item_index_lookup_tests {
     }
 
     #[tokio::test]
-    async fn item_index_cleanup_seeks_addressed_ids_on_new_and_legacy_stores() {
-        for legacy in [false, true] {
+    async fn item_index_cleanup_seeks_addressed_ids() {
+        {
             let root = tempfile::tempdir().unwrap();
             let path = root.path().join("projection.db");
-            if legacy {
-                let database = Builder::new_local(path.to_str().unwrap())
-                    .build()
-                    .await
-                    .unwrap();
-                let connection = database.connect().unwrap();
-                connection.execute("CREATE TABLE fireweed_item_index(tenant_id TEXT NOT NULL,queue_id TEXT NOT NULL,\
-                    index_name TEXT NOT NULL,index_key BLOB NOT NULL,item_id TEXT NOT NULL,\
-                    PRIMARY KEY(tenant_id,queue_id,index_name,item_id))", ()).await.unwrap();
-            }
             let store = TursoRelational::open(TursoConfig::local(&path))
                 .await
                 .unwrap();
@@ -4151,7 +4016,7 @@ mod item_index_lookup_tests {
             }
             assert!(
                 details.iter().any(|detail| detail.contains("item_id=?")),
-                "legacy={legacy}: {details:?}"
+                "{details:?}"
             );
             assert!(
                 !details

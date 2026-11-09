@@ -1776,7 +1776,7 @@ async fn migration_is_idempotent_and_state_survives_reopen() {
     let path = dir.path().join("projection.db");
     let config = TursoConfig::local(&path).with_busy_timeout(Duration::from_millis(2_500));
     let store = TursoRelational::open(config.clone()).await.expect("open");
-    store.migrate().await.expect("second migration");
+    store.ensure_schema().await.expect("second migration");
 
     store
         .execute_immediate(&[
