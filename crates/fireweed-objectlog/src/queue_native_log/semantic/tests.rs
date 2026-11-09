@@ -52,6 +52,10 @@ async fn bundle(
         state: Default::default(),
         progress_bound_nanos: 1,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     };
     bundle_for_schema(log, name, job, &schema).await
 }
@@ -1111,6 +1115,10 @@ async fn field_preimages_contract(log: QueueNativeLog) {
         state: Default::default(),
         progress_bound_nanos: 1,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     };
     let (first, genesis) = bundle_for_schema(&log, "fields", &job, &schema).await;
     let fields = Fields::from([
@@ -1140,6 +1148,7 @@ async fn field_preimages_contract(log: QueueNativeLog) {
         state_updates: vec![],
         work_updates: vec![],
         work_inserts: vec![],
+        issued_at: 0,
     };
     let mut seed = group("seed");
     seed.work_inserts.push(NewWork {
@@ -1335,7 +1344,9 @@ async fn field_preimages_contract(log: QueueNativeLog) {
     drop(selected);
     assert_eq!(admission.usage().unwrap(), baseline);
     let deleted = fireweed_engine::queue_publication::CommandRef {
-        effect: EffectRef::Delete,
+        effect: EffectRef::Delete {
+            deleted_at: Some(0),
+        },
         ..command
     };
     let complete = load_command_fields(&reader, deleted, 3, &schema.work, &job)

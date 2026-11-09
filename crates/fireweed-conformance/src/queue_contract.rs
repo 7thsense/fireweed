@@ -32,6 +32,17 @@ pub fn schema() -> QueueSchema {
         )]),
         progress_bound_nanos: 1_000_000_000,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
+    }
+}
+/// The shared schema with other retention windows.
+pub fn schema_with(retention: QueueRetention) -> QueueSchema {
+    QueueSchema {
+        retention,
+        ..schema()
     }
 }
 pub fn item(key: &str, kind: &str, priority: i64, score: i64) -> NewWork {
@@ -55,6 +66,7 @@ pub fn group(id: &str) -> CommitGroup {
         state_updates: vec![],
         work_inserts: vec![],
         work_updates: vec![],
+        issued_at: 0,
     }
 }
 pub fn filter(kind: &str) -> Filter {
@@ -78,6 +90,7 @@ pub fn claim(queue: &QueueAddress, id: &str, kind: &str) -> ClaimRequest {
         max_bytes: 1 << 20,
         fields: None,
         include_body: true,
+        issued_at: 0,
     }
 }
 pub fn update(work: &ClaimedWork) -> ClaimedUpdate {
@@ -132,6 +145,7 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) -> CommitBatch {
             item("high", "matching", 8, 3),
             item("foreign", "foreign", -100, 1),
         ],
+        issued_at: 0,
     };
     let first = store.insert(insert.clone()).await.unwrap();
     assert_eq!(first.len(), 3);
@@ -506,6 +520,7 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) -> CommitBatch {
             request_id: "terminal-upsert".into(),
             mode: InsertMode::Upsert,
             items: vec![item("foreign", "foreign", 0, 1)],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -526,6 +541,7 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) -> CommitBatch {
             request_id: "unique".into(),
             mode: InsertMode::InsertOnly,
             items: vec![unique],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -590,6 +606,7 @@ pub async fn competing_claims_with_handoff(
         request_id: "seed-race".into(),
         mode: InsertMode::InsertOnly,
         items,
+        issued_at: 0,
     })
     .await
     .unwrap();
@@ -648,6 +665,7 @@ pub async fn expiry_and_administration(
             request_id: "seed-expiry".into(),
             mode: InsertMode::InsertOnly,
             items: vec![item("expiring", "expiry", 0, 0)],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -793,6 +811,7 @@ pub async fn ordered_long_values_and_cursor_scope(store: &dyn QueueStore, queue:
             request_id: "long-seed".into(),
             mode: InsertMode::InsertOnly,
             items,
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -938,6 +957,7 @@ pub async fn predicate_and_order_oracles(store: &dyn QueueStore, queue: QueueAdd
                 request_id: format!("seed-{field}"),
                 mode: InsertMode::InsertOnly,
                 items: items.clone(),
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -1062,6 +1082,7 @@ pub async fn predicate_and_order_oracles(store: &dyn QueueStore, queue: QueueAdd
             request_id: "order-seed".into(),
             mode: InsertMode::InsertOnly,
             items: ordered,
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -1196,6 +1217,7 @@ pub async fn ordered_groups_sparse_stats_and_replay_precedence(
                 sparse,
                 item("early", "groups", 0, 1),
             ],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -1283,6 +1305,7 @@ pub async fn ordered_groups_sparse_stats_and_replay_precedence(
                     item(&format!("{kind}-a"), kind, 0, 0),
                     item(&format!("{kind}-b"), kind, 0, 1),
                 ],
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -1369,6 +1392,7 @@ pub async fn unrestricted_names_obey_response_bounds(store: &dyn QueueStore, que
             request_id: "named-seed".into(),
             mode: InsertMode::InsertOnly,
             items,
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -1484,6 +1508,7 @@ pub async fn prepare_process_loss(
         request_id: "crash-seed".into(),
         mode: InsertMode::InsertOnly,
         items: vec![item("crash-source", "source", 0, 0)],
+        issued_at: 0,
     };
     assert!(matches!(
         store.insert(seed).await.unwrap()[0],
@@ -1645,6 +1670,7 @@ pub async fn ordered_insert_uniqueness(store: &dyn QueueStore, queue: QueueAddre
             request_id: "vector-seed".into(),
             mode: InsertMode::InsertOnly,
             items: vec![target("a", "x"), target("external", "z")],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -1663,6 +1689,7 @@ pub async fn ordered_insert_uniqueness(store: &dyn QueueStore, queue: QueueAddre
             target("d", "z"),
             target("e", "free"),
         ],
+        issued_at: 0,
     };
     let result = store.insert(request.clone()).await.unwrap();
     assert!(matches!(result[0], InsertOutcome::Replaced { .. }));
@@ -1727,6 +1754,7 @@ pub async fn shrinking_upsert_index_amplification(store: &dyn QueueStore, queue:
             request_id: "large-index-seed".into(),
             mode: InsertMode::InsertOnly,
             items: vec![old.clone()],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -1738,6 +1766,7 @@ pub async fn shrinking_upsert_index_amplification(store: &dyn QueueStore, queue:
             request_id: "small-index-upsert".into(),
             mode: InsertMode::Upsert,
             items: vec![replacement],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -1749,6 +1778,7 @@ pub async fn shrinking_upsert_index_amplification(store: &dyn QueueStore, queue:
             request_id: "released-index-insert".into(),
             mode: InsertMode::InsertOnly,
             items: vec![old],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -1807,6 +1837,7 @@ pub async fn indexed_additional_attributes(store: &dyn QueueStore, queue: QueueA
             request_id: "attribute-seed".into(),
             mode: InsertMode::InsertOnly,
             items: vec![a, b, c, d],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -2059,6 +2090,7 @@ pub async fn indexed_additional_attributes(store: &dyn QueueStore, queue: QueueA
             request_id: "attribute-replace".into(),
             mode: InsertMode::Upsert,
             items: vec![replacement],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -2112,7 +2144,8 @@ pub async fn indexed_additional_attributes(store: &dyn QueueStore, queue: QueueA
                 queue,
                 request_id: "attribute-invalid".into(),
                 mode: InsertMode::InsertOnly,
-                items: vec![invalid]
+                items: vec![invalid],
+                issued_at: 0,
             })
             .await,
         Err(QueueError::Invalid(_))
@@ -2152,6 +2185,7 @@ pub async fn numeric_bucket_stats(store: &dyn QueueStore, clock: &TestClock, que
             request_id: "bucket-seed".into(),
             mode: InsertMode::InsertOnly,
             items,
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -2322,6 +2356,7 @@ pub async fn atomic_administration_preview_and_replay(store: &dyn QueueStore, qu
                 item("control", "control", 0, 1),
                 item("worker", "worker", 0, 2),
             ],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -2513,6 +2548,7 @@ pub async fn administrative_size_siblings_and_preflight(
             request_id: "seed".into(),
             mode: InsertMode::InsertOnly,
             items: vec![item("first", "first", 0, 0), wide],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -2701,6 +2737,7 @@ pub async fn broad_administration_exceeds_input_chunk(store: &dyn QueueStore, qu
                 items: (start..(start + 1000).min(5001))
                     .map(|n| item(&format!("bulk-{n:05}"), "bulk", 0, n))
                     .collect(),
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -2768,4 +2805,700 @@ pub async fn broad_administration_exceeds_input_chunk(store: &dyn QueueStore, qu
             .iter()
             .all(|work| work.record.version == 3 && work.record.work.priority == 123)
     );
+}
+
+const MINUTE: i64 = 60_000_000_000;
+const HOUR: i64 = 60 * MINUTE;
+const SKEW: i64 = 5 * MINUTE;
+
+fn retention(request_id_nanos: i64, deleted_keys: DeletedKeyPolicy) -> QueueRetention {
+    QueueRetention {
+        request_id_nanos: u64::try_from(request_id_nanos).unwrap(),
+        deleted_keys,
+    }
+}
+fn insert_request(
+    queue: &QueueAddress,
+    id: &str,
+    mode: InsertMode,
+    key: &str,
+    issued_at: i64,
+) -> InsertRequest {
+    InsertRequest {
+        queue: queue.clone(),
+        request_id: id.into(),
+        mode,
+        items: vec![item(key, "retention", 0, 0)],
+        issued_at,
+    }
+}
+async fn commit_one(
+    store: &dyn QueueStore,
+    queue: &QueueAddress,
+    group: CommitGroup,
+) -> QueueResult<CommitReceipt> {
+    Ok(store
+        .commit(CommitBatch {
+            queue: queue.clone(),
+            groups: vec![group],
+        })
+        .await?
+        .remove(0))
+}
+/// Claims pending work and deletes `key` with a group issued at `issued_at`.
+/// Returns the version the deletion committed.
+async fn claim_and_delete(
+    store: &dyn QueueStore,
+    queue: &QueueAddress,
+    key: &str,
+    id: &str,
+    issued_at: i64,
+) -> u64 {
+    let claimed = store
+        .claim(ClaimRequest {
+            issued_at,
+            ..claim(queue, &format!("{id}-claim"), "retention")
+        })
+        .await
+        .unwrap();
+    let target = claimed
+        .iter()
+        .find(|work| work.record.work.key == key)
+        .expect("claimed the key");
+    let mut update = update(target);
+    update.disposition = Disposition::Delete;
+    let mut deletion = group(id);
+    deletion.issued_at = issued_at;
+    deletion.claimed_updates.push(update);
+    match commit_one(store, queue, deletion).await.unwrap().outcome {
+        GroupOutcome::Committed { versions } => versions[0].version,
+        other => panic!("deletion not committed: {other:?}"),
+    }
+}
+fn inserted_version(outcomes: &[InsertOutcome]) -> u64 {
+    match outcomes {
+        [InsertOutcome::Inserted { version, .. }] => *version,
+        other => panic!("not inserted: {other:?}"),
+    }
+}
+fn already_exists(outcomes: &[InsertOutcome]) -> bool {
+    matches!(
+        outcomes,
+        [InsertOutcome::Rejected {
+            reason: Rejection::AlreadyExists,
+            ..
+        }]
+    )
+}
+
+/// A `Retired` window must cover the request id window plus five minutes. The
+/// floor is refused at provisioning and nothing is created.
+pub async fn retention_floor_refused_at_provisioning(store: &dyn QueueStore, queue: QueueAddress) {
+    let provision = |retention| {
+        store.provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention),
+        })
+    };
+    let floor = HOUR + SKEW;
+    for refused in [
+        retention(0, DeletedKeyPolicy::Reusable),
+        retention(HOUR, DeletedKeyPolicy::Retired { window_nanos: 0 }),
+        retention(
+            HOUR,
+            DeletedKeyPolicy::Retired {
+                window_nanos: u64::try_from(floor - 1).unwrap(),
+            },
+        ),
+    ] {
+        assert!(
+            matches!(provision(refused).await, Err(QueueError::Invalid(_))),
+            "floor must be refused"
+        );
+    }
+    // Nothing was created by the refusals.
+    assert_eq!(
+        store
+            .insert(insert_request(
+                &queue,
+                "no-queue",
+                InsertMode::InsertOnly,
+                "a",
+                0
+            ))
+            .await,
+        Err(QueueError::QueueNotFound)
+    );
+    provision(retention(
+        HOUR,
+        DeletedKeyPolicy::Retired {
+            window_nanos: u64::try_from(floor).unwrap(),
+        },
+    ))
+    .await
+    .unwrap();
+}
+
+/// `issued_at` beyond the skew is refused with no effect and the same id may be
+/// retried later. The same id with another `issued_at` conflicts.
+pub async fn issued_at_skew_and_conflict(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+) {
+    let now = 100 * HOUR;
+    clock.set(now);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema(),
+        })
+        .await
+        .unwrap();
+    fn invalid<T>(result: &QueueResult<T>) -> bool {
+        matches!(result, Err(QueueError::Invalid(_)))
+    }
+    let ahead = now + SKEW + 1;
+
+    // Insert: the exact skew passes; one nanosecond more is refused, then passes later.
+    let at_limit = insert_request(
+        &queue,
+        "skew-edge",
+        InsertMode::InsertOnly,
+        "edge",
+        now + SKEW,
+    );
+    assert_eq!(inserted_version(&store.insert(at_limit).await.unwrap()), 1);
+    let early = insert_request(
+        &queue,
+        "early-insert",
+        InsertMode::InsertOnly,
+        "early",
+        ahead,
+    );
+    assert!(invalid(&store.insert(early.clone()).await));
+    clock.set(now + 2);
+    let first = store.insert(early.clone()).await.unwrap();
+    assert_eq!(inserted_version(&first), 1);
+    assert_eq!(store.insert(early.clone()).await.unwrap(), first);
+    let mut shifted = early.clone();
+    shifted.issued_at += 1;
+    assert_eq!(
+        store.insert(shifted).await,
+        Err(QueueError::RequestConflict)
+    );
+
+    // Claim.
+    let now = now + 2;
+    let early_claim = ClaimRequest {
+        issued_at: now + SKEW + 10,
+        ..claim(&queue, "early-claim", "retention")
+    };
+    assert!(invalid(&store.claim(early_claim.clone()).await));
+    clock.set(now + 10);
+    let claimed = store.claim(early_claim.clone()).await.unwrap();
+    assert_eq!(claimed.len(), 2);
+    assert_eq!(store.claim(early_claim.clone()).await.unwrap(), claimed);
+    let mut shifted = early_claim;
+    shifted.issued_at -= 1;
+    assert_eq!(store.claim(shifted).await, Err(QueueError::RequestConflict));
+
+    // Commit and preview.
+    let now = now + 10;
+    let mut early_group = group("early-group");
+    early_group
+        .work_inserts
+        .push(item("grouped", "retention", 0, 0));
+    early_group.issued_at = now + SKEW + 10;
+    assert!(invalid(
+        &store
+            .preview(PreviewRequest {
+                queue: queue.clone(),
+                group: early_group.clone()
+            })
+            .await
+    ));
+    assert!(invalid(
+        &commit_one(store, &queue, early_group.clone()).await
+    ));
+    clock.set(now + 10);
+    assert!(
+        store
+            .preview(PreviewRequest {
+                queue: queue.clone(),
+                group: early_group.clone()
+            })
+            .await
+            .is_ok()
+    );
+    let committed = commit_one(store, &queue, early_group.clone())
+        .await
+        .unwrap();
+    assert!(matches!(committed.outcome, GroupOutcome::Committed { .. }));
+    assert_eq!(
+        commit_one(store, &queue, early_group.clone())
+            .await
+            .unwrap(),
+        committed
+    );
+    let mut shifted = early_group;
+    shifted.issued_at -= 1;
+    assert_eq!(
+        commit_one(store, &queue, shifted).await.unwrap().outcome,
+        GroupOutcome::RequestConflict
+    );
+}
+
+/// `Retired` refuses a reinsert for `window_nanos` after the deletion's
+/// `issued_at`, through both insert modes and `work_inserts`. Afterwards the key
+/// returns with a higher version.
+pub async fn retired_keys_refuse_reinsert_within_window(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+) {
+    let window = 2 * HOUR;
+    let now = 10 * HOUR;
+    clock.set(now);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention(
+                HOUR,
+                DeletedKeyPolicy::Retired {
+                    window_nanos: u64::try_from(window).unwrap(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+    store
+        .insert(insert_request(
+            &queue,
+            "seed",
+            InsertMode::InsertOnly,
+            "a",
+            now,
+        ))
+        .await
+        .unwrap();
+    // The deletion's time is its group's issued_at, not the clock reading.
+    let deleted_at = now - 1_000;
+    let deleted_version = claim_and_delete(store, &queue, "a", "delete-a", deleted_at).await;
+    let expires = deleted_at + window;
+    let mut serial = 0;
+    let mut id = |label: &str| {
+        serial += 1;
+        format!("{label}-{serial}")
+    };
+
+    for tick in [now, expires - 1] {
+        clock.set(tick);
+        for mode in [InsertMode::InsertOnly, InsertMode::Upsert] {
+            let outcomes = store
+                .insert(insert_request(&queue, &id("insert"), mode, "a", tick))
+                .await
+                .unwrap();
+            assert!(
+                already_exists(&outcomes),
+                "{mode:?} at {tick}: {outcomes:?}"
+            );
+        }
+        let mut grouped = group(&id("group"));
+        grouped.issued_at = tick;
+        grouped.work_inserts.push(item("a", "retention", 0, 0));
+        assert_eq!(
+            commit_one(store, &queue, grouped).await.unwrap().outcome,
+            GroupOutcome::Rejected(Rejection::AlreadyExists)
+        );
+    }
+    // A key that was never deleted is unaffected.
+    let fresh = store
+        .insert(insert_request(
+            &queue,
+            &id("insert"),
+            InsertMode::InsertOnly,
+            "never-deleted",
+            expires - 1,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(inserted_version(&fresh), 1);
+
+    clock.set(expires);
+    let again = inserted_version(
+        &store
+            .insert(insert_request(
+                &queue,
+                &id("insert"),
+                InsertMode::InsertOnly,
+                "a",
+                expires,
+            ))
+            .await
+            .unwrap(),
+    );
+    assert!(again > deleted_version, "{again} after {deleted_version}");
+
+    // Deleted again, and reinserted through a group once the window has passed.
+    let second_delete = claim_and_delete(store, &queue, "a", "delete-a-again", expires).await;
+    assert!(second_delete > again);
+    clock.set(expires + window - 1);
+    let mut grouped = group(&id("group"));
+    grouped.issued_at = expires + window - 1;
+    grouped.work_inserts.push(item("a", "retention", 0, 0));
+    assert_eq!(
+        commit_one(store, &queue, grouped).await.unwrap().outcome,
+        GroupOutcome::Rejected(Rejection::AlreadyExists)
+    );
+    clock.set(expires + window);
+    let mut grouped = group(&id("group"));
+    grouped.issued_at = expires + window;
+    grouped.work_inserts.push(item("a", "retention", 0, 0));
+    match commit_one(store, &queue, grouped).await.unwrap().outcome {
+        GroupOutcome::Committed { versions } => assert!(versions[0].version > second_delete),
+        other => panic!("not committed: {other:?}"),
+    }
+}
+
+/// `Reusable` keeps today's behaviour: a deleted key returns at once, with a
+/// higher version.
+pub async fn reusable_keys_reinsert_at_once(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+) {
+    let now = 10 * HOUR;
+    clock.set(now);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention(HOUR, DeletedKeyPolicy::Reusable)),
+        })
+        .await
+        .unwrap();
+    store
+        .insert(insert_request(
+            &queue,
+            "seed",
+            InsertMode::InsertOnly,
+            "a",
+            now,
+        ))
+        .await
+        .unwrap();
+    let deleted_version = claim_and_delete(store, &queue, "a", "delete-a", now).await;
+    let again = inserted_version(
+        &store
+            .insert(insert_request(
+                &queue,
+                "again",
+                InsertMode::Upsert,
+                "a",
+                now,
+            ))
+            .await
+            .unwrap(),
+    );
+    assert!(again > deleted_version);
+    let second_delete = claim_and_delete(store, &queue, "a", "delete-a-again", now).await;
+    let mut grouped = group("grouped");
+    grouped.issued_at = now;
+    grouped.work_inserts.push(item("a", "retention", 0, 0));
+    match commit_one(store, &queue, grouped).await.unwrap().outcome {
+        GroupOutcome::Committed { versions } => assert!(versions[0].version > second_delete),
+        other => panic!("not committed: {other:?}"),
+    }
+}
+
+/// The ways a work key can be deleted. Each stamps the deleting group's
+/// `issued_at` as the key's deletion time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeletionRoute {
+    /// A claimed update with `Disposition::Delete`.
+    Claimed,
+    /// An `UnclaimedChange::Delete` work update.
+    Unclaimed,
+    /// An administrative delete addressed by key.
+    AdministrativeAddressed,
+    /// An administrative delete selected by a filter, through the broad route.
+    AdministrativeSelected,
+}
+const DELETION_ROUTES: [DeletionRoute; 4] = [
+    DeletionRoute::Claimed,
+    DeletionRoute::Unclaimed,
+    DeletionRoute::AdministrativeAddressed,
+    DeletionRoute::AdministrativeSelected,
+];
+impl DeletionRoute {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Claimed => "route-claimed",
+            Self::Unclaimed => "route-unclaimed",
+            Self::AdministrativeAddressed => "route-addressed",
+            Self::AdministrativeSelected => "route-selected",
+        }
+    }
+}
+/// Seeds `route`'s key at version 1 and deletes it with a group issued at
+/// `deleted_at`, returning the version the deletion committed. The clock and the
+/// administrative `evaluated_at` deliberately differ from `deleted_at`.
+async fn delete_by_route(
+    store: &dyn QueueStore,
+    queue: &QueueAddress,
+    route: DeletionRoute,
+    deleted_at: i64,
+) -> u64 {
+    use fireweed_core::queue_administration::*;
+    let key = route.key();
+    let id = format!("route-delete-{key}");
+    if route == DeletionRoute::Claimed {
+        store
+            .insert(insert_request(
+                queue,
+                &format!("{id}-seed"),
+                InsertMode::InsertOnly,
+                key,
+                deleted_at,
+            ))
+            .await
+            .unwrap();
+        return claim_and_delete(store, queue, key, &id, deleted_at).await;
+    }
+    // Not of the claimed kind, so no claim leases it.
+    let mut seed = insert_request(
+        queue,
+        &format!("{id}-seed"),
+        InsertMode::InsertOnly,
+        key,
+        deleted_at,
+    );
+    seed.items = vec![item(key, "administered", 0, 0)];
+    assert_eq!(inserted_version(&store.insert(seed).await.unwrap()), 1);
+    let mut deletion = group(&id);
+    deletion.issued_at = deleted_at;
+    let administrative = |operation| {
+        Some(AdministrativeCommit {
+            max_result_bytes: 4096,
+            intent: AdministrativeIntent {
+                evaluated_at: 0,
+                before_fields: None,
+                operation,
+            },
+        })
+    };
+    match route {
+        DeletionRoute::Claimed => unreachable!("handled above"),
+        DeletionRoute::Unclaimed => deletion.work_updates.push(UnclaimedUpdate {
+            key: key.into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Delete,
+        }),
+        DeletionRoute::AdministrativeAddressed => {
+            deletion.administration = administrative(AdministrativeOperation::Addressed(vec![
+                AdministrativeEntry {
+                    key: key.into(),
+                    expected_version: Some(1),
+                    precondition: WorkSelector::all(vec![]),
+                    action: AdministrativeAction::Delete {
+                        lease_guard: AdministrativeLeaseGuard::RejectActive,
+                    },
+                },
+            ]))
+        }
+        DeletionRoute::AdministrativeSelected => {
+            deletion.administration = administrative(AdministrativeOperation::SelectFirst(vec![
+                AdministrativeClause {
+                    id: "delete".into(),
+                    selector: WorkSelector::leaf(SelectorNode::Keys(BTreeSet::from([key.into()]))),
+                    precondition: WorkSelector::all(vec![]),
+                    action: AdministrativeAction::Delete {
+                        lease_guard: AdministrativeLeaseGuard::RejectActive,
+                    },
+                },
+            ]))
+        }
+    }
+    match commit_one(store, queue, deletion).await.unwrap().outcome {
+        GroupOutcome::Committed { versions } => versions[0].version,
+        GroupOutcome::AdministrativeCommitted {
+            versions,
+            administration,
+        } => {
+            assert!(versions.is_empty(), "{route:?}: {versions:?}");
+            match route {
+                DeletionRoute::AdministrativeAddressed => match administration.items[0].outcome {
+                    AdministrativeOutcome::Deleted { version } => version,
+                    ref other => panic!("{route:?} not deleted: {other:?}"),
+                },
+                _ => {
+                    assert_eq!(administration.histogram.matched, 1);
+                    assert_eq!(
+                        administration.clauses[0].histogram.outcomes
+                            [&AdministrativeOutcomeKind::Deleted],
+                        1
+                    );
+                    // A broad delete reports counts only; the version after the
+                    // seed is the next one.
+                    2
+                }
+            }
+        }
+        other => panic!("{route:?} not committed: {other:?}"),
+    }
+}
+
+/// A `Retired` deletion that a reopened store or a rebuilt projection must
+/// reproduce: same refusals inside the window, same acceptance after it, for a
+/// key removed by each deletion route.
+#[derive(Debug, Clone)]
+pub struct RetiredDeletion {
+    queue: QueueAddress,
+    /// Ascending by `expires_at`.
+    keys: Vec<RetiredKey>,
+}
+#[derive(Debug, Clone)]
+struct RetiredKey {
+    key: &'static str,
+    deleted_version: u64,
+    expires_at: i64,
+}
+const RETIRED_WINDOW: i64 = 2 * HOUR;
+/// Deletes one key through each route, each with its own `issued_at`, later
+/// routes later, and checks the refusals while the owner that deleted them is
+/// still live.
+pub async fn prepare_retired_deletion(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+) -> RetiredDeletion {
+    prepare_retired_deletion_through(store, clock, queue, cfg!(target_os = "linux")).await
+}
+/// `broad_administration` adds the filter-selected administrative delete. The
+/// native store runs that route only on Linux; PostgreSQL runs it everywhere.
+pub async fn prepare_retired_deletion_through(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+    broad_administration: bool,
+) -> RetiredDeletion {
+    let now = 10 * HOUR;
+    clock.set(now);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention(
+                HOUR,
+                DeletedKeyPolicy::Retired {
+                    window_nanos: u64::try_from(RETIRED_WINDOW).unwrap(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+    let mut keys = Vec::new();
+    let routes = DELETION_ROUTES
+        .into_iter()
+        .filter(|route| broad_administration || *route != DeletionRoute::AdministrativeSelected);
+    for (index, route) in routes.enumerate() {
+        // Distinct, ascending times behind the clock: a deletion time taken from
+        // the clock, from `evaluated_at` (0) or from another route's group fails.
+        let deleted_at = now - 10_000 + 1_000 * i64::try_from(index).unwrap();
+        let deleted_version = delete_by_route(store, &queue, route, deleted_at).await;
+        keys.push(RetiredKey {
+            key: route.key(),
+            deleted_version,
+            expires_at: deleted_at + RETIRED_WINDOW,
+        });
+    }
+    let prepared = RetiredDeletion { queue, keys };
+    refuse_reinserts(store, clock, &prepared, "live", 0).await;
+    prepared
+}
+/// At one tick before the first expiry among `keys[from..]`, every one of them
+/// refuses a reinsert in each insert mode and through a group.
+async fn refuse_reinserts(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    deletion: &RetiredDeletion,
+    label: &str,
+    from: usize,
+) {
+    let tick = deletion.keys[from].expires_at - 1;
+    clock.set(tick);
+    for retired in &deletion.keys[from..] {
+        for mode in [InsertMode::InsertOnly, InsertMode::Upsert] {
+            let outcomes = store
+                .insert(insert_request(
+                    &deletion.queue,
+                    &format!("{label}-{}-{mode:?}-{tick}", retired.key),
+                    mode,
+                    retired.key,
+                    tick,
+                ))
+                .await
+                .unwrap();
+            assert!(
+                already_exists(&outcomes),
+                "{label} {} {mode:?}: {outcomes:?}",
+                retired.key
+            );
+        }
+        let mut grouped = group(&format!("{label}-{}-group-{tick}", retired.key));
+        grouped.issued_at = tick;
+        grouped
+            .work_inserts
+            .push(item(retired.key, "retention", 0, 0));
+        assert_eq!(
+            commit_one(store, &deletion.queue, grouped)
+                .await
+                .unwrap()
+                .outcome,
+            GroupOutcome::Rejected(Rejection::AlreadyExists),
+            "{label} {}",
+            retired.key
+        );
+    }
+}
+/// Walks the expiries in order: just before each, the keys not yet expired
+/// refuse; at it, that key returns at a higher version.
+pub async fn verify_retired_deletion(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    deletion: RetiredDeletion,
+) {
+    for (index, retired) in deletion.keys.iter().enumerate() {
+        refuse_reinserts(store, clock, &deletion, "rebuilt", index).await;
+        clock.set(retired.expires_at);
+        let again = inserted_version(
+            &store
+                .insert(insert_request(
+                    &deletion.queue,
+                    &format!("rebuilt-after-window-{}", retired.key),
+                    InsertMode::InsertOnly,
+                    retired.key,
+                    retired.expires_at,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            again > retired.deleted_version,
+            "{}: {again} after {}",
+            retired.key,
+            retired.deleted_version
+        );
+    }
+}
+/// Every deletion route stamps the deleting group's `issued_at` and honours the
+/// window: refused inside it, accepted after it at a higher version.
+pub async fn retired_keys_cover_every_deletion_route(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+    broad_administration: bool,
+) {
+    let deletion =
+        prepare_retired_deletion_through(store, clock, queue, broad_administration).await;
+    verify_retired_deletion(store, clock, deletion).await;
 }

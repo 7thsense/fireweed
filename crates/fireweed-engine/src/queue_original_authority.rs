@@ -503,6 +503,7 @@ mod tests {
                     ..Default::default()
                 }),
             }],
+            issued_at: 0,
         };
         CommitBatch {
             queue: QueueAddress {
@@ -526,6 +527,10 @@ mod tests {
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let definition =
             AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), job).unwrap();
@@ -661,6 +666,10 @@ mod tests {
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let definition =
             AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), &job).unwrap();
@@ -1072,6 +1081,7 @@ mod domain_tests {
                 fields: Default::default(),
                 body: Default::default(),
             }],
+            issued_at: 0,
         };
         let outcomes = [InsertOutcome::Rejected {
             key: "absent".into(),
@@ -1110,6 +1120,7 @@ mod domain_tests {
             max_bytes: 1024,
             fields: None,
             include_body: true,
+            issued_at: 0,
         };
         let receipt = encode_claim_receipt(&[], 1 << 20, &job).unwrap();
         let wrapper = encode_claim_publication(

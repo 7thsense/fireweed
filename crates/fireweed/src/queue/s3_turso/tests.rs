@@ -233,6 +233,7 @@ async fn round_trip(queue: &Queue, queue_address: QueueAddress) {
                 suite::item("a", "job", 1, 10),
                 suite::item("b", "job", 2, 20),
             ],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -387,6 +388,17 @@ async fn contract(queue: &Queue, clock: &TestClock, id: u128) -> Prepared {
     suite::shrinking_upsert_index_amplification(queue, a("shrinking-upsert")).await;
     suite::indexed_additional_attributes(queue, a("additional-attributes")).await;
     suite::numeric_bucket_stats(queue, clock, a("numeric-buckets")).await;
+    suite::retention_floor_refused_at_provisioning(queue, a("retention-floor")).await;
+    suite::issued_at_skew_and_conflict(queue, clock, a("issued-at")).await;
+    suite::retired_keys_refuse_reinsert_within_window(queue, clock, a("retired-keys")).await;
+    suite::reusable_keys_reinsert_at_once(queue, clock, a("reusable-keys")).await;
+    suite::retired_keys_cover_every_deletion_route(
+        queue,
+        clock,
+        a("retired-routes"),
+        cfg!(target_os = "linux"),
+    )
+    .await;
     suite::unrestricted_names_obey_response_bounds(queue, a("names-bounds")).await;
     suite::atomic_administration_preview_and_replay(queue, a("administration-preview")).await;
     suite::administrative_size_siblings_and_preflight(queue, a("administration-sizes")).await;

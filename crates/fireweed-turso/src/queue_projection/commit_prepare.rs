@@ -431,6 +431,7 @@ mod tests {
             max_bytes: 65536,
             fields: Some(Default::default()),
             include_body: false,
+            issued_at: 0,
         };
         let claim_input = |head| ClaimReplayInput {
             genesis: input(&definition, &seed_job, group("unused"), head, 2).genesis,
@@ -622,6 +623,7 @@ mod tests {
             max_bytes: 65536,
             fields: Some(["u".into()].into()),
             include_body: false,
+            issued_at: 0,
         };
         let claim_input = |head| {
             let definition = AdmittedQueueDefinition::from_raw(definition.raw(), &job).unwrap();

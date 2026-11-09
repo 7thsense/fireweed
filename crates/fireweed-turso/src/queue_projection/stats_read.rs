@@ -694,6 +694,7 @@ mod tests {
                         request_id: "stats-order-seed".into(),
                         mode: InsertMode::InsertOnly,
                         items,
+                        issued_at: 0,
                     },
                     limits: QueueLimits::default(),
                     required_next_offset: 2,

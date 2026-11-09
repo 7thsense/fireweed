@@ -154,7 +154,7 @@ pub async fn load_command_fields<R: QueueSourceReader>(
         _charge: charge,
     };
     let fields = match command.effect {
-        EffectRef::Delete | EffectRef::StatePut { .. } => None,
+        EffectRef::Delete { .. } | EffectRef::StatePut { .. } => None,
         EffectRef::WorkPut {
             fields: FieldsCommandRef::Replace(_),
             ..

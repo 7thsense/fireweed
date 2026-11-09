@@ -124,6 +124,10 @@ mod tests {
             .into(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         schema.validate().unwrap();
         assert_eq!(collection_number(&schema, None).unwrap(), 0);
@@ -159,6 +163,10 @@ mod tests {
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         for number in [i32::MIN, -1, 1, i32::MAX] {
             assert!(matches!(

@@ -166,8 +166,10 @@ mod tests {
             for (id,key,sequence) in [(1,b"a",u64::MAX),(2,b"b",2)] {
                 connection.execute("INSERT INTO q7_records(id,queue_id,collection,key_hash,key,version,active,lifecycle,priority,available_at,eligible_since,attempts,insertion_sequence,last_change_offset,prior_highwater) VALUES(?1,42,0,?2,?3,?4,1,0,0,0,0,0,?5,1,?4)",vec![Value::Integer(id),blob(&discovery_digest(key)),blob(key),number(1),number(sequence)]).await.map_err(unknown)?;
             }
-            let mut request=ClaimRequest {queue:QueueAddress {tenant:"t".into(),queue:"q".into()},request_id:"r".into(),filter:Filter::default(),order:ClaimOrder::PriorityAscending,eligible_at:0,lease_nanos:1_000_000,max_records:2,max_bytes:4096,fields:Some(Default::default()),include_body:false};
-            let mut schema=QueueSchema {work:CollectionDefinition {fields:Default::default(),indexes:Default::default(),unique_indexes:Default::default(),additional_field_prefixes:Default::default()},state:Default::default(),progress_bound_nanos:u64::MAX,max_attempts:3};
+            let mut request=ClaimRequest {queue:QueueAddress {tenant:"t".into(),queue:"q".into()},request_id:"r".into(),filter:Filter::default(),order:ClaimOrder::PriorityAscending,eligible_at:0,lease_nanos:1_000_000,max_records:2,max_bytes:4096,fields:Some(Default::default()),include_body:false, issued_at: 0,
+};
+            let mut schema=QueueSchema {work:CollectionDefinition {fields:Default::default(),indexes:Default::default(),unique_indexes:Default::default(),additional_field_prefixes:Default::default()},state:Default::default(),progress_bound_nanos:u64::MAX,max_attempts:3, retention: fireweed_core::queue_contract::QueueRetention { request_id_nanos: 86_400_000_000_000, deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable },
+};
             async fn order(connection:&Connection,request:&ClaimRequest,schema:&QueueSchema,now:i64)->QueueResult<Vec<i64>> {
                 let (sql,pool)=candidate_sql(request,schema,42,now)?;assert!(pool.is_empty());let mut rows=connection.query(&sql,()).await.map_err(unknown)?;let mut out=Vec::new();while let Some(row)=rows.next().await.map_err(unknown)? {out.push(integer(&row.get_value(0).map_err(unknown)?)?);}Ok(out)
             }

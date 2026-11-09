@@ -715,6 +715,7 @@ mod tests {
                         request_id: "query-seed-many".into(),
                         mode: InsertMode::InsertOnly,
                         items,
+                        issued_at: 0,
                     },
                     limits: QueueLimits::default(),
                     required_next_offset: 1,
@@ -962,6 +963,7 @@ mod tests {
             max_bytes: 65536,
             fields: None,
             include_body: true,
+            issued_at: 0,
         };
         let prepared = projection
             .prepare_claim(

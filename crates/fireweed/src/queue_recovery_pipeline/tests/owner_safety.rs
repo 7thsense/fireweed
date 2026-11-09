@@ -56,6 +56,7 @@ async fn second_handle_gets_busy() {
             request_id: "busy-insert".into(),
             mode: InsertMode::InsertOnly,
             items: vec![suite::item("busy", "counts", 0, 0)],
+            issued_at: 0,
         })
         .await
         .err(),
@@ -206,6 +207,7 @@ async fn publish_failure_drops_projection_and_exits() {
                 request_id: "after-fault".into(),
                 mode: InsertMode::InsertOnly,
                 items: vec![suite::item("after-fault", "counts", 0, 0)],
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -372,6 +374,7 @@ async fn requeued_mutation_is_never_busy() {
         request_id: "requeued".into(),
         mode: InsertMode::InsertOnly,
         items: vec![suite::item("requeued", "counts", 0, 0)],
+        issued_at: 0,
     };
     // The append lands, its reply is lost, and re-entry cannot reach the control plane.
     a.pipeline_for_test()

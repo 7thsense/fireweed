@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS fireweed_api007.records (
  key_hash BYTEA NOT NULL, key BYTEA NOT NULL, version NUMERIC(20,0) NOT NULL, active BOOLEAN NOT NULL,
  lifecycle SMALLINT NOT NULL DEFAULT 0, priority BIGINT NOT NULL DEFAULT 0, available_at BIGINT NOT NULL DEFAULT 0,
  eligible_since BIGINT NOT NULL DEFAULT 0, attempts BIGINT NOT NULL DEFAULT 0, lease_until BIGINT, lease_hash BYTEA,
- insertion_sequence NUMERIC(20,0) NOT NULL DEFAULT 0);
+ insertion_sequence NUMERIC(20,0) NOT NULL DEFAULT 0, deleted_at BIGINT);
+ALTER TABLE fireweed_api007.records ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
 CREATE INDEX IF NOT EXISTS record_key_probe ON fireweed_api007.records(queue_id,collection,key_hash);
 CREATE INDEX IF NOT EXISTS claim_priority ON fireweed_api007.records(queue_id,priority,insertion_sequence) WHERE active AND collection=0;
 CREATE INDEX IF NOT EXISTS claim_due ON fireweed_api007.records(queue_id,available_at,insertion_sequence) WHERE active AND collection=0;
@@ -85,7 +86,12 @@ CREATE TABLE IF NOT EXISTS fireweed_api007.requests (
  outcome BYTEA NOT NULL);
 CREATE INDEX IF NOT EXISTS request_identity_probe ON fireweed_api007.requests(queue_id,domain,identity_hash);
 "#;
-const RECORD_COLUMNS: &str = "r.id,r.collection,r.key,r.version::text,r.active,r.lifecycle,r.priority,r.available_at,r.eligible_since,r.attempts,r.lease_until,CASE WHEN r.lease_hash IS NULL OR octet_length(r.lease_hash)=32 THEN r.lease_hash ELSE ''::bytea END,r.insertion_sequence::text";
+const RECORD_COLUMNS: &str = "r.id,r.collection,r.key,r.version::text,r.active,r.lifecycle,r.priority,r.available_at,r.eligible_since,r.attempts,r.lease_until,CASE WHEN r.lease_hash IS NULL OR octet_length(r.lease_hash)=32 THEN r.lease_hash ELSE ''::bytea END,r.insertion_sequence::text,r.deleted_at";
+/// A request issued beyond the skew ahead of the store clock has no effect and
+/// may be retried with the same id later. Runs before any lookup.
+fn check_issued_at(clock: &dyn Clock, issued_at: i64) -> QueueResult<()> {
+    fireweed_engine::queue_retention::check_issued_at(issued_at, timestamp_nanos(clock.now())?)
+}
 fn storage(error: impl std::fmt::Display) -> QueueError {
     QueueError::OutcomeUnknown(error.to_string())
 }
@@ -810,6 +816,13 @@ async fn load_group_with_fields<'a>(
         let v = version(row.get(3))?;
         snapshot.versions.insert(identity, v);
         if !row.get::<_, bool>(4) {
+            if col == 0 {
+                let deleted_at: Option<i64> = row.get(13);
+                snapshot.deleted_at.insert(
+                    record_key,
+                    deleted_at.ok_or_else(|| storage("deleted work has no deletion time"))?,
+                );
+            }
             continue;
         }
         if let Some(collection) = collection_name {
@@ -1125,6 +1138,7 @@ async fn persist_delta(
     let mut until: Vec<Option<i64>> = vec![];
     let mut tokens: Vec<Option<Vec<u8>>> = vec![];
     let mut sequences = vec![];
+    let mut deleted_at: Vec<Option<i64>> = vec![];
     let mut payload_ids = vec![];
     let mut payloads = vec![];
     let mut changed_fields: BTreeMap<i64, (i32, Fields)> = BTreeMap::new();
@@ -1148,6 +1162,7 @@ async fn persist_delta(
             None
         } {
             active.push(true);
+            deleted_at.push(None);
             states.push(life(work.record.lifecycle));
             priorities.push(work.record.work.priority);
             available.push(work.record.work.available_at);
@@ -1202,6 +1217,7 @@ async fn persist_delta(
             .and_then(|col| state_by_key.get(&(col.as_str(), v.key.as_str())).copied())
         {
             active.push(true);
+            deleted_at.push(None);
             states.push(0);
             priorities.push(0);
             available.push(0);
@@ -1222,6 +1238,18 @@ async fn persist_delta(
             }
         } else {
             active.push(false);
+            deleted_at.push(if col == 0 {
+                Some(
+                    delta
+                        .deleted_work
+                        .iter()
+                        .find(|deleted| deleted.key == v.key)
+                        .ok_or_else(|| storage("deleted work has no deletion time"))?
+                        .deleted_at,
+                )
+            } else {
+                None
+            });
             states.push(0);
             priorities.push(0);
             available.push(0);
@@ -1234,12 +1262,12 @@ async fn persist_delta(
         }
     }
     if !ids.is_empty() {
-        tx.execute("INSERT INTO fireweed_api007.records(id,queue_id,collection,key_hash,key,version,active,lifecycle,priority,available_at,eligible_since,attempts,lease_until,lease_hash,insertion_sequence) \
-            SELECT id,$1,col,key_hash,key,version::numeric,active,state,priority,available,eligible,attempts,lease_until,lease_hash,sequence::numeric FROM \
-            UNNEST($2::bigint[],$3::int[],$4::bytea[],$5::bytea[],$6::text[],$7::bool[],$8::smallint[],$9::bigint[],$10::bigint[],$11::bigint[],$12::bigint[],$13::bigint[],$14::bytea[],$15::text[]) \
-            AS x(id,col,key_hash,key,version,active,state,priority,available,eligible,attempts,lease_until,lease_hash,sequence) \
-            ON CONFLICT(id) DO UPDATE SET version=EXCLUDED.version,active=EXCLUDED.active,lifecycle=EXCLUDED.lifecycle,priority=EXCLUDED.priority,available_at=EXCLUDED.available_at,eligible_since=EXCLUDED.eligible_since,attempts=EXCLUDED.attempts,lease_until=EXCLUDED.lease_until,lease_hash=EXCLUDED.lease_hash,insertion_sequence=EXCLUDED.insertion_sequence",
-            &[&queue.id,&ids,&cols,&hashes,&keys,&versions,&active,&states,&priorities,&available,&eligible,&attempts,&until,&tokens,&sequences]).await.map_err(storage)?;
+        tx.execute("INSERT INTO fireweed_api007.records(id,queue_id,collection,key_hash,key,version,active,lifecycle,priority,available_at,eligible_since,attempts,lease_until,lease_hash,insertion_sequence,deleted_at) \
+            SELECT id,$1,col,key_hash,key,version::numeric,active,state,priority,available,eligible,attempts,lease_until,lease_hash,sequence::numeric,deleted_at FROM \
+            UNNEST($2::bigint[],$3::int[],$4::bytea[],$5::bytea[],$6::text[],$7::bool[],$8::smallint[],$9::bigint[],$10::bigint[],$11::bigint[],$12::bigint[],$13::bigint[],$14::bytea[],$15::text[],$16::bigint[]) \
+            AS x(id,col,key_hash,key,version,active,state,priority,available,eligible,attempts,lease_until,lease_hash,sequence,deleted_at) \
+            ON CONFLICT(id) DO UPDATE SET version=EXCLUDED.version,active=EXCLUDED.active,lifecycle=EXCLUDED.lifecycle,priority=EXCLUDED.priority,available_at=EXCLUDED.available_at,eligible_since=EXCLUDED.eligible_since,attempts=EXCLUDED.attempts,lease_until=EXCLUDED.lease_until,lease_hash=EXCLUDED.lease_hash,insertion_sequence=EXCLUDED.insertion_sequence,deleted_at=EXCLUDED.deleted_at",
+            &[&queue.id,&ids,&cols,&hashes,&keys,&versions,&active,&states,&priorities,&available,&eligible,&attempts,&until,&tokens,&sequences,&deleted_at]).await.map_err(storage)?;
     }
     if !payload_ids.is_empty() {
         tx.execute("INSERT INTO fireweed_api007.bodies(record_id,value) SELECT * FROM UNNEST($1::bigint[],$2::bytea[]) ON CONFLICT(record_id) DO UPDATE SET value=EXCLUDED.value",
@@ -1729,6 +1757,9 @@ impl QueueStore for PostgresQueueStore {
             administrative_envelope_preflight(&request, &self.inner.limits)?;
             let limits = self.inner.limits;
             let clock = Arc::clone(&self.inner.clock);
+            for group in &request.groups {
+                check_issued_at(clock.as_ref(), group.issued_at)?;
+            }
             let workers = self.inner.scratch_workers.clone();
             let quota = Arc::clone(&self.inner.scratch_quota);
             let scratch_root = Arc::clone(&self.inner.scratch_root);
@@ -1858,6 +1889,7 @@ impl QueueStore for PostgresQueueStore {
             )?;
             let limits = self.inner.limits;
             let clock = Arc::clone(&self.inner.clock);
+            check_issued_at(clock.as_ref(), request.group.issued_at)?;
             let workers = self.inner.scratch_workers.clone();
             let quota = Arc::clone(&self.inner.scratch_quota);
             let scratch_root = Arc::clone(&self.inner.scratch_root);
@@ -1926,6 +1958,7 @@ impl QueueStore for PostgresQueueStore {
             request.preflight(&self.inner.limits)?;
             let limits = self.inner.limits;
             let clock = Arc::clone(&self.inner.clock);
+            check_issued_at(clock.as_ref(), request.issued_at)?;
             let incoming_headers = incoming_headers(&request)?;
             let charge = encoded_len(&request)?
                 .checked_mul(4)
@@ -1959,6 +1992,7 @@ impl QueueStore for PostgresQueueStore {
                         state_updates: vec![],
                         work_inserts: request.items.clone(),
                         work_updates: vec![],
+                        issued_at: 0,
                     };
                     let mut loaded = load_group(&tx, &queue, &read_set, &reservation).await?;
                     let before = loaded.snapshot.clone();
@@ -2001,6 +2035,7 @@ impl QueueStore for PostgresQueueStore {
             request.preflight(&self.inner.limits)?;
             let limits = self.inner.limits;
             let clock = Arc::clone(&self.inner.clock);
+            check_issued_at(clock.as_ref(), request.issued_at)?;
             let incoming_headers = incoming_headers(&request)?;
             let charge = encoded_len(&request)?
                 .checked_mul(4)
@@ -2519,6 +2554,7 @@ mod tests {
                             .into(),
                             body: Default::default(),
                         }],
+                        issued_at: 0,
                     })
                     .await
                     .unwrap();
@@ -2534,6 +2570,7 @@ mod tests {
                         max_bytes: 65536,
                         fields: Some(Default::default()),
                         include_body: false,
+                        issued_at: 0,
                     })
                     .await
                     .unwrap()
@@ -2545,6 +2582,7 @@ mod tests {
                     state_updates: vec![],
                     work_updates: vec![],
                     work_inserts: vec![],
+                    issued_at: 0,
                 };
                 let patch = WorkPatch {
                     fields: [("target".into(), Some(FieldValue::Text("after".into())))].into(),
@@ -2699,6 +2737,7 @@ mod tests {
                     body: Default::default(),
                 }],
                 administration: None,
+                issued_at: 0,
             }],
         };
         let legitimate = store.commit(request.clone()).await.unwrap();
@@ -2769,6 +2808,7 @@ mod tests {
                     ]),
                     body: Default::default(),
                 }],
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -2783,6 +2823,7 @@ mod tests {
             max_bytes: 4096,
             fields: Some(Default::default()),
             include_body: false,
+            issued_at: 0,
         };
         assert_eq!(store.claim(request.clone()).await.unwrap().len(), 1);
         let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
@@ -2896,6 +2937,7 @@ mod tests {
                         body: Default::default(),
                     })
                     .collect(),
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -2926,6 +2968,7 @@ mod tests {
                     }]),
                 },
             }),
+            issued_at: 0,
         };
         let mut transition = make("preview-then-execute", "a", 1, 17);
         transition.state_updates.push(StateUpdate {
@@ -3326,6 +3369,7 @@ mod tests {
                         body: Default::default(),
                     },
                 ],
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -3352,6 +3396,7 @@ mod tests {
                     work_updates: vec![],
                     work_inserts: vec![],
                     state_updates: vec![state_update.clone()],
+                    issued_at: 0,
                 }],
             })
             .await
@@ -3372,6 +3417,7 @@ mod tests {
                     ..WorkPatch::default()
                 }),
             }],
+            issued_at: 0,
         };
         let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
             .await
@@ -3536,6 +3582,7 @@ mod tests {
                     ..WorkPatch::default()
                 }),
             }],
+            issued_at: 0,
         };
         let rejected_rekey = update_target("rejected-rekey", "a", 3, "new-owner");
         let free_and_create = CommitGroup {
@@ -3555,6 +3602,7 @@ mod tests {
                 body: Default::default(),
                 fields: BTreeMap::from([("target".into(), FieldValue::Text("new-owner".into()))]),
             }],
+            issued_at: 0,
         };
         let rekey_created = update_target("rekey-created", "d", 1, "final-owner");
         let reuse = update_target("reuse", "a", 3, "new-owner");
@@ -3611,6 +3659,7 @@ mod tests {
                     lease_guard: AdministrativeLeaseGuard::RejectActive,
                 },
             }],
+            issued_at: 0,
         };
         load_unique_probes(&tx, &writer_row, &mut writer, &noop, 0, &writer_job)
             .await
@@ -3768,6 +3817,7 @@ mod tests {
                     ..WorkPatch::default()
                 }),
             }],
+            issued_at: 0,
         };
         let remove_before = writer.snapshot.clone();
         load_unique_probes(&tx, &writer_row, &mut writer, &remove_only, 0, &writer_job)
@@ -3907,6 +3957,7 @@ mod tests {
                     ..WorkPatch::default()
                 }),
             }],
+            issued_at: 0,
         };
         let body_before = writer.snapshot.clone();
         load_unique_probes(&tx, &writer_row, &mut writer, &body_group, 0, &writer_job)
@@ -4045,6 +4096,7 @@ mod tests {
             state_updates: vec![],
             work_inserts: vec![],
             work_updates: vec![],
+            issued_at: 0,
         };
         let state = |expect: StateExpect, value: u8| StateUpdate {
             collection: "instances".into(),
@@ -4280,6 +4332,7 @@ mod tests {
                 fields: Fields::new(),
                 body: vec![8].into(),
             }],
+            issued_at: 0,
         };
         let owned = store.clone();
         let address = queue.clone();

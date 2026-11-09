@@ -94,6 +94,12 @@ pub fn decode_definition(raw: &[u8]) -> QueueResult<QueueSchema> {
                 .collect(),
             progress_bound_nanos: old.progress_bound_nanos,
             max_attempts: old.max_attempts,
+            // Unframed definitions predate retention: they keep reusable keys and
+            // read as a one day request id window.
+            retention: QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: DeletedKeyPolicy::Reusable,
+            },
         }
     };
     schema

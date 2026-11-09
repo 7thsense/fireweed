@@ -1,6 +1,7 @@
 //! Disposable one-work-command preparation. This reuses the publication command
 //! writer/parser; these bytes have no frame, receipt or publication authority.
 use super::*;
+use crate::queue_planner::DeletedWork;
 
 pub struct ResolvedWorkFragment<'r> {
     bytes: Vec<u8>,
@@ -97,7 +98,11 @@ fn write_administrative_work_fragment(
     if let Some((row, fields, body)) = row {
         write_work_value(sink, row, fields, body)?;
     } else {
+        let deleted = delta.deleted_work.first().ok_or(PublicationError::Invalid(
+            "work deletion lacks deletion time",
+        ))?;
         sink.tag(0)?;
+        sink.i(deleted.deleted_at)?;
     }
     Ok(())
 }
@@ -234,7 +239,12 @@ pub fn materialize_administrative_work<'r>(
         },
     };
     match command.effect {
-        EffectRef::Delete => delta.deleted_work.push(key),
+        EffectRef::Delete { deleted_at } => delta.deleted_work.push(DeletedWork {
+            key,
+            deleted_at: deleted_at.ok_or(PublicationError::Invalid(
+                "work deletion lacks deletion time",
+            ))?,
+        }),
         EffectRef::StatePut { .. } => return invalid("state in administrative work command"),
         EffectRef::WorkPut {
             metadata,
@@ -569,7 +579,15 @@ mod tests {
             prefixes: Default::default(),
         };
         let result = materialize_administrative_work(command, &before, &schema.work, &job).unwrap();
-        assert_eq!(result.delta().deleted_work, vec![key]);
+        assert_eq!(
+            result
+                .delta()
+                .deleted_work
+                .iter()
+                .map(|d| d.key.clone())
+                .collect::<Vec<_>>(),
+            vec![key]
+        );
         drop(result);
         let small = QueueAdmission::new(1, 8192).unwrap();
         let limited = small.reserve(0).unwrap();

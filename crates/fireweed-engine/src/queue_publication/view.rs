@@ -117,7 +117,9 @@ pub struct WorkMetadataRef<'a> {
 }
 #[derive(Debug, Clone, Copy)]
 pub enum EffectRef<'a> {
-    Delete,
+    /// `deleted_at` is the deleting group's `issued_at`, carried by work
+    /// deletions only; a state deletion has none.
+    Delete { deleted_at: Option<i64> },
     WorkPut {
         metadata: WorkMetadataRef<'a>,
         fields: FieldsCommandRef<'a>,
@@ -455,7 +457,13 @@ pub(super) fn parse_command<'a>(
         return invalid("invalid predecessor highwater");
     }
     let effect = match s.tag()? {
-        0 => EffectRef::Delete,
+        0 => EffectRef::Delete {
+            deleted_at: if identity.collection.is_none() {
+                Some(i64::from_le_bytes(s.raw(8)?.try_into().unwrap()))
+            } else {
+                None
+            },
+        },
         1 if identity.collection.is_some() => EffectRef::StatePut {
             fields: fields(s, false)?,
             value: s.bytes()?,

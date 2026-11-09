@@ -641,6 +641,7 @@ async fn prefix_composite_unique_active_delete_and_final_clock_expiry_preserve_a
             max_bytes: 65536,
             fields: Some(["u".into()].into()),
             include_body: false,
+            issued_at: 0,
         },
         now: 100,
         limits: QueueLimits::default(),

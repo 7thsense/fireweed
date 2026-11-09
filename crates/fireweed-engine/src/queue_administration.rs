@@ -593,7 +593,10 @@ fn propose_group_legacy(
                 work_bodies,
                 work: proposal.replacement.take().into_iter().collect(),
                 deleted_work: if matches!(proposal.outcome, AdministrativeOutcome::Deleted { .. }) {
-                    vec![entry.key.to_owned()]
+                    vec![crate::queue_planner::DeletedWork {
+                        key: entry.key.to_owned(),
+                        deleted_at: ordinary.issued_at,
+                    }]
                 } else {
                     vec![]
                 },
@@ -727,8 +730,8 @@ mod tests {
                 full.body_loaded = true;
                 result.work.insert(key.clone(), full);
             }
-            for key in &delta.deleted_work {
-                result.work.remove(key);
+            for deleted in &delta.deleted_work {
+                result.work.remove(&deleted.key);
             }
             for row in &delta.state {
                 result
@@ -785,6 +788,10 @@ mod tests {
             state: BTreeMap::new(),
             progress_bound_nanos: 1_000_000_000,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         }
     }
     pub(super) fn row() -> StoredWork {
@@ -1494,6 +1501,7 @@ mod tests {
             state_updates: vec![],
             work_inserts: vec![],
             work_updates: vec![],
+            issued_at: 0,
         }
     }
     pub(super) fn source() -> crate::queue_planner::RecordSnapshot {

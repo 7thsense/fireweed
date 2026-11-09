@@ -612,6 +612,7 @@ async fn broad_more_than_5000_targets_stream_complete_and_fail_closed_on_unselec
     let request = InsertRequest {
         queue: address(),
         request_id: "many-seed".into(),
+        issued_at: 10,
         mode: InsertMode::InsertOnly,
         items: (0..5001)
             .map(|i| work(&format!("target-{i:05}-λ"), i, false))

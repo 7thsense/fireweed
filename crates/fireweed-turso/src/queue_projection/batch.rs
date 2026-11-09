@@ -376,6 +376,7 @@ mod tests {
                 request_id: id.into(),
                 mode: InsertMode::InsertOnly,
                 items: vec![work(key, u, false)],
+                issued_at: 0,
             },
             limits: QueueLimits::default(),
             required_next_offset: point.0,

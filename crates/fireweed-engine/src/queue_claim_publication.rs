@@ -319,6 +319,10 @@ mod tests {
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         }
     }
     fn request() -> ClaimRequest {
@@ -336,6 +340,7 @@ mod tests {
             max_bytes: 1 << 20,
             fields: Some(Default::default()),
             include_body: false,
+            issued_at: 0,
         }
     }
     fn before() -> RecordSnapshot {
@@ -645,10 +650,10 @@ mod tests {
                         .iter()
                         .map(|byte| format!("{byte:02x}"))
                         .collect::<String>(),
-                    "07be6c7890946d187d28d9ec51a3079648de8f9cc41589d75628ccbf1ddf7ca0"
+                    "059e64eec5af1c779ed4e06ed54401d4e5bc51a9249b4b8b3e32217473e17c9c"
                 );
             } else {
-                const EMPTY: &str = "46575143310a00000000000000000000000000000040420f00000000000500000000000000636c61696ddeff9504e3694d7fca65113892b75f4640c71515d003a56f26aa84363a4b4a0a5d00000000000000465751503104000000000000007400ceb20400000000000000712fcebbca34cd395acac8ddffbe8b24816de31c87573a5290d20f00070e62cf8ae9dfef02000000000000000200000000000000000000000000000000000000000000000d0000000000000046574352310000000000000000";
+                const EMPTY: &str = "46575143310a00000000000000000000000000000040420f00000000000500000000000000636c61696daab55c434dda873ac8fd790173338bb5671fdd1c9e3823a1ea1def502ecb73225d00000000000000465751503104000000000000007400ceb20400000000000000712fcebb20e569a5228ca922ed50d018b847cbee60c8c6c482290c9c8419fddecab9293202000000000000000200000000000000000000000000000000000000000000000d0000000000000046574352310000000000000000";
                 let expected = EMPTY
                     .as_bytes()
                     .as_chunks::<2>()
@@ -707,6 +712,7 @@ mod tests {
                     .map(|key| before.work[key].record.work.clone())
                     .collect(),
                 mode: InsertMode::InsertOnly,
+                issued_at: 0,
             };
             let empty = RecordSnapshot::default();
             let mut seeded = empty.clone();
@@ -841,7 +847,12 @@ mod tests {
                             changed.work.retain(|row| row.record.work.key != "a");
                             changed.work_fields.remove("a");
                             changed.work_bodies.remove("a");
-                            changed.deleted_work.push("a".into());
+                            changed
+                                .deleted_work
+                                .push(crate::queue_planner::DeletedWork {
+                                    key: "a".into(),
+                                    deleted_at: 0,
+                                });
                         }
                     }
                     let changed_commands = encode_publication_pinned(

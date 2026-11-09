@@ -305,6 +305,19 @@ async fn native_port_identical_contract(s3: bool) {
     suite::indexed_additional_attributes(&queue, address("additional-attributes")).await;
     eprintln!("native contract {s3}: numeric_bucket_stats");
     suite::numeric_bucket_stats(&queue, &clock, address("numeric-buckets")).await;
+    eprintln!("native contract {s3}: retention");
+    suite::retention_floor_refused_at_provisioning(&queue, address("retention-floor")).await;
+    suite::issued_at_skew_and_conflict(&queue, &clock, address("issued-at")).await;
+    suite::retired_keys_refuse_reinsert_within_window(&queue, &clock, address("retired-keys"))
+        .await;
+    suite::reusable_keys_reinsert_at_once(&queue, &clock, address("reusable-keys")).await;
+    suite::retired_keys_cover_every_deletion_route(
+        &queue,
+        &clock,
+        address("retired-routes"),
+        cfg!(target_os = "linux"),
+    )
+    .await;
     eprintln!("native contract {s3}: unrestricted_names_obey_response_bounds");
     suite::unrestricted_names_obey_response_bounds(&queue, address("names-bounds")).await;
     eprintln!("native contract {s3}: atomic_administration_preview_and_replay");
@@ -451,6 +464,60 @@ async fn native_condition_checks_contract(s3: bool) {
     drop(rebuilt);
     drop(queue);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A `Retired` deletion time lives in the log and the projection row: a cold
+/// rebuild must refuse and accept exactly where the live owner did.
+async fn native_retired_deletion_contract(s3: bool) {
+    use fireweed_conformance::queue_contract::{self as suite, TestClock};
+    use fireweed_engine::queue_contract::QueueStore;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("fireweed-retired-contract-{s3}-{nonce}"));
+    std::fs::create_dir_all(&root).unwrap();
+    let prefix = s3.then(|| format!("api007-retired-contract-{nonce}"));
+    let clock = Arc::new(TestClock::default());
+    let live = native_port_fixture(
+        &root,
+        "primary-projections",
+        prefix.as_deref(),
+        clock.clone(),
+    )
+    .await;
+    let prepared = suite::prepare_retired_deletion(
+        &live,
+        &clock,
+        QueueAddress {
+            tenant: "api007-retired-contract".into(),
+            queue: nonce.to_string(),
+        },
+    )
+    .await;
+    live.shutdown().await.unwrap();
+    drop(live);
+    let rebuilt = native_port_fixture(
+        &root,
+        "cold-rebuild-projections",
+        prefix.as_deref(),
+        clock.clone(),
+    )
+    .await;
+    suite::verify_retired_deletion(&rebuilt, &clock, prepared).await;
+    rebuilt.shutdown().await.unwrap();
+    drop(rebuilt);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn native_store_retired_deletion_survives_rebuild_local() {
+    native_retired_deletion_contract(false).await;
+}
+
+#[tokio::test]
+async fn native_store_retired_deletion_survives_rebuild_real_s3() {
+    native_retired_deletion_contract(true).await;
 }
 
 #[tokio::test]

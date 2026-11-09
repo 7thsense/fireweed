@@ -61,6 +61,7 @@ pub mod queue_namespace;
 pub mod queue_original_authority;
 pub mod queue_planner;
 pub mod queue_recovery;
+pub mod queue_retention;
 pub mod queue_runtime;
 pub mod queue_source_index;
 pub mod queue_state_authority;

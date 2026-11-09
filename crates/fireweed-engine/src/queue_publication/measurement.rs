@@ -109,7 +109,8 @@ pub fn measure_work_mutation(
         if let Some((work, fields, body)) = row {
             write_work_value(sink, work, fields, body)
         } else {
-            sink.tag(0)
+            sink.tag(0)?;
+            sink.i(0)
         }
     })
 }
@@ -297,6 +298,7 @@ mod tests {
                 state_updates: vec![],
                 work_inserts: vec![],
                 work_updates: vec![],
+                issued_at: 0,
             };
             let change = match step {
                 0 => UnclaimedChange::Patch(WorkPatch {
@@ -407,6 +409,7 @@ mod tests {
             state_updates: vec![],
             work_inserts: vec![],
             work_updates: vec![],
+            issued_at: 0,
         };
         let result = CommitReceipt {
             request_id: id,

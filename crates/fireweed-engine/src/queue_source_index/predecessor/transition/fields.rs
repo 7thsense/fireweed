@@ -11,7 +11,7 @@ impl QueueSourceRecordTransition<'_, '_> {
     {
         use crate::queue_index::borrowed_value;
         let replacement = match self.resolved().effect {
-            EffectRef::Delete => {
+            EffectRef::Delete { .. } => {
                 for (name, value) in self.fields.complete_entries()? {
                     visitor(name, Some(borrowed_value(value)), None)?;
                 }
@@ -97,7 +97,7 @@ impl QueueSourceRecordTransition<'_, '_> {
             return Err(unknown("dependency names must be sorted and unique"));
         }
         let (fields, complete) = match self.resolved().effect {
-            EffectRef::Delete => {
+            EffectRef::Delete { .. } => {
                 for name in names {
                     visitor(name, None)?;
                 }

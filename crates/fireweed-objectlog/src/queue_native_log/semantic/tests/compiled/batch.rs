@@ -33,6 +33,10 @@ async fn batch_contract(log: QueueNativeLog) {
         state: BTreeMap::from([("workflow".into(), collection)]),
         progress_bound_nanos: 1,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     };
     let (acquired, genesis) = bundle_for_schema(&log, "producer", &job, &schema).await;
     let definition = {

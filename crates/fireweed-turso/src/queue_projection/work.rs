@@ -3,8 +3,15 @@
 use super::*;
 pub(super) enum WorkAuthority {
     Absent,
-    Deleted { version: u64 },
-    Present { id: i64, work: Box<StoredWork> },
+    /// `deleted_at` is the deleting group's `issued_at`.
+    Deleted {
+        version: u64,
+        deleted_at: i64,
+    },
+    Present {
+        id: i64,
+        work: Box<StoredWork>,
+    },
 }
 pub(super) async fn load_current_work(
     connection: &Connection,
@@ -27,7 +34,7 @@ pub(super) async fn load_work_authority(
     insertion_head: u64,
 ) -> QueueResult<WorkAuthority> {
     let key_hash = discovery_digest(key.as_bytes());
-    let row = one(connection,"SELECT CASE WHEN typeof(id)='integer' THEN id ELSE NULL END,CASE WHEN typeof(version)='blob' AND length(version)=8 THEN version ELSE NULL END,CASE WHEN typeof(active)='integer' THEN active ELSE NULL END,CASE WHEN typeof(lifecycle)='integer' THEN lifecycle ELSE NULL END,CASE WHEN typeof(priority)='integer' THEN priority ELSE NULL END,CASE WHEN typeof(available_at)='integer' THEN available_at ELSE NULL END,CASE WHEN typeof(eligible_since)='integer' THEN eligible_since ELSE NULL END,CASE WHEN typeof(attempts)='integer' THEN attempts ELSE NULL END,CASE WHEN lease_until IS NULL OR typeof(lease_until)='integer' THEN lease_until ELSE '' END,CASE WHEN lease_hash IS NULL OR (typeof(lease_hash)='blob' AND length(lease_hash)=32) THEN lease_hash ELSE x'' END,CASE WHEN typeof(insertion_sequence)='blob' AND length(insertion_sequence)=8 THEN insertion_sequence ELSE NULL END FROM q7_records WHERE queue_id=?1 AND collection=0 AND key_hash=?2 AND key=?3",vec![Value::Integer(queue_id),blob(&key_hash),blob(key.as_bytes())],11).await?;
+    let row = one(connection,"SELECT CASE WHEN typeof(id)='integer' THEN id ELSE NULL END,CASE WHEN typeof(version)='blob' AND length(version)=8 THEN version ELSE NULL END,CASE WHEN typeof(active)='integer' THEN active ELSE NULL END,CASE WHEN typeof(lifecycle)='integer' THEN lifecycle ELSE NULL END,CASE WHEN typeof(priority)='integer' THEN priority ELSE NULL END,CASE WHEN typeof(available_at)='integer' THEN available_at ELSE NULL END,CASE WHEN typeof(eligible_since)='integer' THEN eligible_since ELSE NULL END,CASE WHEN typeof(attempts)='integer' THEN attempts ELSE NULL END,CASE WHEN lease_until IS NULL OR typeof(lease_until)='integer' THEN lease_until ELSE '' END,CASE WHEN lease_hash IS NULL OR (typeof(lease_hash)='blob' AND length(lease_hash)=32) THEN lease_hash ELSE x'' END,CASE WHEN typeof(insertion_sequence)='blob' AND length(insertion_sequence)=8 THEN insertion_sequence ELSE NULL END,CASE WHEN deleted_at IS NULL OR typeof(deleted_at)='integer' THEN deleted_at ELSE '' END FROM q7_records WHERE queue_id=?1 AND collection=0 AND key_hash=?2 AND key=?3",vec![Value::Integer(queue_id),blob(&key_hash),blob(key.as_bytes())],12).await?;
     let Some(row) = row else {
         return Ok(WorkAuthority::Absent);
     };
@@ -37,7 +44,16 @@ pub(super) async fn load_work_authority(
         return Err(unknown("invalid work high-water metadata"));
     }
     match integer(&row[2])? {
-        0 => return Ok(WorkAuthority::Deleted { version }),
+        0 => {
+            let deleted_at = match row[11] {
+                Value::Integer(deleted_at) => deleted_at,
+                _ => return Err(unknown("deleted work has no deletion time")),
+            };
+            return Ok(WorkAuthority::Deleted {
+                version,
+                deleted_at,
+            });
+        }
         1 => {}
         _ => return Err(unknown("invalid active state")),
     }

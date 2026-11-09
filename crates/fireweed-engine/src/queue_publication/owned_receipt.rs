@@ -81,6 +81,7 @@ mod tests {
                 fields: Default::default(),
                 body: Default::default(),
             }],
+            issued_at: 0,
         };
         let receipt = CommitReceipt {
             request_id: group.request_id.clone(),
@@ -225,6 +226,7 @@ mod tests {
                 },
                 max_result_bytes: 65536,
             }),
+            issued_at: 0,
         };
         let limit = measure_complete_administrative_receipt(
             &group.request_id,

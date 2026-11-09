@@ -155,7 +155,11 @@ pub(super) async fn load_groups<'a>(
             super::work::load_work_authority(connection, queue_id, key, sequence).await?;
         match authority {
             super::work::WorkAuthority::Absent => {}
-            super::work::WorkAuthority::Deleted { version } => {
+            super::work::WorkAuthority::Deleted {
+                version,
+                deleted_at,
+            } => {
+                snapshot.deleted_at.insert(key.into(), deleted_at);
                 snapshot.versions.insert(identity, version);
             }
             super::work::WorkAuthority::Present { id, mut work } => {

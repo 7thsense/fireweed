@@ -220,6 +220,10 @@ pub(super) fn mixed_schema() -> QueueSchema {
         state: std::collections::BTreeMap::from([("s\0α".into(), collection)]),
         progress_bound_nanos: 100,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     }
 }
 pub(super) fn put_state(

@@ -55,6 +55,7 @@ async fn seeded(
             fields: Default::default(),
             body: Default::default(),
         }],
+        issued_at: 0,
     };
     let fp = group.fingerprint(&address).unwrap();
     let budget = if tight {

@@ -329,6 +329,7 @@ mod tests {
                 fields: Default::default(),
                 body: Default::default(),
             }],
+            issued_at: 0,
         };
         let result = AdministrativeResult {
             histogram: Default::default(),

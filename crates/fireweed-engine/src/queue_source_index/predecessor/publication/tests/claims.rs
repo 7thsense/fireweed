@@ -76,6 +76,7 @@ impl Harness {
             max_bytes: 1 << 20,
             fields: Some(Default::default()),
             include_body: false,
+            issued_at: 0,
         };
         let limits = QueueLimits {
             max_records: 100,

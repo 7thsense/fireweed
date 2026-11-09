@@ -256,8 +256,15 @@ where
             proposal.outcome = AdministrativeOutcome::Invalid;
         }
         if let Some(row) = target
-            && let Some(candidate) =
-                resolve_candidate(key, row, image, &mut proposal, schema, &reservation)?
+            && let Some(candidate) = resolve_candidate(
+                key,
+                row,
+                image,
+                &mut proposal,
+                schema,
+                &reservation,
+                ordinary.issued_at,
+            )?
         {
             let packet = ResolvedAdministrativeRow {
                 scan: scan.clone(),

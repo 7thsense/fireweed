@@ -185,10 +185,15 @@ struct MeasuredSchema {
     state: MeasuredState,
     progress_bound_nanos: u64,
     max_attempts: u32,
+    retention: QueueRetention,
 }
 impl MeasuredSchema {
     fn headers(&self) -> QueueResult<u64> {
-        let _ = (self.progress_bound_nanos, self.max_attempts);
+        let _ = (
+            self.progress_bound_nanos,
+            self.max_attempts,
+            &self.retention,
+        );
         self.work
             .headers()?
             .checked_add(self.state.0)
@@ -1135,6 +1140,10 @@ mod tests {
             state: BTreeMap::new(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let raw = postcard::to_allocvec(&schema).unwrap();
         assert_eq!(
@@ -1214,6 +1223,10 @@ mod tests {
             state: BTreeMap::new(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let group = CommitGroup {
             administration: None,
@@ -1228,6 +1241,7 @@ mod tests {
                 fields: BTreeMap::from([("field".into(), field)]),
                 body: Default::default(),
             }],
+            issued_at: 0,
         };
         assert!(
             group_expansion_budget(&group, &RecordSnapshot::default(), &schema).unwrap()
@@ -1246,6 +1260,10 @@ mod tests {
             state: BTreeMap::new(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         for n in 0..32 {
             let name = n.to_string();
@@ -1269,6 +1287,7 @@ mod tests {
             state_updates: vec![],
             work_updates: vec![],
             work_inserts: vec![work.clone()],
+            issued_at: 0,
         };
         let empty = RecordSnapshot::default();
         let base = group_expansion_budget(&group, &empty, &schema).unwrap();

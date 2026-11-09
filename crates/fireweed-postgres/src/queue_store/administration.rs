@@ -1117,6 +1117,7 @@ async fn apply_resolved_administrative_commands(
                     expect: StateExpect::Version(command.prior_highwater),
                     change: UnclaimedChange::Patch(WorkPatch::default()),
                 }],
+                issued_at: 0,
             };
             let mut loaded =
                 load_group_with_fields(tx, queue, &carrier, reservation, Some(&names)).await?;
@@ -1218,6 +1219,10 @@ mod tests {
             )]),
             progress_bound_nanos: 1_000_000_000,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let store = PostgresQueueStore::connect(
             &url,
@@ -1291,6 +1296,7 @@ mod tests {
                 fields: BTreeMap::new(),
                 body: Default::default(),
             }],
+            issued_at: 0,
         };
         let intent = AdministrativeIntent {
             evaluated_at: 0,
@@ -1637,6 +1643,7 @@ mod tests {
                         body: vec![n; 262144].into(),
                     })
                     .collect(),
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -1652,6 +1659,7 @@ mod tests {
                     fields: Default::default(),
                     body: Default::default(),
                 }],
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -1669,6 +1677,7 @@ mod tests {
                         expect: StateExpect::Version(1),
                         change: UnclaimedChange::Delete,
                     }],
+                    issued_at: 0,
                 }],
             })
             .await
@@ -1691,6 +1700,7 @@ mod tests {
             state_updates: vec![],
             work_updates: vec![],
             work_inserts: vec![],
+            issued_at: 0,
         };
         let update = AdministrativeAction::Update {
             patch: WorkPatch {
@@ -2484,6 +2494,7 @@ mod tests {
                 request_id: "seed".into(),
                 mode: InsertMode::InsertOnly,
                 items,
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -2502,6 +2513,7 @@ mod tests {
                 max_bytes: 1 << 20,
                 fields: Some(BTreeSet::new()),
                 include_body: false,
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -2523,6 +2535,7 @@ mod tests {
             state_updates: vec![],
             work_inserts: vec![],
             work_updates: vec![],
+            issued_at: 0,
         };
         let clause = |key: &str, value: &str| AdministrativeClause {
             id: key.into(),
@@ -2688,7 +2701,15 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(plan.proposal().delta.deleted_work, vec!["c"]);
+        assert_eq!(
+            plan.proposal()
+                .delta
+                .deleted_work
+                .iter()
+                .map(|d| d.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c"]
+        );
         assert!(!plan.initial_authority().unique_probes_loaded.is_empty());
         drop(plan);
         // All results above remain speculative: native selection itself writes
@@ -2826,7 +2847,15 @@ mod tests {
             plan.proposal().delta.receipt.outcome,
             GroupOutcome::Committed { .. }
         ));
-        assert_eq!(plan.proposal().delta.deleted_work, vec!["c"]);
+        assert_eq!(
+            plan.proposal()
+                .delta
+                .deleted_work
+                .iter()
+                .map(|d| d.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c"]
+        );
         assert_eq!(plan.proposal().delta.work.len(), 1);
         assert!(
             plan.initial_authority()
@@ -3245,6 +3274,7 @@ mod tests {
                 request_id: "seed".into(),
                 mode: InsertMode::InsertOnly,
                 items: records.iter().map(|row| row.work.clone()).collect(),
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -3486,6 +3516,7 @@ mod tests {
             state_updates: vec![],
             work_inserts: vec![],
             work_updates: vec![],
+            issued_at: 0,
         };
         let mut noops = operation(
             vec![WorkSelector::leaf(SelectorNode::Present {

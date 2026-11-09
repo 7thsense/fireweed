@@ -343,7 +343,7 @@ fn validate_delta(before: &RecordSnapshot, d: &CommitDelta) -> PublicationResult
     if d.work
         .windows(2)
         .any(|p| p[0].record.work.key >= p[1].record.work.key)
-        || d.deleted_work.windows(2).any(|p| p[0] >= p[1])
+        || d.deleted_work.windows(2).any(|p| p[0].key >= p[1].key)
         || d.state
             .windows(2)
             .any(|p| (&p[0].collection, &p[0].key) >= (&p[1].collection, &p[1].key))
@@ -422,7 +422,10 @@ fn validate_delta(before: &RecordSnapshot, d: &CommitDelta) -> PublicationResult
                 .binary_search_by(|r| r.record.work.key.as_str().cmp(&v.key))
                 .ok()
                 .map(|i| &d.work[i]);
-            let deleted = d.deleted_work.binary_search(&v.key).is_ok();
+            let deleted = d
+                .deleted_work
+                .binary_search_by(|d| d.key.as_str().cmp(&v.key))
+                .is_ok();
             if row.is_some() == deleted {
                 return invalid("work effect identity");
             }
@@ -893,7 +896,12 @@ fn write_delta_mutation(
             &delta.work_bodies[&version.key],
         )
     } else {
-        s.tag(0)
+        let deleted = delta
+            .deleted_work
+            .binary_search_by(|d| d.key.as_str().cmp(&version.key))
+            .map_err(|_| PublicationError::Invalid("work deletion lacks deletion time"))?;
+        s.tag(0)?;
+        s.i(delta.deleted_work[deleted].deleted_at)
     }
 }
 /// Full zero-allocation scan. Length bounds come from the supplied frame slice;
@@ -993,6 +1001,10 @@ mod tests {
             state: BTreeMap::from([("instances".into(), def)]),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         }
     }
     pub(super) fn queue() -> QueueAddress {
@@ -1009,6 +1021,7 @@ mod tests {
             state_updates: vec![],
             work_updates: vec![],
             work_inserts: vec![],
+            issued_at: 0,
         }
     }
     #[test]
@@ -1256,7 +1269,7 @@ mod tests {
         let hash = sha2::Sha256::digest(bytes);
         assert_eq!(
             hash.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-            "aaf900b5512de2f9d137a24310256c48654c89ad8c1b5766a056319b754696b2"
+            "85912939bb2d44c3aaa2c4eeb4db47a2c9bf6df9a0cf755ae1f374e99970cb7a"
         );
         drop(frame);
         assert_eq!(admission.usage().unwrap(), (1, 1));
@@ -1395,6 +1408,7 @@ mod tests {
             request_id: "insert".into(),
             mode: InsertMode::InsertOnly,
             items: seed().work_inserts,
+            issued_at: 0,
         };
         let outcomes = vec![InsertOutcome::Rejected {
             key: request.items[0].key.clone(),

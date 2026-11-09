@@ -21,6 +21,10 @@ fn schema() -> QueueSchema {
         state: Default::default(),
         progress_bound_nanos: 1,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     }
 }
 fn group(id: &str, change: UnclaimedChange) -> CommitGroup {
@@ -35,6 +39,7 @@ fn group(id: &str, change: UnclaimedChange) -> CommitGroup {
             expect: StateExpect::Version(1),
             change,
         }],
+        issued_at: 0,
     }
 }
 fn apply_group(
@@ -114,6 +119,7 @@ fn selected_fold_handles_replace_edit_preserve_delete_recreate_and_lease_metadat
             .into(),
             body: bytes::Bytes::from_static(b"abc"),
         }],
+        issued_at: 0,
     };
     let genesis = encode_checked_genesis(1, &queue, &definition, &[31; 32], 1 << 20, &job).unwrap();
     let mut records = vec![genesis];
@@ -321,7 +327,9 @@ fn selected_fold_handles_replace_edit_preserve_delete_recreate_and_lease_metadat
         expected_version: Some(5),
         prior_highwater: 5,
         output_highwater: 9,
-        effect: EffectRef::Delete,
+        effect: EffectRef::Delete {
+            deleted_at: Some(0),
+        },
     })
     .unwrap();
     assert_eq!(set.descriptor(0, "a").unwrap().highwater, 9);

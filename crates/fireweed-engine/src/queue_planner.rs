@@ -30,12 +30,21 @@ pub struct UniqueIdentity {
     pub index: String,
     pub full_sort_key: Vec<u8>,
 }
+/// A deleted work key and the `issued_at` of the group that deleted it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct DeletedWork {
+    pub key: String,
+    pub deleted_at: i64,
+}
 #[derive(Debug, Clone, Default)]
 pub struct RecordSnapshot {
     pub work: BTreeMap<String, StoredWork>,
     pub state: BTreeMap<(String, String), StateRecord>,
     /// Durable high-water versions include deleted keys, preventing ABA.
     pub versions: BTreeMap<RecordIdentity, u64>,
+    /// Deletion time of every retained deleted work key: the deleting group's
+    /// `issued_at`. Loaded from the same row as the high-water version.
+    pub deleted_at: BTreeMap<String, i64>,
     pub next_sequence: u64,
     /// Loaded existence/nonexistence authority for every prospective unique tuple.
     pub unique_probes_loaded: BTreeSet<UniqueIdentity>,
@@ -46,7 +55,7 @@ pub struct CommitDelta {
     pub work: Vec<StoredWork>,
     pub work_fields: BTreeMap<String, ResolvedFields>,
     pub work_bodies: BTreeMap<String, ResolvedBody>,
-    pub deleted_work: Vec<String>,
+    pub deleted_work: Vec<DeletedWork>,
     pub state: Vec<StateRecord>,
     pub deleted_state: Vec<(String, String)>,
     pub versions: Vec<RecordVersion>,
@@ -79,6 +88,7 @@ pub fn plan_insert_vector(
             state_updates: vec![],
             work_inserts: vec![item.clone()],
             work_updates: vec![],
+            issued_at: request.issued_at,
         };
         if request.mode == InsertMode::Upsert
             && let Some(old) = old
@@ -134,6 +144,7 @@ pub fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> QueueResult<Commi
     let mut work: BTreeMap<String, Option<StoredWork>> = BTreeMap::new();
     let mut states: BTreeMap<(String, String), Option<StateRecord>> = BTreeMap::new();
     let mut versions = BTreeMap::new();
+    let mut deleted_at: BTreeMap<String, i64> = BTreeMap::new();
     let mut next = initial;
     for delta in deltas {
         validate_resolved_writes(delta)?;
@@ -160,10 +171,14 @@ pub fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> QueueResult<Commi
             bodies.insert(key.clone(), body);
             work.insert(row.record.work.key.clone(), Some(row.clone()));
         }
-        for key in &delta.deleted_work {
-            commands.remove(key);
-            bodies.remove(key);
-            work.insert(key.clone(), None);
+        for deleted in &delta.deleted_work {
+            commands.remove(&deleted.key);
+            bodies.remove(&deleted.key);
+            work.insert(deleted.key.clone(), None);
+            deleted_at.insert(deleted.key.clone(), deleted.deleted_at);
+        }
+        for row in &delta.work {
+            deleted_at.remove(&row.record.work.key);
         }
         for row in &delta.state {
             states.insert((row.collection.clone(), row.key.clone()), Some(row.clone()));
@@ -199,7 +214,15 @@ pub fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> QueueResult<Commi
     for (key, value) in work {
         match value {
             Some(value) => out.work.push(value),
-            None => out.deleted_work.push(key),
+            None => out.deleted_work.push(DeletedWork {
+                // Every deletion records its time and only a later insert of the
+                // same key clears it, so a missing time is a malformed delta, never
+                // an epoch deletion.
+                deleted_at: deleted_at.get(&key).copied().ok_or_else(|| {
+                    QueueError::OutcomeUnknown("packed deletion lacks its deletion time".into())
+                })?,
+                key,
+            }),
         }
     }
     for (key, value) in states {
@@ -221,6 +244,7 @@ pub fn load_envelope<'a>(groups: impl IntoIterator<Item = &'a CommitGroup>) -> C
         state_updates: vec![],
         work_inserts: vec![],
         work_updates: vec![],
+        issued_at: 0,
     };
     for group in groups {
         all.claimed_updates.extend(group.claimed_updates.clone());
@@ -427,7 +451,13 @@ pub(crate) fn apply_group(
             Disposition::Check => unreachable!("checks return before mutation planning"),
             Disposition::Delete => {
                 snapshot.work.remove(&update.key);
-                delta.deleted_work.push(update.key.clone());
+                snapshot
+                    .deleted_at
+                    .insert(update.key.clone(), group.issued_at);
+                delta.deleted_work.push(DeletedWork {
+                    key: update.key.clone(),
+                    deleted_at: group.issued_at,
+                });
                 delta.versions.push(RecordVersion {
                     collection: None,
                     key: update.key.clone(),
@@ -560,7 +590,13 @@ pub(crate) fn apply_group(
             }
             UnclaimedChange::Delete => {
                 snapshot.work.remove(&update.key);
-                delta.deleted_work.push(update.key.clone());
+                snapshot
+                    .deleted_at
+                    .insert(update.key.clone(), group.issued_at);
+                delta.deleted_work.push(DeletedWork {
+                    key: update.key.clone(),
+                    deleted_at: group.issued_at,
+                });
             }
         }
         delta.versions.push(RecordVersion {
@@ -573,6 +609,16 @@ pub(crate) fn apply_group(
         if snapshot.work.contains_key(&work.key) {
             return Err(Rejection::AlreadyExists);
         }
+        if snapshot
+            .deleted_at
+            .get(&work.key)
+            .is_some_and(|deleted_at| {
+                crate::queue_retention::is_retired(&schema.retention, *deleted_at, now)
+            })
+        {
+            return Err(Rejection::AlreadyExists);
+        }
+        snapshot.deleted_at.remove(&work.key);
         let version = next_version(snapshot, None, &work.key)?;
         let sequence = snapshot
             .next_sequence
@@ -1244,6 +1290,9 @@ pub(crate) fn addressed_snapshot(group: &CommitGroup, source: &RecordSnapshot) -
         if let Some(version) = source.versions.get(&id) {
             out.versions.insert(id, *version);
         }
+        if let Some(deleted_at) = source.deleted_at.get(key) {
+            out.deleted_at.insert(key.clone(), *deleted_at);
+        }
     }
     for update in &group.state_updates {
         let key = (update.collection.clone(), update.key.clone());
@@ -1300,13 +1349,17 @@ fn merge_delta(
     for (key, owner) in additions {
         snapshot.unique_owners.insert(key, owner);
     }
-    for key in &delta.deleted_work {
-        snapshot.work.remove(key);
+    for deleted in &delta.deleted_work {
+        snapshot.work.remove(&deleted.key);
+        snapshot
+            .deleted_at
+            .insert(deleted.key.clone(), deleted.deleted_at);
     }
     for key in &delta.deleted_state {
         snapshot.state.remove(key);
     }
     for record in merged_work {
+        snapshot.deleted_at.remove(&record.record.work.key);
         snapshot.work.insert(record.record.work.key.clone(), record);
     }
     for record in &delta.state {
@@ -1476,6 +1529,7 @@ mod tests {
             request_id: "identity/".repeat(8192),
             mode: InsertMode::InsertOnly,
             items: (0..257).map(|n| work(&format!("k{n}"))).collect(),
+            issued_at: 0,
         };
         let mut snapshot = RecordSnapshot::default();
         let (deltas, outcomes) =
@@ -1510,6 +1564,10 @@ mod tests {
             )]),
             progress_bound_nanos: 1_000_000_000,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         }
     }
     fn group() -> CommitGroup {
@@ -1520,6 +1578,7 @@ mod tests {
             state_updates: vec![],
             work_inserts: vec![],
             work_updates: vec![],
+            issued_at: 0,
         }
     }
     fn work(key: &str) -> NewWork {
@@ -2982,6 +3041,36 @@ mod tests {
                 assert_eq!(snapshot.work, original);
             }
         }
+    }
+    #[test]
+    fn packed_deletion_keeps_its_group_time_and_never_defaults_to_zero() {
+        let s = unique_schema();
+        let mut snapshot = RecordSnapshot::default();
+        let mut seed = group();
+        seed.work_inserts.push(unique_work("a", "x"));
+        let inserted = probe_and_plan(&seed, &mut snapshot, &s);
+        let mut remove = group();
+        remove.issued_at = 777;
+        remove.work_updates.push(UnclaimedUpdate {
+            key: "a".into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Delete,
+        });
+        let deleted = probe_and_plan(&remove, &mut snapshot, &s);
+        let packed = combine_deltas(&[inserted.clone(), deleted.clone()], 0).unwrap();
+        assert_eq!(packed.deleted_work.len(), 1);
+        assert_eq!(packed.deleted_work[0].deleted_at, 777);
+        // One delta never carries a key as both written and deleted; if it did,
+        // the deletion's time would be lost, which is an error rather than epoch 0.
+        let mut malformed = inserted;
+        malformed.deleted_work.push(DeletedWork {
+            key: "a".into(),
+            deleted_at: 5,
+        });
+        assert!(matches!(
+            combine_deltas(&[malformed], 0),
+            Err(QueueError::OutcomeUnknown(_))
+        ));
     }
     #[test]
     fn fresh_replacement_rejects_stored_lease_even_after_expiry() {

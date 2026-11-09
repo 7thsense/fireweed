@@ -52,6 +52,7 @@ fn group(id: &str) -> CommitGroup {
         work_updates: vec![],
         work_inserts: vec![],
         state_updates: vec![],
+        issued_at: 0,
     }
 }
 fn ordinary(
@@ -543,6 +544,10 @@ async fn producer_contract(log: QueueNativeLog) {
         state: BTreeMap::from([("workflow".into(), collection)]),
         progress_bound_nanos: 1,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     };
     let (mut acquired, genesis) = bundle_for_schema(&log, "producer", &job, &schema).await;
     let genesis_view = genesis.view().unwrap();
@@ -970,6 +975,7 @@ fn claim_record(
         max_bytes: 1 << 20,
         fields: Some(Default::default()),
         include_body: false,
+        issued_at: 0,
     };
     let receipt = fireweed_engine::queue_claim_receipt::encode_claim_receipt(
         &[fireweed_engine::queue_claim_receipt::ClaimLease {

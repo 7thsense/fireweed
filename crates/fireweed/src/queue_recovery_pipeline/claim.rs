@@ -20,6 +20,7 @@ impl QueueRecoveryPipeline {
         job: Arc<QueueReservation>,
     ) -> QueueResult<AdmittedClaimReplay> {
         request.preflight(&limits)?;
+        check_issued_at(clock.as_ref(), request.issued_at)?;
         let headers = incoming_headers(&request)?
             .checked_mul(2)
             .ok_or(QueueError::TooLarge)?;

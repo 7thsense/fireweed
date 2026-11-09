@@ -93,6 +93,10 @@ fn fixture_with_keys_and_float(keys: [&str; 2], float: Option<f64>) -> Fixture {
         )]),
         progress_bound_nanos: 1,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     };
     let definition =
         AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), &job).unwrap();
@@ -931,7 +935,7 @@ fn provisional_record_edits_match_complete_state_inventory_and_retain_tombstones
                         )
                         .unwrap(),
                     }),
-                    EffectRef::Delete => None,
+                    EffectRef::Delete { .. } => None,
                     _ => panic!("state fixture"),
                 };
                 let fields = after

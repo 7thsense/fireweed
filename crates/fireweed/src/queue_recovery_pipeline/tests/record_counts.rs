@@ -104,6 +104,7 @@ pub(super) async fn insert(store: &NativeQueueStore, queue: &QueueAddress, n: us
             request_id: format!("insert-{n}"),
             mode: InsertMode::InsertOnly,
             items: vec![suite::item(&format!("k-{n}"), "counts", 0, n as i64)],
+            issued_at: 0,
         })
         .await
         .unwrap();
