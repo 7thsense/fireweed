@@ -42,6 +42,8 @@ fireweed-memory = { path = "../fireweed-memory", optional = true }
 fireweed-objectlog = { path = "../fireweed-objectlog", optional = true }
 fireweed-postgres = { path = "../fireweed-postgres", optional = true }
 fireweed-turso = { path = "../fireweed-turso", optional = true }
+# Only to parse a PostgreSQL URL before any I/O in `Queue::s3_turso`.
+tokio-postgres = { version = "0.7", optional = true }
 # Composition-root only: Class B MemoryLog pairings and object-log × memory projection assembly.
 fireweed-projection = { path = "../fireweed-projection", optional = true }
 # Optional: pulled by `objectlog` / `postgres` / `turso`. Workers need `rt` + I/O drivers for LogEngine.
@@ -58,11 +60,15 @@ rustix = { version = "1", default-features = false, features = ["time"] }
 # projection. `postgres` is opt-in: the legacy facade uses it for the control
 # plane; API-007 queue::Queue also offers the native PostgreSQL baseline. It does
 # not restore retired PostgreSQL log/projection axes on the legacy facade.
-default = ["objectlog", "turso"]
+default = ["s3-turso"]
 memory = ["dep:fireweed-memory", "dep:fireweed-projection"]
 # objectlog enables the shared Tokio reactor used by LogEngine I/O.
 objectlog = ["dep:fireweed-queue-spool", "dep:fireweed-objectlog", "dep:fireweed-projection", "dep:tokio"]
 postgres = ["dep:fireweed-postgres", "dep:tokio"]
+# Production queue storage: S3 object log, local Turso projection cache and the
+# PostgreSQL control plane (`queue::Queue::s3_turso`, `open_objectlog_turso_coordinated_async`).
+# It does not enable `postgres`, which is the PostgreSQL reference store.
+s3-turso = ["objectlog", "turso", "dep:fireweed-postgres", "dep:tokio-postgres"]
 # Local embedded Turso 0.7 ordinary-WAL projection (public default projection axis).
 turso = ["dep:fireweed-turso", "fireweed-turso/local", "dep:tokio", "dep:fireweed-projection"]
 
