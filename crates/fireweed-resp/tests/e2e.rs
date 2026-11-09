@@ -264,7 +264,7 @@ async fn resp_wire_carries_updated_field_a_and_field_c() {
         .arg("payload")
         .arg("opaque")
         .arg("metadata")
-        .arg(r#"{"tenant_segment":{"String":"vip"}}"#)
+        .arg(r#"{"tenant_segment":"vip"}"#)
         .arg("recipient_ref")
         .arg("r-1")
         .arg("field-a")
@@ -352,7 +352,7 @@ async fn resp_oracle_does_not_use_backend_echo() {
         .arg("payload")
         .arg("opaque")
         .arg("metadata")
-        .arg(r#"{"tenant_segment":{"String":"vip"}}"#)
+        .arg(r#"{"tenant_segment":"vip"}"#)
         .arg("recipient_ref")
         .arg("r-1")
         .arg("field-a")
@@ -972,7 +972,7 @@ fn assert_claimed_entry_parity(entry: &redis::streams::StreamId, claimed: &Claim
     );
     assert_eq!(
         entry.get::<String>("metadata").as_deref(),
-        // Natural JSON encoding (fireweed-c744be3e); legacy `{"String":"vip"}` still accepted on write.
+        // Natural JSON encoding (fireweed-c744be3e).
         Some(r#"{"tenant_segment":"vip"}"#)
     );
     assert!(

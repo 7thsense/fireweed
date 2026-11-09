@@ -2021,8 +2021,8 @@ mod serde_tests {
     }
 
     #[test]
-    fn legacy_integer_array_side_record_still_replays() {
-        // Minimal envelope body with legacy integer-array key/payload.
+    fn integer_array_side_record_bytes_are_rejected() {
+        // Byte fields are base64 strings; integer arrays are not accepted.
         let json = r#"{
             "command_id":"c1",
             "request_id":null,
@@ -2034,12 +2034,7 @@ mod serde_tests {
             "checksum":0,
             "created_at":{"seconds":1,"nanoseconds":0}
         }"#;
-        let decoded: CommandEnvelope = serde_json::from_str(json).unwrap();
-        let QueueCommand::WriteSideRecords(w) = decoded.command else {
-            panic!("expected WriteSideRecords");
-        };
-        assert_eq!(w.records[0].key, b"state");
-        assert_eq!(&w.records[0].payload[..], b"opaque");
+        assert!(serde_json::from_str::<CommandEnvelope>(json).is_err());
     }
 
     #[test]
