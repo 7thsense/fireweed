@@ -1,6 +1,6 @@
 name: ci
 
-# Documentation-only changes skip the Rust jobs. The ignore list holds only paths
+# Documentation-only changes do not start the Rust jobs. The ignore list holds only paths
 # that no job here reads by name. docs/helix (formal checks, topology gate),
 # docs/site, docs/operator and docs/deployment (microsite sources), docs/releases
 # (release-identity checks), README.md and CONTRIBUTING.md (cargo host-safeguard
