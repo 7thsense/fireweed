@@ -244,6 +244,10 @@ async fn contract(log: QueueNativeLog) {
         )]),
         progress_bound_nanos: 1,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     };
     let (acquired, genesis) = bundle_for_schema(&log, "producer", &job, &schema).await;
     let definition = {
@@ -463,6 +467,7 @@ async fn contract(log: QueueNativeLog) {
                             max_bytes: 1 << 20,
                             fields: None,
                             include_body: false,
+                            issued_at: 0,
                         };
                         let producer = QueueSourceCandidateProducer::begin(
                             reader,
@@ -698,6 +703,7 @@ async fn caller_abandonment(
                     filter: Filter { fields: BTreeMap::from([("n".into(), Predicate::Equal(FieldValue::Integer(1)))]), ..Default::default() },
                     order: ClaimOrder::PriorityAscending, eligible_at: 0, lease_nanos: 1_000_000,
                     max_records: 3, max_bytes: 1 << 20, fields: None, include_body: false,
+                    issued_at: 0,
                 };
                 let producer = QueueSourceCandidateProducer::begin(reader, scratch, &definition,
                     QueueSourceSelectionRequest::Claim(&request), 0, &QueueLimits::default(), job.clone(), sent_selection).await.unwrap();
