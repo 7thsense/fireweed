@@ -432,9 +432,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "2c8d7e70f9039558b90a",
+        "id": "9082219717004b956b7c",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 331,
+        "line": 332,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/tests/queue_contract.rs",
         "status": "debt"
@@ -544,9 +544,9 @@
           "P2f"
         ],
         "detail": "intentional_env_or_release_ignore",
-        "id": "5f251bfd844c8c44ad37",
+        "id": "c49e254b5f41c3a4054e",
         "identity": "#[ignore = \"requires FIREWEED_API007_PG_TEST_URL and FIREWEED_S3_TEST_*\"]",
-        "line": 517,
+        "line": 524,
         "owner": "P10pf",
         "path": "crates/fireweed/src/queue/s3_turso/tests.rs",
         "status": "discovery_negative"
@@ -558,9 +558,9 @@
           "P2f"
         ],
         "detail": "intentional_env_or_release_ignore",
-        "id": "a32c349f146ee13cdd91",
+        "id": "b9206dc5ed8fb3f381e8",
         "identity": "#[ignore = \"requires FIREWEED_API007_PG_TEST_URL and FIREWEED_S3_TEST_*\"]",
-        "line": 559,
+        "line": 566,
         "owner": "P10pf",
         "path": "crates/fireweed/src/queue/s3_turso/tests.rs",
         "status": "discovery_negative"
@@ -572,9 +572,9 @@
           "P2f"
         ],
         "detail": "intentional_env_or_release_ignore",
-        "id": "0bf378024ddd7fca66bb",
+        "id": "6c0c48cbb45bf17d4a88",
         "identity": "#[ignore = \"requires FIREWEED_API007_PG_TEST_URL and FIREWEED_S3_TEST_*\"]",
-        "line": 606,
+        "line": 613,
         "owner": "P10pf",
         "path": "crates/fireweed/src/queue/s3_turso/tests.rs",
         "status": "discovery_negative"
@@ -824,9 +824,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "00fffc8e57df9ad21e1f",
+        "id": "412251da3ba8ed6dfad2",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 216,
+        "line": 218,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/simple_queue_postgres.rs",
         "status": "debt"
@@ -16144,7 +16144,7 @@
     "cargo_status": "listed",
     "errors": [],
     "generated_by": "scripts/ci/fireweed_test_placement.py",
-    "input_sha256": "84bb7f26cf89fcc2ee1b96d7b6e8e9dd36940ab152a9351cd815c65753cdd026",
+    "input_sha256": "c8935bf6c5a3bf8f15f767648bdd17ca95ac1ba2e79a4b925bf15582a2edd5e4",
     "private_surface": [
       {
         "declaration_kind": "fn",
@@ -45745,6 +45745,36 @@
       "features": [],
       "harness_id": "queue_planner::tests::packed_delete_reinsert_requires_full_replace_and_preserves_highwater",
       "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_planner::tests::packed_delete_reinsert_requires_full_replace_and_preserves_highwater",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--no-default-features",
+        "--lib",
+        "queue_planner::tests::packed_deletion_keeps_its_group_time_and_never_defaults_to_zero",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "queue_planner::tests::packed_deletion_keeps_its_group_time_and_never_defaults_to_zero",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_planner::tests::packed_deletion_keeps_its_group_time_and_never_defaults_to_zero",
       "listed_kind": "test",
       "package": "fireweed-engine",
       "target": "fireweed_engine",
@@ -122745,7 +122775,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "6f58716653e3526e7b382baa9f93f8c17e7ba223f31da05b6050a28041b68244",
+  "source_inventory_sha256": "30a419c9bc5d1f6194717d263c5e23115a2c3df6c92ebda7b59c457e7d45a908",
   "workspaces": [
     {
       "listing_error_sha256": "",
