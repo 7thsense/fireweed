@@ -6,6 +6,8 @@
 #
 # Fails when a tier runs zero tests, so a rename cannot empty the tier silently.
 # Not listed in public-release-gates*.json: releases do not wait for this tier.
+# Runs from .github/workflows/nightly.yml (daily schedule and manual dispatch),
+# not on pull requests or pushes.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

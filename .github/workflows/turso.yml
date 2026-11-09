@@ -94,6 +94,8 @@ jobs:
       - name: Reuse Cargo build state
         uses: Swatinem/rust-cache@v2
         with:
+          shared-key: turso-focused
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Verify workflow policy
@@ -102,9 +104,18 @@ jobs:
       - name: rustfmt
         run: cargo +1.99.0 fmt --all --check
 
+      # Order: clippy (check builds) first, then tests grouped by feature set so
+      # consecutive steps reuse compiled crates: local, default, all-features.
       # Adapter suite: complete fireweed-turso local embedded WAL qualification.
       - name: fireweed-turso clippy (local)
         run: cargo +1.99.0 clippy -p fireweed-turso --all-targets --features local -- -D warnings
+
+      # Server: default feature closure (includes turso-projection) and all-features.
+      - name: fireweed-server clippy (default features)
+        run: cargo +1.99.0 clippy -p fireweed-server --all-targets -- -D warnings
+
+      - name: fireweed-server clippy (all features)
+        run: cargo +1.99.0 clippy -p fireweed-server --all-targets --all-features -- -D warnings
 
       - name: fireweed-turso tests (local)
         # Preserve the first panic if a later test aborts the process.
@@ -135,6 +146,21 @@ jobs:
       - name: Public workflow correctness and log recovery
         run: cargo +1.99.0 test -p fireweed-workload
 
+      # Broad live suites and Kafka remain in governed-product; the focused
+      # storage matrix above owns only its PostgreSQL/S3 correctness fixtures.
+      - name: Server configuration unit tests (default features)
+        run: cargo +1.99.0 test -p fireweed-server --lib env_config::tests -- --test-threads=1
+
+      - name: Server public configuration tests
+        run: cargo +1.99.0 test -p fireweed-server --test env_config -- --test-threads=1
+
+      - name: Repository shape test (public-default Turso lane)
+        run: >
+          cargo +1.99.0 test -p fireweed-server --test turso_workflow_shape
+          turso_workflow_qualifies_the_public_default_projection
+          -- --exact
+
+      # All-features tests: fireweed facade, then server.
       # Fireweed facade: 12-cell register Turso route leaves + composition matrix.
       - name: Fireweed 12-cell Turso route tests
         run: >
@@ -153,21 +179,6 @@ jobs:
           cargo +1.99.0 test -p fireweed --all-features --lib
           storage_config_matrix_tests::turso_projection_feature_and_recovery_boundaries
           -- --exact
-
-      # Server: default feature closure (includes turso-projection) and all-features.
-      - name: fireweed-server clippy (default features)
-        run: cargo +1.99.0 clippy -p fireweed-server --all-targets -- -D warnings
-
-      - name: fireweed-server clippy (all features)
-        run: cargo +1.99.0 clippy -p fireweed-server --all-targets --all-features -- -D warnings
-
-      # Broad live suites and Kafka remain in governed-product; the focused
-      # storage matrix above owns only its PostgreSQL/S3 correctness fixtures.
-      - name: Server configuration unit tests (default features)
-        run: cargo +1.99.0 test -p fireweed-server --lib env_config::tests -- --test-threads=1
-
-      - name: Server public configuration tests
-        run: cargo +1.99.0 test -p fireweed-server --test env_config -- --test-threads=1
 
       # Exact public default selector + Class A delete-rebuild from authoritative log.
       - name: public default Turso env selector
@@ -204,12 +215,6 @@ jobs:
         run: >
           cargo +1.99.0 test -p fireweed-server --all-features --test server
           memory_turso_server_push_claim_lifecycle
-          -- --exact
-
-      - name: Repository shape test (public-default Turso lane)
-        run: >
-          cargo +1.99.0 test -p fireweed-server --test turso_workflow_shape
-          turso_workflow_qualifies_the_public_default_projection
           -- --exact
 
       - name: Tear down matrix S3 fixture
