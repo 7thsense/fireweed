@@ -140,7 +140,7 @@ fn apply_reference(
                 }
                 admit_fields(fields, definition)?;
             }
-            EffectRef::Delete => {}
+            EffectRef::Delete { .. } => {}
         }
     }
     let check_success = |i: IdentityRef<'_>, version: u64| -> PublicationResult<()> {
@@ -203,7 +203,7 @@ fn apply_reference(
         let c = command?;
         let identity = id(c.identity);
         match c.effect {
-            EffectRef::Delete => {
+            EffectRef::Delete { .. } => {
                 if let Some(collection) = c.identity.collection {
                     next.snapshot
                         .state
@@ -683,11 +683,11 @@ fn replay_group(
                     _ => panic!("wrong body command"),
                 };
             }
-            EffectRef::Delete => assert!(
+            EffectRef::Delete { .. } => assert!(
                 packed
                     .deleted_work
                     .iter()
-                    .any(|k| k == command.identity.key)
+                    .any(|k| k.key == command.identity.key)
                     || packed
                         .deleted_state
                         .iter()

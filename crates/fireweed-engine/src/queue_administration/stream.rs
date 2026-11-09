@@ -625,6 +625,7 @@ pub(super) fn resolve_candidate<'r>(
     proposal: &mut AdministrativeProposal,
     schema: &QueueSchema,
     reservation: &'r QueueReservation,
+    issued_at: i64,
 ) -> QueueResult<Option<AcceptedCandidate<'r>>> {
     if !matches!(
         proposal.outcome,
@@ -675,7 +676,10 @@ pub(super) fn resolve_candidate<'r>(
                 .ok_or_else(|| unknown("changed proposal lacks body intent"))?,
         );
     } else {
-        delta.deleted_work.push(key.into());
+        delta.deleted_work.push(crate::queue_planner::DeletedWork {
+            key: key.into(),
+            deleted_at: issued_at,
+        });
     }
     delta.versions.push(RecordVersion {
         collection: None,
@@ -835,6 +839,7 @@ impl Accumulator<'_, '_> {
             &mut proposal,
             self.schema,
             self.reservation,
+            self.ordinary.issued_at,
         )? && accepted
         {
             let mut retained_bytes = add(snapshot_bound(&before)?, delta_bound(&delta)?)?;
@@ -2554,7 +2559,7 @@ where
             limits,
         )?;
         if let Some(candidate) =
-            resolve_candidate(key, row, image, &mut proposal, schema, &reservation)?
+            resolve_candidate(key, row, image, &mut proposal, schema, &reservation, 0)?
         {
             let owned = ResolvedAdministrativeRow {
                 scan: scan.clone(),

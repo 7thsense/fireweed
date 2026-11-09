@@ -103,7 +103,7 @@ async fn catch_apply_panic<F: std::future::Future>(future: F) -> QueueResult<F::
 const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS q7_queues(id INTEGER PRIMARY KEY,address_hash BLOB NOT NULL,tenant BLOB NOT NULL,name BLOB NOT NULL,definition BLOB NOT NULL,cursor_secret BLOB NOT NULL,next_sequence BLOB NOT NULL,applied_next_offset INTEGER NOT NULL,last_record_epoch BLOB NOT NULL);
 CREATE INDEX IF NOT EXISTS q7_address ON q7_queues(address_hash);
-CREATE TABLE IF NOT EXISTS q7_records(id INTEGER PRIMARY KEY,queue_id INTEGER NOT NULL,collection INTEGER NOT NULL,key_hash BLOB NOT NULL,key BLOB NOT NULL,version BLOB NOT NULL,active INTEGER NOT NULL,lifecycle INTEGER NOT NULL,priority INTEGER NOT NULL,available_at INTEGER NOT NULL,eligible_since INTEGER NOT NULL,attempts INTEGER NOT NULL,lease_until INTEGER,lease_hash BLOB,insertion_sequence BLOB NOT NULL,last_change_offset INTEGER NOT NULL,prior_highwater BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS q7_records(id INTEGER PRIMARY KEY,queue_id INTEGER NOT NULL,collection INTEGER NOT NULL,key_hash BLOB NOT NULL,key BLOB NOT NULL,version BLOB NOT NULL,active INTEGER NOT NULL,lifecycle INTEGER NOT NULL,priority INTEGER NOT NULL,available_at INTEGER NOT NULL,eligible_since INTEGER NOT NULL,attempts INTEGER NOT NULL,lease_until INTEGER,lease_hash BLOB,insertion_sequence BLOB NOT NULL,last_change_offset INTEGER NOT NULL,prior_highwater BLOB NOT NULL,deleted_at INTEGER);
 CREATE INDEX IF NOT EXISTS q7_record_key ON q7_records(queue_id,collection,key_hash);
 CREATE INDEX IF NOT EXISTS q7_claim_priority ON q7_records(queue_id,priority,insertion_sequence) WHERE active=1 AND collection=0;
 CREATE INDEX IF NOT EXISTS q7_claim_due ON q7_records(queue_id,available_at,insertion_sequence) WHERE active=1 AND collection=0;
@@ -1210,7 +1210,7 @@ async fn apply_command(
         integer(&row[0])?
     };
     match command.effect {
-        EffectRef::Delete => {
+        EffectRef::Delete { deleted_at } => {
             for sql in [
                 "DELETE FROM q7_fields WHERE record_id=?1",
                 "DELETE FROM q7_additional WHERE record_id=?1",
@@ -1222,7 +1222,7 @@ async fn apply_command(
                     .await
                     .map_err(unknown)?;
             }
-            connection.execute("UPDATE q7_records SET version=?2,active=0,lifecycle=0,lease_until=NULL,lease_hash=NULL,last_change_offset=?3,prior_highwater=?4 WHERE id=?1",vec![Value::Integer(record_id),number(command.output_highwater),Value::Integer(offset),number(highwater)]).await.map_err(unknown)?;
+            connection.execute("UPDATE q7_records SET version=?2,active=0,lifecycle=0,lease_until=NULL,lease_hash=NULL,last_change_offset=?3,prior_highwater=?4,deleted_at=?5 WHERE id=?1",vec![Value::Integer(record_id),number(command.output_highwater),Value::Integer(offset),number(highwater),deleted_at.map_or(Value::Null,Value::Integer)]).await.map_err(unknown)?;
         }
         EffectRef::WorkPut {
             metadata,
@@ -1253,7 +1253,7 @@ async fn apply_command(
             if let BodyCommandRef::Replace(body) = body {
                 write_body(connection, record_id, body, job).await?;
             }
-            connection.execute("UPDATE q7_records SET version=?2,active=1,lifecycle=?3,priority=?4,available_at=?5,eligible_since=?6,attempts=?7,lease_until=?8,lease_hash=?9,insertion_sequence=?10,last_change_offset=?11,prior_highwater=?12 WHERE id=?1",vec![Value::Integer(record_id),number(command.output_highwater),Value::Integer(i64::from(encode_lifecycle(metadata.lifecycle))),Value::Integer(metadata.priority),Value::Integer(metadata.available_at),Value::Integer(metadata.eligible_since),Value::Integer(i64::from(metadata.attempts)),metadata.lease_expires_at.map_or(Value::Null,Value::Integer),metadata.lease_hash.map_or(Value::Null,|value|blob(value)),number(metadata.insertion_sequence),Value::Integer(offset),number(highwater)]).await.map_err(unknown)?;
+            connection.execute("UPDATE q7_records SET version=?2,active=1,lifecycle=?3,priority=?4,available_at=?5,eligible_since=?6,attempts=?7,lease_until=?8,lease_hash=?9,insertion_sequence=?10,last_change_offset=?11,prior_highwater=?12,deleted_at=NULL WHERE id=?1",vec![Value::Integer(record_id),number(command.output_highwater),Value::Integer(i64::from(encode_lifecycle(metadata.lifecycle))),Value::Integer(metadata.priority),Value::Integer(metadata.available_at),Value::Integer(metadata.eligible_since),Value::Integer(i64::from(metadata.attempts)),metadata.lease_expires_at.map_or(Value::Null,Value::Integer),metadata.lease_hash.map_or(Value::Null,|value|blob(value)),number(metadata.insertion_sequence),Value::Integer(offset),number(highwater)]).await.map_err(unknown)?;
         }
         EffectRef::StatePut { fields, value } => {
             let owned = field_change(FieldsCommandRef::Replace(fields), definition, job)?;
@@ -1272,7 +1272,7 @@ async fn apply_command(
             )
             .await?;
             write_body(connection, record_id, value, job).await?;
-            connection.execute("UPDATE q7_records SET version=?2,active=1,lifecycle=0,priority=0,available_at=0,eligible_since=0,attempts=0,lease_until=NULL,lease_hash=NULL,insertion_sequence=?3,last_change_offset=?4,prior_highwater=?5 WHERE id=?1",vec![Value::Integer(record_id),number(command.output_highwater),number(0),Value::Integer(offset),number(highwater)]).await.map_err(unknown)?;
+            connection.execute("UPDATE q7_records SET version=?2,active=1,lifecycle=0,priority=0,available_at=0,eligible_since=0,attempts=0,lease_until=NULL,lease_hash=NULL,insertion_sequence=?3,last_change_offset=?4,prior_highwater=?5,deleted_at=NULL WHERE id=?1",vec![Value::Integer(record_id),number(command.output_highwater),number(0),Value::Integer(offset),number(highwater)]).await.map_err(unknown)?;
         }
     }
     Ok(())

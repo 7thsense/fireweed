@@ -38,6 +38,13 @@ pub fn schema() -> QueueSchema {
         },
     }
 }
+/// The shared schema with other retention windows.
+pub fn schema_with(retention: QueueRetention) -> QueueSchema {
+    QueueSchema {
+        retention,
+        ..schema()
+    }
+}
 pub fn item(key: &str, kind: &str, priority: i64, score: i64) -> NewWork {
     NewWork {
         key: key.into(),
@@ -2798,4 +2805,510 @@ pub async fn broad_administration_exceeds_input_chunk(store: &dyn QueueStore, qu
             .iter()
             .all(|work| work.record.version == 3 && work.record.work.priority == 123)
     );
+}
+
+const MINUTE: i64 = 60_000_000_000;
+const HOUR: i64 = 60 * MINUTE;
+const SKEW: i64 = 5 * MINUTE;
+
+fn retention(request_id_nanos: i64, deleted_keys: DeletedKeyPolicy) -> QueueRetention {
+    QueueRetention {
+        request_id_nanos: u64::try_from(request_id_nanos).unwrap(),
+        deleted_keys,
+    }
+}
+fn insert_request(
+    queue: &QueueAddress,
+    id: &str,
+    mode: InsertMode,
+    key: &str,
+    issued_at: i64,
+) -> InsertRequest {
+    InsertRequest {
+        queue: queue.clone(),
+        request_id: id.into(),
+        mode,
+        items: vec![item(key, "retention", 0, 0)],
+        issued_at,
+    }
+}
+async fn commit_one(
+    store: &dyn QueueStore,
+    queue: &QueueAddress,
+    group: CommitGroup,
+) -> QueueResult<CommitReceipt> {
+    Ok(store
+        .commit(CommitBatch {
+            queue: queue.clone(),
+            groups: vec![group],
+        })
+        .await?
+        .remove(0))
+}
+/// Claims pending work and deletes `key` with a group issued at `issued_at`.
+/// Returns the version the deletion committed.
+async fn claim_and_delete(
+    store: &dyn QueueStore,
+    queue: &QueueAddress,
+    key: &str,
+    id: &str,
+    issued_at: i64,
+) -> u64 {
+    let claimed = store
+        .claim(ClaimRequest {
+            issued_at,
+            ..claim(queue, &format!("{id}-claim"), "retention")
+        })
+        .await
+        .unwrap();
+    let target = claimed
+        .iter()
+        .find(|work| work.record.work.key == key)
+        .expect("claimed the key");
+    let mut update = update(target);
+    update.disposition = Disposition::Delete;
+    let mut deletion = group(id);
+    deletion.issued_at = issued_at;
+    deletion.claimed_updates.push(update);
+    match commit_one(store, queue, deletion).await.unwrap().outcome {
+        GroupOutcome::Committed { versions } => versions[0].version,
+        other => panic!("deletion not committed: {other:?}"),
+    }
+}
+fn inserted_version(outcomes: &[InsertOutcome]) -> u64 {
+    match outcomes {
+        [InsertOutcome::Inserted { version, .. }] => *version,
+        other => panic!("not inserted: {other:?}"),
+    }
+}
+fn already_exists(outcomes: &[InsertOutcome]) -> bool {
+    matches!(
+        outcomes,
+        [InsertOutcome::Rejected {
+            reason: Rejection::AlreadyExists,
+            ..
+        }]
+    )
+}
+
+/// A `Retired` window must cover the request id window plus five minutes. The
+/// floor is refused at provisioning and nothing is created.
+pub async fn retention_floor_refused_at_provisioning(store: &dyn QueueStore, queue: QueueAddress) {
+    let provision = |retention| {
+        store.provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention),
+        })
+    };
+    let floor = HOUR + SKEW;
+    for refused in [
+        retention(0, DeletedKeyPolicy::Reusable),
+        retention(HOUR, DeletedKeyPolicy::Retired { window_nanos: 0 }),
+        retention(
+            HOUR,
+            DeletedKeyPolicy::Retired {
+                window_nanos: u64::try_from(floor - 1).unwrap(),
+            },
+        ),
+    ] {
+        assert!(
+            matches!(provision(refused).await, Err(QueueError::Invalid(_))),
+            "floor must be refused"
+        );
+    }
+    // Nothing was created by the refusals.
+    assert_eq!(
+        store
+            .insert(insert_request(
+                &queue,
+                "no-queue",
+                InsertMode::InsertOnly,
+                "a",
+                0
+            ))
+            .await,
+        Err(QueueError::QueueNotFound)
+    );
+    provision(retention(
+        HOUR,
+        DeletedKeyPolicy::Retired {
+            window_nanos: u64::try_from(floor).unwrap(),
+        },
+    ))
+    .await
+    .unwrap();
+}
+
+/// `issued_at` beyond the skew is refused with no effect and the same id may be
+/// retried later. The same id with another `issued_at` conflicts.
+pub async fn issued_at_skew_and_conflict(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+) {
+    let now = 100 * HOUR;
+    clock.set(now);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema(),
+        })
+        .await
+        .unwrap();
+    fn invalid<T>(result: &QueueResult<T>) -> bool {
+        matches!(result, Err(QueueError::Invalid(_)))
+    }
+    let ahead = now + SKEW + 1;
+
+    // Insert: the exact skew passes; one nanosecond more is refused, then passes later.
+    let at_limit = insert_request(
+        &queue,
+        "skew-edge",
+        InsertMode::InsertOnly,
+        "edge",
+        now + SKEW,
+    );
+    assert_eq!(inserted_version(&store.insert(at_limit).await.unwrap()), 1);
+    let early = insert_request(
+        &queue,
+        "early-insert",
+        InsertMode::InsertOnly,
+        "early",
+        ahead,
+    );
+    assert!(invalid(&store.insert(early.clone()).await));
+    clock.set(now + 2);
+    let first = store.insert(early.clone()).await.unwrap();
+    assert_eq!(inserted_version(&first), 1);
+    assert_eq!(store.insert(early.clone()).await.unwrap(), first);
+    let mut shifted = early.clone();
+    shifted.issued_at += 1;
+    assert_eq!(
+        store.insert(shifted).await,
+        Err(QueueError::RequestConflict)
+    );
+
+    // Claim.
+    let now = now + 2;
+    let early_claim = ClaimRequest {
+        issued_at: now + SKEW + 10,
+        ..claim(&queue, "early-claim", "retention")
+    };
+    assert!(invalid(&store.claim(early_claim.clone()).await));
+    clock.set(now + 10);
+    let claimed = store.claim(early_claim.clone()).await.unwrap();
+    assert_eq!(claimed.len(), 2);
+    assert_eq!(store.claim(early_claim.clone()).await.unwrap(), claimed);
+    let mut shifted = early_claim;
+    shifted.issued_at -= 1;
+    assert_eq!(store.claim(shifted).await, Err(QueueError::RequestConflict));
+
+    // Commit and preview.
+    let now = now + 10;
+    let mut early_group = group("early-group");
+    early_group
+        .work_inserts
+        .push(item("grouped", "retention", 0, 0));
+    early_group.issued_at = now + SKEW + 10;
+    assert!(invalid(
+        &store
+            .preview(PreviewRequest {
+                queue: queue.clone(),
+                group: early_group.clone()
+            })
+            .await
+    ));
+    assert!(invalid(
+        &commit_one(store, &queue, early_group.clone()).await
+    ));
+    clock.set(now + 10);
+    assert!(
+        store
+            .preview(PreviewRequest {
+                queue: queue.clone(),
+                group: early_group.clone()
+            })
+            .await
+            .is_ok()
+    );
+    let committed = commit_one(store, &queue, early_group.clone())
+        .await
+        .unwrap();
+    assert!(matches!(committed.outcome, GroupOutcome::Committed { .. }));
+    assert_eq!(
+        commit_one(store, &queue, early_group.clone())
+            .await
+            .unwrap(),
+        committed
+    );
+    let mut shifted = early_group;
+    shifted.issued_at -= 1;
+    assert_eq!(
+        commit_one(store, &queue, shifted).await.unwrap().outcome,
+        GroupOutcome::RequestConflict
+    );
+}
+
+/// `Retired` refuses a reinsert for `window_nanos` after the deletion's
+/// `issued_at`, through both insert modes and `work_inserts`. Afterwards the key
+/// returns with a higher version.
+pub async fn retired_keys_refuse_reinsert_within_window(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+) {
+    let window = 2 * HOUR;
+    let now = 10 * HOUR;
+    clock.set(now);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention(
+                HOUR,
+                DeletedKeyPolicy::Retired {
+                    window_nanos: u64::try_from(window).unwrap(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+    store
+        .insert(insert_request(
+            &queue,
+            "seed",
+            InsertMode::InsertOnly,
+            "a",
+            now,
+        ))
+        .await
+        .unwrap();
+    // The deletion's time is its group's issued_at, not the clock reading.
+    let deleted_at = now - 1_000;
+    let deleted_version = claim_and_delete(store, &queue, "a", "delete-a", deleted_at).await;
+    let expires = deleted_at + window;
+    let mut serial = 0;
+    let mut id = |label: &str| {
+        serial += 1;
+        format!("{label}-{serial}")
+    };
+
+    for tick in [now, expires - 1] {
+        clock.set(tick);
+        for mode in [InsertMode::InsertOnly, InsertMode::Upsert] {
+            let outcomes = store
+                .insert(insert_request(&queue, &id("insert"), mode, "a", tick))
+                .await
+                .unwrap();
+            assert!(
+                already_exists(&outcomes),
+                "{mode:?} at {tick}: {outcomes:?}"
+            );
+        }
+        let mut grouped = group(&id("group"));
+        grouped.issued_at = tick;
+        grouped.work_inserts.push(item("a", "retention", 0, 0));
+        assert_eq!(
+            commit_one(store, &queue, grouped).await.unwrap().outcome,
+            GroupOutcome::Rejected(Rejection::AlreadyExists)
+        );
+    }
+    // A key that was never deleted is unaffected.
+    let fresh = store
+        .insert(insert_request(
+            &queue,
+            &id("insert"),
+            InsertMode::InsertOnly,
+            "never-deleted",
+            expires - 1,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(inserted_version(&fresh), 1);
+
+    clock.set(expires);
+    let again = inserted_version(
+        &store
+            .insert(insert_request(
+                &queue,
+                &id("insert"),
+                InsertMode::InsertOnly,
+                "a",
+                expires,
+            ))
+            .await
+            .unwrap(),
+    );
+    assert!(again > deleted_version, "{again} after {deleted_version}");
+
+    // Deleted again, and reinserted through a group once the window has passed.
+    let second_delete = claim_and_delete(store, &queue, "a", "delete-a-again", expires).await;
+    assert!(second_delete > again);
+    clock.set(expires + window - 1);
+    let mut grouped = group(&id("group"));
+    grouped.issued_at = expires + window - 1;
+    grouped.work_inserts.push(item("a", "retention", 0, 0));
+    assert_eq!(
+        commit_one(store, &queue, grouped).await.unwrap().outcome,
+        GroupOutcome::Rejected(Rejection::AlreadyExists)
+    );
+    clock.set(expires + window);
+    let mut grouped = group(&id("group"));
+    grouped.issued_at = expires + window;
+    grouped.work_inserts.push(item("a", "retention", 0, 0));
+    match commit_one(store, &queue, grouped).await.unwrap().outcome {
+        GroupOutcome::Committed { versions } => assert!(versions[0].version > second_delete),
+        other => panic!("not committed: {other:?}"),
+    }
+}
+
+/// `Reusable` keeps today's behaviour: a deleted key returns at once, with a
+/// higher version.
+pub async fn reusable_keys_reinsert_at_once(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+) {
+    let now = 10 * HOUR;
+    clock.set(now);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention(HOUR, DeletedKeyPolicy::Reusable)),
+        })
+        .await
+        .unwrap();
+    store
+        .insert(insert_request(
+            &queue,
+            "seed",
+            InsertMode::InsertOnly,
+            "a",
+            now,
+        ))
+        .await
+        .unwrap();
+    let deleted_version = claim_and_delete(store, &queue, "a", "delete-a", now).await;
+    let again = inserted_version(
+        &store
+            .insert(insert_request(
+                &queue,
+                "again",
+                InsertMode::Upsert,
+                "a",
+                now,
+            ))
+            .await
+            .unwrap(),
+    );
+    assert!(again > deleted_version);
+    let second_delete = claim_and_delete(store, &queue, "a", "delete-a-again", now).await;
+    let mut grouped = group("grouped");
+    grouped.issued_at = now;
+    grouped.work_inserts.push(item("a", "retention", 0, 0));
+    match commit_one(store, &queue, grouped).await.unwrap().outcome {
+        GroupOutcome::Committed { versions } => assert!(versions[0].version > second_delete),
+        other => panic!("not committed: {other:?}"),
+    }
+}
+
+/// A `Retired` deletion that a reopened store or a rebuilt projection must
+/// reproduce: same refusals inside the window, same acceptance after it.
+#[derive(Debug, Clone)]
+pub struct RetiredDeletion {
+    queue: QueueAddress,
+    deleted_version: u64,
+    expires_at: i64,
+}
+const RETIRED_WINDOW: i64 = 2 * HOUR;
+pub async fn prepare_retired_deletion(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+) -> RetiredDeletion {
+    let now = 10 * HOUR;
+    clock.set(now);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention(
+                HOUR,
+                DeletedKeyPolicy::Retired {
+                    window_nanos: u64::try_from(RETIRED_WINDOW).unwrap(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+    store
+        .insert(insert_request(
+            &queue,
+            "rebuild-seed",
+            InsertMode::InsertOnly,
+            "a",
+            now,
+        ))
+        .await
+        .unwrap();
+    let deleted_at = now - 1_000;
+    let deleted_version = claim_and_delete(store, &queue, "a", "rebuild-delete", deleted_at).await;
+    let prepared = RetiredDeletion {
+        queue,
+        deleted_version,
+        expires_at: deleted_at + RETIRED_WINDOW,
+    };
+    refuse_reinserts(store, clock, &prepared, "live").await;
+    prepared
+}
+async fn refuse_reinserts(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    deletion: &RetiredDeletion,
+    label: &str,
+) {
+    clock.set(deletion.expires_at - 1);
+    let tick = deletion.expires_at - 1;
+    for mode in [InsertMode::InsertOnly, InsertMode::Upsert] {
+        let outcomes = store
+            .insert(insert_request(
+                &deletion.queue,
+                &format!("{label}-{mode:?}"),
+                mode,
+                "a",
+                tick,
+            ))
+            .await
+            .unwrap();
+        assert!(already_exists(&outcomes), "{label} {mode:?}: {outcomes:?}");
+    }
+    let mut grouped = group(&format!("{label}-group"));
+    grouped.issued_at = tick;
+    grouped.work_inserts.push(item("a", "retention", 0, 0));
+    assert_eq!(
+        commit_one(store, &deletion.queue, grouped)
+            .await
+            .unwrap()
+            .outcome,
+        GroupOutcome::Rejected(Rejection::AlreadyExists)
+    );
+}
+pub async fn verify_retired_deletion(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    deletion: RetiredDeletion,
+) {
+    refuse_reinserts(store, clock, &deletion, "rebuilt").await;
+    clock.set(deletion.expires_at);
+    let again = inserted_version(
+        &store
+            .insert(insert_request(
+                &deletion.queue,
+                "rebuilt-after-window",
+                InsertMode::InsertOnly,
+                "a",
+                deletion.expires_at,
+            ))
+            .await
+            .unwrap(),
+    );
+    assert!(again > deletion.deleted_version);
 }

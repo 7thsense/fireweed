@@ -573,13 +573,13 @@ impl AdministrativePublicationBuilder {
                 if effect
                     != (
                         command.output_highwater,
-                        matches!(command.effect, EffectRef::Delete),
+                        matches!(command.effect, EffectRef::Delete { .. }),
                     )
                 {
                     return invalid("addressed command/result effect mismatch");
                 }
             }
-            let kind = usize::from(matches!(command.effect, EffectRef::Delete));
+            let kind = usize::from(matches!(command.effect, EffectRef::Delete { .. }));
             self.admin_appended[kind] = self.admin_appended[kind]
                 .checked_add(1)
                 .ok_or(PublicationError::Overflow)?;

@@ -715,7 +715,9 @@ fn selective_preimages_follow_existing_index_closure_and_complete_membership() {
         assert_eq!(reader.ranges.load(Ordering::Relaxed), 0);
         drop(preserved);
         let deleted = CommandRef {
-            effect: EffectRef::Delete,
+            effect: EffectRef::Delete {
+                deleted_at: Some(0),
+            },
             ..preserve()
         };
         let complete = load_command_fields(&reader, deleted, 3, &schema.work, &job)

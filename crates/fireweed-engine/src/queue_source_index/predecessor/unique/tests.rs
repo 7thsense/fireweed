@@ -935,7 +935,7 @@ fn provisional_record_edits_match_complete_state_inventory_and_retain_tombstones
                         )
                         .unwrap(),
                     }),
-                    EffectRef::Delete => None,
+                    EffectRef::Delete { .. } => None,
                     _ => panic!("state fixture"),
                 };
                 let fields = after

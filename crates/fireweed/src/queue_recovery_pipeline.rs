@@ -6,6 +6,14 @@
 //! projection. Healthy operation reads no log records.
 use fireweed_core::queue_contract::{QueueAddress, QueueError, QueueLimits, QueueResult};
 mod claim;
+/// A request issued beyond the skew ahead of the owner's clock has no effect and
+/// may be retried with the same id later. Runs before any lookup or staging.
+fn check_issued_at(clock: &dyn fireweed_engine::Clock, issued_at: i64) -> QueueResult<()> {
+    fireweed_core::queue_contract::QueueRetention::check_issued_at(
+        issued_at,
+        fireweed_core::queue_contract::timestamp_nanos(clock.now())?,
+    )
+}
 mod diagnostics;
 pub use diagnostics::{RecoveryCounters, RecoverySnapshot};
 mod commit_batch;

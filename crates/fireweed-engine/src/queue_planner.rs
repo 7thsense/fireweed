@@ -30,12 +30,21 @@ pub struct UniqueIdentity {
     pub index: String,
     pub full_sort_key: Vec<u8>,
 }
+/// A deleted work key and the `issued_at` of the group that deleted it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct DeletedWork {
+    pub key: String,
+    pub deleted_at: i64,
+}
 #[derive(Debug, Clone, Default)]
 pub struct RecordSnapshot {
     pub work: BTreeMap<String, StoredWork>,
     pub state: BTreeMap<(String, String), StateRecord>,
     /// Durable high-water versions include deleted keys, preventing ABA.
     pub versions: BTreeMap<RecordIdentity, u64>,
+    /// Deletion time of every retained deleted work key: the deleting group's
+    /// `issued_at`. Loaded from the same row as the high-water version.
+    pub deleted_at: BTreeMap<String, i64>,
     pub next_sequence: u64,
     /// Loaded existence/nonexistence authority for every prospective unique tuple.
     pub unique_probes_loaded: BTreeSet<UniqueIdentity>,
@@ -46,7 +55,7 @@ pub struct CommitDelta {
     pub work: Vec<StoredWork>,
     pub work_fields: BTreeMap<String, ResolvedFields>,
     pub work_bodies: BTreeMap<String, ResolvedBody>,
-    pub deleted_work: Vec<String>,
+    pub deleted_work: Vec<DeletedWork>,
     pub state: Vec<StateRecord>,
     pub deleted_state: Vec<(String, String)>,
     pub versions: Vec<RecordVersion>,
@@ -79,7 +88,7 @@ pub fn plan_insert_vector(
             state_updates: vec![],
             work_inserts: vec![item.clone()],
             work_updates: vec![],
-            issued_at: 0,
+            issued_at: request.issued_at,
         };
         if request.mode == InsertMode::Upsert
             && let Some(old) = old
@@ -135,6 +144,7 @@ pub fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> QueueResult<Commi
     let mut work: BTreeMap<String, Option<StoredWork>> = BTreeMap::new();
     let mut states: BTreeMap<(String, String), Option<StateRecord>> = BTreeMap::new();
     let mut versions = BTreeMap::new();
+    let mut deleted_at: BTreeMap<String, i64> = BTreeMap::new();
     let mut next = initial;
     for delta in deltas {
         validate_resolved_writes(delta)?;
@@ -161,10 +171,14 @@ pub fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> QueueResult<Commi
             bodies.insert(key.clone(), body);
             work.insert(row.record.work.key.clone(), Some(row.clone()));
         }
-        for key in &delta.deleted_work {
-            commands.remove(key);
-            bodies.remove(key);
-            work.insert(key.clone(), None);
+        for deleted in &delta.deleted_work {
+            commands.remove(&deleted.key);
+            bodies.remove(&deleted.key);
+            work.insert(deleted.key.clone(), None);
+            deleted_at.insert(deleted.key.clone(), deleted.deleted_at);
+        }
+        for row in &delta.work {
+            deleted_at.remove(&row.record.work.key);
         }
         for row in &delta.state {
             states.insert((row.collection.clone(), row.key.clone()), Some(row.clone()));
@@ -200,7 +214,10 @@ pub fn combine_deltas(deltas: &[CommitDelta], initial: u64) -> QueueResult<Commi
     for (key, value) in work {
         match value {
             Some(value) => out.work.push(value),
-            None => out.deleted_work.push(key),
+            None => out.deleted_work.push(DeletedWork {
+                deleted_at: deleted_at.get(&key).copied().unwrap_or_default(),
+                key,
+            }),
         }
     }
     for (key, value) in states {
@@ -429,7 +446,13 @@ pub(crate) fn apply_group(
             Disposition::Check => unreachable!("checks return before mutation planning"),
             Disposition::Delete => {
                 snapshot.work.remove(&update.key);
-                delta.deleted_work.push(update.key.clone());
+                snapshot
+                    .deleted_at
+                    .insert(update.key.clone(), group.issued_at);
+                delta.deleted_work.push(DeletedWork {
+                    key: update.key.clone(),
+                    deleted_at: group.issued_at,
+                });
                 delta.versions.push(RecordVersion {
                     collection: None,
                     key: update.key.clone(),
@@ -562,7 +585,13 @@ pub(crate) fn apply_group(
             }
             UnclaimedChange::Delete => {
                 snapshot.work.remove(&update.key);
-                delta.deleted_work.push(update.key.clone());
+                snapshot
+                    .deleted_at
+                    .insert(update.key.clone(), group.issued_at);
+                delta.deleted_work.push(DeletedWork {
+                    key: update.key.clone(),
+                    deleted_at: group.issued_at,
+                });
             }
         }
         delta.versions.push(RecordVersion {
@@ -575,6 +604,14 @@ pub(crate) fn apply_group(
         if snapshot.work.contains_key(&work.key) {
             return Err(Rejection::AlreadyExists);
         }
+        if snapshot
+            .deleted_at
+            .get(&work.key)
+            .is_some_and(|deleted_at| schema.retention.is_retired(*deleted_at, now))
+        {
+            return Err(Rejection::AlreadyExists);
+        }
+        snapshot.deleted_at.remove(&work.key);
         let version = next_version(snapshot, None, &work.key)?;
         let sequence = snapshot
             .next_sequence
@@ -1246,6 +1283,9 @@ pub(crate) fn addressed_snapshot(group: &CommitGroup, source: &RecordSnapshot) -
         if let Some(version) = source.versions.get(&id) {
             out.versions.insert(id, *version);
         }
+        if let Some(deleted_at) = source.deleted_at.get(key) {
+            out.deleted_at.insert(key.clone(), *deleted_at);
+        }
     }
     for update in &group.state_updates {
         let key = (update.collection.clone(), update.key.clone());
@@ -1302,13 +1342,17 @@ fn merge_delta(
     for (key, owner) in additions {
         snapshot.unique_owners.insert(key, owner);
     }
-    for key in &delta.deleted_work {
-        snapshot.work.remove(key);
+    for deleted in &delta.deleted_work {
+        snapshot.work.remove(&deleted.key);
+        snapshot
+            .deleted_at
+            .insert(deleted.key.clone(), deleted.deleted_at);
     }
     for key in &delta.deleted_state {
         snapshot.state.remove(key);
     }
     for record in merged_work {
+        snapshot.deleted_at.remove(&record.record.work.key);
         snapshot.work.insert(record.record.work.key.clone(), record);
     }
     for record in &delta.state {

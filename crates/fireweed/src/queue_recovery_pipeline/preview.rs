@@ -24,6 +24,7 @@ impl QueueRecoveryPipeline {
         job: Arc<QueueReservation>,
     ) -> QueueResult<AdmittedQueuePreview> {
         request.preflight(&limits)?;
+        check_issued_at(clock.as_ref(), request.group.issued_at)?;
         administrative_groups_preflight(
             &request.queue,
             std::slice::from_ref(&request.group),

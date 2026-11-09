@@ -164,7 +164,14 @@ fn atomic_state_and_next_work_match_shared_full_image_planner() {
         assert_eq!(plan.delta.state.len(), 1);
         assert_eq!(plan.delta.state[0].key, "state");
         assert_eq!(plan.delta.state[0].value.as_ref(), &[6]);
-        assert_eq!(plan.delta.deleted_work, vec!["a"]);
+        assert_eq!(
+            plan.delta
+                .deleted_work
+                .iter()
+                .map(|d| d.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
         assert_eq!(plan.delta.work.len(), 1);
         assert_eq!(plan.delta.work[0].record.work.key, "next");
         assert_eq!(plan.receipt(), &expected.receipt);

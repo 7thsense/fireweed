@@ -343,7 +343,7 @@ fn validate_delta(before: &RecordSnapshot, d: &CommitDelta) -> PublicationResult
     if d.work
         .windows(2)
         .any(|p| p[0].record.work.key >= p[1].record.work.key)
-        || d.deleted_work.windows(2).any(|p| p[0] >= p[1])
+        || d.deleted_work.windows(2).any(|p| p[0].key >= p[1].key)
         || d.state
             .windows(2)
             .any(|p| (&p[0].collection, &p[0].key) >= (&p[1].collection, &p[1].key))
@@ -422,7 +422,10 @@ fn validate_delta(before: &RecordSnapshot, d: &CommitDelta) -> PublicationResult
                 .binary_search_by(|r| r.record.work.key.as_str().cmp(&v.key))
                 .ok()
                 .map(|i| &d.work[i]);
-            let deleted = d.deleted_work.binary_search(&v.key).is_ok();
+            let deleted = d
+                .deleted_work
+                .binary_search_by(|d| d.key.as_str().cmp(&v.key))
+                .is_ok();
             if row.is_some() == deleted {
                 return invalid("work effect identity");
             }
@@ -893,7 +896,12 @@ fn write_delta_mutation(
             &delta.work_bodies[&version.key],
         )
     } else {
-        s.tag(0)
+        let deleted = delta
+            .deleted_work
+            .binary_search_by(|d| d.key.as_str().cmp(&version.key))
+            .map_err(|_| PublicationError::Invalid("work deletion lacks deletion time"))?;
+        s.tag(0)?;
+        s.i(delta.deleted_work[deleted].deleted_at)
     }
 }
 /// Full zero-allocation scan. Length bounds come from the supplied frame slice;

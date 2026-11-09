@@ -1344,7 +1344,9 @@ async fn field_preimages_contract(log: QueueNativeLog) {
     drop(selected);
     assert_eq!(admission.usage().unwrap(), baseline);
     let deleted = fireweed_engine::queue_publication::CommandRef {
-        effect: EffectRef::Delete,
+        effect: EffectRef::Delete {
+            deleted_at: Some(0),
+        },
         ..command
     };
     let complete = load_command_fields(&reader, deleted, 3, &schema.work, &job)

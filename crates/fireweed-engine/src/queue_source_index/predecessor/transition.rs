@@ -126,7 +126,7 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
             return Err(unknown("selected fields exceed source membership count"));
         }
         let (count, live) = match command.effect {
-            EffectRef::Delete => (0, None),
+            EffectRef::Delete { .. } => (0, None),
             EffectRef::StatePut {
                 fields: replacement,
                 value,

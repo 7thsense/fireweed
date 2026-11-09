@@ -2701,7 +2701,15 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(plan.proposal().delta.deleted_work, vec!["c"]);
+        assert_eq!(
+            plan.proposal()
+                .delta
+                .deleted_work
+                .iter()
+                .map(|d| d.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c"]
+        );
         assert!(!plan.initial_authority().unique_probes_loaded.is_empty());
         drop(plan);
         // All results above remain speculative: native selection itself writes
@@ -2839,7 +2847,15 @@ mod tests {
             plan.proposal().delta.receipt.outcome,
             GroupOutcome::Committed { .. }
         ));
-        assert_eq!(plan.proposal().delta.deleted_work, vec!["c"]);
+        assert_eq!(
+            plan.proposal()
+                .delta
+                .deleted_work
+                .iter()
+                .map(|d| d.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c"]
+        );
         assert_eq!(plan.proposal().delta.work.len(), 1);
         assert!(
             plan.initial_authority()

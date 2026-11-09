@@ -104,7 +104,7 @@ macro_rules! define_queue_source_oracle {
                         key: command.identity.key.into(),
                     };
                     match command.effect {
-                        EffectRef::Delete => {
+                        EffectRef::Delete { .. } => {
                             payloads.remove(&identity);
                         }
                         EffectRef::WorkPut {

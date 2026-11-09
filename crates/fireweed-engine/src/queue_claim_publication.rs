@@ -847,7 +847,12 @@ mod tests {
                             changed.work.retain(|row| row.record.work.key != "a");
                             changed.work_fields.remove("a");
                             changed.work_bodies.remove("a");
-                            changed.deleted_work.push("a".into());
+                            changed
+                                .deleted_work
+                                .push(crate::queue_planner::DeletedWork {
+                                    key: "a".into(),
+                                    deleted_at: 0,
+                                });
                         }
                     }
                     let changed_commands = encode_publication_pinned(

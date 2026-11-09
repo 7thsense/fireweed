@@ -327,7 +327,9 @@ fn selected_fold_handles_replace_edit_preserve_delete_recreate_and_lease_metadat
         expected_version: Some(5),
         prior_highwater: 5,
         output_highwater: 9,
-        effect: EffectRef::Delete,
+        effect: EffectRef::Delete {
+            deleted_at: Some(0),
+        },
     })
     .unwrap();
     assert_eq!(set.descriptor(0, "a").unwrap().highwater, 9);

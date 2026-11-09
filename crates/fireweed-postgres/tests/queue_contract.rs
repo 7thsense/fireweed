@@ -316,6 +316,10 @@ async fn mandatory_competition_expiry_and_long_ordering() {
         .await;
     suite::indexed_additional_attributes(&a, q("additional-attributes")).await;
     suite::numeric_bucket_stats(&a, &clock, q("numeric-buckets")).await;
+    suite::retention_floor_refused_at_provisioning(&a, q("retention-floor")).await;
+    suite::issued_at_skew_and_conflict(&a, &clock, q("issued-at")).await;
+    suite::retired_keys_refuse_reinsert_within_window(&a, &clock, q("retired-keys")).await;
+    suite::reusable_keys_reinsert_at_once(&a, &clock, q("reusable-keys")).await;
     suite::ordered_insert_uniqueness(&a, q("insert-uniqueness")).await;
     suite::shrinking_upsert_index_amplification(&a, q("shrinking-index-upsert")).await;
     suite::unrestricted_names_obey_response_bounds(&a, q("names-bounds")).await;

@@ -593,7 +593,10 @@ fn propose_group_legacy(
                 work_bodies,
                 work: proposal.replacement.take().into_iter().collect(),
                 deleted_work: if matches!(proposal.outcome, AdministrativeOutcome::Deleted { .. }) {
-                    vec![entry.key.to_owned()]
+                    vec![crate::queue_planner::DeletedWork {
+                        key: entry.key.to_owned(),
+                        deleted_at: ordinary.issued_at,
+                    }]
                 } else {
                     vec![]
                 },
@@ -727,8 +730,8 @@ mod tests {
                 full.body_loaded = true;
                 result.work.insert(key.clone(), full);
             }
-            for key in &delta.deleted_work {
-                result.work.remove(key);
+            for deleted in &delta.deleted_work {
+                result.work.remove(&deleted.key);
             }
             for row in &delta.state {
                 result

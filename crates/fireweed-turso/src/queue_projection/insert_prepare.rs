@@ -199,7 +199,11 @@ impl NativeTransactionWork for Worker {
             .await?
             {
                 super::work::WorkAuthority::Absent => {}
-                super::work::WorkAuthority::Deleted { version } => {
+                super::work::WorkAuthority::Deleted {
+                    version,
+                    deleted_at,
+                } => {
+                    snapshot.deleted_at.insert(item.key.clone(), deleted_at);
                     snapshot.versions.insert(identity, version);
                 }
                 super::work::WorkAuthority::Present { id, mut work } => {

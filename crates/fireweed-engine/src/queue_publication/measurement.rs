@@ -109,7 +109,8 @@ pub fn measure_work_mutation(
         if let Some((work, fields, body)) = row {
             write_work_value(sink, work, fields, body)
         } else {
-            sink.tag(0)
+            sink.tag(0)?;
+            sink.i(0)
         }
     })
 }

@@ -308,7 +308,7 @@ impl ColdStateTracker {
                         continue;
                     }
                     let descriptor = match command.effect {
-                        EffectRef::Delete => StateDescriptor::Deleted {
+                        EffectRef::Delete { .. } => StateDescriptor::Deleted {
                             highwater: command.output_highwater,
                         },
                         EffectRef::StatePut { fields, value } => StateDescriptor::Present {

@@ -206,7 +206,7 @@ impl WorkSet {
             return Err(unknown("source work predecessor disagreement"));
         }
         match command.effect {
-            EffectRef::Delete => {
+            EffectRef::Delete { .. } => {
                 entry.metadata = None;
                 for value in entry.fields.values_mut() {
                     *value = None;

@@ -44,6 +44,11 @@ async fn concrete_queue_runs_identical_contract_and_reopens_exact_receipt() {
     suite::shrinking_upsert_index_amplification(&queue, address("shrinking-upsert")).await;
     suite::indexed_additional_attributes(&queue, address("additional-attributes")).await;
     suite::numeric_bucket_stats(&queue, &clock, address("numeric-buckets")).await;
+    suite::retention_floor_refused_at_provisioning(&queue, address("retention-floor")).await;
+    suite::issued_at_skew_and_conflict(&queue, &clock, address("issued-at")).await;
+    suite::retired_keys_refuse_reinsert_within_window(&queue, &clock, address("retired-keys"))
+        .await;
+    suite::reusable_keys_reinsert_at_once(&queue, &clock, address("reusable-keys")).await;
     suite::unrestricted_names_obey_response_bounds(&queue, address("names-bounds")).await;
     suite::atomic_administration_preview_and_replay(&queue, address("administration-preview"))
         .await;

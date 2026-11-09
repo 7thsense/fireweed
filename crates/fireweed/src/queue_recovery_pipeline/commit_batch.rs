@@ -61,6 +61,9 @@ impl QueueRecoveryPipeline {
         job: Arc<QueueReservation>,
     ) -> QueueResult<AdmittedQueueCommitBatch> {
         request.preflight(&limits)?;
+        for group in &request.groups {
+            check_issued_at(clock.as_ref(), group.issued_at)?;
+        }
         administrative_envelope_preflight(&request, &limits)?;
         let headers = incoming_headers(&request)?;
         let input = job.owned_buffer(
@@ -92,6 +95,7 @@ impl QueueRecoveryPipeline {
         job: Arc<QueueReservation>,
     ) -> QueueResult<AdmittedCommitReceipts> {
         group.preflight_for(&queue, &limits)?;
+        check_issued_at(clock.as_ref(), group.issued_at)?;
         fireweed_engine::queue_memory::administrative_groups_preflight(
             &queue,
             std::slice::from_ref(&group),
