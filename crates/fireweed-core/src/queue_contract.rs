@@ -60,6 +60,61 @@ pub struct QueueSchema {
     pub state: BTreeMap<String, CollectionDefinition>,
     pub progress_bound_nanos: u64,
     pub max_attempts: u32,
+    pub retention: QueueRetention,
+}
+/// How long the queue remembers request ids and deleted keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueRetention {
+    /// Replay window for insert, claim and commit request ids, measured from
+    /// `issued_at`. Must be greater than 0.
+    pub request_id_nanos: u64,
+    pub deleted_keys: DeletedKeyPolicy,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeletedKeyPolicy {
+    /// A deleted key may be inserted again at once, with a higher version.
+    Reusable,
+    /// `insert` (both modes) and `work_inserts` return
+    /// `Rejection::AlreadyExists` for a key deleted within `window_nanos`.
+    /// After that the key may be used again, with a higher version. Must be
+    /// greater than 0 and at least `request_id_nanos` plus 5 minutes.
+    Retired { window_nanos: u64 },
+}
+/// Largest amount by which a request's `issued_at` may lead the backend clock.
+/// Also the margin a `Retired` window must add to the request id window.
+pub const ISSUED_AT_SKEW_NANOS: u64 = 300_000_000_000;
+impl QueueRetention {
+    /// Refuses a request issued beyond the skew ahead of `now`. Callers run
+    /// this before any lookup or side effect.
+    pub fn check_issued_at(issued_at: i64, now: i64) -> QueueResult<()> {
+        if i128::from(issued_at) > i128::from(now) + i128::from(ISSUED_AT_SKEW_NANOS) {
+            return Err(invalid("issued_at is ahead of the queue clock"));
+        }
+        Ok(())
+    }
+    /// True when a key deleted at `deleted_at` is still retired at `now`.
+    pub fn is_retired(&self, deleted_at: i64, now: i64) -> bool {
+        match self.deleted_keys {
+            DeletedKeyPolicy::Reusable => false,
+            DeletedKeyPolicy::Retired { window_nanos } => {
+                i128::from(now) - i128::from(deleted_at) < i128::from(window_nanos)
+            }
+        }
+    }
+    pub fn validate(&self) -> QueueResult<()> {
+        if self.request_id_nanos == 0 {
+            return Err(invalid("request id window must be positive"));
+        }
+        if let DeletedKeyPolicy::Retired { window_nanos } = self.deleted_keys {
+            let floor = self.request_id_nanos.saturating_add(ISSUED_AT_SKEW_NANOS);
+            if window_nanos == 0 || window_nanos < floor {
+                return Err(invalid(
+                    "deleted key window must cover the request id window plus 5 minutes",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Lifecycle {
@@ -201,6 +256,8 @@ pub struct CommitGroup {
     pub work_updates: Vec<UnclaimedUpdate>,
     #[serde(default)]
     pub administration: Option<AdministrativeCommit>,
+    /// UTC nanoseconds taken once when the request id was created.
+    pub issued_at: i64,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitBatch {
@@ -358,6 +415,8 @@ pub struct ClaimRequest {
     /// None returns all fields, Some(empty) returns no fields. Body separately selected.
     pub fields: Option<BTreeSet<String>>,
     pub include_body: bool,
+    /// UTC nanoseconds taken once when the request id was created.
+    pub issued_at: i64,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InsertMode {
@@ -370,6 +429,8 @@ pub struct InsertRequest {
     pub request_id: String,
     pub mode: InsertMode,
     pub items: Vec<NewWork>,
+    /// UTC nanoseconds taken once when the request id was created.
+    pub issued_at: i64,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InsertOutcome {
@@ -642,6 +703,7 @@ impl QueueSchema {
         if self.progress_bound_nanos == 0 || self.max_attempts == 0 {
             return Err(invalid("progress bound must be positive"));
         }
+        self.retention.validate()?;
         for (collection, definition) in std::iter::once(("work", &self.work))
             .chain(self.state.iter().map(|(key, value)| (key.as_str(), value)))
         {
@@ -1163,6 +1225,7 @@ struct CommitFingerprintV3<'a> {
     state_updates: &'a [StateUpdate],
     work_inserts: &'a [NewWork],
     work_updates: &'a [UnclaimedUpdate],
+    issued_at: i64,
 }
 impl<'a> From<&'a CommitGroup> for CommitFingerprintV3<'a> {
     fn from(group: &'a CommitGroup) -> Self {
@@ -1172,6 +1235,7 @@ impl<'a> From<&'a CommitGroup> for CommitFingerprintV3<'a> {
             state_updates: &group.state_updates,
             work_inserts: &group.work_inserts,
             work_updates: &group.work_updates,
+            issued_at: group.issued_at,
         }
     }
 }
@@ -1184,6 +1248,7 @@ struct CommitFingerprintV4<'a> {
     state_updates: &'a [StateUpdate],
     work_inserts: &'a [NewWork],
     work_updates: &'a [UnclaimedUpdate],
+    issued_at: i64,
     administration: AdministrativeFingerprintValue<'a>,
 }
 #[derive(Serialize)]
@@ -1202,6 +1267,7 @@ impl Serialize for CommitAccountingGroup<'_> {
                 state_updates: &self.0.state_updates,
                 work_inserts: &self.0.work_inserts,
                 work_updates: &self.0.work_updates,
+                issued_at: self.0.issued_at,
                 administration: AdministrativeFingerprintValue {
                     intent: &admin.intent,
                     max_result_bytes: admin.max_result_bytes,
@@ -1278,6 +1344,7 @@ impl CommitGroup {
                     state_updates: &self.state_updates,
                     work_inserts: &self.work_inserts,
                     work_updates: &self.work_updates,
+                    issued_at: self.issued_at,
                     administration: AdministrativeFingerprintValue {
                         intent,
                         max_result_bytes,
@@ -1620,6 +1687,7 @@ mod tests {
             work_inserts: vec![],
             work_updates: vec![],
             administration: None,
+            issued_at: 0,
         };
         assert_eq!(group.modified_records().count(), 0);
         let limits = QueueLimits::default();
@@ -1664,6 +1732,7 @@ mod tests {
             work_inserts: vec![],
             work_updates: vec![],
             administration: None,
+            issued_at: 0,
         };
         let success = CommitReceipt {
             request_id: group.request_id.clone(),
@@ -1725,6 +1794,10 @@ mod tests {
             state: BTreeMap::from([("instance".into(), definition)]),
             progress_bound_nanos: 1_000_000_000,
             max_attempts: 3,
+            retention: crate::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: crate::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         }
     }
     fn queue() -> QueueAddress {
@@ -1758,6 +1831,7 @@ mod tests {
             }],
             work_inserts: vec![],
             work_updates: vec![],
+            issued_at: 0,
         }
     }
     fn claim() -> ClaimRequest {
@@ -1772,6 +1846,7 @@ mod tests {
             max_bytes: 1 << 20,
             fields: None,
             include_body: true,
+            issued_at: 0,
         }
     }
     #[test]
@@ -1973,6 +2048,7 @@ mod tests {
             request_id: "insert".into(),
             mode: InsertMode::InsertOnly,
             items: vec![item("k")],
+            issued_at: 0,
         };
         insert.items[0]
             .fields
@@ -2024,6 +2100,7 @@ mod tests {
             state_updates: vec![],
             work_inserts: vec![],
             work_updates: vec![],
+            issued_at: 0,
         };
         let rich = CommitGroup {
             administration: None,
@@ -2070,17 +2147,18 @@ mod tests {
                 expect: StateExpect::Version(1),
                 change: UnclaimedChange::Delete,
             }],
+            issued_at: 0,
         };
         for (group, wire, digest) in [
             (
                 &empty,
-                "0474002f7804712fc3a905656d70747900000000",
-                "ee3a8791dd0a46a3445d71b36d2c0b3f67cd9082b2c26aa2aae8f81cdf68ce63",
+                "0474002f7804712fc3a905656d7074790000000000",
+                "4dfbb837b6f410a00c4bf51b74dfb499588132206bb1b481c11dddeb1adfcf95",
             ),
             (
                 &rich,
-                "0474002f7804712fc3a90a636f6d6d6974002fc3a90107636c61696d65640300ff01ffffffffffffffffff01010d01ffffffffffffffffff0102086e756c002f6b657901040200ff0772656d6f76656400010003010108696e7374616e63650173018001000104666c61670201030001ff01046e657874feffffffffffffffff010303016100ff01016201000000000000008001630304c3a9002f02ff00010672656d6f7665010103",
-                "f6bffe65f454e14c35943a1438cd252a47bb8dbc74a5641977998ddcb13c419e",
+                "0474002f7804712fc3a90a636f6d6d6974002fc3a90107636c61696d65640300ff01ffffffffffffffffff01010d01ffffffffffffffffff0102086e756c002f6b657901040200ff0772656d6f76656400010003010108696e7374616e63650173018001000104666c61670201030001ff01046e657874feffffffffffffffff010303016100ff01016201000000000000008001630304c3a9002f02ff00010672656d6f766501010300",
+                "a69126c4f514a03f3382acc4116d25cdb90de95229c9eeaf2eca37d19fa27e43",
             ),
         ] {
             #[derive(Serialize)]
@@ -2090,6 +2168,7 @@ mod tests {
                 state_updates: &'a [StateUpdate],
                 work_inserts: &'a [NewWork],
                 work_updates: &'a [UnclaimedUpdate],
+                issued_at: i64,
             }
             let legacy = LegacyGroup {
                 request_id: &group.request_id,
@@ -2097,6 +2176,7 @@ mod tests {
                 state_updates: &group.state_updates,
                 work_inserts: &group.work_inserts,
                 work_updates: &group.work_updates,
+                issued_at: group.issued_at,
             };
             let original = postcard::to_allocvec(&(&address, &legacy)).unwrap();
             let projected =
@@ -2120,6 +2200,7 @@ mod tests {
             state_updates: vec![],
             work_inserts: vec![item("next")],
             work_updates: vec![],
+            issued_at: 0,
         };
         let batch = CommitBatch {
             queue: queue(),
@@ -2132,6 +2213,7 @@ mod tests {
             state_updates: &'a [StateUpdate],
             work_inserts: &'a [NewWork],
             work_updates: &'a [UnclaimedUpdate],
+            issued_at: i64,
         }
         #[derive(Serialize)]
         struct LegacyEnvelope<'a> {
@@ -2145,6 +2227,7 @@ mod tests {
                 state_updates: &group.state_updates,
                 work_inserts: &group.work_inserts,
                 work_updates: &group.work_updates,
+                issued_at: group.issued_at,
             }
         }
         let legacy = LegacyEnvelope {
@@ -2232,10 +2315,10 @@ mod tests {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
-        assert_eq!(encoded_len(&request).unwrap(), 28);
+        assert_eq!(encoded_len(&request).unwrap(), 29);
         assert_eq!(
             digest,
-            "f9ecef4a79efc3846a7a78fa7a1f96d1c872c42db2898cf92d822dbc67456c68"
+            "dfd53525da9de5f840ddb93e98ba078e66deb3e7df5309d26dc3ae4e4e92e99e"
         );
     }
     #[test]
@@ -2313,6 +2396,7 @@ mod tests {
             request_id: "insert".into(),
             mode: InsertMode::InsertOnly,
             items: vec![item("one")],
+            issued_at: 0,
         };
         let limits = QueueLimits {
             max_response_bytes: 1,
@@ -2348,6 +2432,7 @@ mod tests {
             request_id: "rid".repeat(100),
             mode: InsertMode::InsertOnly,
             items: vec![item(&"await-key".repeat(100))],
+            issued_at: 0,
         };
         request.items[0]
             .fields
@@ -2530,6 +2615,7 @@ mod administrative_fingerprint_tests {
             state_updates: vec![],
             work_inserts: vec![],
             work_updates: vec![],
+            issued_at: 0,
         };
         let intent = AdministrativeIntent {
             evaluated_at: 0,
@@ -2542,6 +2628,7 @@ mod administrative_fingerprint_tests {
             state_updates: &group.state_updates,
             work_inserts: &group.work_inserts,
             work_updates: &group.work_updates,
+            issued_at: group.issued_at,
             administration: AdministrativeFingerprintValue {
                 intent: &intent,
                 max_result_bytes: 300,
@@ -2549,7 +2636,7 @@ mod administrative_fingerprint_tests {
         };
         assert_eq!(
             postcard::to_allocvec(&(&queue, projection)).unwrap(),
-            b"\x01t\x01q\x01g\0\0\0\0\0\x01\0\0\xac\x02"
+            b"\x01t\x01q\x01g\0\0\0\0\0\0\x01\0\0\xac\x02"
         );
         let fingerprint = group
             .administrative_fingerprint(&queue, &intent, 300)
@@ -2559,7 +2646,7 @@ mod administrative_fingerprint_tests {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>(),
-            "737cd7ad8cc1315aab34c1132738be2081bf8c1b1048d6626f82e3de4de89bcc"
+            "7e1cd088c6fd0066e7e9755b17198d570ad8e659c15462291fcd9a81bdce0fa3"
         );
         assert_ne!(fingerprint, group.fingerprint(&queue).unwrap());
         assert_ne!(
@@ -2585,5 +2672,85 @@ mod administrative_fingerprint_tests {
             )
             .unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    const MINUTE: u64 = 60_000_000_000;
+    fn with(request_id_nanos: u64, deleted_keys: DeletedKeyPolicy) -> QueueRetention {
+        QueueRetention {
+            request_id_nanos,
+            deleted_keys,
+        }
+    }
+    #[test]
+    fn schema_validate_refuses_each_bad_retention() {
+        let base = |retention: QueueRetention| QueueSchema {
+            work: CollectionDefinition {
+                fields: BTreeMap::new(),
+                indexes: BTreeMap::new(),
+                unique_indexes: BTreeSet::new(),
+                additional_field_prefixes: BTreeSet::new(),
+            },
+            state: BTreeMap::new(),
+            progress_bound_nanos: 1,
+            max_attempts: 1,
+            retention,
+        };
+        let refused = |retention| matches!(base(retention).validate(), Err(QueueError::Invalid(_)));
+        assert!(refused(with(0, DeletedKeyPolicy::Reusable)));
+        assert!(refused(with(
+            1,
+            DeletedKeyPolicy::Retired { window_nanos: 0 }
+        )));
+        assert!(
+            base(with(10, DeletedKeyPolicy::Reusable))
+                .validate()
+                .is_ok()
+        );
+    }
+    #[test]
+    fn retired_floor_is_request_window_plus_five_minutes() {
+        let request = 7 * MINUTE;
+        let floor = request + 5 * MINUTE;
+        let at = |window_nanos| with(request, DeletedKeyPolicy::Retired { window_nanos });
+        assert!(at(floor).validate().is_ok());
+        assert!(at(floor + 1).validate().is_ok());
+        assert!(matches!(
+            at(floor - 1).validate(),
+            Err(QueueError::Invalid(_))
+        ));
+    }
+    #[test]
+    fn retired_floor_does_not_overflow() {
+        let max = |window_nanos| with(u64::MAX, DeletedKeyPolicy::Retired { window_nanos });
+        assert!(matches!(
+            max(u64::MAX - 1).validate(),
+            Err(QueueError::Invalid(_))
+        ));
+        assert!(max(u64::MAX).validate().is_ok());
+        assert!(
+            with(
+                u64::MAX - 1,
+                DeletedKeyPolicy::Retired {
+                    window_nanos: u64::MAX
+                }
+            )
+            .validate()
+            .is_ok()
+        );
+    }
+    #[test]
+    fn issued_at_skew_and_retired_window_boundaries() {
+        let skew = i64::try_from(ISSUED_AT_SKEW_NANOS).unwrap();
+        assert!(QueueRetention::check_issued_at(1_000 + skew, 1_000).is_ok());
+        assert!(QueueRetention::check_issued_at(1_001 + skew, 1_000).is_err());
+        assert!(QueueRetention::check_issued_at(i64::MAX, i64::MAX).is_ok());
+        let retired = with(1, DeletedKeyPolicy::Retired { window_nanos: 100 });
+        assert!(retired.is_retired(0, 99));
+        assert!(!retired.is_retired(0, 100));
+        assert!(!with(1, DeletedKeyPolicy::Reusable).is_retired(0, 0));
     }
 }

@@ -31,6 +31,10 @@ fn fixture() -> (
         state: Default::default(),
         progress_bound_nanos: 1,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     };
     let definition =
         AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), &job).unwrap();
@@ -420,6 +424,7 @@ fn domain_record(
                 fields: Default::default(),
                 body: Default::default(),
             }],
+            issued_at: 0,
         };
         let outcomes = [InsertOutcome::Rejected {
             key: "k".into(),
@@ -459,6 +464,7 @@ fn domain_record(
         max_bytes: 4096,
         fields: None,
         include_body: true,
+        issued_at: 0,
     };
     let receipt = crate::queue_claim_receipt::encode_claim_receipt(&[], 1 << 20, job).unwrap();
     let wrapper = crate::queue_claim_publication::encode_claim_publication(
@@ -631,6 +637,7 @@ fn original_claim_requires_command_to_lease_binding_after_valid_span_digest_and_
             max_bytes: 4096,
             fields: None,
             include_body: true,
+            issued_at: 0,
         };
         let receipt = encode_claim_receipt(
             &[ClaimLease {

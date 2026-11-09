@@ -266,6 +266,7 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress, config: Workload) 
                 request_id: format!("seed-{offset}"),
                 mode: InsertMode::InsertOnly,
                 items,
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -315,6 +316,7 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress, config: Workload) 
                     max_bytes: 4 << 20,
                     fields: None,
                     include_body: true,
+                    issued_at: 0,
                 })
                 .await
                 .unwrap();
@@ -383,6 +385,7 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress, config: Workload) 
                         vec![]
                     },
                     work_updates: vec![],
+                    issued_at: 0,
                 });
             }
             let batch = CommitBatch {

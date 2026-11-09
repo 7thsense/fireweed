@@ -1959,6 +1959,7 @@ impl QueueStore for PostgresQueueStore {
                         state_updates: vec![],
                         work_inserts: request.items.clone(),
                         work_updates: vec![],
+                        issued_at: 0,
                     };
                     let mut loaded = load_group(&tx, &queue, &read_set, &reservation).await?;
                     let before = loaded.snapshot.clone();
@@ -2519,6 +2520,7 @@ mod tests {
                             .into(),
                             body: Default::default(),
                         }],
+                        issued_at: 0,
                     })
                     .await
                     .unwrap();
@@ -2534,6 +2536,7 @@ mod tests {
                         max_bytes: 65536,
                         fields: Some(Default::default()),
                         include_body: false,
+                        issued_at: 0,
                     })
                     .await
                     .unwrap()
@@ -2545,6 +2548,7 @@ mod tests {
                     state_updates: vec![],
                     work_updates: vec![],
                     work_inserts: vec![],
+                    issued_at: 0,
                 };
                 let patch = WorkPatch {
                     fields: [("target".into(), Some(FieldValue::Text("after".into())))].into(),
@@ -2699,6 +2703,7 @@ mod tests {
                     body: Default::default(),
                 }],
                 administration: None,
+                issued_at: 0,
             }],
         };
         let legitimate = store.commit(request.clone()).await.unwrap();
@@ -2769,6 +2774,7 @@ mod tests {
                     ]),
                     body: Default::default(),
                 }],
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -2783,6 +2789,7 @@ mod tests {
             max_bytes: 4096,
             fields: Some(Default::default()),
             include_body: false,
+            issued_at: 0,
         };
         assert_eq!(store.claim(request.clone()).await.unwrap().len(), 1);
         let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
@@ -2896,6 +2903,7 @@ mod tests {
                         body: Default::default(),
                     })
                     .collect(),
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -2926,6 +2934,7 @@ mod tests {
                     }]),
                 },
             }),
+            issued_at: 0,
         };
         let mut transition = make("preview-then-execute", "a", 1, 17);
         transition.state_updates.push(StateUpdate {
@@ -3326,6 +3335,7 @@ mod tests {
                         body: Default::default(),
                     },
                 ],
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -3352,6 +3362,7 @@ mod tests {
                     work_updates: vec![],
                     work_inserts: vec![],
                     state_updates: vec![state_update.clone()],
+                    issued_at: 0,
                 }],
             })
             .await
@@ -3372,6 +3383,7 @@ mod tests {
                     ..WorkPatch::default()
                 }),
             }],
+            issued_at: 0,
         };
         let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
             .await
@@ -3536,6 +3548,7 @@ mod tests {
                     ..WorkPatch::default()
                 }),
             }],
+            issued_at: 0,
         };
         let rejected_rekey = update_target("rejected-rekey", "a", 3, "new-owner");
         let free_and_create = CommitGroup {
@@ -3555,6 +3568,7 @@ mod tests {
                 body: Default::default(),
                 fields: BTreeMap::from([("target".into(), FieldValue::Text("new-owner".into()))]),
             }],
+            issued_at: 0,
         };
         let rekey_created = update_target("rekey-created", "d", 1, "final-owner");
         let reuse = update_target("reuse", "a", 3, "new-owner");
@@ -3611,6 +3625,7 @@ mod tests {
                     lease_guard: AdministrativeLeaseGuard::RejectActive,
                 },
             }],
+            issued_at: 0,
         };
         load_unique_probes(&tx, &writer_row, &mut writer, &noop, 0, &writer_job)
             .await
@@ -3768,6 +3783,7 @@ mod tests {
                     ..WorkPatch::default()
                 }),
             }],
+            issued_at: 0,
         };
         let remove_before = writer.snapshot.clone();
         load_unique_probes(&tx, &writer_row, &mut writer, &remove_only, 0, &writer_job)
@@ -3907,6 +3923,7 @@ mod tests {
                     ..WorkPatch::default()
                 }),
             }],
+            issued_at: 0,
         };
         let body_before = writer.snapshot.clone();
         load_unique_probes(&tx, &writer_row, &mut writer, &body_group, 0, &writer_job)
@@ -4045,6 +4062,7 @@ mod tests {
             state_updates: vec![],
             work_inserts: vec![],
             work_updates: vec![],
+            issued_at: 0,
         };
         let state = |expect: StateExpect, value: u8| StateUpdate {
             collection: "instances".into(),
@@ -4280,6 +4298,7 @@ mod tests {
                 fields: Fields::new(),
                 body: vec![8].into(),
             }],
+            issued_at: 0,
         };
         let owned = store.clone();
         let address = queue.clone();

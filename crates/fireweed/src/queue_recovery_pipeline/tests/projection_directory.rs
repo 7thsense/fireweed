@@ -292,6 +292,7 @@ async fn the_wal_stays_bounded(s3: bool) {
                 request_id: format!("wal-{n}"),
                 mode: InsertMode::InsertOnly,
                 items: vec![heavy(n)],
+                issued_at: 0,
             })
             .await
             .unwrap();

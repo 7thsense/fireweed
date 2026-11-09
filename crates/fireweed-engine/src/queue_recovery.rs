@@ -195,6 +195,10 @@ mod tests {
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         }
     }
     #[test]
@@ -278,7 +282,7 @@ mod tests {
             .windows(raw.len())
             .position(|candidate| candidate == raw)
             .unwrap();
-        invalid_schema[schema_start + raw.len() - 1] = 0;
+        invalid_schema[schema_start + raw.len() - 9] = 0; // max_attempts, before the 8 retention bytes
         let mut history = ColdQueueHistory::new(&address, &job).unwrap();
         assert!(history.observe(0, &invalid_schema).is_err());
         assert_eq!(history.next_offset(), 0);

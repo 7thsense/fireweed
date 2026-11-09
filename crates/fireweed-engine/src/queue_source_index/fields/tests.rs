@@ -331,6 +331,7 @@ fn group(id: &str) -> CommitGroup {
         state_updates: vec![],
         work_updates: vec![],
         work_inserts: vec![],
+        issued_at: 0,
     }
 }
 fn preserve() -> CommandRef<'static> {
@@ -645,6 +646,10 @@ fn selective_preimages_follow_existing_index_closure_and_complete_membership() {
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let mut seed = group("seed");
         seed.work_inserts.push(NewWork {

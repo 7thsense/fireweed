@@ -712,6 +712,7 @@ async fn each_group_samples_its_own_clock_across_real_lease_expiry() {
                     max_bytes: 65536,
                     fields: None,
                     include_body: false,
+                    issued_at: 0,
                 },
                 now: 0,
                 limits: QueueLimits::default(),

@@ -636,6 +636,7 @@ pub(super) mod tests {
             state_updates: vec![],
             work_updates: vec![],
             work_inserts: vec![],
+            issued_at: 0,
         }
     }
     pub(in crate::queue_source_index) fn record(
@@ -696,6 +697,10 @@ pub(super) mod tests {
                 state: Default::default(),
                 progress_bound_nanos: 1,
                 max_attempts: 3,
+                retention: fireweed_core::queue_contract::QueueRetention {
+                    request_id_nanos: 86_400_000_000_000,
+                    deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+                },
             };
             let raw = encode_definition(&schema).unwrap();
             let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
@@ -1572,6 +1577,7 @@ pub(super) mod tests {
                 max_bytes: 1 << 20,
                 fields: Some(Default::default()),
                 include_body: false,
+                issued_at: 0,
             };
             let limits = QueueLimits {
                 max_records: 10,
@@ -1983,6 +1989,10 @@ pub(super) mod tests {
                 state: BTreeMap::from([("state".into(), empty)]),
                 progress_bound_nanos: 1,
                 max_attempts: 3,
+                retention: fireweed_core::queue_contract::QueueRetention {
+                    request_id_nanos: 86_400_000_000_000,
+                    deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+                },
             };
             let definition =
                 AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), &job)

@@ -47,6 +47,7 @@ fn hydration_group(key: &str, action: &AdministrativeAction, include_body: bool)
                 },
             },
         }],
+        issued_at: 0,
     }
 }
 

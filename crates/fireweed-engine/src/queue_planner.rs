@@ -79,6 +79,7 @@ pub fn plan_insert_vector(
             state_updates: vec![],
             work_inserts: vec![item.clone()],
             work_updates: vec![],
+            issued_at: 0,
         };
         if request.mode == InsertMode::Upsert
             && let Some(old) = old
@@ -221,6 +222,7 @@ pub fn load_envelope<'a>(groups: impl IntoIterator<Item = &'a CommitGroup>) -> C
         state_updates: vec![],
         work_inserts: vec![],
         work_updates: vec![],
+        issued_at: 0,
     };
     for group in groups {
         all.claimed_updates.extend(group.claimed_updates.clone());
@@ -1476,6 +1478,7 @@ mod tests {
             request_id: "identity/".repeat(8192),
             mode: InsertMode::InsertOnly,
             items: (0..257).map(|n| work(&format!("k{n}"))).collect(),
+            issued_at: 0,
         };
         let mut snapshot = RecordSnapshot::default();
         let (deltas, outcomes) =
@@ -1510,6 +1513,10 @@ mod tests {
             )]),
             progress_bound_nanos: 1_000_000_000,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         }
     }
     fn group() -> CommitGroup {
@@ -1520,6 +1527,7 @@ mod tests {
             state_updates: vec![],
             work_inserts: vec![],
             work_updates: vec![],
+            issued_at: 0,
         }
     }
     fn work(key: &str) -> NewWork {

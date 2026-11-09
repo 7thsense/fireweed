@@ -813,8 +813,8 @@ mod tests {
     use fireweed_core::queue_contract::{CollectionDefinition, QueueSchema};
     use sha2::{Digest, Sha256};
     use std::collections::{BTreeMap, BTreeSet};
-    const GOLDEN: &str = "4657514c3107000000000000000060000000000000001a0000000000000046575141444452310100000000000000740100000000000000711600000000000000ffffffffffffffffffff465751443400000000000103a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5";
-    const GOLDEN_V2: &str = "4657514c3207000000000000000060000000000000001a0000000000000046575141444452310100000000000000740100000000000000711600000000000000ffffffffffffffffffff465751443400000000000103a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5083f3d5bca758a84e221d72cbf83450855b81ea52a5faa1e4922634eccd25717";
+    const GOLDEN: &str = "4657514c3107000000000000000068000000000000001a0000000000000046575141444452310100000000000000740100000000000000711e00000000000000ffffffffffffffffffff4657514434000000000001038080bc8ac9d21300a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5";
+    const GOLDEN_V2: &str = "4657514c3207000000000000000068000000000000001a0000000000000046575141444452310100000000000000740100000000000000711e00000000000000ffffffffffffffffffff4657514434000000000001038080bc8ac9d21300a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a587452b75d24115ec5c5c8bae654e21b5a8125b9361c89bcc68075a8bb348bc35";
     fn hex(raw: &[u8]) -> String {
         raw.iter().map(|byte| format!("{byte:02x}")).collect()
     }
@@ -838,6 +838,10 @@ mod tests {
             state: BTreeMap::new(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         }
     }
     fn address() -> QueueAddress {
@@ -919,7 +923,7 @@ mod tests {
         let raw = encode_definition(&schema()).unwrap();
         let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
         let n = checked_genesis_record_len(&address(), &definition).unwrap();
-        assert_eq!(n, 150);
+        assert_eq!(n, 158);
         let record =
             encode_checked_genesis(7, &address(), &definition, &[0xa5; 32], n, &job).unwrap();
         assert_eq!(hex(record.bytes()), GOLDEN_V2);
@@ -988,7 +992,7 @@ mod tests {
             if version == b'1' {
                 assert_eq!(
                     hex(record.bytes()),
-                    "4657514c3209000000000000000157000000000000004657515031010000000000000074010000000000000071ca34cd395acac8ddffbe8b24816de31c87573a5290d20f00070e62cf8ae9dfef0000000000000000000000000000000000000000000000000000000000000000138bea4f2fd135807bcb48096e538dd43d8418ce0482c153e0685f4032f72497"
+                    "4657514c320900000000000000015700000000000000465751503101000000000000007401000000000000007120e569a5228ca922ed50d018b847cbee60c8c6c482290c9c8419fddecab92932000000000000000000000000000000000000000000000000000000000000000063325621fc1d1440c310c29de66450299b2aec6efd61bdda31fe748264b9aa62"
                 );
             }
             for offset in 0..record.bytes().len() {
@@ -1067,13 +1071,16 @@ mod tests {
     fn genesis_literal_pin_secret_and_exact_boundary() {
         let job = job();
         let raw = encode_definition(&schema()).unwrap();
-        assert_eq!(hex(&raw), "ffffffffffffffffffff465751443400000000000103");
+        assert_eq!(
+            hex(&raw),
+            "ffffffffffffffffffff4657514434000000000001038080bc8ac9d21300"
+        );
         let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
-        let encoded = encode_genesis(7, &address(), &definition, &[0xa5; 32], 118, &job).unwrap();
+        let encoded = encode_genesis(7, &address(), &definition, &[0xa5; 32], 126, &job).unwrap();
         assert_eq!(hex(encoded.bytes()), GOLDEN);
         assert_eq!(
             hex(&Sha256::digest(encoded.bytes())),
-            "65e549ab60c95b5d001089e48c55cfc271d423e0ad7716443a276fb6c00d9358"
+            "6f79f186a8a6857a64ed9d276ca731b90216dcca951662d46e16f190329ad1db"
         );
         assert!(matches!(
             encode_genesis(7, &address(), &definition, &[0xa5; 32], 117, &job),
@@ -1094,7 +1101,7 @@ mod tests {
         assert!(encoded.belongs_to(&job));
         assert_eq!(
             format!("{encoded:?}"),
-            "OwnedQueueLogRecord { bytes: 118, .. }"
+            "OwnedQueueLogRecord { bytes: 126, .. }"
         );
     }
     #[test]

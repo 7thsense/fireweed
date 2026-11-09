@@ -1036,6 +1036,10 @@ mod tests {
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let admission = QueueAdmission::new(2, 32 << 20).unwrap();
         let first_job = Arc::new(admission.reserve(0).unwrap());
@@ -1223,6 +1227,10 @@ mod tests {
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let definition =
             AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), &job).unwrap();
@@ -1313,6 +1321,10 @@ mod tests {
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let admission = QueueAdmission::new(1, 16 << 20).unwrap();
         let job = Arc::new(admission.reserve(0).unwrap());
@@ -1394,6 +1406,10 @@ mod tests {
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let address = QueueAddress {
             tenant: "tenant\0雪".into(),
@@ -1618,6 +1634,10 @@ mod tests {
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let admission = QueueAdmission::new(2, 16 << 20).unwrap();
         let job = Arc::new(admission.reserve(0).unwrap());
@@ -1794,6 +1814,10 @@ mod tests {
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let admission = QueueAdmission::new(3, 16 << 20).unwrap();
         let first = Arc::new(admission.reserve(0).unwrap());

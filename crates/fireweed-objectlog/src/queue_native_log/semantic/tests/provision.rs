@@ -301,6 +301,10 @@ async fn provision_exhausted_adoption_capacity_precedes_namespace_io() {
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let definition =
             AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), &job).unwrap();
@@ -708,6 +712,7 @@ pub(super) async fn append_work_group(
         }],
         work_updates: vec![],
         administration: None,
+        issued_at: 0,
     };
     let queue_limits = fireweed_core::queue_contract::QueueLimits::default();
     let plan = fireweed_engine::queue_source_index::load_group_preimage(
@@ -799,6 +804,10 @@ async fn historical_genesis_adoption_survives_a_later_append_during_frame_read_r
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let definition = Arc::new(
             AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), &job).unwrap(),
@@ -1009,6 +1018,10 @@ async fn cancelled_public_provision_adoption_keeps_read_owners_and_reuses_ledger
             state: Default::default(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         };
         let definition = Arc::new(
             AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), &job).unwrap(),
@@ -1233,6 +1246,10 @@ async fn winner_during_acquisition_recovery_contract(
         state: Default::default(),
         progress_bound_nanos: 1,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     };
     let definition = Arc::new(
         AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), &job).unwrap(),

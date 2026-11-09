@@ -412,6 +412,10 @@ fn fixture_contents(
         state: BTreeMap::new(),
         progress_bound_nanos: 1,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     };
     if universe {
         schema.state.insert("state".into(), schema.work.clone());
@@ -602,6 +606,7 @@ fn request(queue: &QueueAddress, predicate: Predicate) -> ClaimRequest {
         max_bytes: 1 << 20,
         fields: None,
         include_body: false,
+        issued_at: 0,
     }
 }
 #[test]

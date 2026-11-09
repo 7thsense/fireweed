@@ -233,6 +233,7 @@ async fn round_trip(queue: &Queue, queue_address: QueueAddress) {
                 suite::item("a", "job", 1, 10),
                 suite::item("b", "job", 2, 20),
             ],
+            issued_at: 0,
         })
         .await
         .unwrap();

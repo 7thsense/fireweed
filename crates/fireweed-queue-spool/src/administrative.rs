@@ -587,6 +587,10 @@ pub(super) mod tests {
             state: BTreeMap::new(),
             progress_bound_nanos: 1_000_000_000,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         }
     }
     pub(crate) fn run_scan(
@@ -638,6 +642,7 @@ pub(super) mod tests {
             state_updates: vec![],
             work_updates: vec![],
             work_inserts: vec![],
+            issued_at: 0,
         };
         let intent = AdministrativeIntent {
             evaluated_at: 0,
@@ -786,6 +791,7 @@ pub(super) mod tests {
                 state_updates: vec![],
                 work_updates: vec![],
                 work_inserts: vec![],
+                issued_at: 0,
             };
             let intent = AdministrativeIntent {
                 evaluated_at: 0,

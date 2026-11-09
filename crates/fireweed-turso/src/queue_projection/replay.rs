@@ -301,7 +301,8 @@ mod tests {
             let _definition_charge=definition_charge;
             let writer=task_projection.writer.lock().await;let connection=writer.as_ref().unwrap();
             let mut request=ClaimRequest {queue:QueueAddress {tenant:"t".into(),queue:"q".into()},request_id:"i".into(),filter:Filter::default(),order:ClaimOrder::PriorityAscending,
-                eligible_at:0,lease_nanos:1_000_000,max_records:128,max_bytes:4096,fields:None,include_body:false};
+                eligible_at:0,lease_nanos:1_000_000,max_records:128,max_bytes:4096,fields:None,include_body:false, issued_at: 0,
+};
             let mut charges=Vec::new();let mut total=0;
             // 128 retained records omit one absent 80-KiB schema name each.
             let mut records=Vec::new();

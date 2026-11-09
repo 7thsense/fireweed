@@ -81,6 +81,7 @@ async fn caller_drop_still_completes_the_operation_durably() {
         request_id: "dropped-caller".into(),
         mode: InsertMode::InsertOnly,
         items: vec![suite::item("dropped", "counts", 0, 0)],
+        issued_at: 0,
     };
     let caller = tokio::spawn({
         let a = a.clone();

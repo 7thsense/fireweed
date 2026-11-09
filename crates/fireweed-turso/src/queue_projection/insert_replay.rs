@@ -213,6 +213,7 @@ mod tests {
             request_id: "seed".into(),
             mode: InsertMode::InsertOnly,
             items: vec![work("a", 1, true), work("b", 2, false)],
+            issued_at: 0,
         };
         let original = vec![
             InsertOutcome::Inserted {
@@ -277,6 +278,7 @@ mod tests {
             request_id: "upsert".into(),
             mode: InsertMode::Upsert,
             items: vec![work("a", 3, false), work("b", 2, false)],
+            issued_at: 0,
         };
         snapshot
             .unique_probes_loaded

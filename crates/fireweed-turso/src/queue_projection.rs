@@ -1590,6 +1590,10 @@ mod tests {
             state: [("workflow".into(), state)].into(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         }
     }
     pub(super) fn work(key: &str, u: i64, opaque: bool) -> NewWork {
@@ -1725,6 +1729,7 @@ mod tests {
             request_id: "seed".into(),
             items: vec![work("a", 1, opaque), work("b", 2, false)],
             mode: InsertMode::InsertOnly,
+            issued_at: 0,
         };
         snapshot.unique_probes_loaded =
             insert_unique_probes(&request.items, &snapshot, &schema).unwrap();
@@ -1762,6 +1767,7 @@ mod tests {
             work_inserts: vec![],
             work_updates: vec![],
             administration: None,
+            issued_at: 0,
         }
     }
     #[tokio::test]
@@ -2764,6 +2770,7 @@ mod tests {
             max_bytes: 1 << 20,
             fields: Some(Default::default()),
             include_body: false,
+            issued_at: 0,
         };
         claim_fixture_with_request(input, bad_priority, request)
     }
@@ -2928,6 +2935,7 @@ mod tests {
             max_bytes: 4096,
             fields: None,
             include_body: true,
+            issued_at: 0,
         };
         let (record, mut claimed, _, _) = claim_fixture_with_request(
             ClaimFixture {
@@ -3238,6 +3246,7 @@ mod tests {
             max_bytes: 4096,
             fields: None,
             include_body: true,
+            issued_at: 0,
         };
         let (record, _, _, _) = claim_fixture_with_request(
             ClaimFixture {
@@ -3416,6 +3425,7 @@ mod tests {
             max_bytes: 4096,
             fields: Some(Default::default()),
             include_body: false,
+            issued_at: 0,
         };
         let cases = vec![
             (Predicate::Equal(FieldValue::Integer(1)), vec!["a"]),
@@ -3727,6 +3737,7 @@ mod tests {
             max_bytes: 4096,
             fields: Some(Default::default()),
             include_body: false,
+            issued_at: 0,
         };
         assert_eq!(
             select_fixture(
@@ -3823,6 +3834,7 @@ mod tests {
             max_bytes: 4096,
             fields: Some(Default::default()),
             include_body: false,
+            issued_at: 0,
         };
         assert_eq!(
             select_fixture(
@@ -3924,6 +3936,7 @@ mod tests {
             max_bytes: 4096,
             fields: Some(Default::default()),
             include_body: false,
+            issued_at: 0,
         };
         let (record, claimed, _, _) = claim_fixture_with_request(
             ClaimFixture {
@@ -3962,6 +3975,7 @@ mod tests {
             max_bytes: 4096,
             fields: Some(Default::default()),
             include_body: false,
+            issued_at: 0,
         };
         let (record, _, _, _) = claim_fixture_with_request(
             ClaimFixture {

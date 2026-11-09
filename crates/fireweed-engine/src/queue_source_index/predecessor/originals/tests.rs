@@ -36,6 +36,10 @@ fn fixture() -> Fixture {
         state: Default::default(),
         progress_bound_nanos: 1,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     };
     let definition =
         AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), &job).unwrap();
@@ -91,6 +95,7 @@ fn ordinary(f: &Fixture, identities: &[(u8, &str)]) -> OwnedQueueLogRecord {
                 fields: Default::default(),
                 body: Default::default(),
             }],
+            issued_at: 0,
         })
         .collect();
     let insert_outcomes: Vec<_> = identities
@@ -153,6 +158,7 @@ fn claim(f: &Fixture, id: &str) -> OwnedQueueLogRecord {
         max_bytes: 1024,
         fields: None,
         include_body: true,
+        issued_at: 0,
     };
     let receipt = crate::queue_claim_receipt::encode_claim_receipt(&[], 1 << 20, &f.job).unwrap();
     let wrapper = crate::queue_claim_publication::encode_claim_publication(
@@ -710,6 +716,7 @@ fn two_lease_claim_retains_complete_receipt_in_priority_order_as_one_original() 
             max_bytes: 1 << 20,
             fields: None,
             include_body: true,
+            issued_at: 0,
         };
         let receipt =
             crate::queue_claim_receipt::encode_claim_receipt(&leases, 1 << 20, &f.job).unwrap();

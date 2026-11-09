@@ -441,6 +441,7 @@ mod tests {
                 max_bytes: 4 << 20,
                 fields: None,
                 include_body: true,
+                issued_at: 0,
             }
         }
         fn input(&self, request: ClaimRequest, offset: u64, epoch: u64) -> ClaimReplayInput {
@@ -1015,6 +1016,7 @@ mod tests {
                 body: bytes::Bytes::new(),
             }],
             mode: InsertMode::InsertOnly,
+            issued_at: 0,
         };
         snapshot.unique_probes_loaded =
             insert_unique_probes(&insert.items, &snapshot, f.definition.schema()).unwrap();

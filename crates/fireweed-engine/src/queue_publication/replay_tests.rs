@@ -794,6 +794,7 @@ fn decoded_insert_and_rejected_receipts_replay() {
             request_id: request_id.into(),
             mode,
             items: items.clone(),
+            issued_at: 0,
         };
         let before = image.snapshot.clone();
         let mut expected = before.clone();

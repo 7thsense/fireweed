@@ -32,6 +32,10 @@ pub fn schema() -> QueueSchema {
         )]),
         progress_bound_nanos: 1_000_000_000,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     }
 }
 pub fn item(key: &str, kind: &str, priority: i64, score: i64) -> NewWork {
@@ -55,6 +59,7 @@ pub fn group(id: &str) -> CommitGroup {
         state_updates: vec![],
         work_inserts: vec![],
         work_updates: vec![],
+        issued_at: 0,
     }
 }
 pub fn filter(kind: &str) -> Filter {
@@ -78,6 +83,7 @@ pub fn claim(queue: &QueueAddress, id: &str, kind: &str) -> ClaimRequest {
         max_bytes: 1 << 20,
         fields: None,
         include_body: true,
+        issued_at: 0,
     }
 }
 pub fn update(work: &ClaimedWork) -> ClaimedUpdate {
@@ -132,6 +138,7 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) -> CommitBatch {
             item("high", "matching", 8, 3),
             item("foreign", "foreign", -100, 1),
         ],
+        issued_at: 0,
     };
     let first = store.insert(insert.clone()).await.unwrap();
     assert_eq!(first.len(), 3);
@@ -506,6 +513,7 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) -> CommitBatch {
             request_id: "terminal-upsert".into(),
             mode: InsertMode::Upsert,
             items: vec![item("foreign", "foreign", 0, 1)],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -526,6 +534,7 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) -> CommitBatch {
             request_id: "unique".into(),
             mode: InsertMode::InsertOnly,
             items: vec![unique],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -590,6 +599,7 @@ pub async fn competing_claims_with_handoff(
         request_id: "seed-race".into(),
         mode: InsertMode::InsertOnly,
         items,
+        issued_at: 0,
     })
     .await
     .unwrap();
@@ -648,6 +658,7 @@ pub async fn expiry_and_administration(
             request_id: "seed-expiry".into(),
             mode: InsertMode::InsertOnly,
             items: vec![item("expiring", "expiry", 0, 0)],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -793,6 +804,7 @@ pub async fn ordered_long_values_and_cursor_scope(store: &dyn QueueStore, queue:
             request_id: "long-seed".into(),
             mode: InsertMode::InsertOnly,
             items,
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -938,6 +950,7 @@ pub async fn predicate_and_order_oracles(store: &dyn QueueStore, queue: QueueAdd
                 request_id: format!("seed-{field}"),
                 mode: InsertMode::InsertOnly,
                 items: items.clone(),
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -1062,6 +1075,7 @@ pub async fn predicate_and_order_oracles(store: &dyn QueueStore, queue: QueueAdd
             request_id: "order-seed".into(),
             mode: InsertMode::InsertOnly,
             items: ordered,
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -1196,6 +1210,7 @@ pub async fn ordered_groups_sparse_stats_and_replay_precedence(
                 sparse,
                 item("early", "groups", 0, 1),
             ],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -1283,6 +1298,7 @@ pub async fn ordered_groups_sparse_stats_and_replay_precedence(
                     item(&format!("{kind}-a"), kind, 0, 0),
                     item(&format!("{kind}-b"), kind, 0, 1),
                 ],
+                issued_at: 0,
             })
             .await
             .unwrap();
@@ -1369,6 +1385,7 @@ pub async fn unrestricted_names_obey_response_bounds(store: &dyn QueueStore, que
             request_id: "named-seed".into(),
             mode: InsertMode::InsertOnly,
             items,
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -1484,6 +1501,7 @@ pub async fn prepare_process_loss(
         request_id: "crash-seed".into(),
         mode: InsertMode::InsertOnly,
         items: vec![item("crash-source", "source", 0, 0)],
+        issued_at: 0,
     };
     assert!(matches!(
         store.insert(seed).await.unwrap()[0],
@@ -1645,6 +1663,7 @@ pub async fn ordered_insert_uniqueness(store: &dyn QueueStore, queue: QueueAddre
             request_id: "vector-seed".into(),
             mode: InsertMode::InsertOnly,
             items: vec![target("a", "x"), target("external", "z")],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -1663,6 +1682,7 @@ pub async fn ordered_insert_uniqueness(store: &dyn QueueStore, queue: QueueAddre
             target("d", "z"),
             target("e", "free"),
         ],
+        issued_at: 0,
     };
     let result = store.insert(request.clone()).await.unwrap();
     assert!(matches!(result[0], InsertOutcome::Replaced { .. }));
@@ -1727,6 +1747,7 @@ pub async fn shrinking_upsert_index_amplification(store: &dyn QueueStore, queue:
             request_id: "large-index-seed".into(),
             mode: InsertMode::InsertOnly,
             items: vec![old.clone()],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -1738,6 +1759,7 @@ pub async fn shrinking_upsert_index_amplification(store: &dyn QueueStore, queue:
             request_id: "small-index-upsert".into(),
             mode: InsertMode::Upsert,
             items: vec![replacement],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -1749,6 +1771,7 @@ pub async fn shrinking_upsert_index_amplification(store: &dyn QueueStore, queue:
             request_id: "released-index-insert".into(),
             mode: InsertMode::InsertOnly,
             items: vec![old],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -1807,6 +1830,7 @@ pub async fn indexed_additional_attributes(store: &dyn QueueStore, queue: QueueA
             request_id: "attribute-seed".into(),
             mode: InsertMode::InsertOnly,
             items: vec![a, b, c, d],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -2059,6 +2083,7 @@ pub async fn indexed_additional_attributes(store: &dyn QueueStore, queue: QueueA
             request_id: "attribute-replace".into(),
             mode: InsertMode::Upsert,
             items: vec![replacement],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -2112,7 +2137,8 @@ pub async fn indexed_additional_attributes(store: &dyn QueueStore, queue: QueueA
                 queue,
                 request_id: "attribute-invalid".into(),
                 mode: InsertMode::InsertOnly,
-                items: vec![invalid]
+                items: vec![invalid],
+                issued_at: 0,
             })
             .await,
         Err(QueueError::Invalid(_))
@@ -2152,6 +2178,7 @@ pub async fn numeric_bucket_stats(store: &dyn QueueStore, clock: &TestClock, que
             request_id: "bucket-seed".into(),
             mode: InsertMode::InsertOnly,
             items,
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -2322,6 +2349,7 @@ pub async fn atomic_administration_preview_and_replay(store: &dyn QueueStore, qu
                 item("control", "control", 0, 1),
                 item("worker", "worker", 0, 2),
             ],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -2513,6 +2541,7 @@ pub async fn administrative_size_siblings_and_preflight(
             request_id: "seed".into(),
             mode: InsertMode::InsertOnly,
             items: vec![item("first", "first", 0, 0), wide],
+            issued_at: 0,
         })
         .await
         .unwrap();
@@ -2701,6 +2730,7 @@ pub async fn broad_administration_exceeds_input_chunk(store: &dyn QueueStore, qu
                 items: (start..(start + 1000).min(5001))
                     .map(|n| item(&format!("bulk-{n:05}"), "bulk", 0, n))
                     .collect(),
+                issued_at: 0,
             })
             .await
             .unwrap();

@@ -785,6 +785,10 @@ mod tests {
             state: BTreeMap::new(),
             progress_bound_nanos: 1_000_000_000,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         }
     }
     pub(super) fn row() -> StoredWork {
@@ -1494,6 +1498,7 @@ mod tests {
             state_updates: vec![],
             work_inserts: vec![],
             work_updates: vec![],
+            issued_at: 0,
         }
     }
     pub(super) fn source() -> crate::queue_planner::RecordSnapshot {

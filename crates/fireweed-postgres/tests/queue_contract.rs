@@ -62,6 +62,7 @@ async fn condition_checks_use_metadata_admission_and_preserve_unique_owners() {
         }],
         work_updates: vec![],
         administration: None,
+        issued_at: 0,
     };
     assert!(matches!(
         seed.commit(CommitBatch {
@@ -85,6 +86,7 @@ async fn condition_checks_use_metadata_admission_and_preserve_unique_owners() {
             max_bytes: 65536,
             fields: Some(BTreeSet::new()),
             include_body: false,
+            issued_at: 0,
         })
         .await
         .unwrap()

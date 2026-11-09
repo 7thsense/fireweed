@@ -993,6 +993,10 @@ mod tests {
             state: BTreeMap::from([("instances".into(), def)]),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         }
     }
     pub(super) fn queue() -> QueueAddress {
@@ -1009,6 +1013,7 @@ mod tests {
             state_updates: vec![],
             work_updates: vec![],
             work_inserts: vec![],
+            issued_at: 0,
         }
     }
     #[test]
@@ -1256,7 +1261,7 @@ mod tests {
         let hash = sha2::Sha256::digest(bytes);
         assert_eq!(
             hash.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-            "aaf900b5512de2f9d137a24310256c48654c89ad8c1b5766a056319b754696b2"
+            "85912939bb2d44c3aaa2c4eeb4db47a2c9bf6df9a0cf755ae1f374e99970cb7a"
         );
         drop(frame);
         assert_eq!(admission.usage().unwrap(), (1, 1));
@@ -1395,6 +1400,7 @@ mod tests {
             request_id: "insert".into(),
             mode: InsertMode::InsertOnly,
             items: seed().work_inserts,
+            issued_at: 0,
         };
         let outcomes = vec![InsertOutcome::Rejected {
             key: request.items[0].key.clone(),

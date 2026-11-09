@@ -297,6 +297,7 @@ mod tests {
                 state_updates: vec![],
                 work_inserts: vec![],
                 work_updates: vec![],
+                issued_at: 0,
             };
             let change = match step {
                 0 => UnclaimedChange::Patch(WorkPatch {
@@ -407,6 +408,7 @@ mod tests {
             state_updates: vec![],
             work_inserts: vec![],
             work_updates: vec![],
+            issued_at: 0,
         };
         let result = CommitReceipt {
             request_id: id,

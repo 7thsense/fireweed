@@ -664,6 +664,7 @@ mod tests {
             state_updates: vec![],
             work_inserts: vec![],
             work_updates: vec![],
+            issued_at: 0,
         }
     }
     fn fixture() -> Fixture {
@@ -1168,7 +1169,7 @@ mod tests {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>(),
-            "e89687ff3a745a648dfd204a47340dda6530c58c5ee5de3e73c69002c52b95a2"
+            "cb90a91d8c9ac87745000358bdcaa65ff754570d23d35e18bdf74686f85bff6f"
         );
         assert!(view_publication(frame.as_bytes()).is_err());
         assert!(scan_publication(frame.as_bytes()).is_err());

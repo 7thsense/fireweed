@@ -110,6 +110,7 @@ fn insert_of(
             request_id: id.into(),
             mode,
             items,
+            issued_at: 0,
         },
     );
     Box::pin(async move { store.insert(request).await })

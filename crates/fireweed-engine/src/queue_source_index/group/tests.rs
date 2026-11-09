@@ -48,6 +48,10 @@ fn fixture_with_work_schema(
         state: BTreeMap::from([("s".into(), collection)]),
         progress_bound_nanos: 1,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     };
     let definition =
         AdmittedQueueDefinition::from_raw(&encode_definition(&schema).unwrap(), &job).unwrap();

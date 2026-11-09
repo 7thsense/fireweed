@@ -527,6 +527,10 @@ mod tests {
             .into(),
             progress_bound_nanos: 1,
             max_attempts: 3,
+            retention: fireweed_core::queue_contract::QueueRetention {
+                request_id_nanos: 86_400_000_000_000,
+                deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+            },
         }
     }
     fn genesis(job: &Arc<QueueReservation>) -> (AdmittedQueueDefinition, OwnedQueueLogRecord) {
@@ -576,6 +580,7 @@ mod tests {
                 expect,
                 change,
             }],
+            issued_at: 0,
         };
         let before = snapshot.clone();
         let mut delta = plan_commit_group(&group, snapshot, 0, &schema()).unwrap();
@@ -1005,6 +1010,7 @@ mod tests {
                     change: StateChange::Check,
                 })
                 .collect(),
+            issued_at: 0,
         };
         let mut multi = make_group("multi", Some("instances"));
         let mut other_key = multi.state_updates[0].clone();
@@ -1132,6 +1138,7 @@ mod tests {
                 expect: StateExpect::Version(1),
                 change: StateChange::Check,
             }],
+            issued_at: 0,
         };
         let mut history = ColdQueueHistory::new(&request.queue, &job).unwrap();
         let mut states = ColdStateTracker::new(&request, &job).unwrap();

@@ -283,8 +283,8 @@ async fn malformed_source(
             )
         };
         // Same-length, structurally valid schema with forbidden max_attempts=0.
-        assert_eq!(raw[offset + length - 1], 3);
-        raw[offset + length - 1] = 0;
+        assert_eq!(raw[offset + length - 9], 3);
+        raw[offset + length - 9] = 0;
         assert!(
             fireweed_engine::queue_schema_codec::decode_definition(&raw[offset..offset + length])
                 .is_err()

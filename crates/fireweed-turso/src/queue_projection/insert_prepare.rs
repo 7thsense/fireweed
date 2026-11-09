@@ -168,6 +168,7 @@ impl NativeTransactionWork for Worker {
             state_updates: vec![],
             work_inserts: request.items.clone(),
             work_updates: vec![],
+            issued_at: 0,
         };
         self.charges.push(
             self.job.owned_buffer(
@@ -330,6 +331,7 @@ mod tests {
             request_id: "upsert-ordered".into(),
             mode: InsertMode::Upsert,
             items: vec![work("a", 3, false), work("b", 3, false)],
+            issued_at: 0,
         };
         let prepared = projection
             .prepare_insert(
@@ -434,6 +436,7 @@ mod tests {
             request_id: "reinsert-highwater".into(),
             mode: InsertMode::InsertOnly,
             items: vec![work("a", 4, false)],
+            issued_at: 0,
         };
         let prepared = projection
             .prepare_insert(
@@ -471,6 +474,7 @@ mod tests {
             request_id: "panic-fresh".into(),
             mode: InsertMode::InsertOnly,
             items: vec![work("c", 5, false)],
+            issued_at: 0,
         };
         projection
             .panic_after_command
@@ -533,6 +537,7 @@ mod tests {
             request_id: "probe-original-owner".into(),
             mode: InsertMode::InsertOnly,
             items: vec![work("c", 1, false)],
+            issued_at: 0,
         };
         for (sql, params, restore, restore_params) in [
             (
@@ -606,6 +611,7 @@ mod tests {
             request_id: "wrong-stored-type".into(),
             mode: InsertMode::Upsert,
             items: vec![work("a", 3, false)],
+            issued_at: 0,
         };
         assert!(matches!(
             projection

@@ -25,6 +25,7 @@ fn group(id: &str, key: &str) -> CommitGroup {
                 ..Default::default()
             }),
         }],
+        issued_at: 0,
     }
 }
 fn schema() -> QueueSchema {
@@ -38,6 +39,10 @@ fn schema() -> QueueSchema {
         state: Default::default(),
         progress_bound_nanos: 1,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     }
 }
 #[test]
