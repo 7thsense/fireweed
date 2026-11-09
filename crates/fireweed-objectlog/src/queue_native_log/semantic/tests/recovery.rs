@@ -52,12 +52,8 @@ fn exhausted(budget: &QueueNativeSourceBudget) {
 async fn recovery_contract(log: QueueNativeLog) {
     let admission = QueueAdmission::new(1, 32 << 20).unwrap();
     let job = Arc::new(admission.reserve(0).unwrap());
-    let raw = super::provision::legacy_definition_bytes();
+    let raw = super::provision::definition_bytes();
     let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
-    let modern =
-        AdmittedQueueDefinition::from_raw(&encode_definition(definition.schema()).unwrap(), &job)
-            .unwrap();
-    assert_ne!(definition.pin(), modern.pin());
     let address = QueueAddress {
         tenant: "tenant".into(),
         queue: "queue\0α".into(),
@@ -182,7 +178,6 @@ async fn recovery_contract(log: QueueNativeLog) {
         acquired_budget,
         genesis,
         definition,
-        modern,
     ));
     log.shutdown().await.unwrap();
     drop((log, job));

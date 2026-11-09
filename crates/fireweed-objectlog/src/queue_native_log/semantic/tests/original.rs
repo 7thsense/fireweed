@@ -19,8 +19,7 @@ async fn seeded(
         queue: "original\0queue".into(),
     };
     let definition =
-        AdmittedQueueDefinition::from_raw(&super::provision::legacy_definition_bytes(), job)
-            .unwrap();
+        AdmittedQueueDefinition::from_raw(&super::provision::definition_bytes(), job).unwrap();
     let genesis = log
         .provision_record(
             &address,

@@ -54,7 +54,6 @@ CREATE TABLE IF NOT EXISTS fireweed_api007.records (
  lifecycle SMALLINT NOT NULL DEFAULT 0, priority BIGINT NOT NULL DEFAULT 0, available_at BIGINT NOT NULL DEFAULT 0,
  eligible_since BIGINT NOT NULL DEFAULT 0, attempts BIGINT NOT NULL DEFAULT 0, lease_until BIGINT, lease_hash BYTEA,
  insertion_sequence NUMERIC(20,0) NOT NULL DEFAULT 0, deleted_at BIGINT);
-ALTER TABLE fireweed_api007.records ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
 CREATE INDEX IF NOT EXISTS record_key_probe ON fireweed_api007.records(queue_id,collection,key_hash);
 CREATE INDEX IF NOT EXISTS claim_priority ON fireweed_api007.records(queue_id,priority,insertion_sequence) WHERE active AND collection=0;
 CREATE INDEX IF NOT EXISTS claim_due ON fireweed_api007.records(queue_id,available_at,insertion_sequence) WHERE active AND collection=0;

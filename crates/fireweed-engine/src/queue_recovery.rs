@@ -208,8 +208,8 @@ mod tests {
             tenant: "t\0β".into(),
             queue: "q/λ".into(),
         };
-        let legacy = [0, 0, 0, 0, 1, 3];
-        let definition = AdmittedQueueDefinition::from_raw(&legacy, &job).unwrap();
+        let raw = encode_definition(&schema()).unwrap();
+        let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
         let genesis = encode_genesis(7, &address, &definition, &[19; 32], 4096, &job).unwrap();
         let before = RecordSnapshot::default();
         let delta = combine_deltas(&[], 0).unwrap();
@@ -219,7 +219,7 @@ mod tests {
         let mut history = ColdQueueHistory::new(&address, &job).unwrap();
         assert!(history.definition().is_err());
         history.observe(0, genesis.bytes()).unwrap();
-        assert_eq!(history.definition().unwrap().raw(), legacy);
+        assert_eq!(history.definition().unwrap().raw(), raw);
         assert_eq!(history.cursor_secret().unwrap(), &[19; 32]);
         for (offset, version) in [(1, b'1'), (2, b'2')] {
             let mut raw = frame.as_bytes().to_vec();
@@ -267,10 +267,10 @@ mod tests {
             assert!(history.observe(1, publication.bytes()).is_err());
             assert_eq!(history.next_offset(), 1);
         }
-        // Semantically equivalent modern definition still has a different raw pin.
-        let legacy = AdmittedQueueDefinition::from_raw(&[0, 0, 0, 0, 1, 3], &job).unwrap();
+        // A publication pinned to different definition bytes is refused.
+        let other_pin = crate::queue_schema_codec::DefinitionPin::from_persisted_bytes(b"other");
         let wrong =
-            encode_publication_pinned(&address, legacy.pin(), &before, &delta, &[], 4096, &job)
+            encode_publication_pinned(&address, other_pin, &before, &delta, &[], 4096, &job)
                 .unwrap();
         let wrong = encode_publication_record(8, wrong.as_bytes(), 4096, &job).unwrap();
         let mut history = ColdQueueHistory::new(&address, &job).unwrap();

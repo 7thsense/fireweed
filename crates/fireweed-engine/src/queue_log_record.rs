@@ -1138,14 +1138,11 @@ mod tests {
         assert_eq!(admission.usage().unwrap(), (1, 0));
     }
     #[test]
-    fn exact_legacy_definition_bytes_and_job_ownership_are_preserved() {
+    fn exact_definition_bytes_and_job_ownership_are_preserved() {
         let job = job();
-        let raw = [0, 0, 0, 0, 1, 3];
-        let legacy = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
-        let modern_raw = encode_definition(legacy.schema()).unwrap();
-        let modern = AdmittedQueueDefinition::from_raw(&modern_raw, &job).unwrap();
-        assert_ne!(legacy.pin(), modern.pin());
-        let encoded = encode_genesis(1, &address(), &legacy, &[1; 32], 4096, &job).unwrap();
+        let raw = encode_definition(&schema()).unwrap();
+        let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
+        let encoded = encode_genesis(1, &address(), &definition, &[1; 32], 4096, &job).unwrap();
         let view = encoded.view().unwrap();
         let QueueLogPayload::Genesis(genesis) = view.payload() else {
             panic!("genesis")
@@ -1153,10 +1150,10 @@ mod tests {
         assert_eq!(genesis.definition_bytes(), raw);
         assert_eq!(
             genesis.validate_definition(&job).unwrap().pin(),
-            legacy.pin()
+            definition.pin()
         );
         let other = Arc::new(QueueAdmission::new(1, 1 << 20).unwrap().reserve(0).unwrap());
-        assert!(encode_genesis(1, &address(), &legacy, &[1; 32], 4096, &other).is_err());
+        assert!(encode_genesis(1, &address(), &definition, &[1; 32], 4096, &other).is_err());
     }
     #[test]
     fn publication_dispatch_uses_existing_readers_and_retains_exact_bytes() {

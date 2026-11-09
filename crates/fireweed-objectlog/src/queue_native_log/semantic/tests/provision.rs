@@ -1,44 +1,30 @@
 use super::*;
 use crate::queue_native_log::tests::{provision_limits, source_budget};
-use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Serialize)]
-struct LegacyDefinition {
-    fields: BTreeMap<String, fireweed_core::queue_contract::FieldType>,
-    indexes: BTreeMap<String, Vec<String>>,
-    unique_indexes: BTreeSet<String>,
-}
-#[derive(Serialize)]
-struct LegacySchema {
-    work: LegacyDefinition,
-    state: BTreeMap<String, LegacyDefinition>,
-    progress_bound_nanos: u64,
-    max_attempts: u32,
-}
-pub(super) fn legacy_definition_bytes() -> Vec<u8> {
-    fireweed_engine::queue_storage_layout::encode(&LegacySchema {
-        work: LegacyDefinition {
+pub(super) fn definition_bytes() -> Vec<u8> {
+    encode_definition(&QueueSchema {
+        work: CollectionDefinition {
             fields: BTreeMap::new(),
             indexes: BTreeMap::new(),
             unique_indexes: BTreeSet::new(),
+            additional_field_prefixes: BTreeSet::new(),
         },
         state: BTreeMap::new(),
         progress_bound_nanos: 1,
         max_attempts: 3,
+        retention: fireweed_core::queue_contract::QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: fireweed_core::queue_contract::DeletedKeyPolicy::Reusable,
+        },
     })
     .unwrap()
 }
 async fn provision_contract(log: QueueNativeLog) {
     let admission = QueueAdmission::new(1, 32 << 20).unwrap();
     let job = Arc::new(admission.reserve(0).unwrap());
-    let legacy = legacy_definition_bytes();
-    let persisted = AdmittedQueueDefinition::from_raw(&legacy, &job).unwrap();
-    let modern =
-        AdmittedQueueDefinition::from_raw(&encode_definition(persisted.schema()).unwrap(), &job)
-            .unwrap();
-    assert_ne!(persisted.pin(), modern.pin());
-    assert_eq!(persisted.schema(), modern.schema());
+    let raw = definition_bytes();
+    let persisted = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
     let address = QueueAddress {
         tenant: "tenant".into(),
         queue: "queue\0α".into(),
@@ -160,7 +146,7 @@ async fn provision_contract(log: QueueNativeLog) {
         .provision_record(
             &address,
             QueueNativeGenesisIntent {
-                definition: &modern,
+                definition: &persisted,
                 candidate_secret: &[99; 32],
                 known_queue: true,
             },
@@ -187,7 +173,7 @@ async fn provision_contract(log: QueueNativeLog) {
         panic!()
     };
     assert_eq!(genesis.cursor_secret(), &[7; 32]);
-    assert_eq!(genesis.definition_bytes(), legacy);
+    assert_eq!(genesis.definition_bytes(), raw);
     let observed = log
         .capture_source(source.retained_namespace(&address, &job).unwrap(), &job)
         .await
@@ -213,7 +199,6 @@ async fn provision_contract(log: QueueNativeLog) {
         adopted,
         observed,
         source,
-        modern,
         persisted,
         budget,
         adoption_budget,
