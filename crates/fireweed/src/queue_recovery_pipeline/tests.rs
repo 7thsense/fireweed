@@ -311,6 +311,13 @@ async fn native_port_identical_contract(s3: bool) {
     suite::retired_keys_refuse_reinsert_within_window(&queue, &clock, address("retired-keys"))
         .await;
     suite::reusable_keys_reinsert_at_once(&queue, &clock, address("reusable-keys")).await;
+    suite::retired_keys_cover_every_deletion_route(
+        &queue,
+        &clock,
+        address("retired-routes"),
+        cfg!(target_os = "linux"),
+    )
+    .await;
     eprintln!("native contract {s3}: unrestricted_names_obey_response_bounds");
     suite::unrestricted_names_obey_response_bounds(&queue, address("names-bounds")).await;
     eprintln!("native contract {s3}: atomic_administration_preview_and_replay");

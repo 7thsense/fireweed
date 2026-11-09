@@ -3211,19 +3211,176 @@ pub async fn reusable_keys_reinsert_at_once(
     }
 }
 
+/// The ways a work key can be deleted. Each stamps the deleting group's
+/// `issued_at` as the key's deletion time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeletionRoute {
+    /// A claimed update with `Disposition::Delete`.
+    Claimed,
+    /// An `UnclaimedChange::Delete` work update.
+    Unclaimed,
+    /// An administrative delete addressed by key.
+    AdministrativeAddressed,
+    /// An administrative delete selected by a filter, through the broad route.
+    AdministrativeSelected,
+}
+const DELETION_ROUTES: [DeletionRoute; 4] = [
+    DeletionRoute::Claimed,
+    DeletionRoute::Unclaimed,
+    DeletionRoute::AdministrativeAddressed,
+    DeletionRoute::AdministrativeSelected,
+];
+impl DeletionRoute {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Claimed => "route-claimed",
+            Self::Unclaimed => "route-unclaimed",
+            Self::AdministrativeAddressed => "route-addressed",
+            Self::AdministrativeSelected => "route-selected",
+        }
+    }
+}
+/// Seeds `route`'s key at version 1 and deletes it with a group issued at
+/// `deleted_at`, returning the version the deletion committed. The clock and the
+/// administrative `evaluated_at` deliberately differ from `deleted_at`.
+async fn delete_by_route(
+    store: &dyn QueueStore,
+    queue: &QueueAddress,
+    route: DeletionRoute,
+    deleted_at: i64,
+) -> u64 {
+    use fireweed_core::queue_administration::*;
+    let key = route.key();
+    let id = format!("route-delete-{key}");
+    if route == DeletionRoute::Claimed {
+        store
+            .insert(insert_request(
+                queue,
+                &format!("{id}-seed"),
+                InsertMode::InsertOnly,
+                key,
+                deleted_at,
+            ))
+            .await
+            .unwrap();
+        return claim_and_delete(store, queue, key, &id, deleted_at).await;
+    }
+    // Not of the claimed kind, so no claim leases it.
+    let mut seed = insert_request(
+        queue,
+        &format!("{id}-seed"),
+        InsertMode::InsertOnly,
+        key,
+        deleted_at,
+    );
+    seed.items = vec![item(key, "administered", 0, 0)];
+    assert_eq!(inserted_version(&store.insert(seed).await.unwrap()), 1);
+    let mut deletion = group(&id);
+    deletion.issued_at = deleted_at;
+    let administrative = |operation| {
+        Some(AdministrativeCommit {
+            max_result_bytes: 4096,
+            intent: AdministrativeIntent {
+                evaluated_at: 0,
+                before_fields: None,
+                operation,
+            },
+        })
+    };
+    match route {
+        DeletionRoute::Claimed => unreachable!("handled above"),
+        DeletionRoute::Unclaimed => deletion.work_updates.push(UnclaimedUpdate {
+            key: key.into(),
+            expect: StateExpect::Version(1),
+            change: UnclaimedChange::Delete,
+        }),
+        DeletionRoute::AdministrativeAddressed => {
+            deletion.administration = administrative(AdministrativeOperation::Addressed(vec![
+                AdministrativeEntry {
+                    key: key.into(),
+                    expected_version: Some(1),
+                    precondition: WorkSelector::all(vec![]),
+                    action: AdministrativeAction::Delete {
+                        lease_guard: AdministrativeLeaseGuard::RejectActive,
+                    },
+                },
+            ]))
+        }
+        DeletionRoute::AdministrativeSelected => {
+            deletion.administration = administrative(AdministrativeOperation::SelectFirst(vec![
+                AdministrativeClause {
+                    id: "delete".into(),
+                    selector: WorkSelector::leaf(SelectorNode::Keys(BTreeSet::from([key.into()]))),
+                    precondition: WorkSelector::all(vec![]),
+                    action: AdministrativeAction::Delete {
+                        lease_guard: AdministrativeLeaseGuard::RejectActive,
+                    },
+                },
+            ]))
+        }
+    }
+    match commit_one(store, queue, deletion).await.unwrap().outcome {
+        GroupOutcome::Committed { versions } => versions[0].version,
+        GroupOutcome::AdministrativeCommitted {
+            versions,
+            administration,
+        } => {
+            assert!(versions.is_empty(), "{route:?}: {versions:?}");
+            match route {
+                DeletionRoute::AdministrativeAddressed => match administration.items[0].outcome {
+                    AdministrativeOutcome::Deleted { version } => version,
+                    ref other => panic!("{route:?} not deleted: {other:?}"),
+                },
+                _ => {
+                    assert_eq!(administration.histogram.matched, 1);
+                    assert_eq!(
+                        administration.clauses[0].histogram.outcomes
+                            [&AdministrativeOutcomeKind::Deleted],
+                        1
+                    );
+                    // A broad delete reports counts only; the version after the
+                    // seed is the next one.
+                    2
+                }
+            }
+        }
+        other => panic!("{route:?} not committed: {other:?}"),
+    }
+}
+
 /// A `Retired` deletion that a reopened store or a rebuilt projection must
-/// reproduce: same refusals inside the window, same acceptance after it.
+/// reproduce: same refusals inside the window, same acceptance after it, for a
+/// key removed by each deletion route.
 #[derive(Debug, Clone)]
 pub struct RetiredDeletion {
     queue: QueueAddress,
+    /// Ascending by `expires_at`.
+    keys: Vec<RetiredKey>,
+}
+#[derive(Debug, Clone)]
+struct RetiredKey {
+    key: &'static str,
     deleted_version: u64,
     expires_at: i64,
 }
 const RETIRED_WINDOW: i64 = 2 * HOUR;
+/// Deletes one key through each route, each with its own `issued_at`, later
+/// routes later, and checks the refusals while the owner that deleted them is
+/// still live.
 pub async fn prepare_retired_deletion(
     store: &dyn QueueStore,
     clock: &TestClock,
     queue: QueueAddress,
+) -> RetiredDeletion {
+    prepare_retired_deletion_through(store, clock, queue, cfg!(target_os = "linux")).await
+}
+/// `broad_administration` adds the filter-selected administrative delete. The
+/// native store runs that route only on Linux; PostgreSQL runs it everywhere.
+pub async fn prepare_retired_deletion_through(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+    broad_administration: bool,
 ) -> RetiredDeletion {
     let now = 10 * HOUR;
     clock.set(now);
@@ -3239,76 +3396,109 @@ pub async fn prepare_retired_deletion(
         })
         .await
         .unwrap();
-    store
-        .insert(insert_request(
-            &queue,
-            "rebuild-seed",
-            InsertMode::InsertOnly,
-            "a",
-            now,
-        ))
-        .await
-        .unwrap();
-    let deleted_at = now - 1_000;
-    let deleted_version = claim_and_delete(store, &queue, "a", "rebuild-delete", deleted_at).await;
-    let prepared = RetiredDeletion {
-        queue,
-        deleted_version,
-        expires_at: deleted_at + RETIRED_WINDOW,
-    };
-    refuse_reinserts(store, clock, &prepared, "live").await;
+    let mut keys = Vec::new();
+    let routes = DELETION_ROUTES
+        .into_iter()
+        .filter(|route| broad_administration || *route != DeletionRoute::AdministrativeSelected);
+    for (index, route) in routes.enumerate() {
+        // Distinct, ascending times behind the clock: a deletion time taken from
+        // the clock, from `evaluated_at` (0) or from another route's group fails.
+        let deleted_at = now - 10_000 + 1_000 * i64::try_from(index).unwrap();
+        let deleted_version = delete_by_route(store, &queue, route, deleted_at).await;
+        keys.push(RetiredKey {
+            key: route.key(),
+            deleted_version,
+            expires_at: deleted_at + RETIRED_WINDOW,
+        });
+    }
+    let prepared = RetiredDeletion { queue, keys };
+    refuse_reinserts(store, clock, &prepared, "live", 0).await;
     prepared
 }
+/// At one tick before the first expiry among `keys[from..]`, every one of them
+/// refuses a reinsert in each insert mode and through a group.
 async fn refuse_reinserts(
     store: &dyn QueueStore,
     clock: &TestClock,
     deletion: &RetiredDeletion,
     label: &str,
+    from: usize,
 ) {
-    clock.set(deletion.expires_at - 1);
-    let tick = deletion.expires_at - 1;
-    for mode in [InsertMode::InsertOnly, InsertMode::Upsert] {
-        let outcomes = store
-            .insert(insert_request(
-                &deletion.queue,
-                &format!("{label}-{mode:?}"),
-                mode,
-                "a",
-                tick,
-            ))
-            .await
-            .unwrap();
-        assert!(already_exists(&outcomes), "{label} {mode:?}: {outcomes:?}");
+    let tick = deletion.keys[from].expires_at - 1;
+    clock.set(tick);
+    for retired in &deletion.keys[from..] {
+        for mode in [InsertMode::InsertOnly, InsertMode::Upsert] {
+            let outcomes = store
+                .insert(insert_request(
+                    &deletion.queue,
+                    &format!("{label}-{}-{mode:?}-{tick}", retired.key),
+                    mode,
+                    retired.key,
+                    tick,
+                ))
+                .await
+                .unwrap();
+            assert!(
+                already_exists(&outcomes),
+                "{label} {} {mode:?}: {outcomes:?}",
+                retired.key
+            );
+        }
+        let mut grouped = group(&format!("{label}-{}-group-{tick}", retired.key));
+        grouped.issued_at = tick;
+        grouped
+            .work_inserts
+            .push(item(retired.key, "retention", 0, 0));
+        assert_eq!(
+            commit_one(store, &deletion.queue, grouped)
+                .await
+                .unwrap()
+                .outcome,
+            GroupOutcome::Rejected(Rejection::AlreadyExists),
+            "{label} {}",
+            retired.key
+        );
     }
-    let mut grouped = group(&format!("{label}-group"));
-    grouped.issued_at = tick;
-    grouped.work_inserts.push(item("a", "retention", 0, 0));
-    assert_eq!(
-        commit_one(store, &deletion.queue, grouped)
-            .await
-            .unwrap()
-            .outcome,
-        GroupOutcome::Rejected(Rejection::AlreadyExists)
-    );
 }
+/// Walks the expiries in order: just before each, the keys not yet expired
+/// refuse; at it, that key returns at a higher version.
 pub async fn verify_retired_deletion(
     store: &dyn QueueStore,
     clock: &TestClock,
     deletion: RetiredDeletion,
 ) {
-    refuse_reinserts(store, clock, &deletion, "rebuilt").await;
-    clock.set(deletion.expires_at);
-    let again = inserted_version(
-        &store
-            .insert(insert_request(
-                &deletion.queue,
-                "rebuilt-after-window",
-                InsertMode::InsertOnly,
-                "a",
-                deletion.expires_at,
-            ))
-            .await
-            .unwrap(),
-    );
-    assert!(again > deletion.deleted_version);
+    for (index, retired) in deletion.keys.iter().enumerate() {
+        refuse_reinserts(store, clock, &deletion, "rebuilt", index).await;
+        clock.set(retired.expires_at);
+        let again = inserted_version(
+            &store
+                .insert(insert_request(
+                    &deletion.queue,
+                    &format!("rebuilt-after-window-{}", retired.key),
+                    InsertMode::InsertOnly,
+                    retired.key,
+                    retired.expires_at,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            again > retired.deleted_version,
+            "{}: {again} after {}",
+            retired.key,
+            retired.deleted_version
+        );
+    }
+}
+/// Every deletion route stamps the deleting group's `issued_at` and honours the
+/// window: refused inside it, accepted after it at a higher version.
+pub async fn retired_keys_cover_every_deletion_route(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+    broad_administration: bool,
+) {
+    let deletion =
+        prepare_retired_deletion_through(store, clock, queue, broad_administration).await;
+    verify_retired_deletion(store, clock, deletion).await;
 }

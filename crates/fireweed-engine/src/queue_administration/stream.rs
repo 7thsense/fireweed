@@ -2558,9 +2558,15 @@ where
             schema,
             limits,
         )?;
-        if let Some(candidate) =
-            resolve_candidate(key, row, image, &mut proposal, schema, &reservation, 0)?
-        {
+        if let Some(candidate) = resolve_candidate(
+            key,
+            row,
+            image,
+            &mut proposal,
+            schema,
+            &reservation,
+            ordinary.issued_at,
+        )? {
             let owned = ResolvedAdministrativeRow {
                 scan: scan.clone(),
                 ordinal: packet_count,
