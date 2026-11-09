@@ -1,6 +1,11 @@
 name: extended functional checks
 
+# Runs daily on the default branch and on demand. The large-scale tier lives
+# here, not in ci.yml, so pushes and pull requests do not pay for it. A
+# scheduled run has github.ref == refs/heads/main, so it may save caches.
 on:
+  schedule:
+    - cron: '17 6 * * *'
   workflow_dispatch:
 
 permissions:
@@ -18,12 +23,15 @@ jobs:
       - uses: actions/checkout@v7
       - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-workspace
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: bash scripts/ci/verify-github-actions-policy.sh
       - name: Extended workspace library tests
         run: cargo +1.99.0 test --workspace --lib --locked
 
-  # The large-scale tier, the same job as in ci.yml: Rust `::large::` lib
-  # tests and scripts/formal large_test_*.py.
+  # The large-scale tier: Rust `::large::` lib tests and scripts/formal
+  # large_test_*.py. Not run by ci.yml; nothing in the release gates waits on it.
   large:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -35,7 +43,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt
+      # Same entry as ci.yml `functional`: same components, env and fireweed lib
+      # build. Only main and this schedule write it.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fireweed-lib
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned RustFS for S3 product tests
         timeout-minutes: 3
         run: echo "FIREWEED_RUSTFS_BIN=$(bash scripts/ci/s3-qualification-endpoint.sh install)" >> "$GITHUB_ENV"

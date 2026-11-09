@@ -8,7 +8,7 @@ Write new runtime evidence outside active Helix documents. Run from repository r
 
 ```sh
 python3 -m unittest discover -s scripts/formal -p 'test_*.py'
-# large tier: tests over 10 s live in large_test_*.py (run by the `large` CI job)
+# large tier: tests over 10 s live in large_test_*.py (run by the `large` job in the nightly workflow, not on pull requests)
 python3 -m unittest discover -s scripts/formal -p 'large_test_*.py'
 python3 scripts/formal/check.py --output target/formal-analysis.json
 python3 scripts/formal/conformance.py --output target/formal-conformance.json
