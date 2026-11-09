@@ -90,7 +90,7 @@ const RECORD_COLUMNS: &str = "r.id,r.collection,r.key,r.version::text,r.active,r
 /// A request issued beyond the skew ahead of the store clock has no effect and
 /// may be retried with the same id later. Runs before any lookup.
 fn check_issued_at(clock: &dyn Clock, issued_at: i64) -> QueueResult<()> {
-    QueueRetention::check_issued_at(issued_at, timestamp_nanos(clock.now())?)
+    fireweed_engine::queue_retention::check_issued_at(issued_at, timestamp_nanos(clock.now())?)
 }
 fn storage(error: impl std::fmt::Display) -> QueueError {
     QueueError::OutcomeUnknown(error.to_string())

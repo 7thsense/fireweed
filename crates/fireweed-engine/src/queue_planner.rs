@@ -607,7 +607,9 @@ pub(crate) fn apply_group(
         if snapshot
             .deleted_at
             .get(&work.key)
-            .is_some_and(|deleted_at| schema.retention.is_retired(*deleted_at, now))
+            .is_some_and(|deleted_at| {
+                crate::queue_retention::is_retired(&schema.retention, *deleted_at, now)
+            })
         {
             return Err(Rejection::AlreadyExists);
         }

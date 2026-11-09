@@ -80,33 +80,16 @@ pub enum DeletedKeyPolicy {
     /// greater than 0 and at least `request_id_nanos` plus 5 minutes.
     Retired { window_nanos: u64 },
 }
-/// Largest amount by which a request's `issued_at` may lead the backend clock.
-/// Also the margin a `Retired` window must add to the request id window.
-pub const ISSUED_AT_SKEW_NANOS: u64 = 300_000_000_000;
+/// The margin a `Retired` window adds to the request id window: 5 minutes. The
+/// engine's `issued_at` skew bound is the same fixed number.
+const RETIRED_MARGIN_NANOS: u64 = 300_000_000_000;
 impl QueueRetention {
-    /// Refuses a request issued beyond the skew ahead of `now`. Callers run
-    /// this before any lookup or side effect.
-    pub fn check_issued_at(issued_at: i64, now: i64) -> QueueResult<()> {
-        if i128::from(issued_at) > i128::from(now) + i128::from(ISSUED_AT_SKEW_NANOS) {
-            return Err(invalid("issued_at is ahead of the queue clock"));
-        }
-        Ok(())
-    }
-    /// True when a key deleted at `deleted_at` is still retired at `now`.
-    pub fn is_retired(&self, deleted_at: i64, now: i64) -> bool {
-        match self.deleted_keys {
-            DeletedKeyPolicy::Reusable => false,
-            DeletedKeyPolicy::Retired { window_nanos } => {
-                i128::from(now) - i128::from(deleted_at) < i128::from(window_nanos)
-            }
-        }
-    }
-    pub fn validate(&self) -> QueueResult<()> {
+    fn validate(&self) -> QueueResult<()> {
         if self.request_id_nanos == 0 {
             return Err(invalid("request id window must be positive"));
         }
         if let DeletedKeyPolicy::Retired { window_nanos } = self.deleted_keys {
-            let floor = self.request_id_nanos.saturating_add(ISSUED_AT_SKEW_NANOS);
+            let floor = self.request_id_nanos.saturating_add(RETIRED_MARGIN_NANOS);
             if window_nanos == 0 || window_nanos < floor {
                 return Err(invalid(
                     "deleted key window must cover the request id window plus 5 minutes",
@@ -2741,16 +2724,5 @@ mod retention_tests {
             .validate()
             .is_ok()
         );
-    }
-    #[test]
-    fn issued_at_skew_and_retired_window_boundaries() {
-        let skew = i64::try_from(ISSUED_AT_SKEW_NANOS).unwrap();
-        assert!(QueueRetention::check_issued_at(1_000 + skew, 1_000).is_ok());
-        assert!(QueueRetention::check_issued_at(1_001 + skew, 1_000).is_err());
-        assert!(QueueRetention::check_issued_at(i64::MAX, i64::MAX).is_ok());
-        let retired = with(1, DeletedKeyPolicy::Retired { window_nanos: 100 });
-        assert!(retired.is_retired(0, 99));
-        assert!(!retired.is_retired(0, 100));
-        assert!(!with(1, DeletedKeyPolicy::Reusable).is_retired(0, 0));
     }
 }
