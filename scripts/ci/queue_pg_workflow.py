@@ -12,7 +12,8 @@ def validate(workflow):
     for forbidden in ('continue-on-error:', 'needs:', 'strategy:'):
         if forbidden in job:
             raise ValueError('PostgreSQL correctness job cannot be optional: ' + forbidden)
-    if job.count('if:') != 1 or '        if: always()' not in job:
+    # Count step/job-level `if:` keys only; `save-if:` on the cache action is an input.
+    if len(re.findall(r'^\s*if:', job, re.MULTILINE)) != 1 or '        if: always()' not in job:
         raise ValueError('only evidence upload may be conditional')
     required = (
         '    runs-on: ubuntu-24.04\n',
