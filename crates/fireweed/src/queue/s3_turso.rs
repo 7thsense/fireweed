@@ -307,8 +307,13 @@ impl EphemeralDirectory {
             .create(&path)
             .map_err(|_| unavailable("ephemeral directory creation failed"))?;
         // Canonical, so the later absolute-path checks do not depend on symlinks.
-        let path = std::fs::canonicalize(&path)
-            .map_err(|_| unavailable("ephemeral directory resolution failed"))?;
+        let path = match std::fs::canonicalize(&path) {
+            Ok(resolved) => resolved,
+            Err(_) => {
+                let _ = std::fs::remove_dir(&path);
+                return Err(unavailable("ephemeral directory resolution failed"));
+            }
+        };
         Ok(Self(path))
     }
     fn path(&self) -> &Path {
