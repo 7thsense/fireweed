@@ -66,7 +66,7 @@ PRODUCT_SUITE_LEAVES: dict[str, list[str]] = {
         "test_product_validation::scheduled_action_delivery_e2e"
     ],
     "product_workflow_marketo_group_batching_e2e": [
-        "test_product_validation::marketo_group_batching_e2e"
+        "test_product_validation::large::marketo_group_batching_e2e"
     ],
     "product_workflow_callback_cohort_e2e": [
         "test_product_validation::callback_cohort_e2e"
@@ -78,7 +78,7 @@ PRODUCT_SUITE_LEAVES: dict[str, list[str]] = {
         "test_product_validation::worker_crash_recovery_e2e"
     ],
     "product_workflow_noisy_neighbor_scale_e2e": [
-        "test_product_validation::noisy_neighbor_scale_e2e"
+        "test_product_validation::large::noisy_neighbor_scale_e2e"
     ],
     "product_workflow_generic_priority_bounded_relaxed_e2e": [
         "test_product_validation::generic_priority_bounded_relaxed_e2e"
@@ -338,11 +338,11 @@ def build_overlay_assignments(
 
     e2e_routes = {
         "AC-E2E-1": [leaf_command_id("test_product_validation::scheduled_action_delivery_e2e")],
-        "AC-E2E-2": [leaf_command_id("test_product_validation::marketo_group_batching_e2e")],
+        "AC-E2E-2": [leaf_command_id("test_product_validation::large::marketo_group_batching_e2e")],
         "AC-E2E-3": [leaf_command_id("test_product_validation::callback_cohort_e2e")],
         "AC-E2E-4": [leaf_command_id("test_product_validation::jobs_connectors_recurring_e2e")],
         "AC-E2E-5": [leaf_command_id("test_product_validation::worker_crash_recovery_e2e")],
-        "AC-E2E-6": [leaf_command_id("test_product_validation::noisy_neighbor_scale_e2e")],
+        "AC-E2E-6": [leaf_command_id("test_product_validation::large::noisy_neighbor_scale_e2e")],
         "AC-E2E-7": [leaf_command_id("test_product_validation::operator_repair_redrive_e2e")],
         "AC-E2E-8": [leaf_command_id("test_product_validation::generic_priority_bounded_relaxed_e2e")],
         "AC-E2E-9": [leaf_command_id("test_product_validation::downstream_pacing_non_goal_e2e")],

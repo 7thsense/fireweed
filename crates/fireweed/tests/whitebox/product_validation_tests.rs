@@ -1666,256 +1666,6 @@ fn group_qdef(tenant: &str, queue: &str, max_eligible_group_size: u64) -> QueueD
     d
 }
 
-/// AC-E2E-2 (TP-003): model a downstream API that accepts up to N distinct lead groups — a group-batching
-/// queue. Both log-replay and relational compositions must select complete groups.
-///
-/// COVERED via the lib facade (each assertion bites):
-///   - the queue is loaded with >=1000 groups x multiple tasks, and item-level claim still works on it
-///     (parity — the group config does not break ordinary delivery);
-///   - the group-batching claim-compatibility CONTRACT (validate_claim_compatibility, which IS implemented):
-///       * `group_batching` on a queue WITHOUT max_eligible_group_size -> Invalid;
-///       * `group_batching.max_groups == 0` -> Invalid;
-///       * `max_eligible_group_size > max_items` -> BatchTooLarge (the "next whole group cannot fit" guard);
-///       * a well-formed WHOLE-GROUP claim unit on the LOG-REPLAY family returns only complete groups.
-/// ASSERTED (BQ-14b): atomic whole-group SELECTION on the gate/group-capable relational backend, via the
-/// same lib facade — a whole-group claim leases exactly one COMPLETE group (no partial group, INV-7),
-/// bounded by max_groups, and successive claims drain distinct groups with zero duplicates.
-/// DEFERRED (heavier provisioned run): group-representative ordering under contention, concurrent
-/// multi-claimer no-duplicate-group, and active-group discovery.
-#[tokio::test]
-async fn marketo_group_batching_e2e() {
-    let (fireweed, _clock) = deployment();
-    let max_group_size = 5u64;
-    let q = qk("marketo", "leads");
-    fireweed
-        .create_queue(group_qdef("marketo", "leads", max_group_size))
-        .await
-        .unwrap();
-
-    // Load >=1000 lead groups, multiple tasks per lead (establishing a realistic group population).
-    let groups = 1000u64;
-    let tasks_per_group = 3u64;
-    let mut items = Vec::new();
-    for g in 0..groups {
-        for t in 0..tasks_per_group {
-            items.push(NewItem {
-                priority: Some(PriorityValue::Int64(((g * 7 + t) % 100) as i64)),
-                group_key: Some(GroupKey::new(format!("lead-{g}")).unwrap()),
-                ..Default::default()
-            });
-        }
-    }
-    let loaded = items.len() as u64;
-    fireweed.push_batch(&q, items).await.unwrap();
-    assert_eq!(
-        fireweed.metrics(&q).await.unwrap().pending,
-        loaded,
-        "all group tasks resident"
-    );
-
-    // Parity: ITEM-level claim (the default unit) still works on a group-batching queue — the group config
-    // does not disable ordinary delivery. (Counterfactual that the queue itself is healthy.)
-    let item_claim = fireweed.claim(&q, 10, 60_000).await.unwrap();
-    assert_eq!(
-        item_claim.len(),
-        10,
-        "item-level claim works on a group-batching queue"
-    );
-    fireweed
-        .nack(&q, item_claim.iter().map(|c| c.item_id), Nack::Release)
-        .await
-        .unwrap();
-
-    // --- group-batching claim-compatibility CONTRACT (implemented validation; each error is distinct) ---
-    let whole_group = |max_groups: u32| ClaimCompatibility {
-        group_batching: Some(GroupBatching { max_groups }),
-        ..Default::default()
-    };
-
-    // (a) max_groups == 0 -> Invalid (pin the message so this is distinct from the missing-config Invalid (c)).
-    let zero = fireweed.claim_with(&q, 100, 60_000, whole_group(0)).await;
-    assert!(
-        matches!(&zero, Err(EngineError::Invalid(m)) if m.contains("max_groups")),
-        "max_groups=0 is Invalid(max_groups...): {zero:?}"
-    );
-
-    // (b) max_eligible_group_size (5) > max_items (3) -> BatchTooLarge (the whole group can't fit the batch).
-    let too_large = fireweed.claim_with(&q, 3, 60_000, whole_group(300)).await;
-    assert!(
-        matches!(too_large, Err(EngineError::BatchTooLarge)),
-        "a max_items below the group size fires BatchTooLarge (next whole group cannot fit): {too_large:?}"
-    );
-
-    // (c) group_batching on a queue WITHOUT max_eligible_group_size -> Invalid.
-    let plain_q = qk("marketo", "plain");
-    fireweed
-        .create_queue(qdef(
-            "marketo",
-            "plain",
-            PriorityDirection::Ascending,
-            OrderingMode::Strict,
-        ))
-        .await
-        .unwrap();
-    let _ = fireweed.push(&plain_q, NewItem::default()).await.unwrap();
-    let unconfigured = fireweed
-        .claim_with(&plain_q, 100, 60_000, whole_group(300))
-        .await;
-    assert!(
-        matches!(&unconfigured, Err(EngineError::Invalid(m)) if m.contains("max_eligible_group_size")),
-        "group_batching requires max_eligible_group_size (distinct from the max_groups Invalid): {unconfigured:?}"
-    );
-
-    // (d) a well-formed whole-group claim returns complete groups on the log-replay family too.
-    let well_formed = fireweed
-        .claim_with(&q, 100, 60_000, whole_group(300))
-        .await
-        .unwrap();
-    let mut claimed_per_group = BTreeMap::new();
-    for item in &well_formed {
-        *claimed_per_group
-            .entry(item.group_key.clone().expect("grouped item"))
-            .or_insert(0usize) += 1;
-    }
-    assert!(
-        !well_formed.is_empty()
-            && well_formed.len() <= 100
-            && claimed_per_group.len() <= 300
-            && claimed_per_group
-                .values()
-                .all(|count| *count == tasks_per_group as usize),
-        "log replay must return only complete groups: {claimed_per_group:?}"
-    );
-    fireweed
-        .nack(
-            &q,
-            well_formed.iter().map(|item| item.item_id),
-            Nack::Release,
-        )
-        .await
-        .unwrap();
-
-    // --- ASSERTED whole-group SELECTION on the gate/group-capable relational backend (BQ-14b) ---
-    // The relational family implements atomic whole-group claim. Same lib facade (RuntimeCore), relational backend.
-    let rel = RuntimeCore::new(
-        Arc::new(crate::turso_memory_backend()),
-        Arc::new(ManualClock::at(0)),
-    );
-    let rq = qk("marketo", "leads-rel");
-    let mut rdef = qdef(
-        "marketo",
-        "leads-rel",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    );
-    rdef.max_eligible_group_size = Some(5);
-    rel.create_queue(rdef).await.unwrap();
-    // Two whole groups: gA (2 tasks), gB (3 tasks).
-    let group_item = |p: i64, g: &str| NewItem {
-        priority: Some(PriorityValue::Int64(p)),
-        group_key: Some(GroupKey::new(g).unwrap()),
-        fields: BTreeMap::from([(
-            "claim_marker".to_string(),
-            Bytes::from_static(b"whole-group"),
-        )]),
-        ..Default::default()
-    };
-    rel.push_batch(
-        &rq,
-        vec![
-            group_item(10, "gA"),
-            group_item(11, "gA"),
-            group_item(20, "gB"),
-            group_item(21, "gB"),
-            group_item(22, "gB"),
-        ],
-    )
-    .await
-    .unwrap();
-    // whole-group claim, max_groups=1: leases ALL items of exactly ONE group atomically (no partial group).
-    let wg1 = rel
-        .claim_with(&rq, 100, 60_000, whole_group(1))
-        .await
-        .unwrap();
-    assert!(!wg1.is_empty(), "whole-group claim leases a complete group");
-    let g1 = wg1[0].group_key.clone();
-    assert!(
-        wg1.iter().all(|i| i.group_key == g1),
-        "a whole-group claim returns exactly ONE group's items (<= max_groups=1)"
-    );
-    assert!(
-        wg1.iter()
-            .all(|i| i.fields.get("claim_marker").map(|b| b.as_ref()) == Some(&b"whole-group"[..])),
-        "a whole-group claim carries the explicit field through the claim path"
-    );
-    let g1_size = if g1 == Some(GroupKey::new("gA").unwrap()) {
-        2
-    } else {
-        3
-    };
-    assert_eq!(
-        wg1.len(),
-        g1_size,
-        "the whole group is leased atomically — the complete group, no partial (INV-7)"
-    );
-    rel.ack(&rq, wg1.iter().map(|i| i.item_id)).await.unwrap();
-    // A second whole-group claim returns the OTHER complete group (no duplicate group; both fully drain).
-    let wg2 = rel
-        .claim_with(&rq, 100, 60_000, whole_group(1))
-        .await
-        .unwrap();
-    let g2 = wg2[0].group_key.clone();
-    assert_ne!(
-        g1, g2,
-        "the second whole-group claim returns a DIFFERENT group (no group duplicated across claims)"
-    );
-    assert!(
-        wg2.iter()
-            .all(|i| i.fields.get("claim_marker").map(|b| b.as_ref()) == Some(&b"whole-group"[..])),
-        "the explicit field also survives the second whole-group claim"
-    );
-    assert_eq!(
-        wg1.len() + wg2.len(),
-        5,
-        "both whole groups delivered, zero partial/duplicate items"
-    );
-    let whole_group_selection = wg1.len() + wg2.len() == 5 && g1 != g2;
-
-    emit_ac(
-        "AC-E2E-2",
-        &[],
-        "group-batching queue loaded with >=1000 groups; item-level claim parity holds; the group-batching claim-compatibility contract is enforced (max_groups=0 -> Invalid; group-size>max_items -> BatchTooLarge; missing max_eligible_group_size -> Invalid); and ASSERTED atomic whole-group SELECTION on the relational backend (BQ-14b): a whole-group claim leases exactly one COMPLETE group (no partial, INV-7), bounded by max_groups, and successive claims drain distinct groups with zero duplicates. [DEFERRED: group-rep ordering under contention, concurrent multi-claimer no-dup, discovery are the heavier provisioned run]",
-        BTreeMap::from([
-            ("groups_loaded".into(), serde_json::json!(groups)),
-            ("items_loaded".into(), serde_json::json!(loaded)),
-            (
-                "item_level_claim_len".into(),
-                serde_json::json!(item_claim.len()),
-            ),
-            (
-                "max_groups_zero".into(),
-                serde_json::json!(format!("{zero:?}")),
-            ),
-            (
-                "batch_too_large".into(),
-                serde_json::json!(format!("{too_large:?}")),
-            ),
-            (
-                "missing_group_size".into(),
-                serde_json::json!(format!("{unconfigured:?}")),
-            ),
-            (
-                "well_formed_whole_group_logreplay".into(),
-                serde_json::json!(format!("{well_formed:?}")),
-            ),
-            (
-                "relational_whole_group_selection".into(),
-                serde_json::json!(whole_group_selection),
-            ),
-        ]),
-    );
-}
-
 // ---------------------------------------------------------------------------
 // AC-E2E-3 — callback cohort execution
 // ---------------------------------------------------------------------------
@@ -2165,295 +1915,6 @@ async fn callback_cohort_e2e() {
 // ---------------------------------------------------------------------------
 // AC-E2E-6 — noisy-neighbor + active-scope routing
 // ---------------------------------------------------------------------------
-
-/// AC-E2E-6 (TP-003): one hot queue with a large resident backlog, one small eligible queue, and K active
-/// queues on ONE node. (FR-1, FR-12, FR-40..43, FR-48.)
-///
-/// SCOPE (honest): this is the SINGLE-THREADED, in-process CORRECTNESS-isolation slice of AC-E2E-6 — it shows
-/// that per-queue ownership keeps each queue's delivery + drain correct and independent with a large hot
-/// backlog + K queues co-resident. These are restatements of per-queue keying, NOT a contention proof; the
-/// real noisy-neighbor CONTENTION measurement (concurrent workers contending the shared node, throughput-
-/// flatness across a residency ladder) is BQ-41 (queue_density_single_node_tests), already committed.
-///
-/// COVERED via the lib facade:
-///   - a claim from the small queue returns ONLY the small queue's items (and the hot/active claims return
-///     only their own) — per-queue keying, zero cross-queue leakage, each claim verified NON-EMPTY;
-///   - K queues are INDEPENDENTLY claimable (each returns exactly its own 10 items);
-///   - the small queue drains FULLY (completeness) and, at this single in-memory operating point, its
-///     claim+ack rate is reported as a diagnostic (NOT a host-speed gate or the algorithmic-
-///     cost ladder; that, and concurrent contention, are BQ-41);
-///   - the hot backlog is uncorrupted by the small queue's drain (no cross-queue mutation).
-/// ASSERTED (BQ pqueue-289c8d5a): DiscoverActiveScopes on the relational backend via the same lib facade —
-/// active scopes ranked by TRUE oldest-eligible age (most-starved first), a stalled queue with eligible work
-/// + no live serving owner visible through a growing oldest_eligible_age_ms (FR-41), and the per-queue
-/// rollup. The facade returns the UNFILTERED ranking; unauthorized-scope exclusion is the auth layer's
-/// concern (ADR-002 — no principal in the trusted library).
-/// DEFERRED (provisioned perf env, NOT available in-repo): the AC-LAT-1 p95<250ms/p99<1000ms latency bars at
-/// release scale. ALSO out of scope here: the CONCURRENT noisy-neighbor measurement (BQ-41) and
-/// bounded-per-node worker pools (pqueue-c33c367e).
-#[tokio::test]
-async fn noisy_neighbor_scale_e2e() {
-    let (fireweed, _clock) = deployment();
-
-    // Hot queue: a large resident backlog.
-    let hot = qk("nn", "hot");
-    fireweed
-        .create_queue(qdef(
-            "nn",
-            "hot",
-            PriorityDirection::Ascending,
-            OrderingMode::Strict,
-        ))
-        .await
-        .unwrap();
-    let hot_backlog = 50_000u64;
-    let hot_items: Vec<NewItem> = (0..hot_backlog)
-        .map(|_| NewItem {
-            payload: Some(Bytes::from_static(b"hot")),
-            ..Default::default()
-        })
-        .collect();
-    fireweed.push_batch(&hot, hot_items).await.unwrap();
-
-    // K active queues, each with a small resident set.
-    let k = 50u64;
-    for i in 0..k {
-        let q = qk("nn", &format!("active{i}"));
-        fireweed
-            .create_queue(qdef(
-                "nn",
-                &format!("active{i}"),
-                PriorityDirection::Ascending,
-                OrderingMode::Strict,
-            ))
-            .await
-            .unwrap();
-        let marker = format!("active{i}");
-        let items: Vec<NewItem> = (0..10)
-            .map(|_| NewItem {
-                payload: Some(Bytes::from(marker.clone().into_bytes())),
-                ..Default::default()
-            })
-            .collect();
-        fireweed.push_batch(&q, items).await.unwrap();
-    }
-
-    // Small eligible queue.
-    let small = qk("nn", "small");
-    fireweed
-        .create_queue(qdef(
-            "nn",
-            "small",
-            PriorityDirection::Ascending,
-            OrderingMode::Strict,
-        ))
-        .await
-        .unwrap();
-    let small_n = 200u64;
-    let small_items: Vec<NewItem> = (0..small_n)
-        .map(|_| NewItem {
-            payload: Some(Bytes::from_static(b"small")),
-            ..Default::default()
-        })
-        .collect();
-    fireweed.push_batch(&small, small_items).await.unwrap();
-
-    // CORRECTNESS isolation: with the hot backlog + K queues all resident, a claim from the small queue
-    // returns ONLY the small queue's items (no hot/active leakage), and a claim from the hot queue returns
-    // only hot items. Per-queue keying ⇒ zero cross-queue leakage.
-    let from_small = fireweed.claim(&small, 10, 60_000).await.unwrap();
-    assert_eq!(
-        from_small.len(),
-        10,
-        "small queue claim returns items (not vacuously empty)"
-    );
-    assert!(
-        from_small
-            .iter()
-            .all(|c| c.payload.as_deref() == Some(b"small".as_ref())),
-        "the small queue delivers only its own items (no hot/active leakage)"
-    );
-    fireweed
-        .nack(&small, from_small.iter().map(|c| c.item_id), Nack::Release)
-        .await
-        .unwrap();
-    let from_hot = fireweed.claim(&hot, 10, 60_000).await.unwrap();
-    assert_eq!(
-        from_hot.len(),
-        10,
-        "hot queue claim returns items (not vacuously empty)"
-    );
-    assert!(
-        from_hot
-            .iter()
-            .all(|c| c.payload.as_deref() == Some(b"hot".as_ref())),
-        "the hot queue delivers only its own items"
-    );
-    fireweed
-        .nack(&hot, from_hot.iter().map(|c| c.item_id), Nack::Release)
-        .await
-        .unwrap();
-
-    // K queues independently claimable: each returns only its own marker.
-    for i in 0..k {
-        let q = qk("nn", &format!("active{i}"));
-        let got = fireweed.claim(&q, 100, 60_000).await.unwrap();
-        let marker = format!("active{i}");
-        assert_eq!(
-            got.len(),
-            10,
-            "active queue {i} returns exactly its own 10 items (not empty/leaked)"
-        );
-        assert!(
-            got.iter()
-                .all(|c| c.payload.as_deref() == Some(marker.as_bytes())),
-            "active queue {i} delivers only its own items"
-        );
-        fireweed
-            .nack(&q, got.iter().map(|c| c.item_id), Nack::Release)
-            .await
-            .unwrap();
-    }
-
-    // COMPLETENESS + diagnostic throughput: drain the small queue with the hot backlog + K queues resident.
-    // The exact drain/isolation assertions are acceptance; the measured rate is not a host-speed gate.
-    let t = Instant::now();
-    let mut drained = 0u64;
-    loop {
-        let got = fireweed.claim(&small, 100, 60_000).await.unwrap();
-        if got.is_empty() {
-            break;
-        }
-        drained += got.len() as u64;
-        fireweed
-            .ack(&small, got.iter().map(|c| c.item_id))
-            .await
-            .unwrap();
-    }
-    let small_rate = drained as f64 / t.elapsed().as_secs_f64();
-    assert_eq!(
-        drained, small_n,
-        "the small queue fully drains (completeness) with the hot backlog resident"
-    );
-    assert!(
-        small_rate.is_finite() && small_rate > 0.0,
-        "the small queue must make measurable progress with a {hot_backlog}-item hot backlog + {k} queues resident: {small_rate:.0}/s"
-    );
-    // The hot backlog is untouched by the small queue's drain (isolation): still fully resident.
-    let hot_pending_after = fireweed.metrics(&hot).await.unwrap().pending;
-    assert_eq!(
-        hot_pending_after, hot_backlog,
-        "hot backlog undisturbed by the small queue"
-    );
-
-    // --- ASSERTED DiscoverActiveScopes (BQ pqueue-289c8d5a) on the relational backend (per-group summary) ---
-    // The active-scope rollup is a relational-class feature; driven on the relational backend via the same
-    // lib facade. Three groups made eligible at increasing times → discovery ranks them by TRUE
-    // oldest-eligible age (most-starved first). The facade returns the UNFILTERED ranking (no principal —
-    // unauthorized-scope exclusion is the auth layer's concern per ADR-002).
-    let disc_clock = Arc::new(ManualClock::at(0));
-    let rel = RuntimeCore::new(Arc::new(crate::turso_memory_backend()), disc_clock.clone());
-    let dq = qk("nn", "discover");
-    rel.create_queue(qdef(
-        "nn",
-        "discover",
-        PriorityDirection::Ascending,
-        OrderingMode::Strict,
-    ))
-    .await
-    .unwrap();
-    let grouped = |g: &str| NewItem {
-        group_key: Some(GroupKey::new(g).unwrap()),
-        payload: Some(Bytes::from_static(b"work")),
-        ..Default::default()
-    };
-    // Make three groups eligible at t=0, t=100, t=200 (oldest-eligible time increases per group).
-    disc_clock.set(0);
-    rel.push(&dq, grouped("g-old")).await.unwrap();
-    disc_clock.set(100);
-    rel.push(&dq, grouped("g-mid")).await.unwrap();
-    disc_clock.set(200);
-    rel.push(&dq, grouped("g-new")).await.unwrap();
-    // Discover at a later time: ranked oldest-eligible first (the most-aged/starved group leads).
-    disc_clock.set(1000);
-    let scopes: Vec<ActiveScope> = rel
-        .discover_active_scopes(&dq, DiscoveryGranularity::Group)
-        .await
-        .unwrap();
-    assert_eq!(scopes.len(), 3, "three active groups hold eligible work");
-    assert!(
-        scopes
-            .windows(2)
-            .all(|w| w[0].oldest_eligible_age_ms >= w[1].oldest_eligible_age_ms),
-        "active scopes ranked by TRUE oldest-eligible age (most-starved first): {scopes:?}"
-    );
-    assert_eq!(
-        scopes[0].group_key.as_deref(),
-        Some("g-old"),
-        "the most-aged group leads the ranking"
-    );
-    let discovery_ranks_by_age =
-        scopes.len() == 3 && scopes[0].group_key.as_deref() == Some("g-old");
-
-    // STALLED-queue visibility (FR-41): with eligible work and NOTHING claiming it, the oldest-eligible age
-    // keeps GROWING — a stalled queue with no live serving owner is visible through the discovery surface.
-    disc_clock.set(2000);
-    let later = rel
-        .discover_active_scopes(&dq, DiscoveryGranularity::Group)
-        .await
-        .unwrap();
-    let old_later = later
-        .iter()
-        .find(|s| s.group_key.as_deref() == Some("g-old"))
-        .expect("g-old still active (eligible work, undrained)");
-    assert!(
-        old_later.oldest_eligible_age_ms > scopes[0].oldest_eligible_age_ms,
-        "a stalled queue's oldest-eligible age grows while nothing drains it — visible via DiscoverActiveScopes (FR-41)"
-    );
-    let stalled_queue_visible = old_later.oldest_eligible_age_ms > scopes[0].oldest_eligible_age_ms;
-    // The Queue-granularity rollup is one scope for the whole queue (group_key dropped), aged to the most
-    // starved group — the per-queue oldest_eligible_age_ms surface a router/operator ranks queues by.
-    let rollup = rel
-        .discover_active_scopes(&dq, DiscoveryGranularity::Queue)
-        .await
-        .unwrap();
-    assert_eq!(
-        rollup.len(),
-        1,
-        "Queue granularity rolls the groups up to one per-queue scope"
-    );
-    assert!(
-        rollup[0].group_key.is_none(),
-        "the per-queue rollup drops group_key"
-    );
-
-    emit_ac(
-        "AC-E2E-6",
-        &[],
-        "SINGLE-THREADED correctness-isolation (per-queue ownership): small/hot/K-queue claims each return only their own items (zero cross-queue leakage, all non-empty); K queues independently claimable; small queue fully drains while the measured rate remains diagnostic only; hot backlog uncorrupted; and ASSERTED DiscoverActiveScopes on the relational backend (BQ pqueue-289c8d5a): active scopes ranked by TRUE oldest-eligible age (most-starved first), a stalled queue with eligible work + no live serving owner visible via a growing oldest_eligible_age_ms (FR-41), and the per-queue rollup — the facade returns the UNFILTERED ranking (unauthorized-scope exclusion is the auth layer per ADR-002) [DEFERRED: AC-LAT-1 capacity-at-release-scale needs the provisioned perf env; CONCURRENT noisy-neighbor contention + algorithmic-cost proof is BQ-41; bounded-per-node-pools pqueue-c33c367e]",
-        BTreeMap::from([
-            ("hot_backlog".into(), serde_json::json!(hot_backlog)),
-            ("active_queues".into(), serde_json::json!(k)),
-            ("small_items".into(), serde_json::json!(small_n)),
-            (
-                "small_drain_rate_per_s".into(),
-                serde_json::json!(small_rate.round()),
-            ),
-            (
-                "hot_pending_after_small_drain".into(),
-                serde_json::json!(hot_pending_after),
-            ),
-            (
-                "discovery_ranks_active_scopes_by_oldest_eligible_age".into(),
-                serde_json::json!(discovery_ranks_by_age),
-            ),
-            (
-                "stalled_queue_visible_via_discovery".into(),
-                serde_json::json!(stalled_queue_visible),
-            ),
-        ]),
-    );
-}
 
 // ---------------------------------------------------------------------------
 // AC-E2E-5 — worker crash recovery
@@ -3019,4 +2480,551 @@ async fn operator_repair_redrive_e2e() {
             ),
         ]),
     );
+}
+
+/// Large-scale tier: selected in CI by the `::large::` path segment.
+mod large {
+    use super::*;
+
+    /// AC-E2E-2 (TP-003): model a downstream API that accepts up to N distinct lead groups — a group-batching
+    /// queue. Both log-replay and relational compositions must select complete groups.
+    ///
+    /// COVERED via the lib facade (each assertion bites):
+    ///   - the queue is loaded with >=1000 groups x multiple tasks, and item-level claim still works on it
+    ///     (parity — the group config does not break ordinary delivery);
+    ///   - the group-batching claim-compatibility CONTRACT (validate_claim_compatibility, which IS implemented):
+    ///       * `group_batching` on a queue WITHOUT max_eligible_group_size -> Invalid;
+    ///       * `group_batching.max_groups == 0` -> Invalid;
+    ///       * `max_eligible_group_size > max_items` -> BatchTooLarge (the "next whole group cannot fit" guard);
+    ///       * a well-formed WHOLE-GROUP claim unit on the LOG-REPLAY family returns only complete groups.
+    /// ASSERTED (BQ-14b): atomic whole-group SELECTION on the gate/group-capable relational backend, via the
+    /// same lib facade — a whole-group claim leases exactly one COMPLETE group (no partial group, INV-7),
+    /// bounded by max_groups, and successive claims drain distinct groups with zero duplicates.
+    /// DEFERRED (heavier provisioned run): group-representative ordering under contention, concurrent
+    /// multi-claimer no-duplicate-group, and active-group discovery.
+    #[tokio::test]
+    async fn marketo_group_batching_e2e() {
+        let (fireweed, _clock) = deployment();
+        let max_group_size = 5u64;
+        let q = qk("marketo", "leads");
+        fireweed
+            .create_queue(group_qdef("marketo", "leads", max_group_size))
+            .await
+            .unwrap();
+
+        // Load >=1000 lead groups, multiple tasks per lead (establishing a realistic group population).
+        let groups = 1000u64;
+        let tasks_per_group = 3u64;
+        let mut items = Vec::new();
+        for g in 0..groups {
+            for t in 0..tasks_per_group {
+                items.push(NewItem {
+                    priority: Some(PriorityValue::Int64(((g * 7 + t) % 100) as i64)),
+                    group_key: Some(GroupKey::new(format!("lead-{g}")).unwrap()),
+                    ..Default::default()
+                });
+            }
+        }
+        let loaded = items.len() as u64;
+        fireweed.push_batch(&q, items).await.unwrap();
+        assert_eq!(
+            fireweed.metrics(&q).await.unwrap().pending,
+            loaded,
+            "all group tasks resident"
+        );
+
+        // Parity: ITEM-level claim (the default unit) still works on a group-batching queue — the group config
+        // does not disable ordinary delivery. (Counterfactual that the queue itself is healthy.)
+        let item_claim = fireweed.claim(&q, 10, 60_000).await.unwrap();
+        assert_eq!(
+            item_claim.len(),
+            10,
+            "item-level claim works on a group-batching queue"
+        );
+        fireweed
+            .nack(&q, item_claim.iter().map(|c| c.item_id), Nack::Release)
+            .await
+            .unwrap();
+
+        // --- group-batching claim-compatibility CONTRACT (implemented validation; each error is distinct) ---
+        let whole_group = |max_groups: u32| ClaimCompatibility {
+            group_batching: Some(GroupBatching { max_groups }),
+            ..Default::default()
+        };
+
+        // (a) max_groups == 0 -> Invalid (pin the message so this is distinct from the missing-config Invalid (c)).
+        let zero = fireweed.claim_with(&q, 100, 60_000, whole_group(0)).await;
+        assert!(
+            matches!(&zero, Err(EngineError::Invalid(m)) if m.contains("max_groups")),
+            "max_groups=0 is Invalid(max_groups...): {zero:?}"
+        );
+
+        // (b) max_eligible_group_size (5) > max_items (3) -> BatchTooLarge (the whole group can't fit the batch).
+        let too_large = fireweed.claim_with(&q, 3, 60_000, whole_group(300)).await;
+        assert!(
+            matches!(too_large, Err(EngineError::BatchTooLarge)),
+            "a max_items below the group size fires BatchTooLarge (next whole group cannot fit): {too_large:?}"
+        );
+
+        // (c) group_batching on a queue WITHOUT max_eligible_group_size -> Invalid.
+        let plain_q = qk("marketo", "plain");
+        fireweed
+            .create_queue(qdef(
+                "marketo",
+                "plain",
+                PriorityDirection::Ascending,
+                OrderingMode::Strict,
+            ))
+            .await
+            .unwrap();
+        let _ = fireweed.push(&plain_q, NewItem::default()).await.unwrap();
+        let unconfigured = fireweed
+            .claim_with(&plain_q, 100, 60_000, whole_group(300))
+            .await;
+        assert!(
+            matches!(&unconfigured, Err(EngineError::Invalid(m)) if m.contains("max_eligible_group_size")),
+            "group_batching requires max_eligible_group_size (distinct from the max_groups Invalid): {unconfigured:?}"
+        );
+
+        // (d) a well-formed whole-group claim returns complete groups on the log-replay family too.
+        let well_formed = fireweed
+            .claim_with(&q, 100, 60_000, whole_group(300))
+            .await
+            .unwrap();
+        let mut claimed_per_group = BTreeMap::new();
+        for item in &well_formed {
+            *claimed_per_group
+                .entry(item.group_key.clone().expect("grouped item"))
+                .or_insert(0usize) += 1;
+        }
+        assert!(
+            !well_formed.is_empty()
+                && well_formed.len() <= 100
+                && claimed_per_group.len() <= 300
+                && claimed_per_group
+                    .values()
+                    .all(|count| *count == tasks_per_group as usize),
+            "log replay must return only complete groups: {claimed_per_group:?}"
+        );
+        fireweed
+            .nack(
+                &q,
+                well_formed.iter().map(|item| item.item_id),
+                Nack::Release,
+            )
+            .await
+            .unwrap();
+
+        // --- ASSERTED whole-group SELECTION on the gate/group-capable relational backend (BQ-14b) ---
+        // The relational family implements atomic whole-group claim. Same lib facade (RuntimeCore), relational backend.
+        let rel = RuntimeCore::new(
+            Arc::new(crate::turso_memory_backend()),
+            Arc::new(ManualClock::at(0)),
+        );
+        let rq = qk("marketo", "leads-rel");
+        let mut rdef = qdef(
+            "marketo",
+            "leads-rel",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        );
+        rdef.max_eligible_group_size = Some(5);
+        rel.create_queue(rdef).await.unwrap();
+        // Two whole groups: gA (2 tasks), gB (3 tasks).
+        let group_item = |p: i64, g: &str| NewItem {
+            priority: Some(PriorityValue::Int64(p)),
+            group_key: Some(GroupKey::new(g).unwrap()),
+            fields: BTreeMap::from([(
+                "claim_marker".to_string(),
+                Bytes::from_static(b"whole-group"),
+            )]),
+            ..Default::default()
+        };
+        rel.push_batch(
+            &rq,
+            vec![
+                group_item(10, "gA"),
+                group_item(11, "gA"),
+                group_item(20, "gB"),
+                group_item(21, "gB"),
+                group_item(22, "gB"),
+            ],
+        )
+        .await
+        .unwrap();
+        // whole-group claim, max_groups=1: leases ALL items of exactly ONE group atomically (no partial group).
+        let wg1 = rel
+            .claim_with(&rq, 100, 60_000, whole_group(1))
+            .await
+            .unwrap();
+        assert!(!wg1.is_empty(), "whole-group claim leases a complete group");
+        let g1 = wg1[0].group_key.clone();
+        assert!(
+            wg1.iter().all(|i| i.group_key == g1),
+            "a whole-group claim returns exactly ONE group's items (<= max_groups=1)"
+        );
+        assert!(
+            wg1.iter()
+                .all(|i| i.fields.get("claim_marker").map(|b| b.as_ref())
+                    == Some(&b"whole-group"[..])),
+            "a whole-group claim carries the explicit field through the claim path"
+        );
+        let g1_size = if g1 == Some(GroupKey::new("gA").unwrap()) {
+            2
+        } else {
+            3
+        };
+        assert_eq!(
+            wg1.len(),
+            g1_size,
+            "the whole group is leased atomically — the complete group, no partial (INV-7)"
+        );
+        rel.ack(&rq, wg1.iter().map(|i| i.item_id)).await.unwrap();
+        // A second whole-group claim returns the OTHER complete group (no duplicate group; both fully drain).
+        let wg2 = rel
+            .claim_with(&rq, 100, 60_000, whole_group(1))
+            .await
+            .unwrap();
+        let g2 = wg2[0].group_key.clone();
+        assert_ne!(
+            g1, g2,
+            "the second whole-group claim returns a DIFFERENT group (no group duplicated across claims)"
+        );
+        assert!(
+            wg2.iter()
+                .all(|i| i.fields.get("claim_marker").map(|b| b.as_ref())
+                    == Some(&b"whole-group"[..])),
+            "the explicit field also survives the second whole-group claim"
+        );
+        assert_eq!(
+            wg1.len() + wg2.len(),
+            5,
+            "both whole groups delivered, zero partial/duplicate items"
+        );
+        let whole_group_selection = wg1.len() + wg2.len() == 5 && g1 != g2;
+
+        emit_ac(
+            "AC-E2E-2",
+            &[],
+            "group-batching queue loaded with >=1000 groups; item-level claim parity holds; the group-batching claim-compatibility contract is enforced (max_groups=0 -> Invalid; group-size>max_items -> BatchTooLarge; missing max_eligible_group_size -> Invalid); and ASSERTED atomic whole-group SELECTION on the relational backend (BQ-14b): a whole-group claim leases exactly one COMPLETE group (no partial, INV-7), bounded by max_groups, and successive claims drain distinct groups with zero duplicates. [DEFERRED: group-rep ordering under contention, concurrent multi-claimer no-dup, discovery are the heavier provisioned run]",
+            BTreeMap::from([
+                ("groups_loaded".into(), serde_json::json!(groups)),
+                ("items_loaded".into(), serde_json::json!(loaded)),
+                (
+                    "item_level_claim_len".into(),
+                    serde_json::json!(item_claim.len()),
+                ),
+                (
+                    "max_groups_zero".into(),
+                    serde_json::json!(format!("{zero:?}")),
+                ),
+                (
+                    "batch_too_large".into(),
+                    serde_json::json!(format!("{too_large:?}")),
+                ),
+                (
+                    "missing_group_size".into(),
+                    serde_json::json!(format!("{unconfigured:?}")),
+                ),
+                (
+                    "well_formed_whole_group_logreplay".into(),
+                    serde_json::json!(format!("{well_formed:?}")),
+                ),
+                (
+                    "relational_whole_group_selection".into(),
+                    serde_json::json!(whole_group_selection),
+                ),
+            ]),
+        );
+    }
+
+    /// AC-E2E-6 (TP-003): one hot queue with a large resident backlog, one small eligible queue, and K active
+    /// queues on ONE node. (FR-1, FR-12, FR-40..43, FR-48.)
+    ///
+    /// SCOPE (honest): this is the SINGLE-THREADED, in-process CORRECTNESS-isolation slice of AC-E2E-6 — it shows
+    /// that per-queue ownership keeps each queue's delivery + drain correct and independent with a large hot
+    /// backlog + K queues co-resident. These are restatements of per-queue keying, NOT a contention proof; the
+    /// real noisy-neighbor CONTENTION measurement (concurrent workers contending the shared node, throughput-
+    /// flatness across a residency ladder) is BQ-41 (queue_density_single_node_tests), already committed.
+    ///
+    /// COVERED via the lib facade:
+    ///   - a claim from the small queue returns ONLY the small queue's items (and the hot/active claims return
+    ///     only their own) — per-queue keying, zero cross-queue leakage, each claim verified NON-EMPTY;
+    ///   - K queues are INDEPENDENTLY claimable (each returns exactly its own 10 items);
+    ///   - the small queue drains FULLY (completeness) and, at this single in-memory operating point, its
+    ///     claim+ack rate is reported as a diagnostic (NOT a host-speed gate or the algorithmic-
+    ///     cost ladder; that, and concurrent contention, are BQ-41);
+    ///   - the hot backlog is uncorrupted by the small queue's drain (no cross-queue mutation).
+    /// ASSERTED (BQ pqueue-289c8d5a): DiscoverActiveScopes on the relational backend via the same lib facade —
+    /// active scopes ranked by TRUE oldest-eligible age (most-starved first), a stalled queue with eligible work
+    /// + no live serving owner visible through a growing oldest_eligible_age_ms (FR-41), and the per-queue
+    /// rollup. The facade returns the UNFILTERED ranking; unauthorized-scope exclusion is the auth layer's
+    /// concern (ADR-002 — no principal in the trusted library).
+    /// DEFERRED (provisioned perf env, NOT available in-repo): the AC-LAT-1 p95<250ms/p99<1000ms latency bars at
+    /// release scale. ALSO out of scope here: the CONCURRENT noisy-neighbor measurement (BQ-41) and
+    /// bounded-per-node worker pools (pqueue-c33c367e).
+    #[tokio::test]
+    async fn noisy_neighbor_scale_e2e() {
+        let (fireweed, _clock) = deployment();
+
+        // Hot queue: a large resident backlog.
+        let hot = qk("nn", "hot");
+        fireweed
+            .create_queue(qdef(
+                "nn",
+                "hot",
+                PriorityDirection::Ascending,
+                OrderingMode::Strict,
+            ))
+            .await
+            .unwrap();
+        let hot_backlog = 50_000u64;
+        let hot_items: Vec<NewItem> = (0..hot_backlog)
+            .map(|_| NewItem {
+                payload: Some(Bytes::from_static(b"hot")),
+                ..Default::default()
+            })
+            .collect();
+        fireweed.push_batch(&hot, hot_items).await.unwrap();
+
+        // K active queues, each with a small resident set.
+        let k = 50u64;
+        for i in 0..k {
+            let q = qk("nn", &format!("active{i}"));
+            fireweed
+                .create_queue(qdef(
+                    "nn",
+                    &format!("active{i}"),
+                    PriorityDirection::Ascending,
+                    OrderingMode::Strict,
+                ))
+                .await
+                .unwrap();
+            let marker = format!("active{i}");
+            let items: Vec<NewItem> = (0..10)
+                .map(|_| NewItem {
+                    payload: Some(Bytes::from(marker.clone().into_bytes())),
+                    ..Default::default()
+                })
+                .collect();
+            fireweed.push_batch(&q, items).await.unwrap();
+        }
+
+        // Small eligible queue.
+        let small = qk("nn", "small");
+        fireweed
+            .create_queue(qdef(
+                "nn",
+                "small",
+                PriorityDirection::Ascending,
+                OrderingMode::Strict,
+            ))
+            .await
+            .unwrap();
+        let small_n = 200u64;
+        let small_items: Vec<NewItem> = (0..small_n)
+            .map(|_| NewItem {
+                payload: Some(Bytes::from_static(b"small")),
+                ..Default::default()
+            })
+            .collect();
+        fireweed.push_batch(&small, small_items).await.unwrap();
+
+        // CORRECTNESS isolation: with the hot backlog + K queues all resident, a claim from the small queue
+        // returns ONLY the small queue's items (no hot/active leakage), and a claim from the hot queue returns
+        // only hot items. Per-queue keying ⇒ zero cross-queue leakage.
+        let from_small = fireweed.claim(&small, 10, 60_000).await.unwrap();
+        assert_eq!(
+            from_small.len(),
+            10,
+            "small queue claim returns items (not vacuously empty)"
+        );
+        assert!(
+            from_small
+                .iter()
+                .all(|c| c.payload.as_deref() == Some(b"small".as_ref())),
+            "the small queue delivers only its own items (no hot/active leakage)"
+        );
+        fireweed
+            .nack(&small, from_small.iter().map(|c| c.item_id), Nack::Release)
+            .await
+            .unwrap();
+        let from_hot = fireweed.claim(&hot, 10, 60_000).await.unwrap();
+        assert_eq!(
+            from_hot.len(),
+            10,
+            "hot queue claim returns items (not vacuously empty)"
+        );
+        assert!(
+            from_hot
+                .iter()
+                .all(|c| c.payload.as_deref() == Some(b"hot".as_ref())),
+            "the hot queue delivers only its own items"
+        );
+        fireweed
+            .nack(&hot, from_hot.iter().map(|c| c.item_id), Nack::Release)
+            .await
+            .unwrap();
+
+        // K queues independently claimable: each returns only its own marker.
+        for i in 0..k {
+            let q = qk("nn", &format!("active{i}"));
+            let got = fireweed.claim(&q, 100, 60_000).await.unwrap();
+            let marker = format!("active{i}");
+            assert_eq!(
+                got.len(),
+                10,
+                "active queue {i} returns exactly its own 10 items (not empty/leaked)"
+            );
+            assert!(
+                got.iter()
+                    .all(|c| c.payload.as_deref() == Some(marker.as_bytes())),
+                "active queue {i} delivers only its own items"
+            );
+            fireweed
+                .nack(&q, got.iter().map(|c| c.item_id), Nack::Release)
+                .await
+                .unwrap();
+        }
+
+        // COMPLETENESS + diagnostic throughput: drain the small queue with the hot backlog + K queues resident.
+        // The exact drain/isolation assertions are acceptance; the measured rate is not a host-speed gate.
+        let t = Instant::now();
+        let mut drained = 0u64;
+        loop {
+            let got = fireweed.claim(&small, 100, 60_000).await.unwrap();
+            if got.is_empty() {
+                break;
+            }
+            drained += got.len() as u64;
+            fireweed
+                .ack(&small, got.iter().map(|c| c.item_id))
+                .await
+                .unwrap();
+        }
+        let small_rate = drained as f64 / t.elapsed().as_secs_f64();
+        assert_eq!(
+            drained, small_n,
+            "the small queue fully drains (completeness) with the hot backlog resident"
+        );
+        assert!(
+            small_rate.is_finite() && small_rate > 0.0,
+            "the small queue must make measurable progress with a {hot_backlog}-item hot backlog + {k} queues resident: {small_rate:.0}/s"
+        );
+        // The hot backlog is untouched by the small queue's drain (isolation): still fully resident.
+        let hot_pending_after = fireweed.metrics(&hot).await.unwrap().pending;
+        assert_eq!(
+            hot_pending_after, hot_backlog,
+            "hot backlog undisturbed by the small queue"
+        );
+
+        // --- ASSERTED DiscoverActiveScopes (BQ pqueue-289c8d5a) on the relational backend (per-group summary) ---
+        // The active-scope rollup is a relational-class feature; driven on the relational backend via the same
+        // lib facade. Three groups made eligible at increasing times → discovery ranks them by TRUE
+        // oldest-eligible age (most-starved first). The facade returns the UNFILTERED ranking (no principal —
+        // unauthorized-scope exclusion is the auth layer's concern per ADR-002).
+        let disc_clock = Arc::new(ManualClock::at(0));
+        let rel = RuntimeCore::new(Arc::new(crate::turso_memory_backend()), disc_clock.clone());
+        let dq = qk("nn", "discover");
+        rel.create_queue(qdef(
+            "nn",
+            "discover",
+            PriorityDirection::Ascending,
+            OrderingMode::Strict,
+        ))
+        .await
+        .unwrap();
+        let grouped = |g: &str| NewItem {
+            group_key: Some(GroupKey::new(g).unwrap()),
+            payload: Some(Bytes::from_static(b"work")),
+            ..Default::default()
+        };
+        // Make three groups eligible at t=0, t=100, t=200 (oldest-eligible time increases per group).
+        disc_clock.set(0);
+        rel.push(&dq, grouped("g-old")).await.unwrap();
+        disc_clock.set(100);
+        rel.push(&dq, grouped("g-mid")).await.unwrap();
+        disc_clock.set(200);
+        rel.push(&dq, grouped("g-new")).await.unwrap();
+        // Discover at a later time: ranked oldest-eligible first (the most-aged/starved group leads).
+        disc_clock.set(1000);
+        let scopes: Vec<ActiveScope> = rel
+            .discover_active_scopes(&dq, DiscoveryGranularity::Group)
+            .await
+            .unwrap();
+        assert_eq!(scopes.len(), 3, "three active groups hold eligible work");
+        assert!(
+            scopes
+                .windows(2)
+                .all(|w| w[0].oldest_eligible_age_ms >= w[1].oldest_eligible_age_ms),
+            "active scopes ranked by TRUE oldest-eligible age (most-starved first): {scopes:?}"
+        );
+        assert_eq!(
+            scopes[0].group_key.as_deref(),
+            Some("g-old"),
+            "the most-aged group leads the ranking"
+        );
+        let discovery_ranks_by_age =
+            scopes.len() == 3 && scopes[0].group_key.as_deref() == Some("g-old");
+
+        // STALLED-queue visibility (FR-41): with eligible work and NOTHING claiming it, the oldest-eligible age
+        // keeps GROWING — a stalled queue with no live serving owner is visible through the discovery surface.
+        disc_clock.set(2000);
+        let later = rel
+            .discover_active_scopes(&dq, DiscoveryGranularity::Group)
+            .await
+            .unwrap();
+        let old_later = later
+            .iter()
+            .find(|s| s.group_key.as_deref() == Some("g-old"))
+            .expect("g-old still active (eligible work, undrained)");
+        assert!(
+            old_later.oldest_eligible_age_ms > scopes[0].oldest_eligible_age_ms,
+            "a stalled queue's oldest-eligible age grows while nothing drains it — visible via DiscoverActiveScopes (FR-41)"
+        );
+        let stalled_queue_visible =
+            old_later.oldest_eligible_age_ms > scopes[0].oldest_eligible_age_ms;
+        // The Queue-granularity rollup is one scope for the whole queue (group_key dropped), aged to the most
+        // starved group — the per-queue oldest_eligible_age_ms surface a router/operator ranks queues by.
+        let rollup = rel
+            .discover_active_scopes(&dq, DiscoveryGranularity::Queue)
+            .await
+            .unwrap();
+        assert_eq!(
+            rollup.len(),
+            1,
+            "Queue granularity rolls the groups up to one per-queue scope"
+        );
+        assert!(
+            rollup[0].group_key.is_none(),
+            "the per-queue rollup drops group_key"
+        );
+
+        emit_ac(
+            "AC-E2E-6",
+            &[],
+            "SINGLE-THREADED correctness-isolation (per-queue ownership): small/hot/K-queue claims each return only their own items (zero cross-queue leakage, all non-empty); K queues independently claimable; small queue fully drains while the measured rate remains diagnostic only; hot backlog uncorrupted; and ASSERTED DiscoverActiveScopes on the relational backend (BQ pqueue-289c8d5a): active scopes ranked by TRUE oldest-eligible age (most-starved first), a stalled queue with eligible work + no live serving owner visible via a growing oldest_eligible_age_ms (FR-41), and the per-queue rollup — the facade returns the UNFILTERED ranking (unauthorized-scope exclusion is the auth layer per ADR-002) [DEFERRED: AC-LAT-1 capacity-at-release-scale needs the provisioned perf env; CONCURRENT noisy-neighbor contention + algorithmic-cost proof is BQ-41; bounded-per-node-pools pqueue-c33c367e]",
+            BTreeMap::from([
+                ("hot_backlog".into(), serde_json::json!(hot_backlog)),
+                ("active_queues".into(), serde_json::json!(k)),
+                ("small_items".into(), serde_json::json!(small_n)),
+                (
+                    "small_drain_rate_per_s".into(),
+                    serde_json::json!(small_rate.round()),
+                ),
+                (
+                    "hot_pending_after_small_drain".into(),
+                    serde_json::json!(hot_pending_after),
+                ),
+                (
+                    "discovery_ranks_active_scopes_by_oldest_eligible_age".into(),
+                    serde_json::json!(discovery_ranks_by_age),
+                ),
+                (
+                    "stalled_queue_visible_via_discovery".into(),
+                    serde_json::json!(stalled_queue_visible),
+                ),
+            ]),
+        );
+    }
 }

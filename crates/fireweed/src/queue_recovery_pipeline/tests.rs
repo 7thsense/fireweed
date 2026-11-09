@@ -389,14 +389,6 @@ async fn native_port_identical_contract(s3: bool) {
     drop(queue);
     std::fs::remove_dir_all(root).unwrap();
 }
-#[tokio::test]
-async fn native_store_runs_identical_contract_local() {
-    native_port_identical_contract(false).await;
-}
-#[tokio::test]
-async fn native_store_runs_identical_contract_real_s3() {
-    native_port_identical_contract(true).await;
-}
 
 async fn native_condition_checks_contract(s3: bool) {
     use fireweed_conformance::queue_contract::{self as suite, TestClock};
@@ -469,4 +461,19 @@ async fn native_store_condition_checks_replay_and_rebuild_local() {
 #[tokio::test]
 async fn native_store_condition_checks_replay_and_rebuild_real_s3() {
     native_condition_checks_contract(true).await;
+}
+
+/// Large-scale tier: selected in CI by the `::large::` path segment.
+mod large {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_store_runs_identical_contract_local() {
+        native_port_identical_contract(false).await;
+    }
+
+    #[tokio::test]
+    async fn native_store_runs_identical_contract_real_s3() {
+        native_port_identical_contract(true).await;
+    }
 }

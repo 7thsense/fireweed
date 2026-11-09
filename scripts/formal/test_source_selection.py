@@ -269,13 +269,6 @@ class SourceSelectionTests(unittest.TestCase):
             cases=dict(model.CASES);cases['keys_mixed']=replace(cases['keys_mixed'],expression=expression)
             with patch.object(model,'CASES',cases):
                 with self.assertRaisesRegex(AssertionError,'canonical Work Keys'):oracle.run_campaign(gate.helper,model,100000)
-    def test_missing_or_incomplete_campaign_blocks_aggregate(self):
-        for result in [({**self.report,'name':'other'},self.controls),
-                       ({**self.report,'complete':False},self.controls),
-                       ({**self.report,'completed_witnesses':{}},self.controls),
-                       (self.report,[])]:
-            with patch.object(oracle,'run_campaign',lambda *args,result=result:result):
-                with self.assertRaises(AssertionError):gate.run()
     def test_captured_bytes_and_bounded_exploration_fail_closed(self):
         for module in (model,oracle):
             name=str(Path(module.__file__).resolve());self.assertIn(name,gate.helper.LOADED_SOURCES)

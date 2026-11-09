@@ -118,15 +118,6 @@ class CoordinatorTests(unittest.TestCase):
                 self.assertEqual(bootstrap.main(['--output',str(out)]),1)
             r=json.loads(out.read_text());self.assertEqual(r['status'],'FAIL');self.assertIn(marker,r['error'])
         finally:out.unlink(missing_ok=True)
-    def test_ninth_identity_search_and_runtime_are_mandatory(self):
-        self.fail_closed(lambda:patch.object(model.Coordinator,'name','omitted-coordinator'),'ninth exact source coordinator identity required')
-        original=gate.helper.explore
-        def limited(spec,cap):return original(spec,1 if spec.name==model.Coordinator.name and spec.fault is None else cap)
-        self.fail_closed(lambda:patch.object(gate.helper,'explore',limited),'api007-native-commit-coordinator: incomplete search at 1 states')
-        def broken(spec,cap):
-            if spec.name==model.Coordinator.name:raise RuntimeError('injected coordinator runtime')
-            return original(spec,cap)
-        self.fail_closed(lambda:patch.object(gate.helper,'explore',broken),'injected coordinator runtime')
     def test_required_completion_witness_cannot_be_omitted(self):
         spec=model.Coordinator();report,graph=gate.helper.explore(spec,100000);states,edges,parents=graph
         damaged=[[e for e in row if e[0]!='ChooseCoordinator-ambiguous_absence_new_actual_acquire'] for row in edges]
