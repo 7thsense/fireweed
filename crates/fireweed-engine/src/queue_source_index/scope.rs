@@ -2,7 +2,7 @@
 //! Numeric epoch/offset equality never substitutes for that identity.
 use crate::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
-    queue_log_record::{CheckedQueueLogRecord, QueueLogFormat, QueueLogPayload},
+    queue_log_record::{CheckedQueueLogRecord, QueueLogPayload},
     queue_namespace::AddressRef,
 };
 use fireweed_core::queue_contract::{QueueError, QueueResult};
@@ -70,7 +70,6 @@ impl<'a> QueueSourceCut<'a> {
             || !record.owner().belongs_to(job)
             || record.view().address() != self.address
             || record.view().epoch() != self.epoch
-            || record.view().format() != QueueLogFormat::ChecksummedV2
             || matches!(record.view().payload(), QueueLogPayload::Genesis(_)) != (self.through == 0)
         {
             return Err(unknown(

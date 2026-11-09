@@ -33,7 +33,7 @@ mod stats;
 mod store;
 use fireweed_engine::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
-    queue_log_record::{QueueLogFormat, encode_checked_genesis},
+    queue_log_record::encode_checked_genesis,
     queue_schema_codec::AdmittedQueueDefinition,
 };
 use fireweed_objectlog::queue_native_log::QueueNativeLog;

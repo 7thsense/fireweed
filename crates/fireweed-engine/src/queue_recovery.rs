@@ -178,12 +178,13 @@ mod tests {
     use super::*;
     use crate::{
         queue_admission::QueueAdmission,
-        queue_log_record::{encode_genesis, encode_publication_record},
+        queue_log_record::{encode_checked_genesis, encode_checked_publication_record},
         queue_planner::{RecordSnapshot, combine_deltas},
         queue_publication::encode_publication_pinned,
         queue_schema_codec::{AdmittedQueueDefinition, encode_definition},
     };
     use fireweed_core::queue_contract::{CollectionDefinition, QueueSchema};
+    use sha2::Digest;
     fn schema() -> QueueSchema {
         QueueSchema {
             work: CollectionDefinition {
@@ -202,7 +203,7 @@ mod tests {
         }
     }
     #[test]
-    fn exact_genesis_and_both_publication_formats_preserve_authority() {
+    fn exact_genesis_and_both_publication_versions_preserve_authority() {
         let job = Arc::new(QueueAdmission::new(1, 1 << 20).unwrap().reserve(0).unwrap());
         let address = QueueAddress {
             tenant: "t\0β".into(),
@@ -210,7 +211,8 @@ mod tests {
         };
         let raw = encode_definition(&schema()).unwrap();
         let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
-        let genesis = encode_genesis(7, &address, &definition, &[19; 32], 4096, &job).unwrap();
+        let genesis =
+            encode_checked_genesis(7, &address, &definition, &[19; 32], 4096, &job).unwrap();
         let before = RecordSnapshot::default();
         let delta = combine_deltas(&[], 0).unwrap();
         let frame =
@@ -224,7 +226,7 @@ mod tests {
         for (offset, version) in [(1, b'1'), (2, b'2')] {
             let mut raw = frame.as_bytes().to_vec();
             raw[4] = version;
-            let record = encode_publication_record(8, &raw, 4096, &job).unwrap();
+            let record = encode_checked_publication_record(8, &raw, 4096, &job).unwrap();
             history.observe(offset, record.bytes()).unwrap();
         }
         assert_eq!(history.next_offset(), 3);
@@ -240,14 +242,16 @@ mod tests {
         };
         let raw = encode_definition(&schema()).unwrap();
         let definition = AdmittedQueueDefinition::from_raw(&raw, &job).unwrap();
-        let genesis = encode_genesis(7, &address, &definition, &[3; 32], 4096, &job).unwrap();
+        let genesis =
+            encode_checked_genesis(7, &address, &definition, &[3; 32], 4096, &job).unwrap();
         let before = RecordSnapshot::default();
         let delta = combine_deltas(&[], 0).unwrap();
         let frame =
             encode_publication_pinned(&address, definition.pin(), &before, &delta, &[], 4096, &job)
                 .unwrap();
-        let publication = encode_publication_record(8, frame.as_bytes(), 4096, &job).unwrap();
-        let regressed = encode_publication_record(6, frame.as_bytes(), 4096, &job).unwrap();
+        let publication =
+            encode_checked_publication_record(8, frame.as_bytes(), 4096, &job).unwrap();
+        let regressed = encode_checked_publication_record(6, frame.as_bytes(), 4096, &job).unwrap();
         for (offset, bytes) in [(1, genesis.bytes()), (0, publication.bytes())] {
             let mut history = ColdQueueHistory::new(&address, &job).unwrap();
             assert!(history.observe(offset, bytes).is_err());
@@ -272,7 +276,7 @@ mod tests {
         let wrong =
             encode_publication_pinned(&address, other_pin, &before, &delta, &[], 4096, &job)
                 .unwrap();
-        let wrong = encode_publication_record(8, wrong.as_bytes(), 4096, &job).unwrap();
+        let wrong = encode_checked_publication_record(8, wrong.as_bytes(), 4096, &job).unwrap();
         let mut history = ColdQueueHistory::new(&address, &job).unwrap();
         history.observe(0, genesis.bytes()).unwrap();
         assert!(history.observe(1, wrong.bytes()).is_err());
@@ -283,6 +287,9 @@ mod tests {
             .position(|candidate| candidate == raw)
             .unwrap();
         invalid_schema[schema_start + raw.len() - 9] = 0; // max_attempts, before the 8 retention bytes
+        let sealed = invalid_schema.len() - 32;
+        let checksum = sha2::Sha256::digest(&invalid_schema[..sealed]);
+        invalid_schema[sealed..].copy_from_slice(&checksum);
         let mut history = ColdQueueHistory::new(&address, &job).unwrap();
         assert!(history.observe(0, &invalid_schema).is_err());
         assert_eq!(history.next_offset(), 0);
@@ -291,7 +298,8 @@ mod tests {
         let mut discontinuous = frame.as_bytes().to_vec();
         discontinuous[initial_offset..initial_offset + 8].copy_from_slice(&1u64.to_le_bytes());
         discontinuous[initial_offset + 8..initial_offset + 16].copy_from_slice(&1u64.to_le_bytes());
-        let discontinuous = encode_publication_record(8, &discontinuous, 4096, &job).unwrap();
+        let discontinuous =
+            encode_checked_publication_record(8, &discontinuous, 4096, &job).unwrap();
         let mut history = ColdQueueHistory::new(&address, &job).unwrap();
         history.observe(0, genesis.bytes()).unwrap();
         assert!(history.observe(1, discontinuous.bytes()).is_err());
