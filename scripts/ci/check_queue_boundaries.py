@@ -19,20 +19,10 @@ PURE = {
     "fireweed-queue-spool": {"fireweed-core", "fireweed-engine", "tempfile", "postcard", "sha2", "serde", "tokio"},
 }
 ADAPTERS = {
-    "fireweed-postgres": {"async-trait", "tokio-postgres", "tokio", "fireweed-core", "fireweed-engine", "fireweed-queue-spool", "fireweed-projection", "fireweed-objectlog", "axon-esf", "postgres", "native-tls", "postgres-native-tls", "serde", "serde_json", "postcard", "bytes", "futures", "sha2"},
+    "fireweed-postgres": {"async-trait", "tokio-postgres", "tokio", "fireweed-core", "fireweed-engine", "fireweed-queue-spool", "fireweed-projection", "axon-esf", "postgres", "native-tls", "postgres-native-tls", "serde", "serde_json", "postcard", "bytes", "futures", "sha2"},
     "fireweed-turso": {"fireweed-projection", "fireweed-core", "fireweed-engine", "fireweed-queue-spool", "fireweed-relational", "bytes", "serde_json", "tokio", "turso", "turso_core"},
     "fireweed-objectlog": {"async-trait", "futures", "fireweed-core", "fireweed-engine", "fireweed-projection", "fireweed-queue-spool", "object-log", "aws-sdk-s3", "tokio", "serde", "serde_json", "bytes", "sha2"},
 }
-# One exact existing dependency, not an adapter-wide exemption. Remove when the
-# named legacy composition retires; new source locations are not permitted.
-LEGACY = {
-    ("fireweed-postgres", "fireweed-objectlog"): {
-        "file": "crates/fireweed-postgres/src/async_objectlog_postgres.rs",
-        "owner": "PostgreSQL adapter maintainer",
-        "removal": "retire AsyncObjectLogPostgresBackend during API-007 cutover",
-    },
-}
-
 
 def production_dependencies(document: dict, workspace: dict) -> set[str]:
     result = set()
@@ -98,8 +88,6 @@ def violations(graph: dict[str, set[str]]) -> list[str]:
                 errors.append(f"forbidden pure edge: {source} -> {target}")
             if source in ADAPTERS and target not in ADAPTERS[source]:
                 errors.append(f"forbidden adapter edge: {source} -> {target}")
-            if source == "fireweed-postgres" and target == "fireweed-objectlog" and (source, target) not in LEGACY:
-                errors.append(f"unrecorded legacy edge: {source} -> {target}")
     # Iterative traversal keeps dependency graph checking independent of stack depth.
     complete = set()
     for start in sorted(graph):
@@ -147,12 +135,6 @@ def dependency_tokens(root: Path, package: str, protected: set[str]) -> set[str]
 
 def source_controls(root: Path) -> list[str]:
     errors = []
-    for (source, target), exception in LEGACY.items():
-        folder = root / "crates" / source / "src"
-        tokens = dependency_tokens(root, source, {target})
-        for path in folder.rglob("*.rs"):
-            if any(re.search(r"(?<![A-Za-z0-9_])" + re.escape(token) + r"\b", path.read_text()) for token in tokens) and str(path.relative_to(root)) != exception["file"]:
-                errors.append(f"legacy edge expanded to {path.relative_to(root)}")
     queue = root / "crates/fireweed/src/queue.rs"
     if queue.is_file():
         text = queue.read_text()
@@ -224,17 +206,11 @@ def manifest_controls(scratch: Path) -> None:
 
 
 def adapter_source_controls(scratch: Path) -> None:
-    for source, target in [("fireweed-postgres", "object-log"), ("fireweed-turso", "fireweed-objectlog"), ("fireweed-objectlog", "sqlx")]:
+    for source, target in [("fireweed-postgres", "object-log"), ("fireweed-postgres", "fireweed-objectlog"), ("fireweed-turso", "fireweed-objectlog"), ("fireweed-objectlog", "sqlx")]:
         if not violations({source: {target}}):
             raise ValueError(f"adapter dependency control escaped: {source}->{target}")
     with tempfile.TemporaryDirectory(prefix="boundary-source-", dir=scratch) as name:
         root = Path(name)
-        pg = root / "crates/fireweed-postgres/src/new.rs"
-        pg.parent.mkdir(parents=True)
-        pg.write_text("use fireweed_objectlog as log; use log::ObjectLogEngineStore;")
-        if not any("legacy edge expanded" in e for e in source_controls(root)):
-            raise ValueError("aliased legacy object-log source escaped")
-        pg.unlink()
         queue = root / "crates/fireweed/src/queue.rs"
         queue.parent.mkdir(parents=True)
         for text in ("use tokio_postgres as pg; use pg::Client;", "use turso_core::Database;", "use {tokio_postgres as pg};"):
@@ -242,11 +218,6 @@ def adapter_source_controls(scratch: Path) -> None:
             if not any("vendor SDK" in e for e in source_controls(root)):
                 raise ValueError("aliased/root vendor source escaped: " + text)
 
-        pg_manifest = root / "crates/fireweed-postgres/Cargo.toml"
-        pg_manifest.write_text('[package]\nname="fireweed-postgres"\nversion="0.1.0"\n[dependencies]\nlog_authority={package="fireweed-objectlog",version="1"}\n')
-        pg.write_text("use log_authority::ObjectLogEngineStore;")
-        if not any("legacy edge expanded" in e for e in source_controls(root)):
-            raise ValueError("Cargo-renamed legacy source escaped")
         facade_manifest = root / "crates/fireweed/Cargo.toml"
         facade_manifest.write_text('[package]\nname="fireweed"\nversion="0.1.0"\n[target.\'cfg(unix)\'.dependencies]\nsql_vendor={package="tokio-postgres",version="0.7"}\n')
         queue.write_text("use sql_vendor::Client;")

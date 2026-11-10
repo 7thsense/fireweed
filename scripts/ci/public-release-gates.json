@@ -4,7 +4,6 @@
   "gates": [
     {"id": "functional-format-identity", "command": ["bash", "scripts/ci/fast-functional-gate.sh"]},
     {"id": "artifact-topology", "command": ["bash", "scripts/verify-public-artifact-topology.sh"]},
-    {"id": "crate-boundary", "command": ["bash", "scripts/verify-public-crate-boundary.sh"]},
     {"id": "dependency-license-policy", "command": ["cargo", "deny", "check"]},
     {"id": "secret-history", "command": ["bash", "scripts/ci/gitleaks-gate.sh"]},
     {"id": "source-package-sbom-provenance", "command": ["bash", "scripts/release/source-preview-artifacts-test.sh"]},

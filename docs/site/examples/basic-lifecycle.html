@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Concrete Fireweed handle over memory: create a queue, push with a client key, update schedule, claim under a lease, and complete." />
-    <title>Open, push, claim, complete — Fireweed Queue</title>
+    <meta name="description" content="Open a throwaway Queue, provision a schema, insert two items, claim in priority order, complete each with a commit and read the stats." />
+    <title>Provision, insert, claim, commit — Fireweed Queue</title>
     <link rel="stylesheet" href="../assets/site.css" />
   </head>
   <body>
@@ -33,106 +33,86 @@
       <main>
 
         <div class="page-intro">
-          <h2>Open, push, claim, complete</h2>
-          <p>Concrete Fireweed handle over memory: create a queue, push with a client key, update schedule, claim under a lease, and complete.</p>
+          <h2>Provision, insert, claim, commit</h2>
+          <p>Open a throwaway Queue, provision a schema, insert two items, claim in priority order, complete each with a commit and read the stats.</p>
         </div>
         <div class="example-meta">
           <span class="badge neutral">embed</span>
-          <span>Provenance: <code>crates/fireweed/tests/concrete_fireweed.rs::exercise_operation_families · crates/fireweed/tests/concrete_fireweed.rs::queue_definition</code></span>
+          <span>Provenance: <code>crates/fireweed/examples/queue_lifecycle.rs::schema · crates/fireweed/examples/queue_lifecycle.rs::push_claim_complete</code></span>
         </div>
         <div class="tag-list" style="margin-bottom:16px"><span class="tag">embed</span><span class="tag">lifecycle</span><span class="tag">beginner</span></div>
         <div class="code-block">
   <div class="label"><span>docs/site/examples/src/basic-lifecycle.rs</span><span>rust</span></div>
-  <pre><code>// Provenance: crates/fireweed/tests/concrete_fireweed.rs::exercise_operation_families
+  <pre><code>// Provenance: crates/fireweed/examples/queue_lifecycle.rs::schema
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
-async fn exercise_operation_families(fireweed: &amp;Fireweed, queue_name: &amp;str) {
-    let mut definition = queue_definition();
-    definition.queue_id = QueueId::new(queue_name).unwrap();
-    let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    fireweed.create_queue(definition).await.unwrap();
-
-    let client_key = ClientItemKey::new(format!(&quot;{queue_name}-item&quot;)).unwrap();
-    let item_id = fireweed
-        .push(
-            &amp;key,
-            NewItem {
-                client_item_key: Some(client_key.clone()),
-                priority: Some(PriorityValue::Int64(10)),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        fireweed
-            .live_item(&amp;key, client_key)
-            .await
-            .unwrap()
-            .unwrap()
-            .item_id,
-        item_id
-    );
-    fireweed
-        .batch_update(
-            &amp;key,
-            BatchUpdateRequest {
-                request_id: RequestId::new(&quot;cf-reschedule&quot;).unwrap(),
-                updates: vec![BatchUpdateEntry {
-                    item_ref: BatchUpdateItemRef::ItemId(item_id),
-                    expected_item_version: None,
-                    priority: BatchUpdateValue::Replace(PriorityValue::Int64(5)),
-                    not_before: BatchUpdateValue::Keep,
-                    payload: BatchUpdateValue::Keep,
-                    metadata: BatchUpdateValue::Keep,
-                    gate_keys: BatchUpdateValue::Keep,
-                    fields: BatchUpdateValue::Keep,
-                }],
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(fireweed.metrics(&amp;key).await.unwrap().pending, 1);
-    let _ = fireweed.hot_projection_capabilities(&amp;key);
-
-    let claimed = fireweed.claim(&amp;key, 1, 30_000).await.unwrap();
-    assert_eq!(claimed.len(), 1);
-    fireweed
-        .complete(&amp;key, claimed.iter().map(|item| item.item_id))
-        .await
-        .unwrap();
-    assert_eq!(fireweed.metrics(&amp;key).await.unwrap().complete, 1);
+fn schema() -&gt; QueueSchema {
+    QueueSchema {
+        work: CollectionDefinition {
+            fields: BTreeMap::from([(&quot;kind&quot;.into(), FieldType::Text)]),
+            indexes: BTreeMap::new(),
+            unique_indexes: BTreeSet::new(),
+            additional_field_prefixes: BTreeSet::new(),
+        },
+        state: BTreeMap::new(),
+        progress_bound_nanos: 1_000_000_000,
+        max_attempts: 3,
+        retention: QueueRetention {
+            request_id_nanos: 86_400_000_000_000,
+            deleted_keys: DeletedKeyPolicy::Reusable,
+        },
+    }
 }
 
-// Provenance: crates/fireweed/tests/concrete_fireweed.rs::queue_definition
+// Provenance: crates/fireweed/examples/queue_lifecycle.rs::push_claim_complete
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
-fn queue_definition() -&gt; QueueDefinition {
-    QueueDefinition {
-        tenant_id: TenantId::new(&quot;downstream&quot;).unwrap(),
-        queue_id: QueueId::new(&quot;work&quot;).unwrap(),
-        priority_model: PriorityModel {
-            kind: PriorityModelKind::Int64,
-            direction: PriorityDirection::Ascending,
-            tie_breaker: PriorityTieBreaker::CreatedSequence,
-        },
-        ordering_mode: OrderingMode::Strict,
-        max_rank_error: 0,
-        progress_bound_ms: 60_000,
-        eligibility_policy: EligibilityPolicy::default(),
-        cohort_policy: None,
-        recurrence: RecurrencePolicy::default(),
-        request_id_retention_ms: 60_000,
-        client_item_key_retention_ms: 60_000,
-        terminal_retention_ms: 60_000,
-        max_lease_duration_ms: 60_000,
-        retry_policy: RetryPolicy { max_attempts: 3 },
-        max_push_batch_size: 100,
-        max_claim_batch_size: 100,
-        max_eligible_group_size: None,
-        secondary_indexes: vec![],
-        entity_schema: None,
-        typed_indexes: vec![],
-        emit_change_records: true,
+async fn push_claim_complete(queue: &amp;Queue, address: &amp;QueueAddress) -&gt; QueueResult&lt;()&gt; {
+    queue
+        .provision(ProvisionRequest {
+            queue: address.clone(),
+            schema: schema(),
+        })
+        .await?;
+    queue
+        .insert(InsertRequest {
+            queue: address.clone(),
+            request_id: &quot;load-1&quot;.into(),
+            mode: InsertMode::InsertOnly,
+            items: vec![job(&quot;welcome&quot;, 5, 0), job(&quot;digest&quot;, 1, 0)],
+            issued_at: now(),
+        })
+        .await?;
+
+    // Lower priority values are claimed first under `PriorityAscending`.
+    let claimed = queue
+        .claim(claim_request(address, &quot;claim-1&quot;, now()))
+        .await?;
+    assert_eq!(claimed[0].record.work.key, &quot;digest&quot;);
+
+    for (index, work) in claimed.iter().enumerate() {
+        let receipts = queue
+            .commit(settle(
+                address,
+                &amp;format!(&quot;done-{index}&quot;),
+                work,
+                Disposition::Complete,
+            ))
+            .await?;
+        assert!(matches!(
+            receipts[0].outcome,
+            GroupOutcome::Committed { .. }
+        ));
     }
+    let stats = queue
+        .stats(StatsRequest {
+            buckets: None,
+            queue: address.clone(),
+            filter: Filter::default(),
+            group_by: vec![],
+            eligible_at: now(),
+        })
+        .await?;
+    assert_eq!(stats.totals.completed, 2);
+    Ok(())
 }</code></pre>
 </div>
         <div class="prose">
@@ -142,7 +122,7 @@ fn queue_definition() -&gt; QueueDefinition {
           </p>
           <p>
             <a href="index.html">All examples</a> ·
-            Next: <a href="priority-retry.html">Priority order and nack retry</a>
+            Next: <a href="scheduled-delivery.html">Scheduled delivery and retry</a>
           </p>
         </div>
 

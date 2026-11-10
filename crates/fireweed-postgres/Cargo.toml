@@ -21,7 +21,6 @@ fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 fireweed-queue-spool = { path = "../fireweed-queue-spool" }
 fireweed-projection = { path = "../fireweed-projection" }
-fireweed-objectlog = { path = "../fireweed-objectlog" }
 axon-esf.workspace = true
 postgres = "0.19"
 native-tls = { version = "0.2", optional = true }
@@ -42,9 +41,6 @@ tls = ["dep:native-tls", "dep:postgres-native-tls"]
 [dev-dependencies]
 tempfile = "3.27"
 tokio = { version = "1", features = ["rt", "macros", "time"] }
-# The library facade, driven as a COORDINATED owner over the postgres backend + control plane for the B5
-# durable multi-instance competition test. `default-features = false` so we don't pull the other adapters.
-fireweed = { path = "../fireweed", default-features = false, features = ["postgres"] }
 # Runs the shared backend-conformance suite against the postgres backend (env-gated on FIREWEED_PG_TEST_URL).
 fireweed-conformance = { path = "../fireweed-conformance" }
 [[test]]

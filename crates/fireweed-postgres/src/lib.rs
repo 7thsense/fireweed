@@ -72,7 +72,6 @@ use sha2::{Digest, Sha256};
 mod async_control_plane;
 mod async_log;
 mod async_log_replay;
-mod async_objectlog_postgres;
 mod async_projection;
 mod compose_log;
 mod connect;
@@ -86,7 +85,6 @@ pub use async_log::{AsyncPostgresLog, DEFAULT_ASYNC_LOG_MAILBOX_CAPACITY};
 pub use async_log_replay::{
     async_composed_postgres_backend, async_composed_postgres_backend_in_schema, from_postgres_log,
 };
-pub use async_objectlog_postgres::AsyncObjectLogPostgresBackend;
 pub use async_projection::{
     AsyncPostgresRelationalControlPlane, AsyncPostgresRelationalProjection,
     DEFAULT_ASYNC_CONTROL_PLANE_MAILBOX_CAPACITY, DEFAULT_ASYNC_PROJECTION_MAILBOX_CAPACITY,

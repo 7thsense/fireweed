@@ -5,7 +5,6 @@
 //! Postgres transaction is never split across blocking tasks and no blocking client call runs on an async
 //! executor thread.
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
@@ -415,16 +414,6 @@ impl AsyncPostgresRelationalProjection {
     /// Delete the disposable relational projection on its owning thread.
     pub async fn delete_projection(&self) -> EngineResult<()> {
         self.execute(|store| store.delete_projection()).await
-    }
-
-    /// Restore hash-validated raw lease capabilities after scanning an authoritative log.
-    pub(crate) async fn restore_live_tokens(
-        &self,
-        shard: QueueKey,
-        candidates: HashMap<ItemId, fireweed_core::LeaseToken>,
-    ) -> EngineResult<()> {
-        self.execute(move |store| store.restore_live_tokens(&shard, candidates))
-            .await
     }
 }
 

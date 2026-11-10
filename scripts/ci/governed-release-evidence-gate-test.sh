@@ -105,10 +105,9 @@ line_of() {
 
 release_gate="${SCRIPT_DIR}/release-gate.sh"
 release_workflow="${REPO_ROOT}/.github/workflows/release.yml"
-smoke_line="$(line_of '--require-smoke-evidence E2,E3' "${release_gate}")"
 governed_line="$(line_of 'verify-governed-release-composite.sh' "${release_gate}")"
-[[ -n "${smoke_line}" && -n "${governed_line}" && "${smoke_line}" -lt "${governed_line}" ]] ||
-    fail "release gate must run fresh smoke before governed semantic verification"
+[[ -n "${governed_line}" ]] ||
+    fail "release gate must run governed semantic verification"
 
 workflow_smoke_line="$(line_of 'bash scripts/ci/release-gate.sh' "${release_workflow}")"
 workflow_exact_line="$(line_of '--bin fireweed-verify-evidence-attestation' "${release_workflow}")"

@@ -10,7 +10,7 @@ import tomllib
 VERSION = "0.8.2"
 PACKAGES = {"turso", "turso_core", "turso_sdk_kit", "turso_sync_engine", "turso_sync_sdk_kit"}
 SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
-MANIFESTS = ("Cargo.toml", "crates/fireweed-bench/Cargo.toml", "scripts/ci/fixtures/public-crate-boundary/Cargo.toml")
+MANIFESTS = ("Cargo.toml", "crates/fireweed-bench/Cargo.toml")
 LOCKS = tuple(str(Path(path).with_name("Cargo.lock")) for path in MANIFESTS)
 VENDOR_FILES = {"vendor/.gitattributes", "vendor/README.md", "vendor/FIREWEED_VENDOR.json"}
 

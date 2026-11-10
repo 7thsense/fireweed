@@ -96,9 +96,9 @@
           <article class="card card-body">
             <h3>Embed in your process</h3>
             <p>
-              Construct a backend-erased <code>Fireweed</code> handle, create queues,
-              push work, claim batches, and finalize. Storage composition is a
-              construction input—not a post-open type parameter.
+              Open one <code>Queue</code> handle, provision a queue, insert work,
+              claim batches under a lease, and commit the outcome. The storage
+              backend is a construction input, not a type parameter.
             </p>
             <p><a href="api/rust.html">Rust API →</a> · <a href="examples/basic-lifecycle.html">Basic lifecycle →</a></p>
           </article>
@@ -109,7 +109,8 @@
             v0.30.0 is a <strong>GitHub source tree</strong>
             (workspace package identity; annotated tag cut is a separate release step).
             Publication to crates.io is deferred. The public product is the
-            full 4×3 log×projection matrix with Turso as the default projection—see the
+            <code>Queue</code> API over S3 + Turso + PostgreSQL leases, with a
+            PostgreSQL reference store—see the
             <a href="support.html">support boundary</a>.
           </p>
         </div>
@@ -117,14 +118,14 @@
         <div class="section-title"><h2>Featured examples</h2></div>
         <div class="grid-2">
           <article class="card card-body">
-            <h3>Open, push, claim, complete</h3>
-            <p>Happy-path embed from the concrete facade product tests.</p>
+            <h3>Provision, insert, claim, commit</h3>
+            <p>Happy-path embed over a throwaway on-disk queue.</p>
             <p><a href="examples/basic-lifecycle.html">Read the example →</a></p>
           </article>
           <article class="card card-body">
-            <h3>Scheduler boundary workflow</h3>
-            <p>Discover active scopes, disperse workers, claim across queues.</p>
-            <p><a href="examples/scheduler-boundary.html">Read the example →</a></p>
+            <h3>Scheduled delivery and retry</h3>
+            <p>Hold work until it is due and retry a claimed item later.</p>
+            <p><a href="examples/scheduled-delivery.html">Read the example →</a></p>
           </article>
         </div>
 

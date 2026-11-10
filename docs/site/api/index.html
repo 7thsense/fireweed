@@ -35,24 +35,22 @@
         <div class="page-intro">
           <h2>API documentation</h2>
           <p>
-            Fireweed exposes one public face over the queue model: the Rust
-            <code>fireweed</code> facade.
+            Fireweed exposes one public API: <code>Queue</code> in the Rust
+            <code>fireweed</code> crate.
           </p>
         </div>
         <div class="grid-2">
           <article class="card card-body">
-            <h3>Rust facade</h3>
+            <h3>Rust API</h3>
             <p>
-              Concrete <code>Fireweed</code> handle, constructors, lifecycle verbs,
-              discovery, mutation, and hot projection queries.
+              The <code>Queue</code> handle: constructors and the ten operations.
             </p>
             <p><a href="rust.html">Rust API guide →</a></p>
           </article>
           <article class="card card-body">
             <h3>Types</h3>
             <p>
-              Public DTO export closure for embedders that depend only on
-              <code>fireweed</code>.
+              Request and result types re-exported through <code>fireweed::queue</code>.
             </p>
             <p><a href="types.html">Type catalog →</a></p>
           </article>
