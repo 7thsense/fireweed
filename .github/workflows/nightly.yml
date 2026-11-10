@@ -74,7 +74,7 @@ jobs:
           FIREWEED_S3_SECRET_DIR: ${{ runner.temp }}/fireweed-nightly-s3-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           bash scripts/ci/s3-qualification-endpoint.sh teardown
-          if [ -d "${RUNNER_TEMP}/fireweed-nightly-pg/data" ]; then
+          if /usr/lib/postgresql/16/bin/pg_ctl -D "${RUNNER_TEMP}/fireweed-nightly-pg/data" status >/dev/null 2>&1; then
             /usr/lib/postgresql/16/bin/pg_ctl -D "${RUNNER_TEMP}/fireweed-nightly-pg/data" -m immediate -w -t 30 stop
           fi
 
