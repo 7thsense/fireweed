@@ -10,7 +10,7 @@
 
 pub(crate) const VERSION_TABLE: &str = "fireweed_schema_version";
 
-pub(crate) const QUEUE_STORE_SCHEMA_VERSION: i64 = 1;
+pub(crate) const QUEUE_STORE_SCHEMA_VERSION: i64 = 2;
 pub(crate) const RELATIONAL_SCHEMA_VERSION: i64 = 1;
 pub(crate) const COMMAND_LOG_SCHEMA_VERSION: i64 = 1;
 pub(crate) const QUEUE_METRICS_SCHEMA_VERSION: i64 = 1;
@@ -276,8 +276,8 @@ mod tests {
     const PINS: [(&str, i64, &str); 7] = [
         (
             "queue_store",
-            1,
-            "35c99a2d4b28ccb70caa268b77018bdf2f4eebd43108d4f4ba40b5a9be12c452",
+            2,
+            "32f81875b9a133b89aa273481c54dfe38c32421280a91a640ea97dc20cfa872b",
         ),
         (
             "relational",

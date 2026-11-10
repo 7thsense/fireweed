@@ -263,21 +263,6 @@ impl PostgresQueueStore {
                     tx.batch_execute("LOCK TABLE fireweed_api007.queues IN ACCESS EXCLUSIVE MODE")
                         .await
                         .map_err(storage)?;
-                    // CREATE ... IF NOT EXISTS leaves a table an older build made as
-                    // it was. Such data is refused, never read or migrated.
-                    let older: bool = tx
-                        .query_one(
-                            "SELECT (SELECT count(*) FROM information_schema.columns WHERE table_schema='fireweed_api007' AND table_name='queues' AND column_name IN ('horizon','deleted_before','version_floor'))<>3 OR (to_regclass('fireweed_api007.requests') IS NOT NULL AND (SELECT count(*) FROM information_schema.columns WHERE table_schema='fireweed_api007' AND table_name='requests' AND column_name IN ('issued_at','live_until'))<>2)",
-                            &[],
-                        )
-                        .await
-                        .map_err(storage)?
-                        .get(0);
-                    if older {
-                        return Err(QueueError::Invalid(
-                            "the fireweed_api007 tables were written by an older build; drop the schema and provision again".into(),
-                        ));
-                    }
                 }
                 tx.batch_execute(DDL).await.map_err(storage)?;
                 if gate.stamp {

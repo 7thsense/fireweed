@@ -289,60 +289,6 @@ async fn mandatory_shared_queue_contract_and_reopen() {
         .unwrap();
     assert!(matches!(receipt[0], ReceiptLookup::Found(_)));
     reopened.shutdown().await.unwrap();
-    refuses_tables_an_older_build_made(&url, nonce).await;
-}
-
-/// Tables from before the retention columns are refused with an error, never read
-/// or migrated. They are made in a database of their own.
-async fn refuses_tables_an_older_build_made(url: &str, nonce: u128) {
-    let (base, _) = url.rsplit_once('/').unwrap();
-    let database = format!("fireweed_old_tables_{nonce}");
-    let connect = |url: String| async move {
-        let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
-            .await
-            .unwrap();
-        tokio::spawn(connection);
-        client
-    };
-    let admin = connect(url.to_owned()).await;
-    admin
-        .batch_execute(&format!("CREATE DATABASE {database}"))
-        .await
-        .unwrap();
-    let old_url = format!("{base}/{database}");
-    let old = connect(old_url.clone()).await;
-    old.batch_execute(
-        "CREATE SCHEMA fireweed_api007;
-         CREATE TABLE fireweed_api007.queues (id BIGSERIAL PRIMARY KEY, address_hash BYTEA NOT NULL, tenant BYTEA NOT NULL, name BYTEA NOT NULL, definition BYTEA NOT NULL, next_sequence NUMERIC(20,0) NOT NULL DEFAULT 0, cursor_secret BYTEA NOT NULL);
-         CREATE TABLE fireweed_api007.requests (id BIGSERIAL PRIMARY KEY, queue_id BIGINT NOT NULL REFERENCES fireweed_api007.queues(id), domain SMALLINT NOT NULL, identity_hash BYTEA NOT NULL, identity BYTEA NOT NULL, fingerprint BYTEA NOT NULL, expired BOOLEAN NOT NULL DEFAULT false, outcome BYTEA NOT NULL);",
-    )
-    .await
-    .unwrap();
-    drop(old);
-    let refused =
-        PostgresQueueStore::connect(&old_url, Arc::new(FixedClock), QueueLimits::default(), 1)
-            .await;
-    assert!(
-        matches!(&refused, Err(QueueError::Invalid(message)) if message.contains("older build")),
-        "{:?}",
-        refused.err()
-    );
-    // Nothing was added to the old tables.
-    let check = connect(old_url).await;
-    let columns: i64 = check
-        .query_one(
-            "SELECT count(*) FROM information_schema.columns WHERE table_schema='fireweed_api007' AND table_name='queues' AND column_name='horizon'",
-            &[],
-        )
-        .await
-        .unwrap()
-        .get(0);
-    assert_eq!(columns, 0);
-    drop(check);
-    admin
-        .batch_execute(&format!("DROP DATABASE {database} WITH (FORCE)"))
-        .await
-        .unwrap();
 }
 
 #[tokio::test]

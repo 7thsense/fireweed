@@ -238,13 +238,20 @@ impl Drop for Target {
     }
 }
 
+/// The version a component's current DDL is stamped with.
+fn required(component: &str) -> i64 {
+    if component == "queue_store" { 2 } else { 1 }
+}
 fn assert_refusal(message: &str, case: &Case, found: &str, target: &Target) {
     assert!(message.contains(case.component), "{message}");
     assert!(
         message.contains(&format!("stored version {found}")),
         "{message}"
     );
-    assert!(message.contains("requires version 1"), "{message}");
+    assert!(
+        message.contains(&format!("requires version {}", required(case.component))),
+        "{message}"
+    );
     assert!(message.contains("recreated"), "{message}");
     assert!(
         !message.contains(&target.url) && !message.contains("127.0.0.1"),
@@ -259,11 +266,21 @@ fn fresh_open_stamps_and_reopen_succeeds() {
         target
             .open(case)
             .unwrap_or_else(|error| panic!("{}: {error}", case.component));
-        assert_eq!(target.rows(case.component), vec![1], "{}", case.component);
+        assert_eq!(
+            target.rows(case.component),
+            vec![required(case.component)],
+            "{}",
+            case.component
+        );
         target
             .open(case)
             .unwrap_or_else(|error| panic!("{} reopen: {error}", case.component));
-        assert_eq!(target.rows(case.component), vec![1], "{}", case.component);
+        assert_eq!(
+            target.rows(case.component),
+            vec![required(case.component)],
+            "{}",
+            case.component
+        );
     }
 }
 
@@ -382,7 +399,12 @@ fn concurrent_fresh_opens_all_succeed_with_one_row() {
                 .unwrap()
                 .unwrap_or_else(|error| panic!("{}: {error}", case.component));
         }
-        assert_eq!(target.rows(case.component), vec![1], "{}", case.component);
+        assert_eq!(
+            target.rows(case.component),
+            vec![required(case.component)],
+            "{}",
+            case.component
+        );
     }
 }
 
