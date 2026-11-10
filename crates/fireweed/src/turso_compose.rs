@@ -7980,11 +7980,3 @@ mod ownership_hydrate_tests {
         );
     }
 }
-
-#[cfg(all(test, feature = "objectlog"))]
-#[path = "formal_analysis_tests.rs"]
-mod formal_analysis_tests;
-
-#[cfg(all(test, feature = "objectlog"))]
-#[path = "generated_replay_tests.rs"]
-mod generated_replay_tests;

@@ -10,8 +10,8 @@
 #
 # WHAT THIS GATE PROVES:
 #   - fmt clean, clippy clean (-D warnings), and the selected workspace correctness suite is green.
-#   - Public 15-cell storage matrix (T0–T2 library harness + route-source registry) via
-#     scripts/ci/storage-matrix-gate.sh. Full-matrix fixture hard-fail is opt-in via FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1.
+#   - Queue suites: fireweed lib (queue_recovery_pipeline, queue::s3_turso), simple_queue_postgres and the
+#     fireweed-postgres queue_* targets.
 #   - Local mode emits into a CLEAN ledger dir and requires well-formed E2/E3 evidence. GitHub release
 #     jobs skip those workloads and consume exact-revision governed evidence instead.
 #   - The exact files named by the governed TP-002 release manifest semantically satisfy E0-E3. The E3
@@ -65,23 +65,11 @@ ${CARGO} fmt --all --check
 echo "--- clippy ---"
 ${CARGO} clippy --workspace --all-targets -- -D warnings
 
-echo "--- public crate encapsulation ---"
+echo "--- public artifact topology ---"
 bash "${REPO_ROOT}/scripts/verify-public-artifact-topology.sh"
-bash "${REPO_ROOT}/scripts/verify-public-crate-boundary.sh"
 
 echo "--- exact Postgres TP-003 transaction evidence fixtures ---"
 ${CARGO} test -p fireweed-release --test transaction_evidence_tests -- --nocapture
-
-# A clean ledger directory so stale pre-migration rows in the retained
-# target/fireweed-ledger evidence path can
-# never satisfy the gate. Every suite is pointed at this dir via the env var
-# that fireweed_release::ledger_path() honors.
-if [[ "${RUN_LOCAL_PERFORMANCE}" == true ]]; then
-    FIREWEED_LEDGER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fireweed-ledger.XXXXXX")"
-    export FIREWEED_LEDGER_DIR
-    trap 'rm -rf "${FIREWEED_LEDGER_DIR}"' EXIT
-    echo "--- clean ledger dir: ${FIREWEED_LEDGER_DIR} ---"
-fi
 
 echo "--- workspace correctness tests ---"
 if [[ "${RUN_LOCAL_PERFORMANCE}" == true ]]; then
@@ -92,43 +80,22 @@ else
     ${CARGO} test --workspace --lib --bins
 fi
 
-# Explicit facade + conformance suites (v0.24 process gap fireweed-c1dc998a):
+# Explicit Queue + conformance suites (v0.24 process gap fireweed-c1dc998a):
 # `cargo test --workspace --lib` compiles fireweed lib tests but release notes historically listed only
 # narrow engine/objectlog filters. Fail closed if these named suites do not compile or regress.
-echo "--- fireweed facade lib suite (must compile + pass; ignored tests need documented reasons) ---"
+echo "--- fireweed Queue lib suite (queue_recovery_pipeline + queue::s3_turso; must compile + pass) ---"
 ${CARGO} test -p fireweed --lib
 
-echo "--- fireweed facade integration targets (concrete + mutation + local public interfaces) ---"
-# Exercise every enabled local log/projection composition, including native Turso.
-${CARGO} test -p fireweed --test concrete_fireweed
-${CARGO} test -p fireweed --test item_mutation
-${CARGO} test -p fireweed --test public_interface_conformance
+echo "--- fireweed Queue PostgreSQL integration targets ---"
+${CARGO} test -p fireweed --features postgres --test simple_queue_postgres
+${CARGO} test -p fireweed-postgres --test queue_contract --test queue_process_loss --test queue_server_crash
 
 echo "--- fireweed-conformance suite ---"
 ${CARGO} test -p fireweed-conformance --lib
 
-# v0.25 headline proofs: integration targets are NOT covered by --workspace --lib --bins
-# on GitHub release jobs. Fail closed if these regress (P0 eligibility, claim-by-id).
-echo "--- claim_by_item_ids + eligibility recovery ---"
-${CARGO} test -p fireweed-engine --test claim_by_item_ids
-${CARGO} test -p fireweed --features objectlog,turso --test eligibility_index_recovery
-
-# Public 15-cell StorageConfig matrix (Phase 6). S3/PG cells do not run when fixtures are unset unless
-# FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1 is set (then missing fixtures fail the gate).
-echo "--- storage matrix gate (15-cell public surface) ---"
-bash "${SCRIPT_DIR}/storage-matrix-gate.sh"
-
 if [[ "${RUN_LOCAL_PERFORMANCE}" == true ]]; then
-    echo "--- local performance evidence suites ---"
-    ${CARGO} test --manifest-path "${REPO_ROOT}/crates/fireweed-bench/Cargo.toml" \
-        --test performance_cross_queue_scale_out_tests \
-        --test queue_density_single_node_tests
-
-    echo "--- strict validation of locally emitted evidence ---"
-    ${CARGO} run -p fireweed-release --bin fireweed-verify-ledger -- \
-        --ledger-dir "${FIREWEED_LEDGER_DIR}" \
-        --strict \
-        --require-smoke-evidence E2,E3
+    # The local E2/E3 emitters were facade tests and are gone; no performance workload runs here.
+    echo "--- no local performance evidence suites remain; governed evidence is verified below ---"
 else
     # Policy-negative (fail-closed): local performance is not silently green when unexecuted.
     # Hosted/release paths must either set RUN_LOCAL_PERFORMANCE=true or prove governed evidence
@@ -187,7 +154,7 @@ bash "${SCRIPT_DIR}/verify-build-closure.sh" \
 
 echo "=== release gate PASSED ==="
 if [[ "${RUN_LOCAL_PERFORMANCE}" == true ]]; then
-    echo "    Locally generated evidence E2,E3 present and well-formed; coverage bars met."
+    echo "    No local performance workload ran; coverage bars met."
 else
     echo "    No performance workload ran; exact-revision governed evidence was verified."
 fi

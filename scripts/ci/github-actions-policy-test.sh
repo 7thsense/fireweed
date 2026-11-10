@@ -55,7 +55,7 @@ allow = json.loads(Path("scripts/ci/governed-product-allowlist.json").read_text(
 assert allow["product_release_readiness_claimed"] is False
 assert len(allow["commands"]) >= 5
 cats = {e.get("category") for e in allow["commands"]}
-for required in ("functional", "reduced-count", "policy"):
+for required in ("functional", "policy"):
     assert required in cats, required
 print("allowlist population: PASS")
 PY

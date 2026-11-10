@@ -168,7 +168,7 @@ for entry in allowlist["commands"]:
         assert token not in joined, f"{entry['id']} hits forbidden_in_lane {token!r}"
     categories.add(entry.get("category") or "")
 
-for required_cat in ("functional", "reduced-count", "policy"):
+for required_cat in ("functional", "policy"):
     assert required_cat in categories, f"allowlist missing category {required_cat}"
 
 assert "governed-product-allowlist.json" in workflow

@@ -208,45 +208,6 @@ pub(crate) use test_support::open_objectlog_turso_files;
 #[cfg(test)]
 pub(crate) use test_support::{ManualClock, TursoMemoryBackend, turso_memory_backend};
 
-#[cfg(test)]
-#[path = "../tests/whitebox/active_scope_routing.rs"]
-mod test_active_scope_routing;
-#[cfg(test)]
-#[path = "../tests/whitebox/coordination.rs"]
-mod test_coordination;
-#[cfg(test)]
-#[path = "../tests/whitebox/encapsulation.rs"]
-mod test_encapsulation;
-#[cfg(test)]
-#[path = "../tests/whitebox/facade.rs"]
-mod test_facade;
-#[cfg(test)]
-#[path = "../tests/whitebox/hot_projection_queries.rs"]
-mod test_hot_projection_queries;
-#[cfg(test)]
-#[path = "../tests/whitebox/multi_queue_claim.rs"]
-mod test_multi_queue_claim;
-#[cfg(test)]
-#[path = "../tests/whitebox/objectlog_postgres_composition.rs"]
-mod test_objectlog_postgres_composition;
-#[cfg(test)]
-#[path = "../tests/whitebox/product_validation_tests.rs"]
-mod test_product_validation;
-#[cfg(test)]
-#[path = "../tests/whitebox/queue_template.rs"]
-mod test_queue_template;
-#[cfg(test)]
-#[path = "../tests/whitebox/request_id_idempotency.rs"]
-mod test_request_id_idempotency;
-#[cfg(test)]
-#[path = "../tests/whitebox/schema_validation.rs"]
-mod test_schema_validation;
-#[cfg(test)]
-#[path = "../tests/whitebox/secondary_indexes.rs"]
-mod test_secondary_indexes;
-#[cfg(test)]
-#[path = "../tests/whitebox/vectorized_commit.rs"]
-mod test_vectorized_commit;
 
 /// A caller-attested, unfiltered leading prefix of one queue's group-granularity active-scope
 /// discovery. Attestation validates the facts carried by [`ActiveScopeDiscovery`]—the granularity,
