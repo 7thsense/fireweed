@@ -264,6 +264,8 @@ pub struct ReceiptRef<'a> {
     pub request_id: &'a str,
     pub fingerprint_format: u8,
     pub fingerprint: &'a [u8; 32],
+    /// The `issued_at` of the request this receipt answers.
+    pub issued_at: i64,
     pub outcome: ReceiptOutcomeRef<'a>,
     encoded_outcome: &'a [u8],
 }
@@ -580,6 +582,7 @@ fn parse_receipt<'a>(
         return invalid("unsupported fingerprint format/domain");
     }
     let fingerprint = s.raw(32)?.try_into().unwrap();
+    let issued_at = i64::from_le_bytes(s.raw(8)?.try_into().unwrap());
     let start = s.rest;
     let outcome = parse_receipt_outcome(s, format, domain, fingerprint_format)?;
     Ok(ReceiptRef {
@@ -587,6 +590,7 @@ fn parse_receipt<'a>(
         request_id,
         fingerprint_format,
         fingerprint,
+        issued_at,
         outcome,
         encoded_outcome: &start[..start.len() - s.rest.len()],
     })

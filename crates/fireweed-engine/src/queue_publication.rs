@@ -65,6 +65,9 @@ pub struct PublicationReceipt<'a> {
     queue: &'a QueueAddress,
     id: &'a str,
     fingerprint: [u8; 32],
+    /// The `issued_at` the request carried, which decides when cleanup may
+    /// remove the stored receipt.
+    issued_at: i64,
     result: ReceiptResult<'a>,
 }
 #[derive(Debug)]
@@ -101,6 +104,7 @@ impl<'a> PublicationReceipt<'a> {
             fingerprint: group
                 .fingerprint(queue)
                 .map_err(PublicationError::Admission)?,
+            issued_at: group.issued_at,
             result: ReceiptResult::Commit(&receipt.outcome),
         })
     }
@@ -113,6 +117,7 @@ impl<'a> PublicationReceipt<'a> {
             queue: &request.queue,
             id: &request.request_id,
             fingerprint: fingerprint("insert", request).map_err(PublicationError::Admission)?,
+            issued_at: request.issued_at,
             result: ReceiptResult::Insert(outcomes),
         })
     }
@@ -738,14 +743,16 @@ fn write_receipt_header(
     id: &str,
     fingerprint_version: u8,
     fingerprint: &[u8; 32],
+    issued_at: i64,
 ) -> PublicationResult<()> {
     s.tag(domain)?;
     s.text(id)?;
     s.tag(fingerprint_version)?;
-    s.raw(fingerprint)
+    s.raw(fingerprint)?;
+    s.i(issued_at)
 }
 fn write_receipt(s: &mut Sink<'_>, r: &PublicationReceipt<'_>) -> PublicationResult<()> {
-    write_receipt_header(s, r.identity().0, r.id, 3, &r.fingerprint)?;
+    write_receipt_header(s, r.identity().0, r.id, 3, &r.fingerprint, r.issued_at)?;
     match &r.result {
         ReceiptResult::Commit(outcome) => match outcome {
             GroupOutcome::Committed { versions } => {
@@ -1244,7 +1251,7 @@ mod tests {
         let frame =
             encode_publication(&q, &raw, &before, &packed, &[receipt], 10000, &job).unwrap();
         let bytes = frame.as_bytes();
-        assert_eq!(bytes.len(), 489);
+        assert_eq!(bytes.len(), 497);
         let summary = scan_publication(bytes).unwrap();
         assert_eq!(summary.commands, 2);
         assert_eq!(summary.receipts, 1);
@@ -1269,7 +1276,7 @@ mod tests {
         let hash = sha2::Sha256::digest(bytes);
         assert_eq!(
             hash.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-            "85912939bb2d44c3aaa2c4eeb4db47a2c9bf6df9a0cf755ae1f374e99970cb7a"
+            "7ffa34772acd5e352b18c53dc74e7dbfe0913f6d99afe09bf5b8927d43a731ef"
         );
         drop(frame);
         assert_eq!(admission.usage().unwrap(), (1, 1));

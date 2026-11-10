@@ -148,6 +148,7 @@ impl NativeTransactionWork for Worker {
         let request = &self.input.request;
         let schema = native.definition.schema();
         request.validate(schema, &self.input.limits)?;
+        fireweed_engine::queue_retention::check_horizon(request.issued_at, native.horizon)?;
         match read_receipt_metadata(
             connection,
             native.queue_id,
@@ -181,6 +182,7 @@ impl NativeTransactionWork for Worker {
         let names = required_work_fields(&group, schema)?;
         let mut snapshot = RecordSnapshot {
             next_sequence: native.insertion_sequence,
+            version_floor: native.version_floor,
             ..Default::default()
         };
         // Every addressed key is already admitted from the incoming vector. Old

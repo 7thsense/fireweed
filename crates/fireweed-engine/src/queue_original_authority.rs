@@ -122,7 +122,7 @@ impl ColdOriginalTracker {
         Self::new_ids(
             &request.queue,
             2,
-            request.request_ids.iter().map(String::as_str),
+            request.request_ids.iter().map(|id| id.request_id.as_str()),
             true,
             job,
         )
@@ -282,7 +282,7 @@ impl ColdOriginalTracker {
                     });
                 }
             }
-            QueueLogPayload::Entries(_) => {
+            QueueLogPayload::Entries(_) | QueueLogPayload::Retention(_) => {
                 return Err(unknown("entry-list records are not source-indexed"));
             }
         }
@@ -392,7 +392,7 @@ impl AdmittedOriginalAuthority {
                 .entries
                 .iter()
                 .zip(&request.request_ids)
-                .any(|(entry, id)| &entry.id != id)
+                .any(|(entry, id)| entry.id != id.request_id)
         {
             return Err(unknown(
                 "receipt lookup domain or ordered positions mismatch",
@@ -920,6 +920,7 @@ mod domain_tests {
     use super::tests::{batch, records};
     use super::*;
     use crate::queue_admission::QueueAdmission;
+    use fireweed_core::queue_contract::ReceiptReadId;
     #[test]
     fn lookup_aliases_bind_whole_order_empty_scope_and_duplicate_source_poison() {
         let batch = batch();
@@ -928,10 +929,22 @@ mod domain_tests {
         let request = ReceiptReadRequest {
             queue: batch.queue.clone(),
             request_ids: vec![
-                "known".into(),
-                "fresh".into(),
-                "known".into(),
-                "fresh".into(),
+                ReceiptReadId {
+                    request_id: "known".into(),
+                    issued_at: 0,
+                },
+                ReceiptReadId {
+                    request_id: "fresh".into(),
+                    issued_at: 0,
+                },
+                ReceiptReadId {
+                    request_id: "known".into(),
+                    issued_at: 0,
+                },
+                ReceiptReadId {
+                    request_id: "fresh".into(),
+                    issued_at: 0,
+                },
             ],
             max_bytes: 1 << 20,
         };
@@ -962,7 +975,13 @@ mod domain_tests {
             vec!["known", "fresh", "fresh", "fresh"],
         ] {
             let mut changed = request.clone();
-            changed.request_ids = ids.into_iter().map(str::to_owned).collect();
+            changed.request_ids = ids
+                .into_iter()
+                .map(|id| ReceiptReadId {
+                    request_id: id.to_owned(),
+                    issued_at: 0,
+                })
+                .collect();
             assert!(
                 proof
                     .validate_lookup(&changed, &source[0], (2, 0, 1), &job)
@@ -1006,11 +1025,13 @@ mod domain_tests {
         let batch = batch();
         for ids in [
             vec![],
-            vec![
-                "known".to_string(),
-                "known".to_string(),
-                "absent".to_string(),
-            ],
+            ["known", "known", "absent"]
+                .into_iter()
+                .map(|id| ReceiptReadId {
+                    request_id: id.to_string(),
+                    issued_at: 0,
+                })
+                .collect(),
         ] {
             let request = ReceiptReadRequest {
                 queue: batch.queue.clone(),

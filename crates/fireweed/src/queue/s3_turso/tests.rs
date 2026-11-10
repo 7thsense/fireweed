@@ -285,7 +285,10 @@ async fn round_trip(queue: &Queue, queue_address: QueueAddress) {
     let found = queue
         .read_commit(ReceiptReadRequest {
             queue: queue_address,
-            request_ids: vec!["finish".into()],
+            request_ids: vec![ReceiptReadId {
+                request_id: "finish".into(),
+                issued_at: 0,
+            }],
             max_bytes: 1 << 20,
         })
         .await
@@ -425,7 +428,7 @@ async fn contract(queue: &Queue, clock: &TestClock, id: u128) -> Prepared {
         let found = queue
             .read_commit(ReceiptReadRequest {
                 queue: a(name),
-                request_ids: ids.clone(),
+                request_ids: fireweed_conformance::queue_contract::read_ids(ids.clone()),
                 max_bytes: 1 << 20,
             })
             .await
@@ -667,7 +670,7 @@ async fn s3_turso_two_handles_share_a_queue_and_run_the_api007_contract() {
         let found = reopened
             .read_commit(ReceiptReadRequest {
                 queue: queue_address,
-                request_ids: ids,
+                request_ids: fireweed_conformance::queue_contract::read_ids(ids),
                 max_bytes: 1 << 20,
             })
             .await

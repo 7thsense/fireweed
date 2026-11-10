@@ -174,7 +174,7 @@ impl QueueNativeAcquired {
                 limits.compile,
                 job,
             )?,
-            QueueLogPayload::Entries(_) => {
+            QueueLogPayload::Entries(_) | QueueLogPayload::Retention(_) => {
                 return Err(unknown("entry-list records are not source-indexed"));
             }
             QueueLogPayload::Publication(_) | QueueLogPayload::Claim(_) => {

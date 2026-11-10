@@ -28,7 +28,10 @@ async fn concrete_queue_runs_identical_contract_and_reopens_exact_receipt() {
     let expected = queue
         .read_commit(ReceiptReadRequest {
             queue: primary.clone(),
-            request_ids: vec!["transition".into()],
+            request_ids: vec![ReceiptReadId {
+                request_id: "transition".into(),
+                issued_at: 0,
+            }],
             max_bytes: 1 << 20,
         })
         .await
@@ -61,7 +64,10 @@ async fn concrete_queue_runs_identical_contract_and_reopens_exact_receipt() {
     let administrative_expected = queue
         .read_commit(ReceiptReadRequest {
             queue: address("administration-preview"),
-            request_ids: vec!["admin-transition".into()],
+            request_ids: vec![ReceiptReadId {
+                request_id: "admin-transition".into(),
+                issued_at: 0,
+            }],
             max_bytes: 1 << 20,
         })
         .await
@@ -69,7 +75,16 @@ async fn concrete_queue_runs_identical_contract_and_reopens_exact_receipt() {
     let wide_expected = queue
         .read_commit(ReceiptReadRequest {
             queue: address("administration-sizes"),
-            request_ids: vec!["wide-accepted".into(), "middle".into()],
+            request_ids: vec![
+                ReceiptReadId {
+                    request_id: "wide-accepted".into(),
+                    issued_at: 0,
+                },
+                ReceiptReadId {
+                    request_id: "middle".into(),
+                    issued_at: 0,
+                },
+            ],
             max_bytes: 1 << 20,
         })
         .await
@@ -81,7 +96,10 @@ async fn concrete_queue_runs_identical_contract_and_reopens_exact_receipt() {
         clone
             .read_commit(ReceiptReadRequest {
                 queue: primary.clone(),
-                request_ids: vec!["transition".into()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: "transition".into(),
+                    issued_at: 0
+                }],
                 max_bytes: 1 << 20
             })
             .await,
@@ -92,7 +110,10 @@ async fn concrete_queue_runs_identical_contract_and_reopens_exact_receipt() {
         reopened
             .read_commit(ReceiptReadRequest {
                 queue: primary.clone(),
-                request_ids: vec!["transition".into()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: "transition".into(),
+                    issued_at: 0
+                }],
                 max_bytes: 1 << 20
             })
             .await
@@ -104,7 +125,10 @@ async fn concrete_queue_runs_identical_contract_and_reopens_exact_receipt() {
         reopened
             .read_commit(ReceiptReadRequest {
                 queue: address("administration-preview"),
-                request_ids: vec!["admin-transition".into()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: "admin-transition".into(),
+                    issued_at: 0
+                }],
                 max_bytes: 1 << 20
             })
             .await
@@ -115,7 +139,16 @@ async fn concrete_queue_runs_identical_contract_and_reopens_exact_receipt() {
         reopened
             .read_commit(ReceiptReadRequest {
                 queue: address("administration-sizes"),
-                request_ids: vec!["wide-accepted".into(), "middle".into()],
+                request_ids: vec![
+                    ReceiptReadId {
+                        request_id: "wide-accepted".into(),
+                        issued_at: 0
+                    },
+                    ReceiptReadId {
+                        request_id: "middle".into(),
+                        issued_at: 0
+                    }
+                ],
                 max_bytes: 1 << 20
             })
             .await
@@ -235,7 +268,10 @@ async fn explicit_retained_capacity_is_enforced_through_public_clones() {
             tenant: "capacity-test".into(),
             queue: "missing".into(),
         },
-        request_ids: vec!["original".into()],
+        request_ids: vec![ReceiptReadId {
+            request_id: "original".into(),
+            issued_at: 0,
+        }],
         max_bytes: 1024,
     };
     // This valid request would reach QueueNotFound if construction ignored the

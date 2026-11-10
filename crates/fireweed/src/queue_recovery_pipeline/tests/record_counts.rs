@@ -191,7 +191,10 @@ pub(super) async fn reads(store: &NativeQueueStore, queue: &QueueAddress) {
     store
         .read_commit(ReceiptReadRequest {
             queue: queue.clone(),
-            request_ids: vec!["commit-1".into()],
+            request_ids: vec![ReceiptReadId {
+                request_id: "commit-1".into(),
+                issued_at: 0,
+            }],
             max_bytes: 1 << 20,
         })
         .await

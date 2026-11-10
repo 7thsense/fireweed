@@ -279,7 +279,10 @@ async fn mandatory_shared_queue_contract_and_reopen() {
     let receipt = reopened
         .read_commit(ReceiptReadRequest {
             queue,
-            request_ids: vec!["transition".into()],
+            request_ids: vec![ReceiptReadId {
+                request_id: "transition".into(),
+                issued_at: 0,
+            }],
             max_bytes: 1 << 20,
         })
         .await

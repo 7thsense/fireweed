@@ -15,7 +15,7 @@ use fireweed_engine::{
     AcquireOutcome, AsyncQueueControlPlane, Clock, LeaseState, QueueKey,
     queue_log_record::{
         OwnedQueueEntry, OwnedQueueLogRecord, QueueLogPayload, QueueLogRecordView,
-        checked_entries_record_len, encode_checked_entries_record,
+        checked_entries_record_len, encode_checked_entries_record, encode_checked_retention,
     },
 };
 use fireweed_objectlog::queue_native_log::{
@@ -84,9 +84,6 @@ impl QueueOwnership {
         self.skew = skew;
         self
     }
-    pub(super) fn clock(&self) -> Arc<dyn Clock> {
-        self.clock.clone()
-    }
     fn stamp(&self) -> fireweed_core::UtcTimestamp {
         self.clock.now()
     }
@@ -140,6 +137,9 @@ pub(super) struct Tenure {
     /// This queue's projection database. Ending the tenure closes it and deletes
     /// its files.
     projection: TenureProjection,
+    /// Store time at which the next cleanup pass is offered, `i64::MIN` until
+    /// the first operation of the tenure fixes it.
+    retention_due_at: i64,
 }
 impl Tenure {
     pub(super) fn projection(&self) -> &Arc<QueueProjection> {
@@ -214,7 +214,10 @@ impl Tenure {
             QueueLogPayload::Entries(entries) => {
                 self.insertion_sequence = entries.last().frame().summary().final_sequence;
             }
-            // The native pipeline writes and reads only genesis and entry lists.
+            // A cleanup pass moves no insertion sequence.
+            QueueLogPayload::Retention(_) => {}
+            // The native pipeline writes and reads only genesis, entry lists and
+            // retention.
             QueueLogPayload::Publication(_) | QueueLogPayload::Claim(_) => {
                 return Err(unknown("record is not an entry list"));
             }
@@ -233,7 +236,7 @@ impl Tenure {
         record: OwnedQueueLogRecord,
         expected_head: u64,
         job: &Arc<QueueReservation>,
-    ) -> Result<(), Exit> {
+    ) -> Result<u64, Exit> {
         let frozen = OwnedQueueLogRecord::from_admitted_bytes(
             bytes::Bytes::copy_from_slice(record.bytes()),
             job.owned_buffer((record.bytes().len() as u64) * 4 + 4096)
@@ -246,6 +249,33 @@ impl Tenure {
         self.apply(p, frozen, expected_head, job)
             .await
             .map_err(|_| Exit)
+    }
+    /// Offer the queue one cleanup pass at store time `at`: one logged
+    /// `Retention` record, alone in its record, applied to the projection once it
+    /// is durable. Returns the rows it removed. Anything but a stored record is
+    /// `Exit`, as for any other publish.
+    async fn retire(
+        &mut self,
+        p: &QueueRecoveryPipeline,
+        address: &QueueAddress,
+        at: i64,
+        job: &Arc<QueueReservation>,
+    ) -> Result<u64, Exit> {
+        let genesis = self.genesis.as_ref().ok_or(Exit)?;
+        let definition =
+            AdmittedQueueDefinition::from_raw(&genesis.definition, job).map_err(|_| Exit)?;
+        let record = encode_checked_retention(
+            self.epoch,
+            address,
+            &definition,
+            at,
+            u64::from(fireweed_engine::queue_retention::RETENTION_BUDGET_ROWS),
+            p.hard_record_bytes,
+            job,
+        )
+        .map_err(|_| Exit)?;
+        let offset = self.next_offset;
+        self.publish(p, record, offset, job).await
     }
     /// Publish one record of staged entries, then make the staged transaction
     /// the projection. The projection changes only after the record is durable:
@@ -350,12 +380,13 @@ impl Tenure {
         record: fireweed_engine::queue_log_record::OwnedQueueLogRecord,
         offset: u64,
         job: &Arc<QueueReservation>,
-    ) -> QueueResult<()> {
+    ) -> QueueResult<u64> {
         self.check(&record, offset)?;
-        self.projection()
+        let applied = self
+            .projection()
             .apply(record, offset, job, &p.workers)
             .await?;
-        Ok(())
+        Ok(applied.removed)
     }
     /// Verify the record and advance the position past it.
     pub(super) fn check(
@@ -499,6 +530,7 @@ pub(super) trait QueueOp: Send {
     /// Runs in an iteration of its own, never in a batch.
     fn solo(&self) -> bool;
     fn job(&self) -> &Arc<QueueReservation>;
+    fn clock(&self) -> &Arc<dyn Clock>;
     fn attempts(&mut self) -> &mut u32;
     /// Plan a mutation against the batch and stage its entries.
     fn stage<'a>(
@@ -573,6 +605,9 @@ impl<P: Plan> QueueOp for Op<P> {
     }
     fn job(&self) -> &Arc<QueueReservation> {
         &self.job
+    }
+    fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
     }
     fn attempts(&mut self) -> &mut u32 {
         &mut self.attempts
@@ -988,8 +1023,15 @@ impl QueueLoop {
             self.requeue(batch);
             return;
         }
+        // The job and clock the pass borrows, taken before the batch is answered.
+        let pass = batch
+            .last()
+            .map(|op| (Arc::clone(op.job()), Arc::clone(op.clock())));
         for op in batch {
             op.ack();
+        }
+        if let Some((job, clock)) = pass {
+            self.retire(p, &job, clock.as_ref()).await;
         }
         // A queue that does not exist holds nothing.
         if self.tenure.as_ref().is_some_and(|t| t.genesis.is_none()) {
@@ -1004,6 +1046,44 @@ impl QueueLoop {
             .is_some_and(|t| p.ownership.lease_clock.now() >= t.renew_at)
         {
             self.renew(p).await;
+        }
+    }
+    /// Offer the queue a cleanup pass when its schedule says so, after the
+    /// iteration's operations are answered. Every operation is already answered,
+    /// so a pass that fails costs none of them: it only ends the tenure, and the
+    /// next operation enters again.
+    async fn retire(
+        &mut self,
+        p: &Arc<QueueRecoveryPipeline>,
+        job: &Arc<QueueReservation>,
+        clock: &dyn Clock,
+    ) {
+        use fireweed_engine::queue_retention::{RETENTION_BUDGET_ROWS, RETENTION_INTERVAL_NANOS};
+        let Some(t) = self.tenure.as_mut() else {
+            return;
+        };
+        let Ok(now) = fireweed_core::queue_contract::timestamp_nanos(clock.now()) else {
+            return;
+        };
+        if t.genesis.is_none() {
+            return;
+        }
+        if t.retention_due_at == i64::MIN {
+            t.retention_due_at = now.saturating_add(RETENTION_INTERVAL_NANOS);
+            return;
+        }
+        if now < t.retention_due_at {
+            return;
+        }
+        t.retention_due_at = now.saturating_add(RETENTION_INTERVAL_NANOS);
+        match t.retire(p, &self.address, now, job).await {
+            // A full budget means more is waiting: offer the next pass as soon
+            // as the clock moves, not a schedule interval later.
+            Ok(removed) if removed >= u64::from(RETENTION_BUDGET_ROWS) => {
+                t.retention_due_at = now.saturating_add(1);
+            }
+            Ok(_) => {}
+            Err(Exit) => self.exit(),
         }
     }
     fn requeue(&mut self, batch: Vec<Box<dyn QueueOp>>) {
@@ -1136,6 +1216,7 @@ impl QueueLoop {
             deadline: Duration::ZERO,
             renew_at: Duration::ZERO,
             projection,
+            retention_due_at: i64::MIN,
         };
         // With no namespace there is nothing to fence or read; provisioning fences.
         // An existing namespace is always fenced. An empty head means nothing to

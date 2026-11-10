@@ -144,6 +144,9 @@ pub(super) async fn load_groups<'a>(
     }
     let mut snapshot = RecordSnapshot {
         next_sequence: sequence,
+        version_floor: super::retention::read_row(connection, queue_id)
+            .await?
+            .version_floor,
         ..Default::default()
     };
     for (key, need) in readset.work {

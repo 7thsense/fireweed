@@ -387,11 +387,12 @@ mod tests {
             queue: &queue,
             id: "r",
             fingerprint: [7; 32],
+            issued_at: 0,
             result: ReceiptResult::Commit(outcome),
         };
         let mut bytes = Vec::new();
         write_receipt(&mut Sink::Buffer(&mut bytes), &receipt).unwrap();
-        bytes[43..].to_vec() // Frozen domain + length-framed one-byte ID + FP3/hash.
+        bytes[51..].to_vec() // Frozen domain + length-framed one-byte ID + FP3/hash + issued_at.
     }
     fn strict(domain: u8, format: u8, raw: &[u8]) {
         assert!(view_receipt_outcome(domain, format, raw).is_ok());
@@ -473,11 +474,12 @@ mod tests {
             queue: &queue,
             id: "r",
             fingerprint: [7; 32],
+            issued_at: 0,
             result: ReceiptResult::Insert(&outcomes),
         };
         let mut bytes = Vec::new();
         write_receipt(&mut Sink::Buffer(&mut bytes), &receipt).unwrap();
-        let raw = &bytes[43..];
+        let raw = &bytes[51..];
         strict(0, 3, raw);
         let ReceiptOutcomeRef::Insert(view) = view_receipt_outcome(0, 3, raw).unwrap() else {
             panic!("wrong domain")

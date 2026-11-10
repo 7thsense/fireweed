@@ -164,7 +164,14 @@ fn write_administrative_receipt(
     s: &mut Sink<'_>,
     receipt: &AdministrativePublicationReceipt<'_>,
 ) -> PublicationResult<()> {
-    write_receipt_header(s, 2, &receipt.group.request_id, 4, &receipt.fingerprint)?;
+    write_receipt_header(
+        s,
+        2,
+        &receipt.group.request_id,
+        4,
+        &receipt.fingerprint,
+        receipt.group.issued_at,
+    )?;
     match receipt.outcome {
         AdministrativeReceiptOutcome::Committed {
             versions,
@@ -212,7 +219,7 @@ pub fn measure_administrative_publication_fallbacks(
     let mut sink = Sink::Count(0);
     write_frame_header_as(&mut sink, queue, pin, 0, 0, 0, MAGIC_V2)?;
     sink.n(1)?;
-    write_receipt_header(&mut sink, 2, request_id, 4, &[0; 32])?;
+    write_receipt_header(&mut sink, 2, request_id, 4, &[0; 32], 0)?;
     sink.tag(1)?;
     sink.tag(5)?;
     sink.text(std::str::from_utf8(&[b'x'; 256]).expect("ASCII"))?;
@@ -233,7 +240,14 @@ pub fn measure_administrative_success_floor(
     let mut sink = Sink::Count(0);
     write_frame_header_as(&mut sink, queue, pin, 0, 0, 0, MAGIC_V2)?;
     sink.n(1)?;
-    write_receipt_header(&mut sink, 2, &group.request_id, 4, &[0; 32])?;
+    write_receipt_header(
+        &mut sink,
+        2,
+        &group.request_id,
+        4,
+        &[0; 32],
+        group.issued_at,
+    )?;
     sink.tag(4)?;
     sink.n(count as u64)?;
     for (collection, key) in group.modified_records() {
@@ -1163,13 +1177,13 @@ mod tests {
             builder.append_ordinary(command.as_bytes()).unwrap();
         }
         let frame = builder.finish().unwrap();
-        assert_eq!(frame.as_bytes().len(), 618);
+        assert_eq!(frame.as_bytes().len(), 626);
         assert_eq!(
             Sha256::digest(frame.as_bytes())
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>(),
-            "cb90a91d8c9ac87745000358bdcaa65ff754570d23d35e18bdf74686f85bff6f"
+            "c58283ed8c15e47de05301d5daec49d3a5f1f70efdb7772c0f9bcbd51aa82b36"
         );
         assert!(view_publication(frame.as_bytes()).is_err());
         assert!(scan_publication(frame.as_bytes()).is_err());
@@ -1232,7 +1246,7 @@ mod tests {
         for (offset, value) in [
             (id_offset + parsed.request_id.len(), 3),
             (id_offset - 9, 0),
-            (id_offset + parsed.request_id.len() + 33, 0),
+            (id_offset + parsed.request_id.len() + 41, 0),
         ] {
             let mut corrupt = frame.as_bytes().to_vec();
             corrupt[offset] = value;

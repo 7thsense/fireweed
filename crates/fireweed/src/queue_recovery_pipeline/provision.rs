@@ -14,17 +14,12 @@ impl QueueRecoveryPipeline {
         self: &Arc<Self>,
         request: ProvisionRequest,
         limits: QueueLimits,
+        clock: Arc<dyn Clock>,
         job: Arc<QueueReservation>,
         input: OwnedQueueBufferCharge,
     ) -> QueueResult<()> {
-        self.submit(
-            ProvisionPlan { request },
-            limits,
-            self.ownership.clock(),
-            job,
-            input,
-        )
-        .await
+        self.submit(ProvisionPlan { request }, limits, clock, job, input)
+            .await
     }
 }
 impl Plan for ProvisionPlan {

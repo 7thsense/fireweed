@@ -36,7 +36,7 @@ pub fn measure_commit_rejection_floor(
     counted(|sink| {
         write_frame_header(sink, queue, pin, 0, 0, 0)?;
         sink.n(1)?;
-        write_receipt_header(sink, 2, id, 3, &[0; 32])?;
+        write_receipt_header(sink, 2, id, 3, &[0; 32], 0)?;
         sink.tag(1)?;
         rejection(sink, reason)
     })
@@ -254,7 +254,7 @@ mod tests {
         let delta = combine_deltas(&[delta], 0).unwrap();
         let receipt = PublicationReceipt::commit(&q, &group, &result).unwrap();
         let measured = parts(&before, &delta, &receipt, pin);
-        assert_eq!(measured, 489);
+        assert_eq!(measured, 497);
         let admission = QueueAdmission::new(1, 1 << 20).unwrap();
         let job = admission.reserve(0).unwrap();
         let frame =

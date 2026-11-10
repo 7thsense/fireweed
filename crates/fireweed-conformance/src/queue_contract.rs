@@ -5,6 +5,16 @@ use fireweed_core::queue_contract::*;
 use fireweed_engine::queue_contract::QueueStore;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Receipt lookups for ids issued at time zero, which is what the shared
+/// request builders stamp.
+pub fn read_ids<S: Into<String>>(ids: impl IntoIterator<Item = S>) -> Vec<ReceiptReadId> {
+    ids.into_iter()
+        .map(|request_id| ReceiptReadId {
+            request_id: request_id.into(),
+            issued_at: 0,
+        })
+        .collect()
+}
 pub fn schema() -> QueueSchema {
     let work = CollectionDefinition {
         additional_field_prefixes: BTreeSet::new(),
@@ -199,7 +209,10 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) -> CommitBatch {
         store
             .read_commit(ReceiptReadRequest {
                 queue: queue.clone(),
-                request_ids: vec![checks.request_id.clone()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: checks.request_id.clone(),
+                    issued_at: checks.issued_at
+                }],
                 max_bytes: 1 << 20,
             })
             .await
@@ -356,7 +369,20 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) -> CommitBatch {
     let lookup = store
         .read_commit(ReceiptReadRequest {
             queue: queue.clone(),
-            request_ids: vec!["transition".into(), "absent".into(), "transition".into()],
+            request_ids: vec![
+                ReceiptReadId {
+                    request_id: "transition".into(),
+                    issued_at: 0,
+                },
+                ReceiptReadId {
+                    request_id: "absent".into(),
+                    issued_at: 0,
+                },
+                ReceiptReadId {
+                    request_id: "transition".into(),
+                    issued_at: 0,
+                },
+            ],
             max_bytes: 1 << 20,
         })
         .await
@@ -1561,7 +1587,10 @@ pub async fn verify_process_loss(
     let receipts = store
         .read_commit(ReceiptReadRequest {
             queue: queue.clone(),
-            request_ids: vec!["crash-transition".into()],
+            request_ids: vec![ReceiptReadId {
+                request_id: "crash-transition".into(),
+                issued_at: 0,
+            }],
             max_bytes: 1 << 20,
         })
         .await
@@ -1639,7 +1668,10 @@ pub async fn verify_process_loss(
         store
             .read_commit(ReceiptReadRequest {
                 queue,
-                request_ids: vec!["crash-transition".into()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: "crash-transition".into(),
+                    issued_at: 0
+                }],
                 max_bytes: 1 << 20
             })
             .await
@@ -2427,7 +2459,10 @@ pub async fn atomic_administration_preview_and_replay(store: &dyn QueueStore, qu
         store
             .read_commit(ReceiptReadRequest {
                 queue: queue.clone(),
-                request_ids: vec![transition.request_id.clone()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: transition.request_id.clone(),
+                    issued_at: transition.issued_at
+                }],
                 max_bytes: 1 << 20
             })
             .await
@@ -2512,7 +2547,10 @@ pub async fn atomic_administration_preview_and_replay(store: &dyn QueueStore, qu
         store
             .read_commit(ReceiptReadRequest {
                 queue,
-                request_ids: vec!["admin-transition".into()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: "admin-transition".into(),
+                    issued_at: 0
+                }],
                 max_bytes: 1 << 20
             })
             .await
@@ -2676,7 +2714,10 @@ pub async fn administrative_size_siblings_and_preflight(
         store
             .read_commit(ReceiptReadRequest {
                 queue: queue.clone(),
-                request_ids: vec!["wide-accepted".into()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: "wide-accepted".into(),
+                    issued_at: 0
+                }],
                 max_bytes: 1 << 20
             })
             .await
@@ -2698,7 +2739,10 @@ pub async fn administrative_size_siblings_and_preflight(
         store
             .read_commit(ReceiptReadRequest {
                 queue: queue.clone(),
-                request_ids: vec![valid.request_id.clone()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: valid.request_id.clone(),
+                    issued_at: valid.issued_at
+                }],
                 max_bytes: 1 << 20
             })
             .await

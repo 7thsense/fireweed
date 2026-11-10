@@ -247,6 +247,8 @@ impl NativeTransactionWork for Worker {
         let schema = native.definition.schema();
         let group = &self.input.group;
         group.validate_for(&self.input.queue, schema, &self.input.limits)?;
+        // Preview refuses an expired group too, with no lookup.
+        fireweed_engine::queue_retention::check_horizon(group.issued_at, native.horizon)?;
         if matches!(self.mode, Mode::Publish { .. }) {
             let expected = (3, group.fingerprint(&self.input.queue)?);
             let metadata = read_receipt_metadata(
@@ -554,7 +556,10 @@ mod tests {
                     genesis: input(&definition, &job, checks.clone(), 5, 2).genesis,
                     request: ReceiptReadRequest {
                         queue: address(),
-                        request_ids: vec![checks.request_id.clone()],
+                        request_ids: vec![ReceiptReadId {
+                            request_id: checks.request_id.clone(),
+                            issued_at: checks.issued_at,
+                        }],
                         max_bytes: 65536,
                     },
                     limits: QueueLimits::default(),
@@ -753,7 +758,10 @@ mod tests {
                     genesis: input(&definition, &job, transition.clone(), 4, 3).genesis,
                     request: ReceiptReadRequest {
                         queue: address(),
-                        request_ids: vec![transition.request_id.clone()],
+                        request_ids: vec![ReceiptReadId {
+                            request_id: transition.request_id.clone(),
+                            issued_at: transition.issued_at,
+                        }],
                         max_bytes: 65536,
                     },
                     limits: QueueLimits::default(),

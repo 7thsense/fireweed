@@ -381,6 +381,8 @@ impl NativeTransactionWork for Worker {
         let schema = native.definition.schema();
         let group = &input.group;
         group.validate_for(&input.queue, schema, &input.limits)?;
+        // Preview refuses an expired group too, with no lookup.
+        fireweed_engine::queue_retention::check_horizon(group.issued_at, native.horizon)?;
         if matches!(self.mode, Mode::Publish { .. }) {
             let expected = (4, group.fingerprint(&input.queue)?);
             let metadata = super::receipt_metadata::read_receipt_metadata(

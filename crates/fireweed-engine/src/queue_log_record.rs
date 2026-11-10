@@ -26,6 +26,7 @@ const GENESIS: u8 = 0;
 const PUBLICATION: u8 = 1;
 const CLAIM: u8 = 2;
 const ENTRIES: u8 = 3;
+const RETENTION: u8 = 4;
 /// Bytes of an entry-list record that do not depend on its entries: the record
 /// header, the checksum trailer and the entry count.
 pub const ENTRIES_RECORD_FIXED_BYTES: u64 = (RECORD_HEADER_BYTES + TRAILER_BYTES) as u64 + 8;
@@ -68,6 +69,31 @@ pub enum QueueLogPayload<'a> {
     Claim(ClaimPublicationView<'a>),
     /// One or more chained entries that share one log offset.
     Entries(EntriesView<'a>),
+    /// A cleanup pass. It changes no insertion sequence and no live record.
+    Retention(RetentionView<'a>),
+}
+/// One logged cleanup pass: the store time `at` the horizon is computed from,
+/// and the most rows applying it removes. Applying it reads no clock, so every
+/// rebuild of the log reaches the same horizon and the same rows.
+pub struct RetentionView<'a> {
+    address: AddressRef<'a>,
+    definition_pin: &'a [u8; 32],
+    at: i64,
+    budget: u64,
+}
+impl<'a> RetentionView<'a> {
+    pub fn address(&self) -> AddressRef<'a> {
+        self.address
+    }
+    pub fn definition_pin(&self) -> &'a [u8; 32] {
+        self.definition_pin
+    }
+    pub fn at(&self) -> i64 {
+        self.at
+    }
+    pub fn budget(&self) -> u64 {
+        self.budget
+    }
 }
 /// What an entry of an entry-list record holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +177,7 @@ impl<'a> QueueLogRecordView<'a> {
                 tenant: entries.first().frame().summary().queue.0,
                 queue: entries.first().frame().summary().queue.1,
             },
+            QueueLogPayload::Retention(retention) => retention.address,
         }
     }
     pub fn definition_pin_bytes(&self) -> [u8; 32] {
@@ -174,6 +201,7 @@ impl<'a> QueueLogRecordView<'a> {
                 .definition_pin
                 .try_into()
                 .expect("validated entry pin"),
+            QueueLogPayload::Retention(retention) => *retention.definition_pin,
         }
     }
 }
@@ -276,6 +304,25 @@ pub fn view_queue_log_record(raw: &[u8]) -> QueueResult<QueueLogRecordView<'_>> 
             QueueLogPayload::Claim(claim)
         }
         ENTRIES => QueueLogPayload::Entries(view_entries(payload)?),
+        RETENTION => {
+            let mut reader = Reader(payload);
+            let address = view_address(reader.blob()?)?;
+            let definition_pin = reader
+                .take(32)?
+                .try_into()
+                .map_err(|_| invalid("queue-log retention definition pin"))?;
+            let at = reader.u64()? as i64;
+            let budget = reader.u64()?;
+            if !reader.0.is_empty() {
+                return Err(invalid("trailing queue-log retention bytes"));
+            }
+            QueueLogPayload::Retention(RetentionView {
+                address,
+                definition_pin,
+                at,
+                budget,
+            })
+        }
         _ => return Err(invalid("unknown queue-log record kind")),
     };
     Ok(QueueLogRecordView { epoch, payload })
@@ -623,6 +670,40 @@ pub fn standalone_record_bound(hard_record_bytes: u64) -> Option<u64> {
     hard_record_bytes
         .checked_sub(wrapped.checked_sub(standalone)?)
         .filter(|bound| *bound > 0)
+}
+/// A cleanup pass bound to the queue's definition. `budget` is the most rows
+/// applying it removes.
+pub fn encode_checked_retention(
+    epoch: u64,
+    address: &QueueAddress,
+    definition: &AdmittedQueueDefinition,
+    at: i64,
+    budget: u64,
+    max_bytes: u64,
+    job: &Arc<QueueReservation>,
+) -> QueueResult<OwnedQueueLogRecord> {
+    address.validate()?;
+    if !definition.belongs_to(job) {
+        return Err(invalid("retention definition belongs to another job"));
+    }
+    let framed = encode_address(address)?;
+    let payload = framed
+        .len()
+        .checked_add(8 + 32 + 8 + 8)
+        .ok_or(QueueError::TooLarge)?;
+    let size = payload
+        .checked_add(RECORD_HEADER_BYTES + TRAILER_BYTES)
+        .ok_or(QueueError::TooLarge)?;
+    let mut out = admitted_output(size, max_bytes, job)?;
+    header(&mut out.bytes, epoch, RETENTION, payload)?;
+    blob(&mut out.bytes, &framed)?;
+    out.bytes
+        .extend_from_slice(definition.pin().as_bytes().as_slice());
+    out.bytes.extend_from_slice(&at.to_le_bytes());
+    out.bytes.extend_from_slice(&budget.to_le_bytes());
+    let record = seal_record(out);
+    record.view()?;
+    Ok(record)
 }
 /// One record of chained entries. The entries are validated as a chain.
 pub fn encode_checked_entries_record(

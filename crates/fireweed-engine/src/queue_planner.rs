@@ -45,6 +45,9 @@ pub struct RecordSnapshot {
     /// Deletion time of every retained deleted work key: the deleting group's
     /// `issued_at`. Loaded from the same row as the high-water version.
     pub deleted_at: BTreeMap<String, i64>,
+    /// Highest version of any row removed by cleanup. A key with no row starts
+    /// above it, so a removed key never repeats a version.
+    pub version_floor: u64,
     pub next_sequence: u64,
     /// Loaded existence/nonexistence authority for every prospective unique tuple.
     pub unique_probes_loaded: BTreeSet<UniqueIdentity>,
@@ -278,7 +281,7 @@ fn next_version(
         .versions
         .get(&id)
         .copied()
-        .unwrap_or(0)
+        .unwrap_or(snapshot.version_floor)
         .checked_add(1)
         .ok_or_else(|| Rejection::Invalid("record version exhausted".into()))?;
     snapshot.versions.insert(id, n);
@@ -1270,6 +1273,7 @@ pub(crate) fn validate_uniques(
 pub(crate) fn addressed_snapshot(group: &CommitGroup, source: &RecordSnapshot) -> RecordSnapshot {
     let mut out = RecordSnapshot {
         next_sequence: source.next_sequence,
+        version_floor: source.version_floor,
         ..RecordSnapshot::default()
     };
     let work: BTreeSet<_> = group

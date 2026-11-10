@@ -7,6 +7,10 @@ pub(super) struct NativeQueueSnapshot {
     pub next_offset: u64,
     pub insertion_sequence: u64,
     pub last_record_epoch: u64,
+    /// Requests issued before this are refused with no lookup.
+    pub horizon: i64,
+    /// A key with no row starts above this version.
+    pub version_floor: u64,
 }
 impl NativeQueueSnapshot {
     pub(super) fn validate_claim_input(&self, input: &ClaimReplayInput) -> QueueResult<()> {
@@ -71,12 +75,16 @@ pub(super) async fn read_snapshot(
     if next_offset == 0 || last_record_epoch == 0 || last_record_epoch < view.epoch() {
         return Err(unknown("invalid projection snapshot progress"));
     }
+    let queue_id = integer(&row[0])?;
+    let retention = super::retention::read_row(connection, queue_id).await?;
     Ok(Some(NativeQueueSnapshot {
         definition,
-        queue_id: integer(&row[0])?,
+        queue_id,
         cursor_secret: *genesis.cursor_secret(),
         next_offset,
         insertion_sequence: unsigned(&row[2])?,
         last_record_epoch,
+        horizon: retention.state.horizon,
+        version_floor: retention.version_floor,
     }))
 }

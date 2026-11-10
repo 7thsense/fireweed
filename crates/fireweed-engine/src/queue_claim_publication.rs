@@ -54,6 +54,7 @@ impl<'a> AdmittedClaimBinding<'a> {
 }
 pub struct ClaimPublicationView<'a> {
     claimed_at: i64,
+    issued_at: i64,
     eligible_at: i64,
     lease_nanos: u64,
     expires_at: i64,
@@ -66,6 +67,10 @@ pub struct ClaimPublicationView<'a> {
 impl<'a> ClaimPublicationView<'a> {
     pub fn claimed_at(&self) -> i64 {
         self.claimed_at
+    }
+    /// The `issued_at` of the claim request.
+    pub fn issued_at(&self) -> i64 {
+        self.issued_at
     }
     pub fn eligible_at(&self) -> i64 {
         self.eligible_at
@@ -166,6 +171,7 @@ pub fn view_claim_publication(raw: &[u8]) -> QueueResult<ClaimPublicationView<'_
         return Err(invalid("unsupported format"));
     }
     let claimed_at = reader.signed()?;
+    let issued_at = reader.signed()?;
     let eligible_at = reader.signed()?;
     let lease_nanos = reader.number()?;
     lease_duration(lease_nanos).map_err(|_| invalid("invalid stored lease duration"))?;
@@ -195,6 +201,7 @@ pub fn view_claim_publication(raw: &[u8]) -> QueueResult<ClaimPublicationView<'_
     }
     Ok(ClaimPublicationView {
         claimed_at,
+        issued_at,
         eligible_at,
         lease_nanos,
         expires_at,
@@ -261,7 +268,7 @@ pub fn encode_claim_publication(
         input.receipt.bytes().len(),
     ]
     .into_iter()
-    .try_fold(85u64, |n, len| {
+    .try_fold(93u64, |n, len| {
         n.checked_add(u64::try_from(len).map_err(|_| QueueError::TooLarge)?)
             .ok_or(QueueError::TooLarge)
     })?;
@@ -282,6 +289,8 @@ pub fn encode_claim_publication(
         .map_err(|_| QueueError::TooLarge)?;
     out.bytes.extend_from_slice(MAGIC);
     out.bytes.extend_from_slice(&input.claimed_at.to_le_bytes());
+    out.bytes
+        .extend_from_slice(&input.request.issued_at.to_le_bytes());
     out.bytes
         .extend_from_slice(&input.request.eligible_at.to_le_bytes());
     out.bytes
@@ -644,16 +653,16 @@ mod tests {
             // canonical Postcard request bytes and SHA-256, not this writer.
             use sha2::{Digest, Sha256};
             if selected {
-                assert_eq!(n, 544);
+                assert_eq!(n, 552);
                 assert_eq!(
                     Sha256::digest(out.bytes())
                         .iter()
                         .map(|byte| format!("{byte:02x}"))
                         .collect::<String>(),
-                    "059e64eec5af1c779ed4e06ed54401d4e5bc51a9249b4b8b3e32217473e17c9c"
+                    "5c66dda712c1bb97c6a10a5c110a1bb9cbfdcbe0bbb1574c67d1be781cb9e828"
                 );
             } else {
-                const EMPTY: &str = "46575143310a00000000000000000000000000000040420f00000000000500000000000000636c61696daab55c434dda873ac8fd790173338bb5671fdd1c9e3823a1ea1def502ecb73225d00000000000000465751503104000000000000007400ceb20400000000000000712fcebb20e569a5228ca922ed50d018b847cbee60c8c6c482290c9c8419fddecab9293202000000000000000200000000000000000000000000000000000000000000000d0000000000000046574352310000000000000000";
+                const EMPTY: &str = "46575143310a000000000000000000000000000000000000000000000040420f00000000000500000000000000636c61696daab55c434dda873ac8fd790173338bb5671fdd1c9e3823a1ea1def502ecb73225d00000000000000465751503104000000000000007400ceb20400000000000000712fcebb20e569a5228ca922ed50d018b847cbee60c8c6c482290c9c8419fddecab9293202000000000000000200000000000000000000000000000000000000000000000d0000000000000046574352310000000000000000";
                 let expected = EMPTY
                     .as_bytes()
                     .as_chunks::<2>()

@@ -85,7 +85,7 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
             QueueLogPayload::Genesis(_) => {
                 return Err(unknown("genesis has no predecessor publication"));
             }
-            QueueLogPayload::Entries(_) => {
+            QueueLogPayload::Entries(_) | QueueLogPayload::Retention(_) => {
                 return Err(unknown("entry-list records are not source-indexed"));
             }
             QueueLogPayload::Publication(_) => None,
@@ -143,7 +143,9 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
         match self.checked.view().payload() {
             QueueLogPayload::Publication(publication) => publication,
             QueueLogPayload::Claim(claim) => claim.commands(),
-            QueueLogPayload::Genesis(_) | QueueLogPayload::Entries(_) => {
+            QueueLogPayload::Genesis(_)
+            | QueueLogPayload::Entries(_)
+            | QueueLogPayload::Retention(_) => {
                 unreachable!("begin rejects genesis and entry lists")
             }
         }

@@ -16,22 +16,20 @@ impl QueueRecoveryPipeline {
         self: &Arc<Self>,
         request: ReceiptReadRequest,
         limits: QueueLimits,
+        clock: Arc<dyn Clock>,
         job: Arc<QueueReservation>,
     ) -> QueueResult<AdmittedCommitReceipts> {
         request.validate(&limits)?;
+        for id in &request.request_ids {
+            check_issued_at(clock.as_ref(), id.issued_at)?;
+        }
         let input = read_input_charge(
             fireweed_core::queue_contract::encoded_len(&request)?,
             request.headers()?,
             &job,
         )?;
-        self.submit(
-            ReceiptPlan { request },
-            limits,
-            self.ownership.clock(),
-            job,
-            input,
-        )
-        .await
+        self.submit(ReceiptPlan { request }, limits, clock, job, input)
+            .await
     }
 }
 impl Plan for ReceiptPlan {

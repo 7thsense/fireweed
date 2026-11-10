@@ -254,7 +254,10 @@ async fn native_port_identical_contract(s3: bool) {
     };
     let missing = ReceiptReadRequest {
         queue: address("missing"),
-        request_ids: vec!["none".into()],
+        request_ids: vec![ReceiptReadId {
+            request_id: "none".into(),
+            issued_at: 0,
+        }],
         max_bytes: 1 << 20,
     };
     assert_eq!(
@@ -265,11 +268,11 @@ async fn native_port_identical_contract(s3: bool) {
     eprintln!("native contract {s3}: run");
     suite::run(&queue, primary.clone()).await;
     let original_ids = || {
-        vec![
-            "transition".into(),
-            "claim-and-absence-checks".into(),
-            "present-and-absent-state-checks".into(),
-        ]
+        suite::read_ids([
+            "transition",
+            "claim-and-absence-checks",
+            "present-and-absent-state-checks",
+        ])
     };
     let expected = queue
         .read_commit(ReceiptReadRequest {
@@ -335,7 +338,7 @@ async fn native_port_identical_contract(s3: bool) {
             .await;
     }
     let acknowledged = suite::prepare_process_loss(&queue, address("acknowledged-reopen")).await;
-    let receipts = |name: &str, ids: Vec<String>| ReceiptReadRequest {
+    let receipts = |name: &str, ids: Vec<ReceiptReadId>| ReceiptReadRequest {
         queue: address(name),
         request_ids: ids,
         max_bytes: 1 << 20,
@@ -343,14 +346,14 @@ async fn native_port_identical_contract(s3: bool) {
     let administrative_expected = queue
         .read_commit(receipts(
             "administration-preview",
-            vec!["admin-transition".into()],
+            suite::read_ids(["admin-transition"]),
         ))
         .await
         .unwrap();
     let wide_expected = queue
         .read_commit(receipts(
             "administration-sizes",
-            vec!["wide-accepted".into(), "middle".into()],
+            suite::read_ids(["wide-accepted", "middle"]),
         ))
         .await
         .unwrap();
@@ -377,7 +380,7 @@ async fn native_port_identical_contract(s3: bool) {
         reopened
             .read_commit(receipts(
                 "administration-preview",
-                vec!["admin-transition".into()]
+                suite::read_ids(["admin-transition"])
             ))
             .await
             .unwrap(),
@@ -387,7 +390,7 @@ async fn native_port_identical_contract(s3: bool) {
         reopened
             .read_commit(receipts(
                 "administration-sizes",
-                vec!["wide-accepted".into(), "middle".into()]
+                suite::read_ids(["wide-accepted", "middle"])
             ))
             .await
             .unwrap(),
@@ -428,11 +431,11 @@ async fn native_condition_checks_contract(s3: bool) {
     let original = suite::run(&queue, address.clone()).await;
     let receipts = ReceiptReadRequest {
         queue: address.clone(),
-        request_ids: vec![
-            original.groups[0].request_id.clone(),
-            "present-and-absent-state-checks".into(),
-            "transition".into(),
-        ],
+        request_ids: suite::read_ids([
+            original.groups[0].request_id.as_str(),
+            "present-and-absent-state-checks",
+            "transition",
+        ]),
         max_bytes: 65536,
     };
     let expected = queue.read_commit(receipts.clone()).await.unwrap();

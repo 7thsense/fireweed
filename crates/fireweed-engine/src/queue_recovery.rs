@@ -163,7 +163,7 @@ impl ColdQueueHistory {
                 }
                 self.insertion_sequence = summary.final_sequence;
             }
-            QueueLogPayload::Entries(_) => {
+            QueueLogPayload::Entries(_) | QueueLogPayload::Retention(_) => {
                 return Err(invalid("entry-list records are not source-indexed"));
             }
         }

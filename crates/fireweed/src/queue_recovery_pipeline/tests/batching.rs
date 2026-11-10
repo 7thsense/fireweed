@@ -183,10 +183,11 @@ async fn concurrent_mutations_share_one_record(s3: bool, n: usize) {
     let found = store
         .read_commit(ReceiptReadRequest {
             queue: queue.clone(),
-            request_ids: (0..n)
-                .filter(|n| n % 2 == 1)
-                .map(|n| format!("batch-commit-{n}"))
-                .collect(),
+            request_ids: fireweed_conformance::queue_contract::read_ids(
+                (0..n)
+                    .filter(|n| n % 2 == 1)
+                    .map(|n| format!("batch-commit-{n}")),
+            ),
             max_bytes: 1 << 20,
         })
         .await
@@ -458,7 +459,7 @@ async fn observed(
     let receipts = store
         .read_commit(ReceiptReadRequest {
             queue: queue.clone(),
-            request_ids,
+            request_ids: fireweed_conformance::queue_contract::read_ids(request_ids),
             max_bytes: 8 << 20,
         })
         .await
@@ -857,7 +858,10 @@ async fn queues_waiting_for_the_writer_do_not_starve_a_batch_of_workers(s3: bool
                 store
                     .read_commit(ReceiptReadRequest {
                         queue,
-                        request_ids: vec!["none".into()],
+                        request_ids: vec![ReceiptReadId {
+                            request_id: "none".into(),
+                            issued_at: 0,
+                        }],
                         max_bytes: 1 << 20,
                     })
                     .await
