@@ -1884,7 +1884,9 @@ pub(crate) async fn push_idempotency_on(
         return Ok(IdempotencyDecision::Expired);
     }
     let stored = blob(&row[0])?;
-    if stored != fingerprint.canonical_sha256 {
+    // The durable envelope carries the eight-byte prefix of the canonical fingerprint, and the
+    // relational apply persists exactly that.
+    if stored != fingerprint.body_hash().0.to_be_bytes() {
         return Ok(IdempotencyDecision::Conflict);
     }
     let raw: Vec<String> = serde_json::from_str(&text(&row[1])?).map_err(storage)?;

@@ -64,7 +64,15 @@ async fn push_preappend_and_durable_idempotency_are_native_async() {
         1,
     );
     push.request_id = Some(request_id.clone());
-    push.request_fingerprint = Some(42);
+    let replay_fingerprint = PushFingerprint {
+        canonical_sha256: fireweed_engine::push_items_fingerprint_sha256(&[indexed_item(
+            id,
+            "key-one",
+            "one@example.com",
+        )])
+        .unwrap(),
+    };
+    push.request_fingerprint = Some(replay_fingerprint.body_hash().0);
     push.request_outcome = Some(RequestOutcome::Push { item_ids: vec![id] });
     AsyncProjectionStore::apply_live(
         &turso,
@@ -78,14 +86,7 @@ async fn push_preappend_and_durable_idempotency_are_native_async() {
             &turso,
             shard.clone(),
             request_id.clone(),
-            PushFingerprint {
-                canonical_sha256: fireweed_engine::push_items_fingerprint_sha256(&[indexed_item(
-                    id,
-                    "key-one",
-                    "one@example.com",
-                )])
-                .unwrap(),
-            },
+            replay_fingerprint,
             timestamp(2),
         )
         .await
