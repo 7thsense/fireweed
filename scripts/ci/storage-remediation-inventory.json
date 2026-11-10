@@ -17238,6 +17238,26 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::store::tests::concurrent_shutdowns_wait_for_final_drop_repeatedly",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::store::tests::concurrent_shutdowns_wait_for_final_drop_repeatedly",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::store::tests::concurrent_shutdowns_wait_for_final_drop_repeatedly"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::batching::a_commit_batch_that_fills_the_record_continues_in_the_next_local",
           "--",
           "--exact"
@@ -104546,6 +104566,45 @@
         "--features",
         "default,memory,objectlog,postgres,s3-turso,turso",
         "--lib",
+        "queue_recovery_pipeline::store::tests::concurrent_shutdowns_wait_for_final_drop_repeatedly",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "memory",
+        "objectlog",
+        "postgres",
+        "s3-turso",
+        "turso"
+      ],
+      "harness_id": "queue_recovery_pipeline::store::tests::concurrent_shutdowns_wait_for_final_drop_repeatedly",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::store::tests::concurrent_shutdowns_wait_for_final_drop_repeatedly",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,memory,objectlog,postgres,s3-turso,turso",
+        "--lib",
         "queue_recovery_pipeline::tests::batching::a_commit_batch_that_fills_the_record_continues_in_the_next_local",
         "--",
         "--exact"
@@ -122092,7 +122151,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "d8e77e9656d669cf43fb633dbcde30222639fe560e01910789283376e941ab17",
+  "source_inventory_sha256": "b6527976e5ef949ca46ef4030ecbe9c3f845bddf23c5601d0f1ed56523d7ab72",
   "workspaces": [
     {
       "listing_error_sha256": "",
