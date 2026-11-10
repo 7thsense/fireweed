@@ -110,7 +110,7 @@ struct SnapshotMetaDoc {
     ref_id: String,
 }
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Default)]
 struct CatalogDoc {
     definitions: Vec<QueueDefinition>,
 }
@@ -915,10 +915,6 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         )
     }
 
-    fn catalog_key(&self) -> String {
-        format!("{}catalog.json", self.meta_prefix)
-    }
-
     fn definition_prefix(&self) -> String {
         format!("{}queue_definitions/", self.meta_prefix)
     }
@@ -952,18 +948,8 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
     }
 
     async fn load_meta(&self) -> EngineResult<()> {
-        // Read the retired aggregate catalog for backward-compatible reopen, then merge every
-        // per-queue authority record. New writes never update catalog.json: independent queues
+        // Every per-queue authority record is the definition source. Independent queues
         // therefore cannot erase one another through a stale read/modify/write cycle.
-        if let Some(bytes) = self
-            .blob
-            .get(&self.catalog_key())
-            .await
-            .map_err(store_err)?
-        {
-            let doc: CatalogDoc = serde_json::from_slice(&bytes).map_err(store_err)?;
-            *self.catalog.lock().expect("catalog mutex") = doc;
-        }
         let mut keys = self
             .blob
             .list(&self.definition_prefix())
@@ -1111,24 +1097,8 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
     ) -> EngineResult<CreateQueueOutcome> {
         let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         let key = self.definition_key(&shard);
-        // A definition found only in the retired aggregate catalog is still an existing durable
-        // winner. Publish that exact value into the immutable per-queue layout before considering
-        // the caller's candidate; migration must never let a later create rewrite legacy truth.
-        let legacy_winner = self
-            .catalog
-            .lock()
-            .expect("catalog")
-            .definitions
-            .iter()
-            .find(|existing| {
-                existing.tenant_id == definition.tenant_id
-                    && existing.queue_id == definition.queue_id
-            })
-            .cloned();
-        let publication = legacy_winner.clone().unwrap_or_else(|| definition.clone());
-        let bytes = serde_json::to_vec(&publication).map_err(store_err)?;
-        let physically_created = self.publish_immutable_bytes(&key, bytes).await?;
-        let created = physically_created && legacy_winner.is_none();
+        let bytes = serde_json::to_vec(&definition).map_err(store_err)?;
+        let created = self.publish_immutable_bytes(&key, bytes).await?;
         let winner_bytes = self
             .blob
             .get(&key)
@@ -1308,45 +1278,14 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         self.fail_high_water_puts.store(count, Ordering::SeqCst);
     }
 
-    /// Group-commit path for ports that do not hold the per-queue admit permit
-    /// (BatchUpdate / upsert). Concurrent callers share one object PUT when
-    /// they overlap the engine linger.
+    /// Append one caller-owned command vector. Physical engine seals may contain
+    /// several callers, but each caller retains its own apply batch and debt.
+    /// The engine controls physical sealing through its flush configuration.
     pub async fn packed_append(
         &self,
         shard: QueueKey,
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
-    ) -> Result<PackedAppendOutcome, PackedAppendError> {
-        self.packed_append_owned(shard, commands, expected_epoch, None, false)
-            .await
-    }
-
-    /// Append this caller's command vector as one apply batch.
-    ///
-    /// The engine controls physical sealing through its flush configuration.
-    /// This compatibility entry point does not force a separate object PUT.
-    pub async fn packed_append_force_seal(
-        &self,
-        shard: QueueKey,
-        commands: Vec<CommandEnvelope>,
-        expected_epoch: u64,
-        reservation_id: Option<u64>,
-    ) -> Result<PackedAppendOutcome, PackedAppendError> {
-        self.packed_append_owned(shard, commands, expected_epoch, reservation_id, true)
-            .await
-    }
-
-    /// Append one caller-owned command vector. Physical engine seals may contain
-    /// several callers, but each caller retains its own apply batch and debt.
-    /// Reservation and force-seal arguments are retained for compatibility with
-    /// the retired application-level packer; no follower reservations transfer.
-    pub async fn packed_append_owned(
-        &self,
-        shard: QueueKey,
-        commands: Vec<CommandEnvelope>,
-        expected_epoch: u64,
-        reservation_id: Option<u64>,
-        force_seal: bool,
     ) -> Result<PackedAppendOutcome, PackedAppendError> {
         if commands.is_empty() {
             return Ok(PackedAppendOutcome {
@@ -1358,7 +1297,6 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         // produce_immediate validates the epoch under the metadata permit and
         // the pre-position deadline. An eager load here would duplicate that
         // I/O outside the budget and could hang before the timed path starts.
-        let _ = (reservation_id, force_seal);
         let positions = self
             .produce_immediate(&shard, &commands, expected_epoch)
             .await?;
@@ -2214,33 +2152,6 @@ mod tests {
 
         assert_eq!(first.acquire_epoch(shard.clone()).await.unwrap(), 1);
         assert_eq!(second.current_epoch(shard).await.unwrap(), 1);
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[tokio::test]
-    async fn legacy_catalog_definition_migrates_without_candidate_overwrite() {
-        let root = temp_root("legacy-catalog-migration");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("fwmeta")).unwrap();
-        let durable = qdef();
-        std::fs::write(
-            root.join("fwmeta/catalog.json"),
-            serde_json::to_vec(&super::CatalogDoc {
-                definitions: vec![durable.clone()],
-            })
-            .unwrap(),
-        )
-        .unwrap();
-        let store = ObjectLogEngineStore::open_local(&root, zero_linger())
-            .await
-            .unwrap();
-        let mut candidate = durable.clone();
-        candidate.request_id_retention_ms += 1;
-
-        let outcome = store.create_or_read_definition(candidate).await.unwrap();
-        assert!(!outcome.created);
-        assert_eq!(outcome.definition, durable);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3193,7 +3104,7 @@ mod tests {
         assert_eq!(
             production.matches(".produce_immediate(").count(),
             3,
-            "append, append_exclusive, and packed_append_owned must share produce_immediate"
+            "append, append_exclusive, and packed_append must share produce_immediate"
         );
         assert_eq!(
             production
@@ -3466,7 +3377,7 @@ mod tests {
             .reserve(own_shard.clone(), &driver_cmds)
             .await
             .unwrap();
-        let other_res = coordinator
+        let _other_res = coordinator
             .reserve(other_shard.clone(), &[pause_env("other")])
             .await
             .unwrap();
@@ -3474,39 +3385,21 @@ mod tests {
         let other_log = Arc::clone(&log);
         let other_handle = tokio::spawn(async move {
             other_log
-                .packed_append_owned(
-                    other_shard,
-                    vec![pause_env("other")],
-                    other_epoch,
-                    Some(other_res.id()),
-                    false,
-                )
+                .packed_append(other_shard, vec![pause_env("other")], other_epoch)
                 .await
         });
         let follower_log = Arc::clone(&log);
         let follower_shard = own_shard.clone();
-        let follower_id = follower_res.id();
         let follower_handle = tokio::spawn(async move {
             follower_log
-                .packed_append_owned(
-                    follower_shard,
-                    follower_cmds,
-                    own_epoch,
-                    Some(follower_id),
-                    false,
-                )
+                .packed_append(follower_shard, follower_cmds, own_epoch)
                 .await
         });
         tokio::time::sleep(Duration::from_millis(5)).await;
 
         let started = Instant::now();
         let driver_outcome = log
-            .packed_append_force_seal(
-                own_shard.clone(),
-                driver_cmds,
-                own_epoch,
-                Some(driver_res.id()),
-            )
+            .packed_append(own_shard.clone(), driver_cmds, own_epoch)
             .await
             .unwrap();
         assert!(
@@ -3594,12 +3487,7 @@ mod tests {
         let expected_debt = super::exact_envelope_bytes(&commands).unwrap();
         let reservation = coordinator.reserve(shard.clone(), &commands).await.unwrap();
         let error = log
-            .packed_append_force_seal(
-                shard.clone(),
-                commands.clone(),
-                stale_epoch,
-                Some(reservation.id()),
-            )
+            .packed_append(shard.clone(), commands.clone(), stale_epoch)
             .await
             .unwrap_err();
         assert_eq!(
@@ -3630,7 +3518,7 @@ mod tests {
 
         let reservation = coordinator.reserve(shard.clone(), &commands).await.unwrap();
         let outcome = log
-            .packed_append_force_seal(shard.clone(), commands, epoch, Some(reservation.id()))
+            .packed_append(shard.clone(), commands, epoch)
             .await
             .unwrap();
         let batch = outcome.apply_batch.unwrap();
@@ -3673,7 +3561,7 @@ mod tests {
         let reservation = coordinator.reserve(shard.clone(), &commands).await.unwrap();
         log.fail_high_water_puts.store(1, Ordering::SeqCst);
         let error = log
-            .packed_append_force_seal(shard.clone(), commands, epoch, Some(reservation.id()))
+            .packed_append(shard.clone(), commands, epoch)
             .await
             .expect_err("high-water put_json failure is post-position");
         assert!(
@@ -3753,8 +3641,7 @@ mod tests {
                 let shard = shard.clone();
                 let env = pause_env(&format!("{tag}-{i}"));
                 handles.push(tokio::spawn(async move {
-                    log.packed_append_owned(shard, vec![env], epoch, None, false)
-                        .await
+                    log.packed_append(shard, vec![env], epoch).await
                 }));
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -3763,8 +3650,7 @@ mod tests {
                 let shard = shard.clone();
                 let env = pause_env(&format!("{tag}-leader"));
                 handles.push(tokio::spawn(async move {
-                    log.packed_append_owned(shard, vec![env], epoch, None, true)
-                        .await
+                    log.packed_append(shard, vec![env], epoch).await
                 }));
             }
             let mut errors = Vec::new();
@@ -3780,14 +3666,8 @@ mod tests {
             let log = Arc::clone(&log);
             let shard = shard.clone();
             handles.push(tokio::spawn(async move {
-                log.packed_append_owned(
-                    shard,
-                    vec![pause_env(&format!("post-{i}"))],
-                    epoch,
-                    None,
-                    i == 2,
-                )
-                .await
+                log.packed_append(shard, vec![pause_env(&format!("post-{i}"))], epoch)
+                    .await
             }));
         }
         let mut post_errors = 0;

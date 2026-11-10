@@ -797,7 +797,7 @@ mod contention_mapping_tests {
             "async fn dispatch_finalize",
         );
         assert!(class_s.contains("AppendAdmissionClass::ClaimCoordinatorLive"));
-        assert!(class_s.contains(".packed_append_owned("));
+        assert!(class_s.contains(".packed_append("));
 
         let finalize = between(
             derived,
@@ -2877,34 +2877,8 @@ impl SeparateReplayCommitter for ObjectLogTursoCommitter {
                 Some(coordinator) => Some(coordinator.reserve(shard.clone(), &commands).await?),
                 None => None,
             };
-            // A full generation is not a reason to PUT. Eight small commands
-            // are not an S3 object. Seal early only for the local filesystem,
-            // where a PUT is a file rename, or when the append is already huge.
-            let force_seal = (log.uses_local_filesystem()
-                && matches!(
-                    append_admission,
-                    AppendAdmissionClass::SharedSelectionLive
-                        | AppendAdmissionClass::KeyedPermitLive
-                ))
-                || commands
-                    .iter()
-                    .map(|envelope| {
-                        envelope
-                            .item_ids
-                            .iter()
-                            .filter(|id| id.as_u64() != 0)
-                            .count()
-                    })
-                    .sum::<usize>()
-                    >= GENERATION_MAX_ITEMS;
             let outcome = match log
-                .packed_append_owned(
-                    shard.clone(),
-                    commands.clone(),
-                    expected_epoch,
-                    reservation.as_ref().map(|reserved| reserved.id()),
-                    force_seal,
-                )
+                .packed_append(shard.clone(), commands.clone(), expected_epoch)
                 .await
             {
                 Ok(outcome) => outcome,
@@ -4917,13 +4891,7 @@ impl DerivedObjectLogTursoBackend {
         }
         let outcome = match self
             .log
-            .packed_append_owned(
-                shard.clone(),
-                commands.clone(),
-                epoch,
-                reservation.as_ref().map(|reserved| reserved.id()),
-                true,
-            )
+            .packed_append(shard.clone(), commands.clone(), epoch)
             .await
         {
             Ok(outcome) => outcome,
