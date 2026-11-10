@@ -516,8 +516,8 @@ impl Queue {
     ) -> QueueResult<Self> {
         limits.validate()?;
         let (runtime, _, pipeline) = resolve_runtime(&limits, &runtime)?;
-        let directory = EphemeralDirectory::create(parent)?;
         let native = native_options(&limits, &runtime)?;
+        let directory = EphemeralDirectory::create(parent)?;
         let log = QueueNativeLog::local(
             &directory.path().join("log"),
             "ephemeral".to_owned(),

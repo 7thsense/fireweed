@@ -463,6 +463,27 @@ async fn ephemeral_disk_with_refuses_invalid_input_before_creating_a_directory()
     std::fs::remove_dir_all(parent).unwrap();
 }
 
+#[tokio::test]
+async fn ephemeral_disk_with_refuses_unsupported_native_options_before_creating_a_directory() {
+    // The parent does not exist, so any attempt to create the directory would give
+    // `Unavailable`; an error handle removes what it created, so an existing empty
+    // parent could not tell the two orders apart.
+    let parent = scratch_dir("ephemeral-native-invalid");
+    // Consistent admission limits whose largest log record exceeds `u32::MAX`:
+    // only `native_options` refuses them.
+    let limits = QueueLimits {
+        max_request_bytes: 1 << 30,
+        ..QueueLimits::default()
+    };
+    limits.validate().unwrap();
+    let runtime = QueueRuntimeOptions::default();
+    resolve_runtime(&limits, &runtime).unwrap();
+    let result =
+        Queue::ephemeral_disk_in(&parent, limits, runtime, Arc::new(TestClock::default())).await;
+    assert!(matches!(result, Err(QueueError::Invalid(_))), "{result:?}");
+    assert!(!parent.exists());
+}
+
 /// Everything after `run` that a rebuild or reopen must preserve.
 struct Prepared {
     receipts: Vec<(QueueAddress, Vec<String>, Vec<ReceiptLookup>)>,
