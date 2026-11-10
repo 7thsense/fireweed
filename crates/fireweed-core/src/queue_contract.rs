@@ -237,7 +237,6 @@ pub struct CommitGroup {
     pub state_updates: Vec<StateUpdate>,
     pub work_inserts: Vec<NewWork>,
     pub work_updates: Vec<UnclaimedUpdate>,
-    #[serde(default)]
     pub administration: Option<AdministrativeCommit>,
     /// UTC nanoseconds taken once when the request id was created.
     pub issued_at: i64,

@@ -128,18 +128,13 @@ pub struct ProjectionImageItem {
     pub client_item_key: ClientItemKey,
     pub priority: Option<PriorityValue>,
     pub not_before: Option<UtcTimestamp>,
-    /// Optional only for backwards compatibility with snapshots written before active-scope discovery
-    /// was materialized by the shared projection.
-    #[serde(default)]
     pub eligible_since: Option<UtcTimestamp>,
     pub group_key: Option<GroupKey>,
-    #[serde(default)]
     pub cohort_size: Option<u64>,
     pub payload: Option<Bytes>,
     pub fields: BTreeMap<String, Bytes>,
     pub metadata: Metadata,
     pub gate_keys: Vec<String>,
-    #[serde(default)]
     pub index_fields: BTreeMap<String, TypedValue>,
     pub entity_document: Option<serde_json::Value>,
     pub state: ItemState,
@@ -149,11 +144,8 @@ pub struct ProjectionImageItem {
     pub created_seq: u64,
     pub lease_token: Option<LeaseToken>,
     pub lease_expires_at: Option<UtcTimestamp>,
-    /// Whether the active lease was acquired as a whole cohort. Older images
-    /// predate cohort leasing and therefore default to an ordinary lease.
-    #[serde(default)]
+    /// Whether the active lease was acquired as a whole cohort.
     pub lease_is_cohort: bool,
-    #[serde(default)]
     pub worker_id: Option<fireweed_core::WorkerId>,
     pub fenced: bool,
     pub superseded: bool,
@@ -245,10 +237,8 @@ impl From<ProjectionImageItem> for ItemRecord {
 pub struct ProjectionImage {
     pub high_water: Option<CommandPosition>,
     pub paused: bool,
-    #[serde(default)]
     pub pause_drain_intake: bool,
-    /// Operator-blocked dynamic gate keys. Default keeps older snapshots readable.
-    #[serde(default)]
+    /// Operator-blocked dynamic gate keys.
     pub blocked_gates: BTreeSet<String>,
     pub next_seq: u64,
     pub items: Vec<ProjectionImageItem>,
@@ -745,7 +735,6 @@ struct RangeScanCursorState {
     order_by: Vec<OrderField>,
     anchor_item_id: ItemId,
     anchor_values: Vec<TypedValue>,
-    #[serde(default)]
     anchor_index_key: Option<Vec<u8>>,
 }
 

@@ -1250,7 +1250,7 @@
         "evidence"
       ],
       "lines": [
-        5398
+        5393
       ],
       "path": "crates/fireweed-postgres/src/relational.rs",
       "symbol": "set_emission_cursor"
@@ -1303,15 +1303,15 @@
         "evidence"
       ],
       "lines": [
+        7583,
         7594,
-        7605,
-        7615,
-        7623,
-        7628,
-        7638,
-        7646,
-        7651,
-        7661
+        7604,
+        7612,
+        7617,
+        7627,
+        7635,
+        7640,
+        7650
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "td008_observed_terminal_reap_frontier_run"
@@ -1321,11 +1321,11 @@
         "evidence"
       ],
       "lines": [
-        7680,
-        7686,
-        7696,
-        7701,
-        7711
+        7669,
+        7675,
+        7685,
+        7690,
+        7700
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "td008_observed_terminal_reap_no_premature_deletion"
@@ -1335,11 +1335,11 @@
         "evidence"
       ],
       "lines": [
-        7726,
-        7732,
-        7742,
-        7746,
-        7751
+        7715,
+        7721,
+        7731,
+        7735,
+        7740
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "td008_observed_retention_only_reap_run"
@@ -1349,12 +1349,12 @@
         "evidence"
       ],
       "lines": [
+        7755,
+        7759,
         7766,
-        7770,
-        7777,
-        7786,
-        7796,
-        7800
+        7775,
+        7785,
+        7789
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "td008_observed_retention_only_ignores_emission_cursor"
@@ -1364,16 +1364,16 @@
         "evidence"
       ],
       "lines": [
-        7866,
-        7867,
-        7868,
-        7869,
-        7870,
-        7871,
-        7875,
-        7876,
-        7885,
-        7886
+        7855,
+        7856,
+        7857,
+        7858,
+        7859,
+        7860,
+        7864,
+        7865,
+        7874,
+        7875
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "projection_image_roundtrips_full_projection_state"
@@ -5645,7 +5645,7 @@
       "calls": [
         "execute"
       ],
-      "line": 5393,
+      "line": 5388,
       "path": "crates/fireweed-postgres/src/relational.rs",
       "symbol": "set_emission_cursor"
     },
@@ -6219,7 +6219,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "c66551e6c773390763079e9f8ff68933b754f4066ad63d43d5cedc20f7893667",
+  "scan_sha256": "32b76d99ddb2a9234212869be0d9a64ebcff996c6c6f3bcec42d4135e6d20679",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -7971,12 +7971,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1096,
+      "first_match_line": 1095,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1096,
-      "line": 1086,
+      "last_match_line": 1095,
+      "line": 1085,
       "markers": [
         "tp003"
       ],
@@ -9741,12 +9741,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5377,
+      "first_match_line": 5372,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 5377,
-      "line": 5329,
+      "last_match_line": 5372,
+      "line": 5324,
       "markers": [
         "td008"
       ],
@@ -9759,12 +9759,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5425,
+      "first_match_line": 5420,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 5425,
-      "line": 5393,
+      "last_match_line": 5420,
+      "line": 5388,
       "markers": [
         "td008"
       ],
@@ -9868,12 +9868,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1682,
+      "first_match_line": 1671,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1682,
-      "line": 1640,
+      "last_match_line": 1671,
+      "line": 1629,
       "markers": [
         "tp003"
       ],
@@ -9886,12 +9886,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3891,
+      "first_match_line": 3880,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 3891,
-      "line": 3865,
+      "last_match_line": 3880,
+      "line": 3854,
       "markers": [
         "tp003"
       ],
@@ -9904,12 +9904,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 7586,
+      "first_match_line": 7575,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 7586,
-      "line": 7586,
+      "last_match_line": 7575,
+      "line": 7575,
       "markers": [
         "td008"
       ],
@@ -9922,12 +9922,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 7668,
+      "first_match_line": 7657,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 7668,
-      "line": 7668,
+      "last_match_line": 7657,
+      "line": 7657,
       "markers": [
         "td008"
       ],
@@ -9940,12 +9940,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 7718,
+      "first_match_line": 7707,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 7718,
-      "line": 7718,
+      "last_match_line": 7707,
+      "line": 7707,
       "markers": [
         "td008"
       ],
@@ -9958,12 +9958,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 7758,
+      "first_match_line": 7747,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 7758,
-      "line": 7758,
+      "last_match_line": 7747,
+      "line": 7747,
       "markers": [
         "td008"
       ],
@@ -9976,12 +9976,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 7889,
+      "first_match_line": 7878,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 7889,
-      "line": 7811,
+      "last_match_line": 7878,
+      "line": 7800,
       "markers": [
         "tp003"
       ],
@@ -19935,7 +19935,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 121613,
+      "last_match_line": 121522,
       "line": 1,
       "markers": [
         "e3",

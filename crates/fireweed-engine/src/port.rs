@@ -472,7 +472,6 @@ pub struct QueueMetrics {
     pub leased: u64,
     pub complete: u64,
     pub failed: u64,
-    #[serde(default)]
     pub resident_terminal_count: u64,
 }
 
@@ -1364,14 +1363,12 @@ pub struct CommitTransitionEntry {
     /// Additional claimed items finalized with the same disposition as `claim_ref`. Every claim is
     /// validated before any entry write becomes visible, so the claims and the entry's side records,
     /// lifecycle items, and instance fence form one atomic transition boundary.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub additional_claim_refs: Vec<ClaimRef>,
     pub finalize: FinalizeKind,
     pub side_records: Vec<SideRecord>,
     pub lifecycle_items: Vec<PushSpec>,
     /// Optional caller-supplied instance/state fence advanced/validated atomically with this entry (C6).
-    /// `#[serde(default)]` so existing serialized commit bodies/definitions don't churn their fingerprint.
-    #[serde(default)]
     pub instance_fence: Option<InstanceFence>,
 }
 

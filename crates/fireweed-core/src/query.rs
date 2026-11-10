@@ -424,7 +424,6 @@ pub struct QueryCapabilityFlags {
     pub side_record_query: bool,
     /// API-001 `BatchClaimByItemIds` / library `claim_by_item_ids`. Independent of the five paired
     /// hot-query capabilities.
-    #[serde(default)]
     pub claim_by_item_ids: bool,
 }
 
