@@ -315,6 +315,7 @@ async fn mandatory_competition_expiry_and_long_ordering() {
     suite::expiry_and_administration(&a, &clock, q("expiry")).await;
     suite::ordered_long_values_and_cursor_scope(&a, q("long")).await;
     suite::predicate_and_order_oracles(&a, q("predicate-oracles")).await;
+    suite::presence_and_absence_predicates(&a, q("presence")).await;
     suite::ordered_groups_sparse_stats_and_replay_precedence(&a, &clock, q("groups-stats-replay"))
         .await;
     suite::indexed_additional_attributes(&a, q("additional-attributes")).await;
