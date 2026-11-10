@@ -28,7 +28,7 @@ const CHANGE_RECORD_EMISSION_CONCURRENCY: usize = 8;
 const CHANGE_RECORD_REGISTRY_PAGE: usize = 64;
 
 /// Delivery mode for the background change-record emission task (ADR-014). The mode is derived from the
-/// legacy `enabled` + `endpoint` fields so existing config plumbing keeps working:
+/// `enabled` + `endpoint` fields:
 ///
 /// - [`ChangeRecordSinkMode::Disabled`] — emission off (`enabled = false`).
 /// - [`ChangeRecordSinkMode::Embedded`] — the DEFAULT: append change records directly, in-process, to the

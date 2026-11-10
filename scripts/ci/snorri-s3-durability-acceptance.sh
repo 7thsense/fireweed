@@ -106,22 +106,12 @@ if [[ "${P6S_SKIP_SNORRI:-0}" == "1" ]]; then
 elif [[ -n "$snorri_checkout" && -d "$snorri_checkout" ]]; then
   snorri_sha="$(git -C "$snorri_checkout" rev-parse HEAD 2>/dev/null || true)"
   err "external snorri checkout=${snorri_checkout} sha=${snorri_sha:-unknown}"
-  # Prefer provider-neutral script; fall back to legacy garage-named harness.
-  if [[ -x "$snorri_checkout/scripts/test-s3-live-mutations.sh" || -f "$snorri_checkout/scripts/test-s3-live-mutations.sh" ]]; then
+  if [[ -f "$snorri_checkout/scripts/test-s3-live-mutations.sh" ]]; then
     snorri_script="$snorri_checkout/scripts/test-s3-live-mutations.sh"
-  elif [[ -x "$snorri_checkout/scripts/test-garage-live-mutations.sh" || -f "$snorri_checkout/scripts/test-garage-live-mutations.sh" ]]; then
-    snorri_script="$snorri_checkout/scripts/test-garage-live-mutations.sh"
   else
     snorri_script=""
   fi
   if [[ -n "$snorri_script" ]]; then
-    # Export legacy names for harnesses not yet migrated (still P1s values).
-    export SNORRI_GARAGE_S3_ENDPOINT="${FIREWEED_S3_TEST_ENDPOINT}"
-    export SNORRI_GARAGE_S3_BUCKET="${FIREWEED_S3_TEST_BUCKET}"
-    export SNORRI_GARAGE_S3_REGION="${FIREWEED_S3_TEST_REGION}"
-    export SNORRI_GARAGE_S3_ACCESS_KEY="${FIREWEED_S3_TEST_ACCESS_KEY}"
-    export SNORRI_GARAGE_S3_SECRET_KEY="${FIREWEED_S3_TEST_SECRET_KEY}"
-    export SNORRI_GARAGE_TEST=1
     (
       cd "$snorri_checkout"
       bash "$snorri_script"
