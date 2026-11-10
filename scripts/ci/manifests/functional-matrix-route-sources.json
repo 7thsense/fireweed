@@ -22,23 +22,16 @@
     "by_kind": {
       "ac_txn_dry_run": 3,
       "async_invalid": 6,
-      "class_b_server": 4,
-      "external_kafka": 4,
       "guard": 1,
-      "inline_lib": 4,
       "object_log_async": 6,
       "p4_method_suite": 20,
       "strict": 12,
       "t0_t2": 8
     },
-    "leaves": 68,
+    "leaves": 56,
     "object_log_async": 6,
     "strict": 12
   },
-  "external_kafka_feature_tuples": [
-    "feature-on",
-    "feature-off"
-  ],
   "full_execution_claimed": false,
   "generated_by": "scripts/ci/functional_matrix_route_sources.py",
   "leaves": [
@@ -433,316 +426,6 @@
       "cargo_args": [
         "test",
         "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "class_b_server",
-      "leaf_id": "class_b_server:class_b_memory_log_tests::class_b_all_cells_t0_t3",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "class_b_memory_log_tests::class_b_all_cells_t0_t3",
-        "--exact"
-      ],
-      "notes": "Server Class-B exact --lib leaf (P3v objectlog dev tuple consumed)",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "class_b_memory_log_tests::class_b_all_cells_t0_t3"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "class_b_server",
-      "leaf_id": "class_b_server:class_b_memory_log_tests::class_b_memory_memory_t0_t3",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "class_b_memory_log_tests::class_b_memory_memory_t0_t3",
-        "--exact"
-      ],
-      "notes": "Server Class-B exact --lib leaf (P3v objectlog dev tuple consumed)",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "class_b_memory_log_tests::class_b_memory_memory_t0_t3"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "class_b_server",
-      "leaf_id": "class_b_server:class_b_memory_log_tests::class_b_memory_postgres_t0_t3",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "class_b_memory_log_tests::class_b_memory_postgres_t0_t3",
-        "--exact"
-      ],
-      "notes": "Server Class-B exact --lib leaf (P3v objectlog dev tuple consumed)",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "class_b_memory_log_tests::class_b_memory_postgres_t0_t3"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "class_b_server",
-      "leaf_id": "class_b_server:class_b_memory_log_tests::class_b_memory_turso_t0_t3",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "class_b_memory_log_tests::class_b_memory_turso_t0_t3",
-        "--exact"
-      ],
-      "notes": "Server Class-B exact --lib leaf (P3v objectlog dev tuple consumed)",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "class_b_memory_log_tests::class_b_memory_turso_t0_t3"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": "feature-off",
-      "features": [
-        "postgres"
-      ],
-      "kind": "external_kafka",
-      "leaf_id": "external_kafka:feature_off:change_record_sink_mode",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "change_record_sink::tests::change_record_sink_external_kafka_mode_uses_rskafka",
-        "--exact"
-      ],
-      "notes": "Default-off external-kafka: mode classification and feature-off negatives",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "change_record_sink::tests::change_record_sink_external_kafka_mode_uses_rskafka"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--test",
-        "p8c_residual_delivery_cursor"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": "feature-off",
-      "features": [
-        "postgres"
-      ],
-      "kind": "external_kafka",
-      "leaf_id": "external_kafka:feature_off:p8c_class_boundary",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--test",
-        "p8c_residual_delivery_cursor",
-        "--",
-        "--list",
-        "p8c_residual_external_kafka_feature_off_rejects_class_a_and_class_b",
-        "--exact"
-      ],
-      "notes": "Feature-off durability boundary for residual delivery cursor",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "p8c_residual_external_kafka_feature_off_rejects_class_a_and_class_b"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres,external-kafka",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": "feature-on",
-      "features": [
-        "postgres",
-        "external-kafka"
-      ],
-      "kind": "external_kafka",
-      "leaf_id": "external_kafka:feature_on:change_record_sink_mode",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres,external-kafka",
-        "--lib",
-        "--",
-        "--list",
-        "change_record_sink::tests::change_record_sink_external_kafka_mode_uses_rskafka",
-        "--exact"
-      ],
-      "notes": "Feature-on external-kafka: rskafka producer path cannot alias feature-off",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "change_record_sink::tests::change_record_sink_external_kafka_mode_uses_rskafka"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres,external-kafka",
-        "--test",
-        "p8cs_s3_delivery_cursor"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": "feature-on",
-      "features": [
-        "postgres",
-        "external-kafka"
-      ],
-      "kind": "external_kafka",
-      "leaf_id": "external_kafka:feature_on:p8cs_s3_boundary",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres,external-kafka",
-        "--test",
-        "p8cs_s3_delivery_cursor",
-        "--",
-        "--list",
-        "p8cs_external_kafka_feature_off_rejects_s3_class_a",
-        "--exact"
-      ],
-      "notes": "Paired S3 feature tuple; name retains historical feature-off assertion ID",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "p8cs_external_kafka_feature_off_rejects_s3_class_a"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
         "fireweed",
         "--features",
         "memory,objectlog,postgres,turso",
@@ -781,158 +464,6 @@
       "package": "fireweed",
       "provider_neutral": true,
       "test_filter": "route_source_leaf_ids_are_provider_neutral"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "inline_lib",
-      "leaf_id": "inline_lib:byte_admission_wiring_tests::filesystem_object_log_postgres_projection_backend_spec_and_composition_root",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "byte_admission_wiring_tests::filesystem_object_log_postgres_projection_backend_spec_and_composition_root",
-        "--exact"
-      ],
-      "notes": "Server matrix/live exact --lib leaf",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "byte_admission_wiring_tests::filesystem_object_log_postgres_projection_backend_spec_and_composition_root"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "inline_lib",
-      "leaf_id": "inline_lib:byte_admission_wiring_tests::s3_object_log_postgres_projection_backend_spec_and_composition_root",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "byte_admission_wiring_tests::s3_object_log_postgres_projection_backend_spec_and_composition_root",
-        "--exact"
-      ],
-      "notes": "Server matrix/live exact --lib leaf",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "byte_admission_wiring_tests::s3_object_log_postgres_projection_backend_spec_and_composition_root"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "inline_lib",
-      "leaf_id": "inline_lib:postgres_log_matrix_tests::postgres_log_t3_evidence_axis_names_file_contract",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "postgres_log_matrix_tests::postgres_log_t3_evidence_axis_names_file_contract",
-        "--exact"
-      ],
-      "notes": "Server matrix/live exact --lib leaf",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "postgres_log_matrix_tests::postgres_log_t3_evidence_axis_names_file_contract"
-    },
-    {
-      "cargo_args": [
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib"
-      ],
-      "cell_id": null,
-      "exact": true,
-      "feature_tuple": null,
-      "features": [
-        "postgres"
-      ],
-      "kind": "inline_lib",
-      "leaf_id": "inline_lib:postgres_log_matrix_tests::postgres_log_t4_helm_ci_values_and_gate",
-      "list_invocation": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "--list",
-        "postgres_log_matrix_tests::postgres_log_t4_helm_ci_values_and_gate",
-        "--exact"
-      ],
-      "notes": "Server matrix/live exact --lib leaf",
-      "package": "fireweed-server",
-      "provider_neutral": true,
-      "test_filter": "postgres_log_matrix_tests::postgres_log_t4_helm_ci_values_and_gate"
     },
     {
       "cargo_args": [
@@ -2631,7 +2162,7 @@
         "turso"
       ],
       "kind": "t0_t2",
-      "leaf_id": "t0_t2:postgres_log_t3_t4_evidence_and_helm_values_present",
+      "leaf_id": "t0_t2:postgres_log_t3_t4_evidence_present",
       "list_invocation": [
         "rustup",
         "run",
@@ -2646,13 +2177,13 @@
         "storage_matrix_t0_t2",
         "--",
         "--list",
-        "postgres_log_t3_t4_evidence_and_helm_values_present",
+        "postgres_log_t3_t4_evidence_present",
         "--exact"
       ],
       "notes": "Library T0\u2013T2 / evidence harness exact leaf",
       "package": "fireweed",
       "provider_neutral": true,
-      "test_filter": "postgres_log_t3_t4_evidence_and_helm_values_present"
+      "test_filter": "postgres_log_t3_t4_evidence_present"
     },
     {
       "cargo_args": [
@@ -2760,7 +2291,7 @@
         "turso"
       ],
       "kind": "t0_t2",
-      "leaf_id": "t0_t2:s3_log_t3_t4_evidence_and_helm_values_present",
+      "leaf_id": "t0_t2:s3_log_t3_t4_evidence_present",
       "list_invocation": [
         "rustup",
         "run",
@@ -2775,13 +2306,13 @@
         "storage_matrix_t0_t2",
         "--",
         "--list",
-        "s3_log_t3_t4_evidence_and_helm_values_present",
+        "s3_log_t3_t4_evidence_present",
         "--exact"
       ],
       "notes": "Library T0\u2013T2 / evidence harness exact leaf",
       "package": "fireweed",
       "provider_neutral": true,
-      "test_filter": "s3_log_t3_t4_evidence_and_helm_values_present"
+      "test_filter": "s3_log_t3_t4_evidence_present"
     },
     {
       "cargo_args": [
@@ -2916,10 +2447,5 @@
   "p2r_mappings_authored": false,
   "plan_key": "P10r",
   "schema_version": 1,
-  "server_objectlog_dev_tuple": [
-    "memory",
-    "postgres",
-    "objectlog"
-  ],
   "spec_id": "storage-matrix-completion-brief"
 }

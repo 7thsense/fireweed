@@ -17,13 +17,11 @@
 //! read-check-then-write **TOCTOU** — the I4 hazard the log-backed backend documented).
 //!
 //! ## Multi-connection claim pool (fireweed-66d64e91)
-//! Construct with [`PostgresRelationalBackend::connect_with_claim_pool`] (or the schema / config variants)
+//! Construct with [`PostgresRelationalBackend::connect_with_claim_pool`] (or the schema variant)
 //! to open **N claim connections** plus the primary client. [`ClaimPort::claim`] borrows a free claim
 //! connection (no process-wide Mutex across claimers), so concurrent workers exercise `FOR UPDATE SKIP
 //! LOCKED` for real. Non-claim ports still use the primary client behind `Mutex<Inner>` (queue-def cache +
-//! live token map). Production `fireweed-server` multi-queue scale-out is separately provided by its fixed
-//! queue-affine relational pool (`fixed_postgres_relational_pool`). That path satisfies multi-queue
-//! writers; this claim pool is the same-backend multi-writer path embedders need.
+//! live token map). This claim pool is the same-backend multi-writer path embedders need.
 //!
 //! Same-queue claimers use `FOR UPDATE SKIP LOCKED` on **items** and only briefly CAS-update
 //! `relational_cursor` for sequence allocation after candidates are leased (so concurrent claimers
@@ -34,7 +32,7 @@
 //! Like [`crate::PostgresBackend`], this uses the SYNC `postgres` client behind a `Mutex<Client>` for the
 //! single-node launch posture, and the port bodies make blocking calls inside `std::future::ready` — so it
 //! must be driven OFF a tokio runtime (the conformance/reconnect tests use `futures::executor::block_on`).
-//! Wrapping every call in `spawn_blocking` + the claim pool (so a tokio `fireweed-server` can drive it
+//! Wrapping every call in `spawn_blocking` + the claim pool (so a tokio host can drive it
 //! concurrently) is the production wiring. Crucially, unlike the log-backed backend, adding that pool is
 //! SAFE without new locking: the claim already row-locks and the sequence allocation is already atomic.
 //!
@@ -5585,27 +5583,6 @@ impl PostgresRelationalBackend {
             claim_pool_size,
             Some(schema),
         )?;
-        Ok(backend)
-    }
-
-    /// Production-config variant of [`Self::connect_with_claim_pool`].
-    pub fn connect_with_config_and_claim_pool(
-        config: PostgresConnectConfig,
-        claim_pool_size: usize,
-    ) -> EngineResult<Self> {
-        let mut backend = Self::connect_with_config(config.clone())?;
-        backend.attach_claim_pool(|| connect(config.clone()), claim_pool_size, None)?;
-        Ok(backend)
-    }
-
-    /// Schema + production-config + claim pool.
-    pub fn connect_with_config_in_schema_with_claim_pool(
-        config: PostgresConnectConfig,
-        schema: &str,
-        claim_pool_size: usize,
-    ) -> EngineResult<Self> {
-        let mut backend = Self::connect_with_config_in_schema(config.clone(), schema)?;
-        backend.attach_claim_pool(|| connect(config.clone()), claim_pool_size, Some(schema))?;
         Ok(backend)
     }
 

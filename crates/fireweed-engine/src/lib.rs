@@ -259,54 +259,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_resp_tokens_match_td006() {
-        // The wire vocabulary is pinned in TD-006 section 7 and asserted verbatim by conformance.
-        assert_eq!(
-            EngineError::Invalid("x").resp_token(),
-            Some("-ERR fireweed invalid")
-        );
-        assert_eq!(
-            EngineError::Terminal.resp_token(),
-            Some("-ERR fireweed terminal")
-        );
-        assert_eq!(
-            EngineError::StaleLease.resp_token(),
-            Some("-ERR fireweed stale_lease")
-        );
-        assert_eq!(
-            EngineError::Superseded.resp_token(),
-            Some("-ERR fireweed superseded")
-        );
-        assert_eq!(
-            EngineError::Unavailable.resp_token(),
-            Some("-ERR fireweed unavailable")
-        );
-        assert_eq!(
-            EngineError::Conflict.resp_token(),
-            Some("-ERR fireweed conflict")
-        );
-        assert_eq!(
-            EngineError::BatchTooLarge.resp_token(),
-            Some("-ERR fireweed batch_too_large")
-        );
-        assert_eq!(
-            EngineError::RequestIdConflict.resp_token(),
-            Some("-ERR fireweed request_id_conflict")
-        );
-        assert_eq!(
-            EngineError::RequestExpired.resp_token(),
-            Some("-ERR fireweed request_expired")
-        );
-        assert_eq!(
-            EngineError::EpochFenced.resp_token(),
-            Some("-ERR fireweed epoch_stale")
-        );
-        // NotFound (to nil) and Forbidden (to -NOPERM) have non-`-ERR` mappings; no token here.
-        assert_eq!(EngineError::NotFound.resp_token(), None);
-        assert_eq!(EngineError::Forbidden("x").resp_token(), None);
-    }
-
-    #[test]
     fn durability_class_gates_upsert() {
         // Invariant 2 / TD-007 section 2.3: upsert is offered on atomic backends only.
         assert!(DurabilityClass::Atomic.supports_upsert());
@@ -334,14 +286,6 @@ mod tests {
             )
             .unwrap_err(),
             EngineError::Unavailable
-        );
-    }
-
-    #[test]
-    fn pause_error_is_structured() {
-        assert_eq!(
-            EngineError::Paused { drain_intake: true }.resp_token(),
-            Some("-ERR fireweed paused")
         );
     }
 

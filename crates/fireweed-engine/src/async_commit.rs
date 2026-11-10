@@ -347,8 +347,7 @@ pub trait OwnedTaskDispatcher: Send + Sync {
 
 /// In-process dispatcher: each accepted factory runs on a dedicated thread via
 /// [`futures::executor::block_on`]. Suitable for tests and CPU-only axes (memory) where a full tokio
-/// pool is unnecessary. Production server paths that need reactor integration use
-/// `TokioTaskDispatcher` in `fireweed-server`.
+/// pool is unnecessary.
 #[derive(Default)]
 pub struct InlineOwnedTaskDispatcher {
     closed: std::sync::atomic::AtomicBool,

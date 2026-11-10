@@ -1,7 +1,7 @@
 //! Queue-ownership orchestration PRIMITIVES (TD-003 §Recovery + §Per-Queue Progress Bound owner-liveness).
 //!
-//! This module is the engine-level CORE that a server owner-runtime will build on (the full fireweed-server
-//! wiring is tracked as a follow-up — see SCOPE below). It is NOT itself the data-plane fence.
+//! This module is the engine-level CORE that an owner runtime builds on (see SCOPE below). It is NOT
+//! itself the data-plane fence.
 //!
 //! 1. [`acquire_and_fence`] — the lease↔fence binding primitive. TD-003 Recovery step 1 / the Single
 //!    Authoritative Fencing Rule: a new owner acquires the lease AND durably advances the storage epoch
@@ -12,9 +12,8 @@
 //!
 //!    FENCE SCOPE (pqueue-7bac12ce closes the BQ-20/21/22 deferral): Every data-plane port
 //!    (`ClaimPort`/`PushPort`/`FinalizePort`/`RenewLeasePort`/`ReassignLeasePort`/`PurgePort`/`UpsertPort`
-//!    /`CommitTransitionPort`/`ReclaimPort`) accepts `expected_epoch: Option<u64>` from the caller. Both
-//!    the library facade (`Fireweed::push`/`claim`/`ack`/etc.) and the RESP server wiring
-//!    (`OwnershipRuntime::expected_epoch_for_write`) supply the owner's cached `fence_epoch` from the
+//!    /`CommitTransitionPort`/`ReclaimPort`) accepts `expected_epoch: Option<u64>` from the caller. The
+//!    library facade (`Fireweed::push`/`claim`/`ack`/etc.) supplies the owner's cached `fence_epoch` from the
 //!    [`OwnedSession`] — so a SUPERSEDED owner's claim/push/finalize is `EpochFenced` at commit time, not
 //!    just the typed raw-commit seam. Backend implementations (compose.rs, sqlite/relational/apply.rs,
 //!    segmented writer, etc.) check `expected_epoch.is_some_and(|e| e != current_epoch)` inside the atomic
@@ -49,7 +48,7 @@
 //!    (metrics + `DiscoverActiveScopes`); wiring the predicate to those surfaces is the follow-up — this is
 //!    the pure decision only.
 //!
-//! SCOPE (honest): BQ-23's bead area is `fireweed-server`, but the full server runtime (the per-node
+//! SCOPE (honest): the full owner runtime (the per-node
 //! acquire/renew/heartbeat loop, the per-connection serve-gate, drain's "stop serving BatchClaim", and the
 //! observable stalled-queue surface) is a follow-up. This module + its tests deliver the reusable,
 //! unit-testable core those build on.

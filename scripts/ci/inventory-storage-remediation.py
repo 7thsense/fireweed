@@ -272,8 +272,6 @@ def owner_for(path: str, *, performance: bool = False, e3: bool = False) -> tupl
         return "P15" if performance else "P10pb", ["P15" if performance else "P10pb", "P2f"]
     if path.startswith("crates/fireweed-postgres/"):
         return "P10pp", ["P10pp", "P2f"]
-    if path.startswith("crates/fireweed-server/"):
-        return "P10ps", ["P10ps", "P2f"]
     if path.startswith("crates/fireweed-conformance/"):
         return "P10pc", ["P10pc", "P2f"]
     if path.startswith("crates/fireweed/"):
@@ -621,12 +619,7 @@ def fireweed_placement_debt(
 
 def cargo_machete_exception_debt(paths: list[str]) -> list[dict[str, object]]:
     rows = []
-    explicit_owners = {
-        ("crates/fireweed-server/Cargo.toml", "fireweed-turso"): (
-            "P12a",
-            ["P12a", "P2f"],
-        ),
-    }
+    explicit_owners: dict[tuple[str, str], tuple[str, list[str]]] = {}
     for path in paths:
         if not path.endswith("Cargo.toml"):
             continue
@@ -889,7 +882,6 @@ def reclassify_residual_debt(debt: dict[str, list[dict[str, object]]]) -> None:
                     "crates/fireweed-bench/",
                     "crates/fireweed-release/",
                     "crates/fireweed-conformance/",
-                    "crates/fireweed-server/tests/performance_",
                     "docs/perf/",
                     "docs/evidence/",
                     "docs/releases/",

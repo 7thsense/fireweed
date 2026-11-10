@@ -7,20 +7,12 @@ use fireweed_engine::{AsyncLogReplayBackend, EngineResult, assemble_async_log_re
 use fireweed_projection::InMemoryProjection;
 
 use crate::PostgresLog;
-use crate::connect::PostgresConnectConfig;
 
 /// Assemble and recover the composed postgres log-replay backend over `url`.
 pub fn async_composed_postgres_backend(
     url: &str,
 ) -> EngineResult<AsyncLogReplayBackend<PostgresLog, InMemoryProjection>> {
     from_postgres_log(PostgresLog::connect(url)?, 0)?.recover()
-}
-
-/// Assemble and recover from a fully-built connect config (Lakebase-aware path).
-pub fn async_composed_postgres_backend_with_config(
-    config: PostgresConnectConfig,
-) -> EngineResult<AsyncLogReplayBackend<PostgresLog, InMemoryProjection>> {
-    from_postgres_log(PostgresLog::connect_with_config(config)?, 0)?.recover()
 }
 
 /// Assemble and recover isolated in `schema` (test/reopen path).
