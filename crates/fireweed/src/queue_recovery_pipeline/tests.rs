@@ -12,6 +12,7 @@ mod owner_safety;
 pub(super) mod ownership;
 mod projection_directory;
 mod record_counts;
+mod retention;
 mod store_lifecycle;
 use ownership::TestOwnership;
 
@@ -314,6 +315,9 @@ async fn native_port_identical_contract(s3: bool) {
     suite::retired_keys_refuse_reinsert_within_window(&queue, &clock, address("retired-keys"))
         .await;
     suite::reusable_keys_reinsert_at_once(&queue, &clock, address("reusable-keys")).await;
+    suite::request_horizon_expires_old_requests(&queue, &clock, address("request-horizon")).await;
+    suite::horizon_never_passes_a_live_claim(&queue, &clock, address("live-claim-horizon")).await;
+    suite::removed_deleted_keys_keep_versions_rising(&queue, &clock, address("removed-keys")).await;
     suite::retired_keys_cover_every_deletion_route(
         &queue,
         &clock,
@@ -513,6 +517,50 @@ async fn native_retired_deletion_contract(s3: bool) {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// The horizon and the rows it removed live in the log: a cold rebuild must
+/// expire and replay exactly where the live owner did.
+async fn native_request_horizon_contract(s3: bool) {
+    use fireweed_conformance::queue_contract::{self as suite, TestClock};
+    use fireweed_engine::queue_contract::QueueStore;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("fireweed-horizon-contract-{s3}-{nonce}"));
+    std::fs::create_dir_all(&root).unwrap();
+    let prefix = s3.then(|| format!("api007-horizon-contract-{nonce}"));
+    let clock = Arc::new(TestClock::default());
+    let live = native_port_fixture(
+        &root,
+        "primary-projections",
+        prefix.as_deref(),
+        clock.clone(),
+    )
+    .await;
+    let prepared = suite::prepare_request_horizon(
+        &live,
+        &clock,
+        QueueAddress {
+            tenant: "api007-horizon-contract".into(),
+            queue: nonce.to_string(),
+        },
+    )
+    .await;
+    live.shutdown().await.unwrap();
+    drop(live);
+    let rebuilt = native_port_fixture(
+        &root,
+        "cold-rebuild-projections",
+        prefix.as_deref(),
+        clock.clone(),
+    )
+    .await;
+    suite::verify_request_horizon(&rebuilt, &clock, prepared).await;
+    rebuilt.shutdown().await.unwrap();
+    drop(rebuilt);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn native_store_retired_deletion_survives_rebuild_local() {
     native_retired_deletion_contract(false).await;
@@ -521,6 +569,16 @@ async fn native_store_retired_deletion_survives_rebuild_local() {
 #[tokio::test]
 async fn native_store_retired_deletion_survives_rebuild_real_s3() {
     native_retired_deletion_contract(true).await;
+}
+
+#[tokio::test]
+async fn native_store_request_horizon_survives_rebuild_local() {
+    native_request_horizon_contract(false).await;
+}
+
+#[tokio::test]
+async fn native_store_request_horizon_survives_rebuild_real_s3() {
+    native_request_horizon_contract(true).await;
 }
 
 #[tokio::test]

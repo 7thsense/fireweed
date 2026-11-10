@@ -395,6 +395,9 @@ async fn contract(queue: &Queue, clock: &TestClock, id: u128) -> Prepared {
     suite::issued_at_skew_and_conflict(queue, clock, a("issued-at")).await;
     suite::retired_keys_refuse_reinsert_within_window(queue, clock, a("retired-keys")).await;
     suite::reusable_keys_reinsert_at_once(queue, clock, a("reusable-keys")).await;
+    suite::request_horizon_expires_old_requests(queue, clock, a("request-horizon")).await;
+    suite::horizon_never_passes_a_live_claim(queue, clock, a("live-claim-horizon")).await;
+    suite::removed_deleted_keys_keep_versions_rising(queue, clock, a("removed-keys")).await;
     suite::retired_keys_cover_every_deletion_route(
         queue,
         clock,

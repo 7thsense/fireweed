@@ -52,6 +52,9 @@ async fn concrete_queue_runs_identical_contract_and_reopens_exact_receipt() {
     suite::retired_keys_refuse_reinsert_within_window(&queue, &clock, address("retired-keys"))
         .await;
     suite::reusable_keys_reinsert_at_once(&queue, &clock, address("reusable-keys")).await;
+    suite::request_horizon_expires_old_requests(&queue, &clock, address("request-horizon")).await;
+    suite::horizon_never_passes_a_live_claim(&queue, &clock, address("live-claim-horizon")).await;
+    suite::removed_deleted_keys_keep_versions_rising(&queue, &clock, address("removed-keys")).await;
     suite::retired_keys_cover_every_deletion_route(&queue, &clock, address("retired-routes"), true)
         .await;
     suite::unrestricted_names_obey_response_bounds(&queue, address("names-bounds")).await;
