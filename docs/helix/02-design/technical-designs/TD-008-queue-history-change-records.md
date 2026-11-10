@@ -40,7 +40,7 @@ reference.
 **Decision authority**: ADR-013 (log as single source of truth)
 **Cross-repo**: niflheim durable-ingest HTTP endpoint (consumer); cayce CONTRACT-013 uses the same
 ingest path for SES exhaust, so delivery history lands beside delivery exhaust; fjord, embedded in
-fireweed-server, as the Kafka-protocol change-log interface provider (see "Delivery interfaces" and
+the retired server crate, as the Kafka-protocol change-log interface provider (see "Delivery interfaces" and
 ADR-014).
 
 > **Reconciled with the 5×4 storage product (2026-08-03).** ADR-014 specifies
@@ -127,7 +127,7 @@ trait ChangeRecordSink: Send + Sync {
 }
 ```
 
-The runtime-bearing crate (`fireweed-server`, which owns tokio — `crates/fireweed-server/Cargo.toml:33`)
+The runtime-bearing crate (the retired server crate, which owns tokio — the retired server crate)
 drives an interval task (modeled on `flush_tick`/`try_flush_deferred_projection`,
 `compose.rs:1061,1099`): read `read_from(shard, emission_cursor, limit)`, map each committed
 `CommandEnvelope` to `ChangeRecord`s, call `sink.emit`, and only then advance a **durable** per-queue
@@ -178,11 +178,11 @@ The Class A change log has one seam (`ChangeRecordSink` over the committed-log t
 bindings. Two are in contract:
 
 1. **niflheim durable-ingest (HTTP push)** — the current binding, specified throughout this TD: a
-   lean hand-rolled POST driven by the `fireweed-server` interval task.
+   lean hand-rolled POST driven by the the retired server crate interval task.
 2. **Kafka-protocol consumer interface (required)** — product requirement (2026-07-05, provider
    decided 2026-07-06): downstream consumers must be able to subscribe to the change log with stock
    Kafka clients, and **fireweed must own the surface**. ADR-014 settles the provider/shape choice:
-   **fjord, embedded** in `fireweed-server` behind the delivery seam, serves the change topics
+   **fjord, embedded** in the retired server crate behind the delivery seam, serves the change topics
    (metadata, fetch, consumer groups, committed offsets, fan-out) so the surface exists in every
    eligible Class A deployment without operating a second system. Each `(tenant_id, queue_id)` change stream is a
    single-partition topic so per-queue order is preserved (CL-4). The normative record contract
@@ -244,7 +244,7 @@ applies; neither path claims a change-record history.
 
 ## Kafka interface decision
 
-The change-log Kafka surface is provided by **fjord, embedded in fireweed-server**
+The change-log Kafka surface is provided by **fjord, embedded in the retired server crate**
 (product-owner decision 2026-07-06): Fireweed owns the interface, so the surface
 exists in every eligible Class A deployment. The load-bearing rules are the boundary invariants
 (feed-forward only, never on the commit path, separate storage namespace,

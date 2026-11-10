@@ -70,7 +70,7 @@ not a license to reintroduce historical stems.
 | Display name | **Fireweed Queue** | First reference, titles, legal, packaging display |
 | Short name | **Fireweed** | Subsequent prose, short labels |
 | Repository stem | `fireweed` | Clone URLs, monorepo identity |
-| Package / chart stem | `fireweed-queue` | Helm chart and package coordinates |
+| Package stem | `fireweed-queue` | Package coordinates |
 | CLI | `fireweed` | Commands |
 | Rust crate stem | `fireweed` | Embed surface (`fireweed` facade crate) |
 | Environment prefix | `FIREWEED_` | Config |
@@ -181,7 +181,7 @@ slogans:
 5. **Backend-independent transaction integrity** — same external contract across log × projection cells  
 6. **Tunable durability economics** — commit-latency bound vs object-log cost (ops tone)  
 
-Pillars 1–5 are default marketing. Pillar 6 is for deploy/operator surfaces.
+Pillars 1–5 are default marketing. Pillar 6 is for operator-facing surfaces.
 
 ### Point of view
 
@@ -199,7 +199,6 @@ Pillars 1–5 are default marketing. Pillar 6 is for deploy/operator surfaces.
 | Concepts | Definitions, out-of-scope | Product semantics list |
 | Examples | What it proves + provenance | Engineer-first honesty |
 | API | Normative families; public vs internal | Identifier map + facade boundary |
-| Deploy | Verify-first; axes; deferred registries | Support boundary + operator honesty |
 | Contribute | Issues-only; security private | ADR-021 (policy), not naming |
 | Release notes | Past-tense deltas + deferred | Support boundary |
 
@@ -212,7 +211,7 @@ Pillars 1–5 are default marketing. Pillar 6 is for deploy/operator surfaces.
 | Prefer | Avoid in public copy | Why (research-linked) |
 |--------|----------------------|------------------------|
 | work item / item | message (except broker comparison) | Not a generic broker |
-| claim | consume / dequeue (except RESP mapping) | Lease-based model |
+| claim | consume / dequeue | Lease-based model |
 | lease | lock | Different semantics |
 | finalize / complete / retry / release / fail | “process” as whole lifecycle | Explicit terminal outcomes (north star) |
 | eligible / eligibility | “ready” alone | Distinct from priority |
@@ -225,8 +224,7 @@ Pillars 1–5 are default marketing. Pillar 6 is for deploy/operator surfaces.
 ### Public surface vocabulary
 
 - Rust: concrete **`Fireweed`** handle; crate **`fireweed`** only for embedders  
-- Service: **`fireweed-service`**, RESP, Streams-shaped worker path  
-- Say **two public faces**, not “SDK ecosystem”  
+- Say **the Rust library**, not “SDK ecosystem”  
 - Historical: **pqueue / Queueyard** only in lineage footnotes  
 
 ### Claims discipline
@@ -399,13 +397,12 @@ Canonical classes: `.badge`, `.card`, `.callout`, `table.data`, `.code-block`,
 
 | Route | Must include | Must not |
 |-------|--------------|----------|
-| Home | Priority-queue descriptor, pillars, two faces, support honesty | Broker/DAG identity |
+| Home | Priority-queue descriptor, pillars, support honesty | Broker/DAG identity |
 | Why | Stream decision table | Vendor dunking |
 | Concepts | Lifecycle list from naming semantics | Full helix dump |
 | Get started | Source-clone path; deferred registries | Fake crates.io install |
 | Examples | Provenance to real tests | Idealized rewrite of product semantics |
-| API | Public `fireweed` + RESP only | Internal crates as SDKs |
-| Deploy | Verify-first; chart ≠ current support | “All values production” |
+| API | Public `fireweed` only | Internal crates as SDKs |
 | Support | Support matrix | Silent overclaim |
 | Contribute | Issues-only | PR welcome |
 
@@ -422,7 +419,6 @@ Canonical classes: `.badge`, `.card`, `.callout`, `table.data`, `.code-block`,
 - Omitting support status on entry pages
 - Using Queueyard/pqueue as current identity  
 - Spool/pool/yard/cairn metaphors  
-- Deploy badges that contradict the support boundary
 - Examples without provenance  
 - Glassmorphism / purple SaaS skin  
 - “Open a PR” / Discord-first community  

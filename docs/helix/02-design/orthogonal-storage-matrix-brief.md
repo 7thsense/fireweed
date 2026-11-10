@@ -240,5 +240,3 @@ vision + PRD + brief
 | TD-001, TD-007 | Capability / durability tables for 4×3 |
 | API-005 | Full-matrix construction contract |
 | `public-preview-boundary.md`, `docs/site/preview.html` | Axes + matrix |
-| `DEPLOYMENT-READINESS.md`, container runtime contract | Structured config; matrix wiring status |
-| Helm `charts/fireweed-queue` | `storage.log` / `storage.projection` isomorphic to `StorageConfig` |

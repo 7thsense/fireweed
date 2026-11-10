@@ -26,7 +26,6 @@ NAV = [
     ("get-started.html", "Get started", "get-started"),
     ("examples/index.html", "Examples", "examples"),
     ("api/index.html", "API", "api"),
-    ("deploy/index.html", "Deploy", "deploy"),
     ("support.html", "Support", "support"),
 ]
 
@@ -126,7 +125,7 @@ def layout(
       <footer class="site-footer">
         <p>
           Fireweed Queue v{html.escape(version)} · {html.escape(meta["status"])} ·
-          crates.io and GHCR deferred ·
+          crates.io deferred ·
           issues welcome · code contributions not accepted ·
           {html.escape(meta["license"])}.
         </p>
@@ -178,9 +177,8 @@ def page_home(meta: dict) -> str:
           <p class="lede">
             A durable priority queue for engineers building async execution systems.
             Put priority first, then combine it with eligibility, leases, retries,
-            and final state in one queue contract. Embed the Rust facade or run a
-            Redis Streams-shaped RESP worker path when FIFO append order is not the
-            scheduling policy your work needs.
+            and final state in one queue contract. Embed the Rust library when FIFO
+            append order is not the scheduling policy your work needs.
           </p>
           <div class="hero-actions">
             <a class="btn" href="get-started.html">Get started</a>
@@ -227,10 +225,10 @@ def page_home(meta: dict) -> str:
           </article>
         </div>
 
-        <div class="section-title"><h2>Two entry points</h2></div>
+        <div class="section-title"><h2>Rust library</h2></div>
         <div class="grid-2">
           <article class="card card-body">
-            <h3>Rust library</h3>
+            <h3>Embed in your process</h3>
             <p>
               Construct a backend-erased <code>Fireweed</code> handle, create queues,
               push work, claim batches, and finalize. Storage composition is a
@@ -238,21 +236,13 @@ def page_home(meta: dict) -> str:
             </p>
             <p><a href="api/rust.html">Rust API →</a> · <a href="examples/basic-lifecycle.html">Basic lifecycle →</a></p>
           </article>
-          <article class="card card-body">
-            <h3>RESP / Redis clients</h3>
-            <p>
-              Speak stock Streams commands (<code>XADD</code>, <code>XREADGROUP</code>,
-              <code>XACK</code>, and related) against priority-ordered leased delivery.
-            </p>
-            <p><a href="api/resp.html">RESP API →</a> · <a href="examples/resp-drain.html">Redis drain example →</a></p>
-          </article>
         </div>
 
         <div class="callout">
           <p>
             v{html.escape(meta["version"])} is a <strong>GitHub source tree</strong>
             (workspace package identity; annotated tag cut is a separate release step).
-            Publication to crates.io and GHCR is deferred. The public product is the
+            Publication to crates.io is deferred. The public product is the
             full 4×3 log×projection matrix with Turso as the default projection—see the
             <a href="support.html">support boundary</a>.
           </p>
@@ -432,7 +422,7 @@ def page_concepts(meta: dict) -> str:
 
           <h2>Architecture</h2>
           <p>
-            Two driving faces (Rust facade and RESP) sit on a shared engine.
+            The Rust facade sits on a shared engine.
             Durable profiles compose a <strong>command log</strong> with a
             <strong>projection</strong>. Log and projection are independent axes;
             unsupported pairings fail at startup instead of silently substituting.
@@ -468,16 +458,12 @@ cd fireweed
 # Requires rustup; toolchain from rust-toolchain.toml (Rust 1.97.1)
 cargo test -p fireweed --test concrete_fireweed
 cargo run -p fireweed --example scheduler_boundary"""
-    resp = """# From repository root after building fireweed-service
-# See README Quickstart for the in-memory RESP path with redis-cli.
-cargo build -p fireweed-server
-# Follow README for XADD / XREADGROUP / XACK against the local service."""
     body = f"""
         <div class="page-intro">
           <h2>Get started</h2>
           <p>
             Fireweed v{html.escape(meta["version"])} is the current workspace package
-            identity. Clone the repository; crates.io and GHCR publication are deferred.
+            identity. Clone the repository; crates.io publication is deferred.
           </p>
         </div>
         <div class="callout warn">
@@ -487,7 +473,7 @@ cargo build -p fireweed-server
             convenience open helpers remain sugar over that model.
           </p>
         </div>
-        <div class="section-title"><h2>Path A — embed Rust</h2></div>
+        <div class="section-title"><h2>Embed Rust</h2></div>
         {code_block("clone and exercise the facade", embed, "sh")}
         <div class="prose">
           <p>
@@ -500,26 +486,12 @@ cargo build -p fireweed-server
             <a href="examples/scheduler-boundary.html">scheduler boundary</a>.
           </p>
         </div>
-        <div class="section-title"><h2>Path B — Redis-shaped workers</h2></div>
-        {code_block("build the RESP service", resp, "sh")}
         <div class="prose">
-          <p>
-            Stock Streams worker commands map onto Fireweed claim/finalize semantics.
-            See the README quickstart for a full <code>redis-cli</code> session, and
-            <a href="examples/resp-drain.html">the RESP drain example</a> extracted from e2e tests.
-          </p>
-          <p>
-            Worked <strong>Python</strong> queue-management scenarios (docs + e2e + optional
-            performance) live in the repository at
-            <a href="{html.escape(meta['repository'])}/tree/main/examples/python-resp"><code>examples/python-resp/</code></a>
-            (<code>run_e2e.py</code>, <code>run_perf.py</code>).
-          </p>
           <h2>Next</h2>
           <ul>
             <li><a href="concepts.html">Concepts</a> for the product contract</li>
             <li><a href="support.html">Support boundary</a> for supported profiles</li>
-            <li><a href="deploy/index.html">Deploy</a> for Helm and runtime axes</li>
-            <li><a href="api/index.html">API</a> for the two public faces</li>
+            <li><a href="api/index.html">API</a> for the public Rust surface</li>
           </ul>
         </div>
 """
@@ -554,11 +526,11 @@ def page_support(meta: dict) -> str:
           <thead><tr><th>Log × projection</th><th>Status</th><th>Notes</th></tr></thead>
           <tbody>
             <tr><td><code>memory</code> × <code>memory</code> | <code>turso</code> | <code>postgres</code></td><td><span class="badge ok">supported</span></td><td>Class B: durability limited to the projection after process death; no Class A log replay.</td></tr>
-            <tr><td><code>postgres</code> × all three projections</td><td><span class="badge ok">supported</span></td><td>Class A; optional postgres cargo feature / image packaging must fail closed when omitted.</td></tr>
-            <tr><td><code>filesystem</code> × all three projections</td><td><span class="badge ok">supported</span></td><td>Class A local/NAS object log; default deploy log axis with Turso projection.</td></tr>
+            <tr><td><code>postgres</code> × all three projections</td><td><span class="badge ok">supported</span></td><td>Class A; the optional postgres cargo feature must fail closed when omitted.</td></tr>
+            <tr><td><code>filesystem</code> × all three projections</td><td><span class="badge ok">supported</span></td><td>Class A local/NAS object log.</td></tr>
             <tr><td><code>s3</code> × all three projections</td><td><span class="badge ok">supported</span></td><td>Class A object log; NativeConditionalWrite S3 only—provider brands are not product SKUs.</td></tr>
             <tr><td><code>turso</code> projection (any log)</td><td><span class="badge ok">supported default</span></td><td>Embedded/local Turso 0.7 WAL; public default when projection is unset. Remote/sync/MVCC modes are out of scope.</td></tr>
-            <tr><td><code>hybrid</code> / <code>hybrid-async</code> / <code>hybrid-strict</code></td><td><span class="badge blocked">retired</span></td><td>Not public selectors; hard-rejected on env/Helm. Historical evidence only.</td></tr>
+            <tr><td><code>hybrid</code> / <code>hybrid-async</code> / <code>hybrid-strict</code></td><td><span class="badge blocked">retired</span></td><td>Not public selectors; hard-rejected. Historical evidence only.</td></tr>
             <tr><td><code>objectlog</code> / <code>inmemory</code> aliases</td><td><span class="badge blocked">retired</span></td><td>Use <code>filesystem</code>|<code>s3</code> and <code>memory</code>.</td></tr>
           </tbody>
         </table>
@@ -566,23 +538,21 @@ def page_support(meta: dict) -> str:
           <h2>What this source tree ships</h2>
           <ul>
             <li>Workspace package identity v{html.escape(meta["version"])} (source tree; tag cut is a separate release step)</li>
-            <li>Concrete <code>Fireweed</code> Rust facade (<code>open</code> / <code>open_async(StorageConfig)</code>) and RESP service path</li>
+            <li>Concrete <code>Fireweed</code> Rust facade (<code>open</code> / <code>open_async(StorageConfig)</code>)</li>
             <li>Issues-only contribution policy; MIT OR Apache-2.0</li>
           </ul>
           <h2>Explicitly deferred</h2>
           <ul>
             <li>crates.io package publication</li>
-            <li>GHCR container publication</li>
             <li>Universal performance bounds, multi-region failover, provider certification</li>
             <li>Historical query (<code>read_as_of</code>) as a supported facade API</li>
             <li>Remote / sync / MVCC Turso modes</li>
           </ul>
           <h2>Public examples</h2>
           <p>
-            Microsite examples are excerpts of real tests for illustration. Example-only
-            harness status strings (for example Python RESP <code>SKIP:</code> in
-            optional local scenarios) are non-governing and never satisfy a required
-            product or CI route. Required work is proven only by governing routes and gates.
+            Microsite examples are excerpts of real tests for illustration. They are
+            non-governing and never satisfy a required product or CI route. Required
+            work is proven only by governing routes and gates.
           </p>
           <p>
             Full boundary:
@@ -745,8 +715,8 @@ def page_api_index(meta: dict) -> str:
         <div class="page-intro">
           <h2>API documentation</h2>
           <p>
-            Fireweed exposes two public faces over one queue model: the Rust
-            <code>fireweed</code> facade and the RESP worker surface.
+            Fireweed exposes one public face over the queue model: the Rust
+            <code>fireweed</code> facade.
           </p>
         </div>
         <div class="grid-2">
@@ -757,13 +727,6 @@ def page_api_index(meta: dict) -> str:
               discovery, mutation, and hot projection queries.
             </p>
             <p><a href="rust.html">Rust API guide →</a></p>
-          </article>
-          <article class="card card-body">
-            <h3>RESP / Streams</h3>
-            <p>
-              Stock Redis Streams worker path plus Fireweed-native live reads.
-            </p>
-            <p><a href="resp.html">RESP API guide →</a></p>
           </article>
           <article class="card card-body">
             <h3>Types</h3>
@@ -862,55 +825,6 @@ def page_api_rust(meta: dict) -> str:
     )
 
 
-def page_api_resp(meta: dict) -> str:
-    py_examples = f"{html.escape(meta['repository'])}/tree/main/examples/python-resp"
-    body = f"""
-        <div class="page-intro">
-          <h2>RESP worker API</h2>
-          <p>
-            Wire adapter design:
-            <a href="../../helix/02-design/technical-designs/TD-006-resp-wire-adapter.md">TD-006</a>.
-            Two faces rationale:
-            <a href="../../helix/02-design/adr/ADR-007-hexagonal-architecture-and-two-interfaces.md">ADR-007</a>.
-          </p>
-        </div>
-        <table class="data">
-          <thead><tr><th>Command</th><th>Role</th><th>Notes</th></tr></thead>
-          <tbody>
-            <tr><td><code>XADD</code></td><td>Enqueue / mutate</td><td>Maps to append semantics under queue priority rules</td></tr>
-            <tr><td><code>XREADGROUP &gt;</code></td><td>Claim / deliver</td><td>Leased delivery of eligible work</td></tr>
-            <tr><td><code>XACK</code></td><td>Complete</td><td>Finalize claimed items</td></tr>
-            <tr><td><code>XCLAIM</code> / <code>XAUTOCLAIM</code></td><td>Redeliver</td><td>Lease expiry recovery paths</td></tr>
-            <tr><td><code>XLEN</code>, <code>XINFO</code>, <code>XPENDING</code>, <code>XRANGE</code></td><td>Inspect</td><td>Bounded-stale reads where applicable</td></tr>
-            <tr><td><code>FW.MGET</code>, <code>FW.HGETALL</code>, <code>FW.HMGET</code></td><td>Native live read</td><td>Fireweed extensions beyond stock Streams</td></tr>
-          </tbody>
-        </table>
-        <div class="prose">
-          <h2>Library-only on the wire</h2>
-          <p>
-            Filtered/cohort claim, gates, rich finalize, queue create, metrics/discovery,
-            force purge, and repair remain library-primary; the RESP face is the
-            tested Streams worker subset, not a full API-001 mirror.
-          </p>
-          <p><a href="../examples/resp-drain.html">Example: Redis client drain</a></p>
-          <h2>Python examples and e2e</h2>
-          <p>
-            Runnable, commented scenarios for batch insert, pending update, due-batch
-            claim, complete, status, and performance load live in
-            <a href="{py_examples}"><code>examples/python-resp/</code></a>.
-            They double as an evidence-capturing e2e harness over <code>redis-py</code>.
-          </p>
-        </div>
-"""
-    return layout(
-        page="api/resp.html",
-        active="api",
-        title="RESP API — Fireweed Queue",
-        body=body,
-        meta=meta,
-    )
-
-
 def page_api_types(meta: dict) -> str:
     body = """
         <div class="page-intro">
@@ -953,181 +867,6 @@ def page_api_types(meta: dict) -> str:
     )
 
 
-def page_deploy(meta: dict) -> str:
-    # Adapted operator console under product chrome
-    body = f"""
-        <div class="page-intro">
-          <h2>Operator deploy console</h2>
-          <p>
-            v{html.escape(meta["version"])} is a source release. GHCR publication is deferred;
-            use only deployment assets explicitly listed on the GitHub Release.
-          </p>
-        </div>
-        <div class="callout warn">
-          <p>
-            Align production intent with the
-            <a href="../support.html">support boundary</a> and
-            <a href="../../helix/04-build/DEPLOYMENT-READINESS.md">deployment readiness</a>
-            contracts. Public chart values match the 4×3 matrix; legacy
-            <code>objectlog</code>/<code>inmemory</code>/<code>hybrid*</code> names fail schema validation.
-          </p>
-        </div>
-        <div class="operator-grid">
-          <section class="card" aria-labelledby="install-title">
-            <div class="panel-heading">
-              <h2 id="install-title">Install path</h2>
-              <span class="badge warn">verify first</span>
-            </div>
-            <div class="commands">
-              <div class="command-block">
-                <div class="label"><span>release artifacts</span><span>checksums</span></div>
-                <pre><code>OWNER=&lt;github-owner&gt;
-REPO=fireweed
-TAG=v{html.escape(meta["version"])}
-VERSION="${{TAG#v}}"
-DIST_DIR="release-${{TAG}}"
-
-gh release download "$TAG" --repo "${{OWNER}}/${{REPO}}" \\
-  --pattern "fireweed-${{VERSION}}-*.tar.gz" \\
-  --pattern "fireweed-queue-${{VERSION}}.tgz" \\
-  --pattern "fireweed-service-image.txt" \\
-  --pattern "fireweed-queue-helm-chart.txt" \\
-  --pattern "SHA256SUMS" \\
-  --dir "$DIST_DIR"
-
-(cd "$DIST_DIR" &amp;&amp; shasum -a 256 -c SHA256SUMS)</code></pre>
-              </div>
-              <div class="command-block">
-                <div class="label"><span>helm install</span><span>filesystem × turso</span></div>
-                <pre><code>NAMESPACE=fireweed
-RELEASE=fireweed
-IMAGE="ghcr.io/${{OWNER}}/fireweed-service"
-
-kubectl create namespace "$NAMESPACE"
-
-helm install "$RELEASE" "$DIST_DIR/fireweed-queue-${{VERSION}}.tgz" \\
-  --namespace "$NAMESPACE" \\
-  --set image.repository="$IMAGE" \\
-  --set image.tag="$VERSION" \\
-  --set storage.log.backend=filesystem \\
-  --set storage.projection.backend=turso</code></pre>
-              </div>
-              <div class="command-block">
-                <div class="label"><span>kind smoke</span><span>local proof</span></div>
-                <pre><code>bash scripts/ci/helm-gate.sh
-bash scripts/ci/kind-helm-test.sh --log-backend filesystem --projection-backend turso</code></pre>
-              </div>
-            </div>
-          </section>
-          <div>
-            <section class="card" aria-labelledby="storage-axes-title">
-              <div class="panel-heading">
-                <h2 id="storage-axes-title">Storage axes</h2>
-                <span class="badge ok">orthogonal</span>
-              </div>
-              <div class="storage-axis-list">
-                <article class="storage-axis">
-                  <h3>log backend</h3>
-                  <p>Public values: <code>memory</code>, <code>postgres</code>, <code>filesystem</code> (chart default), <code>s3</code>. Object-log roots use <code>storage.log.objectLog.*</code> for filesystem/S3 only.</p>
-                </article>
-                <article class="storage-axis">
-                  <h3>projection backend</h3>
-                  <p>Public values: <code>memory</code>, <code>turso</code> (default), <code>postgres</code>. Chart defaults render <code>FIREWEED_PROJECTION_BACKEND=turso</code> and <code>FIREWEED_TURSO_PROJECTION_PATH</code>.</p>
-                </article>
-              </div>
-            </section>
-            <section class="card" style="margin-top:18px" aria-labelledby="status-title">
-              <div class="panel-heading">
-                <h2 id="status-title">Support status (deploy)</h2>
-                <span class="badge warn">not 1.0</span>
-              </div>
-              <div class="status-list">
-                <article class="status-row">
-                  <h3><span class="badge ok">supported</span> full 4×3 matrix</h3>
-                  <p>All twelve log×projection cells are preview-supported. Class B memory-log cells carry a durability disclaimer only.</p>
-                </article>
-                <article class="status-row">
-                  <h3><span class="badge ok">default</span> filesystem × turso</h3>
-                  <p>Chart and server defaults select local/NAS object log with embedded Turso projection.</p>
-                </article>
-                <article class="status-row">
-                  <h3><span class="badge warn">verify</span> release artifacts</h3>
-                  <p>GHCR deferred: only install images/charts listed on the GitHub Release for the tag.</p>
-                </article>
-              </div>
-            </section>
-          </div>
-        </div>
-        <div class="split">
-          <section class="card" aria-labelledby="topology-title">
-            <div class="panel-heading"><h2 id="topology-title">Runtime topology</h2></div>
-            <div class="diagram" aria-hidden="true">
-              <svg viewBox="0 0 760 260" role="img">
-                <rect x="20" y="30" width="160" height="70" rx="6" fill="#fffffb" stroke="#161616"/>
-                <text x="48" y="62">Helm release</text>
-                <text x="48" y="84" class="thin">charts/fireweed-queue</text>
-                <path d="M180 65 H285" stroke="#161616" stroke-width="3"/>
-                <path d="M275 55 L295 65 L275 75" fill="none" stroke="#161616" stroke-width="3"/>
-                <rect x="295" y="30" width="170" height="70" rx="6" fill="#dcefe4" stroke="#146c43"/>
-                <text x="322" y="62">fireweed-service</text>
-                <text x="322" y="84" class="thin">RESP TCP</text>
-                <path d="M465 65 H575" stroke="#161616" stroke-width="3"/>
-                <path d="M565 55 L585 65 L565 75" fill="none" stroke="#161616" stroke-width="3"/>
-                <rect x="585" y="30" width="155" height="70" rx="6" fill="#fff0d8" stroke="#b45309"/>
-                <text x="620" y="62">Projection</text>
-                <text x="620" y="84" class="thin">turso default</text>
-                <path d="M380 100 V158" stroke="#161616" stroke-width="3"/>
-                <path d="M370 148 L380 168 L390 148" fill="none" stroke="#161616" stroke-width="3"/>
-                <rect x="225" y="168" width="170" height="62" rx="6" fill="#fde2e2" stroke="#b91c1c"/>
-                <text x="255" y="194">Durable log</text>
-                <text x="255" y="216" class="thin">filesystem / s3 / …</text>
-                <rect x="425" y="168" width="185" height="62" rx="6" fill="#fffffb" stroke="#161616"/>
-                <text x="455" y="194">Projection store</text>
-                <text x="455" y="216" class="thin">storage mount</text>
-                <path d="M395 198 H425" stroke="#161616" stroke-width="3"/>
-              </svg>
-            </div>
-          </section>
-          <section class="card" aria-labelledby="docs-title">
-            <div class="panel-heading"><h2 id="docs-title">Runbooks</h2></div>
-            <div class="doc-list">
-              <article class="doc-row">
-                <h3><a href="../../deployment/operator-guide.md">Operator guide</a></h3>
-                <p>Helm install, upgrade, uninstall, values, troubleshooting.</p>
-              </article>
-              <article class="doc-row">
-                <h3><a href="../../deployment/container-runtime-contract.md">Runtime contract</a></h3>
-                <p>Environment variables, storage axes, health probes.</p>
-              </article>
-              <article class="doc-row">
-                <h3><a href="../../deployment/operator-release-artifacts.md">Release artifacts</a></h3>
-                <p>Images, charts, archives, checksum verification.</p>
-              </article>
-              <article class="doc-row">
-                <h3><a href="../../helix/04-build/DEPLOYMENT-READINESS.md">Readiness contract</a></h3>
-                <p>Formal production gate and certification boundary.</p>
-              </article>
-              <article class="doc-row">
-                <h3><a href="../../deployment/helm-static-validation.md">Helm gate</a></h3>
-                <p><code>bash scripts/ci/helm-gate.sh</code></p>
-              </article>
-              <article class="doc-row">
-                <h3><a href="../../deployment/kind-helm-integration.md">kind smoke</a></h3>
-                <p>kind RESP smoke for public log×projection pairs (Turso default).</p>
-              </article>
-            </div>
-          </section>
-        </div>
-"""
-    return layout(
-        page="deploy/index.html",
-        active="deploy",
-        title="Deploy — Fireweed Queue",
-        body=body,
-        meta=meta,
-    )
-
-
 def main() -> int:
     meta = load_meta()
     examples = load_examples()
@@ -1143,9 +882,7 @@ def main() -> int:
         write(f"examples/{ex['slug']}.html", page_example(meta, ex, examples))
     write("api/index.html", page_api_index(meta))
     write("api/rust.html", page_api_rust(meta))
-    write("api/resp.html", page_api_resp(meta))
     write("api/types.html", page_api_types(meta))
-    write("deploy/index.html", page_deploy(meta))
     print("render complete")
     return 0
 

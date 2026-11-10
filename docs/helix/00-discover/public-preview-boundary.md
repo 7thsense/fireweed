@@ -144,13 +144,10 @@ classified below so the preview boundary remains explicit and auditable.
 | `fireweed-relational` | Runtime substrate | Shared implementation used by supported relational projections. |
 | `fireweed-objectlog` | Runtime adapter | Supported through the public `s3` log above. |
 | `fireweed-sqlite` | Retired | Rusqlite log/projection adapter; not a public cell. |
-| `fireweed-server` | Public runtime | Supported service binary for the s3 × turso cell above. |
-| `fireweed-resp` | Public protocol adapter | Supported RESP surface subject to its documented conformance contract. |
 | `fireweed-memory` | Not a public cell | Historical adapter. Not a preview storage cell (ADR-024). |
 | `fireweed-postgres` | Not a public storage cell | Not a public log or projection. Not a second storage product (ADR-024). |
 | `fireweed-turso` | Public projection adapter | The public local Turso projection (embedded WAL); not a log or control-plane authority. |
 | `fireweed-conformance` | Test tooling | Contributor-facing contract tests; not a runtime product artifact. |
-| `fireweed-loadgen` | Test tooling | Load and evidence generation; no public runtime API commitment. |
 | `fireweed-release` | Release tooling | Maintainer tooling; not a runtime product artifact. |
 | `fireweed-sim-support` | Test tooling | Simulation fixtures and support; not a runtime product artifact. |
 
