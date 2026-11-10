@@ -75,15 +75,14 @@ non-governing provenance only
 
 | Class | Log | Authority after restart | Client contract |
 |-------|-----|-------------------------|-----------------|
-| **A — Object log** | `s3` | Object log is the system of record; Turso is a rebuildable cache (`projection_control`) | Success ⇒ durable on the object log. Claim polls applied rows (`AsyncProjection`); an empty claim is not a command failure. Recovery replays the object log. `request_id` resolves ambiguity across crash |
+| **A — Object log** | `s3` | Object log is the system of record; Turso is a rebuildable cache | Success ⇒ durable on the object log. Claim polls applied rows (`AsyncProjection`); an empty claim is not a command failure. Recovery replays the object log. `request_id` resolves ambiguity across crash |
 
 There is no public Class B cell.
 
 ### Public cell
 
-One cell is preview-supported (ADR-024). Open it via typed `StorageConfig`
-(`Fireweed::open` / `open_async`, including `StorageConfig::s3_turso`). Server
-and Helm select the same pair. Other selectors reject before storage I/O.
+One cell is preview-supported (ADR-024). Open it with `Queue::s3_turso`
+(`fireweed::queue`). Other selectors do not exist.
 
 | Log \ Projection | `turso` |
 |------------------|---------|
@@ -97,11 +96,11 @@ against the documented contract for that cell and intend configuration compatibi
 
 | Log backend | Projection | Durability | Barrier | Preview posture |
 |-------------|------------|------------|---------|-----------------|
-| `s3` | `turso` | Class A | `AsyncProjection` | **Supported** — object log is durable; Turso rebuilds through `projection_control` |
+| `s3` | `turso` | Class A | `AsyncProjection` | **Supported** — object log is durable; Turso rebuilds from the object log |
 
 The only public response barrier is `AsyncProjection`. `Strict` is not a public
 barrier. S3 publication authority is `NativeConditionalWrite`; a missing authority
-or a missing `AsyncProjectionSpec` rejects before I/O. `StorageConfig::s3_turso`
+or a missing `AsyncProjectionSpec` rejects before I/O. `Queue::s3_turso`
 sets both. Provider brand names (including historical Garage notes in release
 history) are not product SKUs.
 
@@ -137,9 +136,9 @@ classified below so the preview boundary remains explicit and auditable.
 
 | Crate | Preview class | Public commitment |
 |---|---|---|
-| `fireweed` | Public Rust facade | Supported ergonomic library and composition surface (`StorageConfig` / `open`). |
-| `fireweed-core` | Public contract | Supported domain types and queue contract used by the facade. |
-| `fireweed-engine` | Runtime substrate | Supported through the public facade and server, not promised as a standalone API. |
+| `fireweed` | Public Rust API | Supported library surface: `fireweed::queue::Queue` (`s3_turso`, `ephemeral_disk`, `postgres`). |
+| `fireweed-core` | Public contract | Supported domain types and queue contract used by `Queue`. |
+| `fireweed-engine` | Runtime substrate | Supported through the public `Queue` API, not promised as a standalone API. |
 | `fireweed-projection` | Runtime substrate | Supported through shipped log × projection compositions, not promised as a standalone API. |
 | `fireweed-relational` | Runtime substrate | Shared implementation used by supported relational projections. |
 | `fireweed-objectlog` | Runtime adapter | Supported through the public `s3` log above. |

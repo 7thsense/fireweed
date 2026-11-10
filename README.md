@@ -12,7 +12,7 @@ eligibility, gates, groups, cohorts, typed fields, and secondary indexes.
 
 Fireweed is an embedded Rust library. The `Queue` API
 ([API-007](docs/helix/02-design/contracts/API-007-queue-claim-commit-contract.md))
-in the `fireweed` crate is the product surface: `Queue::postgres`,
+in the `fireweed` crate is the only public entry point: `Queue::postgres`,
 `Queue::s3_turso`, and `Queue::ephemeral_disk`.
 
 ## Status
@@ -28,8 +28,8 @@ preview does not mean that every compiled storage pairing is production-ready.
 Before relying on it, review the
 [v0.22.0 public-preview checklist](docs/helix/05-deploy/public-preview-checklist.md),
 run the applicable smoke and recovery checks, and plan capacity, credentials,
-monitoring, backups, and failure recovery for your environment. The memory
-configuration used below is disposable and development-only.
+monitoring, backups, and failure recovery for your environment. The ephemeral
+on-disk queue used below is disposable and development-only.
 
 ## Quickstart
 
@@ -40,12 +40,12 @@ configuration used below is disposable and development-only.
   `rust-toolchain.toml`);
 - a C toolchain and CMake for native crypto dependencies.
 
-Clone the repository and run the embedded workflow example:
+Clone the repository and run the embedded lifecycle example:
 
 ```sh
 git clone https://github.com/7thsense/fireweed.git
 cd fireweed
-cargo run -p fireweed --example scheduler_boundary
+cargo run -p fireweed --example queue_lifecycle
 ```
 
 `Queue::ephemeral_disk` is a throwaway development queue; see the `fireweed`
@@ -67,7 +67,7 @@ Fireweed separates queue semantics from storage:
 The public storage cell is an object-log published to S3, a Turso projection,
 and async log acknowledgement. The log engine lives in `fireweed-objectlog`:
 filesystem publication is its local adapter, and S3 publication is the public
-adapter. Non-durable tests use Turso `:memory:`. There is no second public
+adapter. Development and tests use `Queue::ephemeral_disk`. There is no second public
 projection and no storage matrix.
 
 ## Documentation
@@ -78,11 +78,11 @@ projection and no storage matrix.
   Deployed site: <https://7thsense.github.io/fireweed/> (GitHub Pages).
 - [Choosing a priority queue instead of a stream](docs/helix/01-frame/guides/choosing-fireweed.md)
   explains the workload boundary.
-- [Rust facade source and crate documentation](crates/fireweed/src/lib.rs)
-  covers embedded construction and worker lifecycle verbs.
-- [Embedded workflow example](crates/fireweed/examples/scheduler_boundary.rs)
-  composes queue templates, grouped discovery, stateless dispersion, bounded
-  multi-queue claims, and worker finalization. The public open is S3 × Turso.
+- [Queue API source](crates/fireweed/src/queue.rs) covers construction and the
+  ten queue operations.
+- [Embedded lifecycle example](crates/fireweed/examples/queue_lifecycle.rs)
+  provisions a queue, inserts work, claims by priority, commits outcomes, and
+  schedules retries. The production open is S3 × Turso.
 - [v0.31.32 release notes](docs/releases/v0.31.32.md) move axon-esf to
   v0.4.2, fjord to v0.1.5, and base64 to 0.23.
 - [v0.31.31 release notes](docs/releases/v0.31.31.md) record the single
@@ -100,8 +100,8 @@ projection and no storage matrix.
   NativeConditionalWrite only; provider brands are not product SKUs.
 - [v0.22.0 release notes](docs/releases/v0.22.0.md) describe request-id push
   Fresh/Replayed disposition for Snorri create/enqueue counters.
-- [v0.21.0 release notes](docs/releases/v0.21.0.md) describe the complete
-  backend-opaque facade and durability matrix.
+- [v0.21.0 release notes](docs/releases/v0.21.0.md) describe a
+  superseded construction surface (historical).
 - [v0.20.0 release notes](docs/releases/v0.20.0.md) record the Fireweed rename.
 
 For source development, the standard local gates are:

@@ -42,28 +42,26 @@
         <div class="callout warn">
           <p>
             Prerequisites: Git, rustup, a C toolchain and CMake for native crypto
-            dependencies. Prefer <code>open(StorageConfig)</code> for the full matrix;
-            convenience open helpers remain sugar over that model.
+            dependencies. <code>Queue::ephemeral_disk</code> needs no services;
+            production uses <code>Queue::s3_turso</code> with S3 and PostgreSQL.
           </p>
         </div>
         <div class="section-title"><h2>Embed Rust</h2></div>
         <div class="code-block">
-  <div class="label"><span>clone and exercise the facade</span><span>sh</span></div>
+  <div class="label"><span>clone and run the lifecycle example</span><span>sh</span></div>
   <pre><code>git clone https://github.com/7thsense/fireweed.git
 cd fireweed
-# Requires rustup; toolchain from rust-toolchain.toml (Rust 1.97.1)
-cargo test -p fireweed --test concrete_fireweed
-cargo run -p fireweed --example scheduler_boundary</code></pre>
+# Requires rustup; toolchain from rust-toolchain.toml
+cargo run -p fireweed --example queue_lifecycle</code></pre>
 </div>
         <div class="prose">
           <p>
-            The public root type is concrete <code>Fireweed</code>. Compose with
-            <code>open</code> / <code>open_async(StorageConfig)</code> (Turso is the
-            default projection), or use convenience helpers such as
-            <code>open_memory</code> and
-            <code>open_objectlog</code>. Walk
-            <a href="examples/basic-lifecycle.html">basic lifecycle</a> then
-            <a href="examples/scheduler-boundary.html">scheduler boundary</a>.
+            The public entry point is <code>fireweed::queue::Queue</code>:
+            <code>Queue::s3_turso</code> (production),
+            <code>Queue::ephemeral_disk</code> (development and tests) and
+            <code>Queue::postgres</code> (feature <code>postgres</code>, the reference store).
+            Walk <a href="examples/basic-lifecycle.html">basic lifecycle</a> then
+            <a href="examples/scheduled-delivery.html">scheduled delivery</a>.
           </p>
         </div>
         <div class="prose">

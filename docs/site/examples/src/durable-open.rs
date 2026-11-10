@@ -1,24 +1,29 @@
-// Provenance: crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_turso
+// Provenance: crates/fireweed/examples/queue_lifecycle.rs::open_production
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
-fn lifecycle_over_shapes_turso() {
-    for shape in all_shapes() {
-        let root = tmp(&format!("turso-{}", shape.name));
-        let fireweed = open_log_turso(&root, Arc::new(SystemClock)).expect("open Turso");
-        run_one("turso", &fireweed, &shape, true);
-        drop(fireweed);
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-}
-
-// Provenance: crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_objectlog
-// Do not edit by hand — regenerate with scripts/site/extract_examples.py
-fn lifecycle_over_shapes_objectlog() {
-    for shape in all_shapes() {
-        let dir = tmp(&format!("objectlog-{}", shape.name));
-        let _ = std::fs::remove_dir_all(&dir);
-        let fireweed = open_log_turso(&dir, Arc::new(SystemClock)).expect("open objectlog");
-        // Exercise the current public batch-update contract on the original rows.
-        run_one("objectlog", &fireweed, &shape, true);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+async fn open_production() -> QueueResult<Queue> {
+    let secret = |name: &str| ConfigSecret::new(std::env::var(name).unwrap_or_default());
+    let options = S3TursoOptions::new(
+        S3LogOptions {
+            endpoint: "https://s3.us-east-1.amazonaws.com".into(),
+            region: "us-east-1".into(),
+            bucket: "work-queues".into(),
+            namespace: "prod/mail".into(),
+            access_key_id: secret("S3_ACCESS_KEY_ID"),
+            secret_access_key: secret("S3_SECRET_ACCESS_KEY"),
+            allow_insecure_http: false,
+        },
+        TursoCacheOptions {
+            directory: "/var/lib/fireweed/cache".into(),
+        },
+        PostgresControlPlaneOptions {
+            url: secret("DATABASE_URL"),
+            schema: "fireweed".into(),
+            instance_id: OwnerId::new("worker-1")
+                .map_err(|e| QueueError::Invalid(e.to_string()))?,
+            heartbeat_ttl_ms: 10_000,
+            lease_ttl_ms: 30_000,
+            ownership_clock: None,
+        },
+    );
+    Queue::s3_turso(options, Arc::new(SystemClock)).await
 }

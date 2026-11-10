@@ -434,12 +434,7 @@ def validate() -> None:
         f"epoch-zero evidence writers remain: {[(row['path'], row['symbol']) for row in epoch_zero_writers]}",
     )
 
-    required_direct_writers = {"write_evidence", "atomic_write_evidence"}
     call_symbols = {row["symbol"] for row in evidence_call_graph}
-    require(
-        required_direct_writers <= call_symbols,
-        f"missing typed evidence writer call graph: {sorted(required_direct_writers - call_symbols)}",
-    )
     require(
         "evidence_dir" not in call_symbols,
         "legacy untyped evidence_dir helper remains in the evidence call graph",

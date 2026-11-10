@@ -5,14 +5,14 @@ ddx:
     - api-native-client-interface
     - adr-engine-enforced-coordination-and-encapsulated-library-surface
     - adr-023-pre-release-fireweed-namespace-cutover
-  status: accepted
+  status: superseded
 ---
 
 # ADR-022: Concrete Fireweed facade and optional controls
 
 | Date | Status | Deciders | Related | Confidence |
 | --- | --- | --- | --- | --- |
-| 2026-07-24 | Accepted | Project maintainers | API-001, API-004, API-005, ADR-009, ADR-023 | High |
+| 2026-07-24 | Superseded: the retired facade was removed before v0.32.0 in favour of `Queue` (API-007) | Project maintainers | API-001, API-004, API-005, ADR-009, ADR-023 | High |
 
 ## Context
 

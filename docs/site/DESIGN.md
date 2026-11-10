@@ -72,7 +72,7 @@ not a license to reintroduce historical stems.
 | Repository stem | `fireweed` | Clone URLs, monorepo identity |
 | Package stem | `fireweed-queue` | Package coordinates |
 | CLI | `fireweed` | Commands |
-| Rust crate stem | `fireweed` | Embed surface (`fireweed` facade crate) |
+| Rust crate stem | `fireweed` | Embed surface (`fireweed` crate, `Queue` API) |
 | Environment prefix | `FIREWEED_` | Config |
 | Informal abbreviation | **FWQ** | Chat/internal only—not hero, legal, or first reference |
 
@@ -198,7 +198,7 @@ Pillars 1–5 are default marketing. Pillar 6 is for operator-facing surfaces.
 | Why | Decision tables vs streams | choosing-fireweed |
 | Concepts | Definitions, out-of-scope | Product semantics list |
 | Examples | What it proves + provenance | Engineer-first honesty |
-| API | Normative families; public vs internal | Identifier map + facade boundary |
+| API | Normative families; public vs internal | Identifier map + `Queue` boundary |
 | Contribute | Issues-only; security private | ADR-021 (policy), not naming |
 | Release notes | Past-tense deltas + deferred | Support boundary |
 
@@ -219,7 +219,7 @@ Pillars 1–5 are default marketing. Pillar 6 is for operator-facing surfaces.
 | command log / durable log | “the stream” for internal log | Workers do not consume the log as an app stream |
 | durable priority queue | workflow engine / DAG | Product identity and explicit anti-position |
 | supported | production-ready (unless certified) | Evidence-bound support language |
-| construction / `open_*` | “backend type parameter” as public model | Concrete `Fireweed` facade |
+| construction / `open_*` | “backend type parameter” as public model | `Queue` constructors |
 
 ### Public surface vocabulary
 

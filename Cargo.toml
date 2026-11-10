@@ -18,7 +18,6 @@ members = [
     "crates/fireweed",
     "crates/fireweed-release",
     "crates/fireweed-sim-support",
-    "crates/fireweed-workload",
 ]
 resolver = "3"
 

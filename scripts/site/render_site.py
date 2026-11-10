@@ -230,9 +230,9 @@ def page_home(meta: dict) -> str:
           <article class="card card-body">
             <h3>Embed in your process</h3>
             <p>
-              Construct a backend-erased <code>Fireweed</code> handle, create queues,
-              push work, claim batches, and finalize. Storage composition is a
-              construction input—not a post-open type parameter.
+              Open one <code>Queue</code> handle, provision a queue, insert work,
+              claim batches under a lease, and commit the outcome. The storage
+              backend is a construction input, not a type parameter.
             </p>
             <p><a href="api/rust.html">Rust API →</a> · <a href="examples/basic-lifecycle.html">Basic lifecycle →</a></p>
           </article>
@@ -243,7 +243,8 @@ def page_home(meta: dict) -> str:
             v{html.escape(meta["version"])} is a <strong>GitHub source tree</strong>
             (workspace package identity; annotated tag cut is a separate release step).
             Publication to crates.io is deferred. The public product is the
-            full 4×3 log×projection matrix with Turso as the default projection—see the
+            <code>Queue</code> API over S3 + Turso + PostgreSQL leases, with a
+            PostgreSQL reference store—see the
             <a href="support.html">support boundary</a>.
           </p>
         </div>
@@ -251,14 +252,14 @@ def page_home(meta: dict) -> str:
         <div class="section-title"><h2>Featured examples</h2></div>
         <div class="grid-2">
           <article class="card card-body">
-            <h3>Open, push, claim, complete</h3>
-            <p>Happy-path embed from the concrete facade product tests.</p>
+            <h3>Provision, insert, claim, commit</h3>
+            <p>Happy-path embed over a throwaway on-disk queue.</p>
             <p><a href="examples/basic-lifecycle.html">Read the example →</a></p>
           </article>
           <article class="card card-body">
-            <h3>Scheduler boundary workflow</h3>
-            <p>Discover active scopes, disperse workers, claim across queues.</p>
-            <p><a href="examples/scheduler-boundary.html">Read the example →</a></p>
+            <h3>Scheduled delivery and retry</h3>
+            <p>Hold work until it is due and retry a claimed item later.</p>
+            <p><a href="examples/scheduled-delivery.html">Read the example →</a></p>
           </article>
         </div>
 """
@@ -374,43 +375,36 @@ def page_concepts(meta: dict) -> str:
         <div class="prose">
           <h2>Work item lifecycle</h2>
           <p>
-            Items are accepted (push/upsert), ordered by the queue’s priority model,
-            claimed under a lease by a worker, then finalized:
-            <strong>complete</strong>, <strong>retry</strong> / <strong>retry_after</strong>,
-            <strong>release</strong>, or <strong>fail</strong>. Convenience verbs are
-            batch-shaped aliases over the native finalize surface.
+            Items are inserted, ordered by priority, claimed under a lease by a worker, then
+            settled in one atomic <code>commit</code> with a <code>Disposition</code>:
+            <strong>Complete</strong>, <strong>Fail</strong>, <strong>Release</strong>,
+            <strong>RetryAt</strong>, <strong>Retain</strong> or <strong>Delete</strong>.
+            A commit can also change state records and insert new work in the same step.
           </p>
           <p><a href="examples/basic-lifecycle.html">Example: basic lifecycle</a> ·
-             <a href="api/rust.html">Rust lifecycle methods</a></p>
+             <a href="api/rust.html">Rust API</a></p>
 
           <h2>Priority vs eligibility</h2>
           <p>
             <strong>Priority</strong> ranks eligible work. <strong>Eligibility</strong>
-            decides whether an item may be claimed at all—gates, <code>not_before</code>,
-            active leases, and retry backoff. Ineligible items must not starve forever
-            under the queue’s progress bound.
+            decides whether an item may be claimed at all: <code>available_at</code>,
+            active leases, and retry times.
           </p>
-          <p><a href="examples/scheduled-delivery.html">Example: scheduled delivery</a> ·
-             <a href="examples/priority-retry.html">Example: priority + retry</a></p>
+          <p><a href="examples/scheduled-delivery.html">Example: scheduled delivery and retry</a></p>
 
           <h2>Leases and recovery</h2>
           <p>
-            A claim grants temporary exclusive execution authority. Workers may renew
-            leases without charging a new delivery. Expired leases reclaim to pending
-            so another worker can continue. Fail marks a terminal dead-letter state;
-            rearm can requeue with reset attempts when the product path allows it.
+            A claim grants temporary exclusive execution authority. A lease that expires
+            returns the item to pending so another worker can continue; a commit with a
+            stale lease is rejected.
           </p>
-          <p><a href="examples/lease-ops.html">Example: lease operations</a></p>
 
-          <h2>Groups, cohorts, and discovery</h2>
+          <h2>Filters, indexes and state</h2>
           <p>
-            Queues may group items so claims form downstream-compatible batches
-            (account, connector, job, campaign). Schedulers discover active scopes,
-            optionally disperse workers with a stateless selector, then claim—sometimes
-            across queues with explicit non-atomic fan-in.
+            A queue schema declares typed fields and indexes. Claims, queries and stats
+            select by filter over those fields; state collections hold per-key records that
+            commit atomically with work.
           </p>
-          <p><a href="examples/scheduler-boundary.html">Example: scheduler boundary</a> ·
-             <a href="examples/dispersion.html">Example: dispersion</a></p>
 
           <h2>External transaction contract</h2>
           <p>
@@ -422,10 +416,9 @@ def page_concepts(meta: dict) -> str:
 
           <h2>Architecture</h2>
           <p>
-            The Rust facade sits on a shared engine.
-            Durable profiles compose a <strong>command log</strong> with a
-            <strong>projection</strong>. Log and projection are independent axes;
-            unsupported pairings fail at startup instead of silently substituting.
+            <code>Queue</code> sits on a shared engine. The production backend composes an
+            S3 <strong>command log</strong>, a disposable local Turso
+            <strong>projection</strong> and PostgreSQL queue leases.
           </p>
 
           <h2>Out of scope</h2>
@@ -439,7 +432,7 @@ def page_concepts(meta: dict) -> str:
             Normative contracts:
             <a href="../helix/02-design/contracts/API-001-native-client-interface.md">API-001</a>,
             <a href="../helix/02-design/contracts/API-004-hot-projection-query-surface.md">API-004</a>,
-            <a href="../helix/02-design/contracts/API-005-fireweed-rust-facade.md">API-005</a>.
+            <a href="../helix/02-design/contracts/API-007-queue-claim-commit-contract.md">API-007</a>.
           </p>
         </div>
 """
@@ -455,9 +448,8 @@ def page_concepts(meta: dict) -> str:
 def page_get_started(meta: dict) -> str:
     embed = """git clone https://github.com/7thsense/fireweed.git
 cd fireweed
-# Requires rustup; toolchain from rust-toolchain.toml (Rust 1.97.1)
-cargo test -p fireweed --test concrete_fireweed
-cargo run -p fireweed --example scheduler_boundary"""
+# Requires rustup; toolchain from rust-toolchain.toml
+cargo run -p fireweed --example queue_lifecycle"""
     body = f"""
         <div class="page-intro">
           <h2>Get started</h2>
@@ -469,21 +461,20 @@ cargo run -p fireweed --example scheduler_boundary"""
         <div class="callout warn">
           <p>
             Prerequisites: Git, rustup, a C toolchain and CMake for native crypto
-            dependencies. Prefer <code>open(StorageConfig)</code> for the full matrix;
-            convenience open helpers remain sugar over that model.
+            dependencies. <code>Queue::ephemeral_disk</code> needs no services;
+            production uses <code>Queue::s3_turso</code> with S3 and PostgreSQL.
           </p>
         </div>
         <div class="section-title"><h2>Embed Rust</h2></div>
-        {code_block("clone and exercise the facade", embed, "sh")}
+        {code_block("clone and run the lifecycle example", embed, "sh")}
         <div class="prose">
           <p>
-            The public root type is concrete <code>Fireweed</code>. Compose with
-            <code>open</code> / <code>open_async(StorageConfig)</code> (Turso is the
-            default projection), or use convenience helpers such as
-            <code>open_memory</code> and
-            <code>open_objectlog</code>. Walk
-            <a href="examples/basic-lifecycle.html">basic lifecycle</a> then
-            <a href="examples/scheduler-boundary.html">scheduler boundary</a>.
+            The public entry point is <code>fireweed::queue::Queue</code>:
+            <code>Queue::s3_turso</code> (production),
+            <code>Queue::ephemeral_disk</code> (development and tests) and
+            <code>Queue::postgres</code> (feature <code>postgres</code>, the reference store).
+            Walk <a href="examples/basic-lifecycle.html">basic lifecycle</a> then
+            <a href="examples/scheduled-delivery.html">scheduled delivery</a>.
           </p>
         </div>
         <div class="prose">
@@ -515,37 +506,29 @@ def page_support(meta: dict) -> str:
             or production-readiness claim.
           </p>
           <p>
-            Storage is the public 4×3 matrix: log
-            (<code>memory</code> | <code>postgres</code> |
-            <code>filesystem</code> | <code>s3</code>) × projection
-            (<code>memory</code> | <code>turso</code> (default) |
-            <code>postgres</code>). Hybrid and legacy profile names are not product values.
+            The public API is <code>fireweed::queue::Queue</code> (API-007). There is one
+            production storage composition and one reference store.
           </p>
         </div>
         <table class="data">
-          <thead><tr><th>Log × projection</th><th>Status</th><th>Notes</th></tr></thead>
+          <thead><tr><th>Constructor</th><th>Status</th><th>Notes</th></tr></thead>
           <tbody>
-            <tr><td><code>memory</code> × <code>memory</code> | <code>turso</code> | <code>postgres</code></td><td><span class="badge ok">supported</span></td><td>Class B: durability limited to the projection after process death; no Class A log replay.</td></tr>
-            <tr><td><code>postgres</code> × all three projections</td><td><span class="badge ok">supported</span></td><td>Class A; the optional postgres cargo feature must fail closed when omitted.</td></tr>
-            <tr><td><code>filesystem</code> × all three projections</td><td><span class="badge ok">supported</span></td><td>Class A local/NAS object log.</td></tr>
-            <tr><td><code>s3</code> × all three projections</td><td><span class="badge ok">supported</span></td><td>Class A object log; NativeConditionalWrite S3 only—provider brands are not product SKUs.</td></tr>
-            <tr><td><code>turso</code> projection (any log)</td><td><span class="badge ok">supported default</span></td><td>Embedded/local Turso 0.7 WAL; public default when projection is unset. Remote/sync/MVCC modes are out of scope.</td></tr>
-            <tr><td><code>hybrid</code> / <code>hybrid-async</code> / <code>hybrid-strict</code></td><td><span class="badge blocked">retired</span></td><td>Not public selectors; hard-rejected. Historical evidence only.</td></tr>
-            <tr><td><code>objectlog</code> / <code>inmemory</code> aliases</td><td><span class="badge blocked">retired</span></td><td>Use <code>filesystem</code>|<code>s3</code> and <code>memory</code>.</td></tr>
+            <tr><td><code>Queue::s3_turso</code></td><td><span class="badge ok">supported</span></td><td>Production: S3 object log (native conditional write), disposable local Turso projection per owned queue, PostgreSQL queue leases. Provider brands are not product SKUs.</td></tr>
+            <tr><td><code>Queue::postgres</code></td><td><span class="badge ok">supported</span></td><td>Native PostgreSQL reference store; opt-in cargo feature <code>postgres</code>.</td></tr>
+            <tr><td><code>Queue::ephemeral_disk</code></td><td><span class="badge neutral">development</span></td><td>Throwaway on-disk store for development and tests; nothing survives shutdown.</td></tr>
           </tbody>
         </table>
         <div class="prose">
           <h2>What this source tree ships</h2>
           <ul>
             <li>Workspace package identity v{html.escape(meta["version"])} (source tree; tag cut is a separate release step)</li>
-            <li>Concrete <code>Fireweed</code> Rust facade (<code>open</code> / <code>open_async(StorageConfig)</code>)</li>
+            <li>The <code>Queue</code> Rust API (<code>fireweed::queue</code>)</li>
             <li>Issues-only contribution policy; MIT OR Apache-2.0</li>
           </ul>
           <h2>Explicitly deferred</h2>
           <ul>
             <li>crates.io package publication</li>
             <li>Universal performance bounds, multi-region failover, provider certification</li>
-            <li>Historical query (<code>read_as_of</code>) as a supported facade API</li>
             <li>Remote / sync / MVCC Turso modes</li>
           </ul>
           <h2>Public examples</h2>
@@ -648,9 +631,8 @@ def page_examples_index(meta: dict, examples: list[dict]) -> str:
         <div class="page-intro">
           <h2>Examples</h2>
           <p>
-            Curated from real tests and the public <code>scheduler_boundary</code>
-            example. Every code block is regenerated from source symbols—if a test
-            moves, provenance checks fail.
+            Excerpts of the compiled <code>queue_lifecycle</code> example. Every code block
+            is regenerated from source symbols; if the example moves, provenance checks fail.
           </p>
         </div>
         <div class="grid-2">
@@ -715,24 +697,22 @@ def page_api_index(meta: dict) -> str:
         <div class="page-intro">
           <h2>API documentation</h2>
           <p>
-            Fireweed exposes one public face over the queue model: the Rust
-            <code>fireweed</code> facade.
+            Fireweed exposes one public API: <code>Queue</code> in the Rust
+            <code>fireweed</code> crate.
           </p>
         </div>
         <div class="grid-2">
           <article class="card card-body">
-            <h3>Rust facade</h3>
+            <h3>Rust API</h3>
             <p>
-              Concrete <code>Fireweed</code> handle, constructors, lifecycle verbs,
-              discovery, mutation, and hot projection queries.
+              The <code>Queue</code> handle: constructors and the ten operations.
             </p>
             <p><a href="rust.html">Rust API guide →</a></p>
           </article>
           <article class="card card-body">
             <h3>Types</h3>
             <p>
-              Public DTO export closure for embedders that depend only on
-              <code>fireweed</code>.
+              Request and result types re-exported through <code>fireweed::queue</code>.
             </p>
             <p><a href="types.html">Type catalog →</a></p>
           </article>
@@ -764,53 +744,46 @@ def page_api_index(meta: dict) -> str:
 def page_api_rust(meta: dict) -> str:
     body = """
         <div class="page-intro">
-          <h2>Rust facade API</h2>
+          <h2>Rust API</h2>
           <p>
-            Normative shape: <a href="../../helix/02-design/contracts/API-005-fireweed-rust-facade.md">API-005</a>.
-            Semantics: <a href="../../helix/02-design/contracts/API-001-native-client-interface.md">API-001</a>.
+            Normative shape: <a href="../../helix/02-design/contracts/API-007-queue-claim-commit-contract.md">API-007</a>.
           </p>
         </div>
         <div class="prose">
           <h2>Root type</h2>
           <p>
-            <code>pub struct Fireweed</code> — no type parameter. <code>Send + Sync</code>.
-            Backend, projection, and coordination are construction inputs only.
-            Optional <code>projection_control()</code> for disposable projections.
+            <code>fireweed::queue::Queue</code> is a cloneable handle. Clones share storage and
+            admission; <code>shutdown</code> closes admission and drains operations for all clones.
+            The backend is chosen only at construction.
           </p>
           <h2>Constructors</h2>
         </div>
         <table class="data">
           <thead><tr><th>Constructor</th><th>Typical use</th><th>Support note</th></tr></thead>
           <tbody>
-            <tr><td><code>open</code> / <code>open_async</code></td><td>Full matrix via <code>StorageConfig</code></td><td>Canonical 4×3 entry; Turso is the default projection</td></tr>
-            <tr><td><code>open_memory</code></td><td>Memory log × memory projection</td><td>Class B convenience sugar</td></tr>
-            <tr><td><code>open_objectlog</code> / <code>open_objectlog_*</code></td><td>Filesystem object-log helpers</td><td>Supported Class A; prefer typed <code>StorageConfig</code> for S3</td></tr>
-            <tr><td><code>open_postgres</code> / <code>open_postgres_*</code></td><td>Postgres log convenience helpers</td><td>Supported Class A (feature-gated packaging fails closed)</td></tr>
+            <tr><td><code>Queue::s3_turso(S3TursoOptions, clock)</code></td><td>Production</td><td>Feature <code>s3-turso</code> (default)</td></tr>
+            <tr><td><code>Queue::ephemeral_disk(clock)</code></td><td>Development and tests</td><td>Throwaway; same feature</td></tr>
+            <tr><td><code>Queue::postgres(PostgresOptions, clock)</code></td><td>Reference store</td><td>Feature <code>postgres</code></td></tr>
           </tbody>
         </table>
         <div class="prose">
-          <h2>Method families</h2>
+          <h2>Operations</h2>
         </div>
         <table class="data">
-          <thead><tr><th>Family</th><th>Methods (representative)</th><th>Example</th></tr></thead>
+          <thead><tr><th>Method</th><th>Purpose</th><th>Example</th></tr></thead>
           <tbody>
-            <tr><td>Queue control</td><td><code>create_queue</code>, <code>ensure_queue</code>, <code>queue_definition</code>, <code>ownership</code></td><td><a href="../examples/basic-lifecycle.html">basic</a></td></tr>
-            <tr><td>Append</td><td><code>push</code>, <code>push_batch</code>, <code>push_with_request_id</code>, <code>upsert</code></td><td><a href="../examples/basic-lifecycle.html">basic</a></td></tr>
-            <tr><td>Claim</td><td><code>claim</code>, <code>claim_with</code>, <code>claim_across_queues</code>, <code>claim_by_query</code></td><td><a href="../examples/multi-queue-claim.html">multi-queue</a></td></tr>
-            <tr><td>Finalize</td><td><code>complete</code>, <code>ack</code>, <code>retry</code>, <code>retry_after</code>, <code>release</code>, <code>fail</code>, <code>commit</code></td><td><a href="../examples/lease-ops.html">leases</a></td></tr>
-            <tr><td>Lease ops</td><td><code>renew</code>, <code>reassign</code>, <code>reclaim_expired</code></td><td><a href="../examples/lease-ops.html">leases</a></td></tr>
-            <tr><td>Discovery</td><td><code>discover_active_scopes</code>, <code>discover_active_scopes_stamped</code></td><td><a href="../examples/scheduler-boundary.html">scheduler</a></td></tr>
-            <tr><td>Mutation</td><td><code>update</code>, <code>update_fields</code>, <code>mutate_items</code>, <code>set_gates</code></td><td><a href="../examples/basic-lifecycle.html">basic</a></td></tr>
-            <tr><td>Query / metrics</td><td><code>live_item</code>, <code>peek</code>, <code>metrics</code>, <code>range_scan</code>, <code>query_index</code></td><td>API-004</td></tr>
-            <tr><td>Projection</td><td><code>projection_control().verify/delete/rebuild</code></td><td>object-log disposable projection</td></tr>
+            <tr><td><code>provision</code></td><td>Create a queue from a <code>QueueSchema</code></td><td><a href="../examples/basic-lifecycle.html">basic</a></td></tr>
+            <tr><td><code>insert</code></td><td>Insert or upsert work, by request id</td><td><a href="../examples/basic-lifecycle.html">basic</a></td></tr>
+            <tr><td><code>claim</code></td><td>Lease the next eligible items by filter and order</td><td><a href="../examples/scheduled-delivery.html">scheduled</a></td></tr>
+            <tr><td><code>commit</code></td><td>Atomically settle claimed work, update state, insert work</td><td><a href="../examples/basic-lifecycle.html">basic</a></td></tr>
+            <tr><td><code>preview</code></td><td>Evaluate a commit without applying it</td><td>API-007</td></tr>
+            <tr><td><code>stats</code></td><td>Counts by lifecycle, group and bucket</td><td><a href="../examples/basic-lifecycle.html">basic</a></td></tr>
+            <tr><td><code>read_state</code> / <code>query</code></td><td>Read state records; page through an index</td><td>API-007</td></tr>
+            <tr><td><code>read_commit</code></td><td>Resolve an unknown outcome by request id</td><td>API-007</td></tr>
+            <tr><td><code>shutdown</code></td><td>Close admission and drain</td><td><a href="../examples/basic-lifecycle.html">basic</a></td></tr>
           </tbody>
         </table>
         <div class="prose">
-          <h2>Stateless helpers</h2>
-          <ul>
-            <li><code>QueueTemplate</code> — exact ensure / creation policy</li>
-            <li><code>select_active_scope_from_prefix</code> / <code>OldestFirstScopePrefix</code> — dispersion</li>
-          </ul>
           <p>
             Generate signatures: <code>cargo doc -p fireweed --no-deps --open</code>.
           </p>
@@ -830,31 +803,27 @@ def page_api_types(meta: dict) -> str:
         <div class="page-intro">
           <h2>Type catalog</h2>
           <p>
-            Embedders should import types from the <code>fireweed</code> crate root.
-            The export closure is fixed by API-005 so downstream crates (e.g. Snorri)
+            Embedders import types from <code>fireweed::queue</code>, so downstream crates
             compile against <code>fireweed</code> alone.
           </p>
         </div>
         <table class="data">
           <thead><tr><th>Area</th><th>Types (representative)</th></tr></thead>
           <tbody>
-            <tr><td>Handle</td><td><code>Fireweed</code>, <code>ProjectionControl</code>, capability/result types</td></tr>
-            <tr><td>Identity</td><td><code>TenantId</code>, <code>QueueId</code>, <code>QueueKey</code>, <code>ItemId</code>, <code>WorkerId</code>, <code>OwnerId</code>, <code>ClientItemKey</code>, <code>RequestId</code></td></tr>
-            <tr><td>Definition</td><td><code>QueueDefinition</code>, <code>PriorityModel</code>, <code>OrderingMode</code>, <code>RetryPolicy</code>, <code>EligibilityPolicy</code></td></tr>
-            <tr><td>Write</td><td><code>NewItem</code>, <code>PriorityValue</code>, <code>ScheduleUpdate</code></td></tr>
-            <tr><td>Claim</td><td><code>ClaimedItem</code>, <code>ClaimAt</code>, <code>MultiQueueClaimTarget</code>, <code>ClaimRef</code></td></tr>
-            <tr><td>Commit</td><td><code>CommitRequest</code>, <code>CommitCapabilities</code>, side-record types</td></tr>
-            <tr><td>Query</td><td><code>ItemView</code>, <code>QueueMetrics</code>, index query types, hot-projection flags</td></tr>
-            <tr><td>Construction</td><td><code>ObjectLogRuntimeConfig</code>, <code>PostgresRuntimeConfig</code>, <code>ConfigSecret</code>, <code>SystemClock</code>, <code>Clock</code></td></tr>
-            <tr><td>Helpers</td><td><code>QueueTemplate</code>, <code>ActiveScopeDiscovery</code>, <code>OldestFirstScopePrefix</code></td></tr>
-            <tr><td>Errors</td><td><code>EngineError</code>, <code>EngineResult</code>, structured error variants</td></tr>
+            <tr><td>Handle</td><td><code>Queue</code>, <code>QueueFuture</code>, <code>QueueError</code>, <code>QueueResult</code></td></tr>
+            <tr><td>Construction</td><td><code>S3TursoOptions</code>, <code>S3LogOptions</code>, <code>TursoCacheOptions</code>, <code>PostgresControlPlaneOptions</code>, <code>PostgresOptions</code>, <code>QueueLimits</code>, <code>QueueRuntimeOptions</code>, <code>ConfigSecret</code>, <code>SystemClock</code>, <code>Clock</code>, <code>OwnerId</code></td></tr>
+            <tr><td>Schema</td><td><code>QueueAddress</code>, <code>QueueSchema</code>, <code>CollectionDefinition</code>, <code>QueueRetention</code>, <code>FieldType</code>, <code>FieldValue</code></td></tr>
+            <tr><td>Work</td><td><code>NewWork</code>, <code>WorkRecord</code>, <code>ClaimedWork</code>, <code>LeaseCredential</code>, <code>Lifecycle</code></td></tr>
+            <tr><td>Requests</td><td><code>ProvisionRequest</code>, <code>InsertRequest</code>, <code>ClaimRequest</code>, <code>CommitBatch</code>, <code>PreviewRequest</code>, <code>StatsRequest</code>, <code>StateReadRequest</code>, <code>QueryRequest</code>, <code>ReceiptReadRequest</code></td></tr>
+            <tr><td>Commit</td><td><code>CommitGroup</code>, <code>ClaimedUpdate</code>, <code>Disposition</code>, <code>StateUpdate</code>, <code>CommitReceipt</code>, <code>GroupOutcome</code>, <code>Rejection</code></td></tr>
+            <tr><td>Selection</td><td><code>Filter</code>, <code>Predicate</code>, <code>ClaimOrder</code></td></tr>
           </tbody>
         </table>
         <div class="prose">
           <p>
             For field layouts and trait bounds, run
             <code>cargo doc -p fireweed --no-deps --open</code>.
-            Full export list: API-005 export closure section.
+            Full contract: API-007.
           </p>
         </div>
 """

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """P13: generate the sole final governed-product allowlist from manifest sources.
 
-Owns population of scripts/ci/governed-product-allowlist.json from:
-  - P10r functional-matrix route sources (exact leaf cargo groups)
-  - reduced-count functional live matrix (storage_matrix_t0_t2; non-authoritative)
+Owns population of scripts/ci/governed-product-allowlist.json from the Queue test
+targets (fireweed lib, simple_queue_postgres, fireweed-postgres queue_* targets) and the
+queue module boundary check. Everything here is functional, never authoritative performance.
 
 Does not claim product-release readiness (P13b) and never authors performance
 or authoritative timing commands (forbidden_in_lane).
@@ -18,7 +18,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ROUTE_SOURCES = ROOT / "scripts/ci/manifests/functional-matrix-route-sources.json"
 ALLOWLIST = ROOT / "scripts/ci/governed-product-allowlist.json"
 
 SCHEMA_VERSION = 1
@@ -40,11 +39,6 @@ class AllowlistError(Exception):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AllowlistError(message)
-
-
-def load_route_sources() -> dict:
-    require(ROUTE_SOURCES.is_file(), f"missing {ROUTE_SOURCES}")
-    return json.loads(ROUTE_SOURCES.read_text())
 
 
 def command_text(command: list[str]) -> str:
@@ -84,108 +78,69 @@ def entry(
     return row
 
 
-def build_commands(route_doc: dict) -> list[dict]:
+def build_commands() -> list[dict]:
     commands: list[dict] = []
 
-    # --- Functional (manifest-generated) ---
     commands.append(
         entry(
-            entry_id="functional-route-sources-check",
+            entry_id="queue-boundaries",
             category="functional",
-            source="P10r",
-            command=[
-                "python3",
-                "scripts/ci/functional_matrix_route_sources.py",
-                "--check",
-                "--self-test",
-            ],
-            notes="Manifest registry cardinality and exact-leaf self-test",
+            source="API-007",
+            command=["python3", "scripts/ci/check_queue_boundaries.py", "--controls"],
+            notes="Queue module boundary check and negative controls",
         )
     )
 
-    features = "memory,objectlog,postgres,turso"
     commands.append(
         entry(
-            entry_id="functional-matrix-dry-run-leaves",
+            entry_id="queue-lib-s3-turso",
             category="functional",
-            source="P10r",
+            source="API-007",
+            command=CARGO + ["test", "-p", "fireweed", "--all-features", "--lib"],
+            notes="queue_recovery_pipeline and queue::s3_turso tests; live S3 cases use FIREWEED_RUSTFS_BIN",
+            requires_fixtures=["FIREWEED_RUSTFS_BIN"],
+        )
+    )
+
+    commands.append(
+        entry(
+            entry_id="queue-postgres-simple",
+            category="functional",
+            source="API-007",
             command=CARGO
             + [
                 "test",
                 "-p",
                 "fireweed",
                 "--features",
-                features,
+                "postgres",
                 "--test",
-                "functional_matrix_route_sources",
-                "--",
-                "--nocapture",
+                "simple_queue_postgres",
             ],
-            notes="Exact dry-run leaves: 12 strict + 6 async + 6 invalid + AC-TXN + guards",
+            notes="Queue::postgres over the PostgreSQL control and store",
+            requires_fixtures=["FIREWEED_PG_TEST_URL"],
         )
     )
 
-    # Live reduced-count functional matrix (T0–T2). Item counts are fixture-scale,
-    # never authoritative performance. Assert ran=20 skipped=0 under live fixtures.
     commands.append(
         entry(
-            entry_id="functional-matrix-t0-t2-live-reduced-count",
-            category="reduced-count",
-            source="P10",
+            entry_id="queue-postgres-store",
+            category="functional",
+            source="API-007",
             command=CARGO
             + [
                 "test",
                 "-p",
-                "fireweed",
-                "--features",
-                features,
+                "fireweed-postgres",
                 "--test",
-                "storage_matrix_t0_t2",
-                "storage_matrix_t0_t2_all_twelve_cells",
-                "--",
-                "--exact",
-                "--nocapture",
-            ],
-            notes=(
-                "Live 12-cell T0–T2 reduced-count functional matrix; "
-                "require ran=20 skipped=0 with PG+S3 fixtures (fail-closed)"
-            ),
-            requires_fixtures=["FIREWEED_PG_TEST_URL", "FIREWEED_S3_TEST_ENDPOINT"],
-        )
-    )
-
-    # Registration leaf (always offline-safe).
-    commands.append(
-        entry(
-            entry_id="functional-matrix-registers-12-cells",
-            category="functional",
-            source="P10r",
-            command=CARGO
-            + [
-                "test",
-                "-p",
-                "fireweed",
-                "--features",
-                features,
+                "queue_contract",
                 "--test",
-                "storage_matrix_t0_t2",
-                "storage_matrix_registers_exactly_20_distinct_cells",
-                "--",
-                "--exact",
-                "--nocapture",
+                "queue_process_loss",
+                "--test",
+                "queue_server_crash",
             ],
-            notes="Offline registration: exactly 20 distinct cell IDs",
-        )
-    )
-
-    # Aggregate storage-matrix gate (functional list; non-REQUIRE_FULL local shape).
-    commands.append(
-        entry(
-            entry_id="storage-matrix-gate",
-            category="functional",
-            source="P10r+P12",
-            command=["bash", "scripts/ci/storage-matrix-gate.sh"],
-            notes="Route-source check, dry-run leaves, legacy product-name hygiene",
+            notes="PostgreSQL QueueStore contract, process-loss and server-crash targets",
+            requires_fixtures=["FIREWEED_PG_TEST_URL"],
         )
     )
 
@@ -203,8 +158,8 @@ def build_commands(route_doc: dict) -> list[dict]:
     return commands
 
 
-def build_allowlist(route_doc: dict) -> dict:
-    commands = build_commands(route_doc)
+def build_allowlist() -> dict:
+    commands = build_commands()
     require(len(commands) >= 5, "allowlist must contain the governed command set")
     return {
         "schema_version": SCHEMA_VERSION,
@@ -220,14 +175,11 @@ def build_allowlist(route_doc: dict) -> dict:
         "command_population_owner": "P13",
         "forbidden_in_lane": FORBIDDEN_IN_LANE,
         "notes": [
-            "P13 populates commands from functional-matrix-route-sources.json and the "
-            "reduced-count live T0–T2 matrix.",
+            "P13 populates commands from the Queue test targets and the queue boundary check.",
             "No authoritative performance, fireweed-bench, or scripts/perf entries.",
             "Regenerate with: python3 scripts/ci/generate-governed-product-allowlist.py --write",
         ],
         "plan_key": PLAN_KEY,
-        "route_sources_sha256_field": "authority_manifest_sha256",
-        "route_sources_authority_manifest_sha256": route_doc.get("authority_manifest_sha256"),
     }
 
 
@@ -246,8 +198,7 @@ def main() -> int:
     parser.add_argument("--emit", action="store_true", help="print allowlist JSON")
     args = parser.parse_args()
     try:
-        route_doc = load_route_sources()
-        allowlist = build_allowlist(route_doc)
+        allowlist = build_allowlist()
 
         if args.write:
             write_json(ALLOWLIST, allowlist)

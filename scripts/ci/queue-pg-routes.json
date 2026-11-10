@@ -294,17 +294,6 @@
       "kind": "test"
     },
     {
-      "debt_id": "7b9ca223abf3cf5e1475",
-      "path": "crates/fireweed/tests/objectlog_turso_postgres_control.rs",
-      "test": "postgres_ownership_with_native_s3_turso_persistence",
-      "package": "fireweed",
-      "target": [
-        "--test",
-        "objectlog_turso_postgres_control"
-      ],
-      "kind": "test"
-    },
-    {
       "debt_id": "46a488d48ec88eba952d",
       "path": "crates/fireweed/tests/simple_queue_postgres.rs",
       "test": "concrete_queue_runs_identical_contract_and_reopens_exact_receipt",
