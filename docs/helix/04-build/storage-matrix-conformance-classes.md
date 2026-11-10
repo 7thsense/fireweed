@@ -53,8 +53,7 @@ cell remains `LogStore × ProjectionStore` with append → apply → acknowledge
 ## 2. Conformance capability claims (by class)
 
 Shared harness: `crates/fireweed-conformance` (`core_suite!`, `log_replay_suite!`,
-`durable_reconnect_suite!` / `relational_reconnect_suite!`,
-`eventual_apply_suite!`). Adapters compose the macros that match their cell.
+`durable_reconnect_suite!`, `eventual_apply_suite!`). Adapters compose the macros that match their cell.
 
 ### 2.1 Claim vocabulary
 

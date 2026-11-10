@@ -10886,27 +10886,6 @@ impl AsOfProjectionStore for PostgresRelational {
     }
 }
 
-/// Retired legacy alias retained for source compatibility. `PostgresRelational` is projection-only; the
-/// selectable unified atomic implementation is [`PostgresRelationalBackend`].
-#[deprecated(
-    since = "0.19.5",
-    note = "use PostgresRelationalBackend; PostgresRelational is projection-only and must not be composed with itself"
-)]
-pub type ComposedPostgresRelationalBackend = PostgresRelationalBackend;
-
-/// The former same-value log/projection composition was not atomic and is no longer selectable.
-#[deprecated(
-    since = "0.19.5",
-    note = "use PostgresRelationalBackend::connect_in_schema for the unified atomic backend"
-)]
-#[allow(deprecated)]
-pub fn composed_postgres_relational_in_schema(
-    url: &str,
-    schema: &str,
-) -> EngineResult<ComposedPostgresRelationalBackend> {
-    PostgresRelationalBackend::connect_in_schema(url, schema)
-}
-
 #[cfg(test)]
 mod sql_shape_tests {
     //! No-DB assertions on the assembled SQL shapes (the live-DB behavioral suites are env-gated on
