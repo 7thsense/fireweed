@@ -1,6 +1,6 @@
 [workspace]
 # `cargo test --workspace` covers exactly the members below: domain, storage
-# adapters (memory/Turso/PostgreSQL/object-log), conformance, facade, server and tools.
+# adapters (memory/Turso/PostgreSQL/object-log), conformance, facade and tools.
 # Independently invoke the standalone `crates/fireweed-bench/Cargo.toml` workspace.
 # object-log comes from crates.io (0.4.0). Its tests live in that repository.
 # Live integrations require explicitly configured PostgreSQL, S3 and Kafka fixtures.
@@ -15,11 +15,8 @@ members = [
     "crates/fireweed-memory",
     "crates/fireweed-postgres",
     "crates/fireweed-objectlog",
-    "crates/fireweed-resp",
     "crates/fireweed",
-    "crates/fireweed-server",
     "crates/fireweed-release",
-    "crates/fireweed-loadgen",
     "crates/fireweed-sim-support",
     "crates/fireweed-workload",
 ]

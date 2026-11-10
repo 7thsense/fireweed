@@ -7,8 +7,7 @@
 //! append rows via [`append_row`]; the CI gate runs the `fireweed-verify-ledger` binary to strict-validate a
 //! ledger and assert that required evidence ids (E0–E3) are present.
 //!
-//! This is the hexagonal-era rebuild of the ledger schema + verifier that lived in the removed
-//! `fireweed-service` crate. The required fields match what `scripts/ci/release-gate.sh` validates.
+//! The required fields match what `scripts/ci/release-gate.sh` validates.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -695,9 +694,8 @@ impl LedgerRow {
 /// returned [`RunOwned`] rejects repository-owned and tracked-evidence targets before any write occurs.
 ///
 /// NOTE: this ledger-directory read is the ONE intentional library `std::env` access in the workspace. It
-/// is CI / test-evidence tooling (where validation suites drop their JSONL ledger rows), NOT server runtime
-/// configuration — so it is exempt from the "no env reads in library runtime code" rule. The runtime
-/// `Config` populator (`fireweed_server::Config::from_env`) is the only env→config path for the server itself.
+/// is CI / test-evidence tooling (where validation suites drop their JSONL ledger rows), NOT runtime
+/// configuration — so it is exempt from the "no env reads in library runtime code" rule.
 pub fn ledger_path(manifest_dir: &str, suite: &str) -> Result<RunOwned, EvidenceIoError> {
     static NEXT_LEDGER: AtomicU64 = AtomicU64::new(0);
 
@@ -1709,14 +1707,14 @@ pub mod e2 {
 
         LedgerRow {
             suite: "performance_multi_node_object_log_e2_kind".into(),
-            command: "scripts/perf/tp002-e2-kind.sh (fireweed-loadgen run -> emit-row; kind: CPU-limited server pods + lean in-cluster load Job)".into(),
+            command: "scripts/perf/tp002-e2-kind.sh (kind: CPU-limited owner pods + lean in-cluster load Job)".into(),
             backend_profile: crate::e2::RELEASE_BACKEND_PROFILE.into(),
             scale: tier.into(),
             seed: 0,
             environment: format!(
                 "live multi-node ADR-008 owner cluster on a kind (Kubernetes-in-docker) cluster; \
                  {cores} cores; node image {node_image}; owner counts 2/4/8; each owner an independent \
-                 fireweed-service Deployment(replicas=1)+Service on object_log_turso_projection in SEGMENTED \
+                 owner-process Deployment(replicas=1)+Service on object_log_turso_projection in SEGMENTED \
                  group-commit mode (TD-004) with its own object-log root + Turso projection on an emptyDir \
                  medium=Memory tmpfs, distinct FIREWEED_NODE_ID, disjoint FIREWEED_BOOTSTRAP_QUEUES, CPU \
                  request={req}/limit={lim}, {worker} worker threads; load driven by a LEAN, SEPARATED \
