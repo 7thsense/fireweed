@@ -2082,7 +2082,7 @@ mod tests {
         let value = FieldValue::Text(String::new());
         assert!(Predicate::Present.matches(Some(&value)));
         assert!(Predicate::Present.matches(Some(&FieldValue::Boolean(false))));
-        assert!(Predicate::Present.matches(Some(&FieldValue::Bytes(Vec::new().into()))));
+        assert!(Predicate::Present.matches(Some(&FieldValue::Bytes(Vec::new()))));
         assert!(!Predicate::Present.matches(None));
         assert!(Predicate::Absent.matches(None));
         assert!(!Predicate::Absent.matches(Some(&value)));
