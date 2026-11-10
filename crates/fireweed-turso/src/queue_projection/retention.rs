@@ -165,7 +165,13 @@ pub(super) async fn apply_retention(
         .await?
         {
             floor = floor.max(unsigned(&row[1])?);
-            for table in ["q7_bodies", "q7_fields", "q7_additional", "q7_indexes"] {
+            for table in [
+                "q7_bodies",
+                "q7_fields",
+                "q7_field_absent",
+                "q7_additional",
+                "q7_indexes",
+            ] {
                 connection
                     .execute(
                         &format!("DELETE FROM {table} WHERE record_id=?1"),

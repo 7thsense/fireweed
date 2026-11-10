@@ -190,10 +190,35 @@ fn probe_rows(
             Ok(())
         };
         match predicate {
-            Predicate::Present | Predicate::Absent => {
-                return Err(QueueError::Invalid(
-                    "presence predicates are not wired".into(),
-                ));
+            Predicate::Present => {
+                // Every present value's ordered key starts [1, 1]; this range
+                // covers the field's whole value space on either table.
+                let mut spans = identity;
+                spans[4] = Some(pool.span(&[1, 1])?);
+                spans[5] = Some(pool.span(&[1, 2])?);
+                rows.push(ProbeRow {
+                    n,
+                    field,
+                    kind: 1,
+                    lower_mode: 0,
+                    upper_mode: 0,
+                    spans,
+                });
+            }
+            Predicate::Absent => {
+                if field < 0 {
+                    return Err(QueueError::Invalid(
+                        "absence requires a declared field".into(),
+                    ));
+                }
+                rows.push(ProbeRow {
+                    n,
+                    field,
+                    kind: 2,
+                    lower_mode: 0,
+                    upper_mode: 0,
+                    spans: identity,
+                });
             }
             Predicate::Equal(value) => equality(value)?,
             Predicate::In(values) => {
@@ -276,6 +301,9 @@ fn indexed_field_intersection(
             branches.push(format!("SELECT f.record_id,p.n FROM probes p CROSS JOIN {table} f INDEXED BY {index} WHERE f.queue_id={queue_id} AND f.collection={collection} AND {identity} AND {predicate} AND {no} AND p.kind={kind}"));
         }
     }
+    // Absence probes read the declared-field absence rows, so they can join the
+    // same count-of-distinct-probes intersection as the value probes.
+    branches.push(format!("SELECT a.record_id,p.n FROM probes p CROSS JOIN q7_field_absent a INDEXED BY q7_field_absent_probe WHERE a.queue_id={queue_id} AND a.collection={collection} AND a.field=p.field AND p.field>=0 AND p.kind=2"));
     let byte_columns = [
         "name_hash",
         "name",

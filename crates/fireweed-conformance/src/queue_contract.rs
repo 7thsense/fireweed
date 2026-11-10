@@ -1286,14 +1286,14 @@ pub async fn presence_and_absence_predicates(store: &dyn QueueStore, queue: Queu
         work(
             "d",
             1,
-            0,
+            5,
             4,
             vec![
                 ("note", FieldValue::Text("y".into())),
                 ("count", FieldValue::Integer(5)),
             ],
         ),
-        work("e", 5, 0, 5, vec![]),
+        work("e", 5, 1, 5, vec![]),
     ];
     let mut ctx = PresenceContext {
         store,
@@ -1437,7 +1437,7 @@ pub async fn presence_and_absence_predicates(store: &dyn QueueStore, queue: Queu
         work(
             "e",
             5,
-            0,
+            1,
             5,
             vec![
                 ("note", FieldValue::Text("e".into())),
@@ -1446,7 +1446,7 @@ pub async fn presence_and_absence_predicates(store: &dyn QueueStore, queue: Queu
                 ("blob", FieldValue::Bytes(vec![])),
             ],
         ),
-        work("f", 4, 0, 6, vec![]),
+        work("f", 4, 2, 6, vec![]),
     ];
     store
         .insert(InsertRequest {
@@ -1503,7 +1503,7 @@ pub async fn presence_and_absence_predicates(store: &dyn QueueStore, queue: Queu
     for set in all_sets() {
         ctx.check_reads(&set).await;
     }
-    let reinserted = work("d", 1, 0, 4, vec![("count", FieldValue::Integer(1))]);
+    let reinserted = work("d", 1, 5, 4, vec![("count", FieldValue::Integer(1))]);
     store
         .insert(InsertRequest {
             queue: queue.clone(),
