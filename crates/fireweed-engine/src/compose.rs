@@ -1670,78 +1670,18 @@ pub fn request_expires_at(now: UtcTimestamp, retention_ms: u64) -> UtcTimestamp 
     .expect("valid ts")
 }
 
-/// Stable body fingerprint for request-id conflict detection (non-cryptographic hash over the serialized
-/// push specs — determinism + collision-safety, not cryptographic strength).
+/// Request-id conflict key for a push body: the leading eight bytes of its canonical SHA-256.
 pub fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
-    #[derive(serde::Serialize)]
-    struct CanonicalPushSpec<'a> {
-        client_item_key: Option<&'a ClientItemKey>,
-        priority: &'a Option<PriorityValue>,
-        not_before: &'a Option<UtcTimestamp>,
-        group_key: &'a Option<GroupKey>,
-        payload: &'a Option<Bytes>,
-        fields: &'a BTreeMap<String, Bytes>,
-        metadata: &'a Metadata,
-        cohort_size: &'a Option<u64>,
-        gate_keys: &'a Vec<String>,
-        entity: &'a Option<serde_json::Value>,
+    Ok(crate::PushFingerprint {
+        canonical_sha256: push_specs_fingerprint_sha256(items)?,
     }
-    let canonical: Vec<_> = items
-        .iter()
-        .map(|item| CanonicalPushSpec {
-            client_item_key: item.client_item_key.as_ref(),
-            priority: &item.priority,
-            not_before: &item.not_before,
-            group_key: &item.group_key,
-            payload: &item.payload,
-            fields: &item.fields,
-            metadata: &item.metadata,
-            cohort_size: &item.cohort_size,
-            gate_keys: &item.gate_keys,
-            entity: &item.entity,
-        })
-        .collect();
-    push_body_hash_canonical(&canonical)
+    .body_hash())
 }
 
-/// Compute both unchanged request fingerprints from one canonical serialization.
+/// The canonical push fingerprint for a caller's push specs.
 pub fn push_specs_fingerprint(items: &[PushSpec]) -> EngineResult<crate::PushFingerprint> {
-    #[derive(serde::Serialize)]
-    struct CanonicalPushSpec<'a> {
-        client_item_key: Option<&'a ClientItemKey>,
-        priority: &'a Option<PriorityValue>,
-        not_before: &'a Option<UtcTimestamp>,
-        group_key: &'a Option<GroupKey>,
-        payload: &'a Option<Bytes>,
-        fields: &'a BTreeMap<String, Bytes>,
-        metadata: &'a Metadata,
-        cohort_size: &'a Option<u64>,
-        gate_keys: &'a Vec<String>,
-        entity: &'a Option<serde_json::Value>,
-    }
-    let canonical: Vec<_> = items
-        .iter()
-        .map(|item| CanonicalPushSpec {
-            client_item_key: item.client_item_key.as_ref(),
-            priority: &item.priority,
-            not_before: &item.not_before,
-            group_key: &item.group_key,
-            payload: &item.payload,
-            fields: &item.fields,
-            metadata: &item.metadata,
-            cohort_size: &item.cohort_size,
-            gate_keys: &item.gate_keys,
-            entity: &item.entity,
-        })
-        .collect();
-    use sha2::{Digest, Sha256};
-    use std::hash::{Hash, Hasher};
-    let bytes = serde_json::to_vec(&canonical).map_err(|e| EngineError::Storage(e.to_string()))?;
-    let mut legacy = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut legacy);
     Ok(crate::PushFingerprint {
-        canonical_sha256: Sha256::digest(&bytes).into(),
-        legacy_body_hash: BodyHash(legacy.finish()),
+        canonical_sha256: push_specs_fingerprint_sha256(items)?,
     })
 }
 
@@ -1782,36 +1722,10 @@ pub fn push_specs_fingerprint_sha256(items: &[PushSpec]) -> EngineResult<[u8; 32
 /// `client_item_key == item_id` is normalized back to `None` so same-body retries with omitted keys replay
 /// after restart.
 pub(crate) fn push_item_body_hash(items: &[PushItem]) -> EngineResult<BodyHash> {
-    #[derive(serde::Serialize)]
-    struct CanonicalPushItem<'a> {
-        client_item_key: Option<&'a ClientItemKey>,
-        priority: &'a Option<PriorityValue>,
-        not_before: &'a Option<UtcTimestamp>,
-        group_key: &'a Option<GroupKey>,
-        payload: &'a Option<Bytes>,
-        fields: &'a BTreeMap<String, Bytes>,
-        metadata: &'a Metadata,
-        cohort_size: &'a Option<u64>,
-        gate_keys: &'a Vec<String>,
-        entity: &'a Option<serde_json::Value>,
+    Ok(crate::PushFingerprint {
+        canonical_sha256: push_items_fingerprint_sha256(items)?,
     }
-    let canonical: Vec<_> = items
-        .iter()
-        .map(|item| CanonicalPushItem {
-            client_item_key: (item.client_item_key.as_str() != item.item_id.to_string())
-                .then_some(&item.client_item_key),
-            priority: &item.priority,
-            not_before: &item.not_before,
-            group_key: &item.group_key,
-            payload: &item.payload,
-            fields: &item.fields,
-            metadata: &item.metadata,
-            cohort_size: &item.cohort_size,
-            gate_keys: &item.gate_keys,
-            entity: &item.entity_document,
-        })
-        .collect();
-    push_body_hash_canonical(&canonical)
+    .body_hash())
 }
 
 pub fn push_items_fingerprint_sha256(items: &[PushItem]) -> EngineResult<[u8; 32]> {
@@ -1851,14 +1765,6 @@ fn push_body_sha256_canonical<T: serde::Serialize>(items: &[T]) -> EngineResult<
     use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(items).map_err(|e| EngineError::Storage(e.to_string()))?;
     Ok(Sha256::digest(bytes).into())
-}
-
-fn push_body_hash_canonical<T: serde::Serialize>(items: &[T]) -> EngineResult<BodyHash> {
-    use std::hash::{Hash, Hasher};
-    let bytes = serde_json::to_vec(items).map_err(|e| EngineError::Storage(e.to_string()))?;
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut h);
-    Ok(BodyHash(h.finish()))
 }
 
 /// Body fingerprint for API-001 `BatchClaim` (`request_id` excluded).
@@ -2497,7 +2403,7 @@ mod paired_push_fingerprint_tests {
             );
             for items in [vec![], vec![PushSpec::default()], vec![item]] {
                 let paired = push_specs_fingerprint(&items).unwrap();
-                assert_eq!(paired.legacy_body_hash, push_body_hash(&items).unwrap());
+                assert_eq!(paired.body_hash(), push_body_hash(&items).unwrap());
                 assert_eq!(
                     paired.canonical_sha256,
                     push_specs_fingerprint_sha256(&items).unwrap()

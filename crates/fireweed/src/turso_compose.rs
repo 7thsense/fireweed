@@ -420,8 +420,8 @@ mod generation_identity_tests {
     use std::collections::BTreeMap;
 
     use fireweed_core::{
-        BodyHash, ClientItemKey, CompoundIndexDef, CompoundIndexField, IndexDeclaration, IndexType,
-        QueueId, QueueIndex, RequestId, TenantId, TypedValue, UtcTimestamp,
+        ClientItemKey, CompoundIndexDef, CompoundIndexField, IndexDeclaration, IndexType, QueueId,
+        QueueIndex, RequestId, TenantId, TypedValue, UtcTimestamp,
     };
     use fireweed_engine::{
         AsyncPushRequest, MutationGenerationMemberOutcome, PushFingerprint, PushSpec,
@@ -497,7 +497,6 @@ mod generation_identity_tests {
             },
             fingerprint: Some(PushFingerprint {
                 canonical_sha256: [index; 32],
-                legacy_body_hash: BodyHash(u64::from(index)),
             }),
         }
     }
@@ -1126,7 +1125,6 @@ mod contention_mapping_tests {
         let work = MutationGenerationWork::Push {
             fingerprint: Some(PushFingerprint {
                 canonical_sha256: [1; 32],
-                legacy_body_hash: fireweed_core::BodyHash(1),
             }),
             request,
         };
@@ -3996,7 +3994,6 @@ impl DerivedObjectLogTursoBackend {
         if let (Some(request_id), items) = (request.request_id.clone(), &request.items) {
             let fingerprint = PushFingerprint {
                 canonical_sha256: fireweed_engine::push_specs_fingerprint_sha256(items)?,
-                legacy_body_hash: fireweed_engine::push_body_hash(items)?,
             };
             self.wait_request_entry_coverage(&request.shard).await?;
             let _permit = self.outcome_slots.acquire().await.map_err(map_coord)?;
@@ -4015,8 +4012,6 @@ impl DerivedObjectLogTursoBackend {
         let fingerprint = request.request_id.as_ref().map(|_| PushFingerprint {
             canonical_sha256: fireweed_engine::push_specs_fingerprint_sha256(&request.items)
                 .unwrap_or([0; 32]),
-            legacy_body_hash: fireweed_engine::push_body_hash(&request.items)
-                .unwrap_or(fireweed_core::BodyHash(0)),
         });
         let replay = request.request_id.clone().map(|id| {
             (
@@ -4419,7 +4414,7 @@ impl DerivedObjectLogTursoBackend {
                         ) {
                             snapshot
                                 .request_fingerprints
-                                .insert(id.clone(), fingerprint.legacy_body_hash);
+                                .insert(id.clone(), fingerprint.body_hash());
                         }
                     }
                 }
@@ -4544,7 +4539,7 @@ impl DerivedObjectLogTursoBackend {
             let envelope = CommandEnvelope {
                 command_id: self.ids.next_command_id(),
                 request_id: request.request_id.clone(),
-                request_fingerprint: fingerprint.map(|hash| hash.legacy_body_hash.0),
+                request_fingerprint: fingerprint.map(|hash| hash.body_hash().0),
                 request_outcome: request.request_id.as_ref().map(|_| RequestOutcome::Push {
                     item_ids: item_ids.clone(),
                 }),

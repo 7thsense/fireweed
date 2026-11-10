@@ -134,7 +134,18 @@ pub struct AsyncPushRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushFingerprint {
     pub canonical_sha256: [u8; 32],
-    pub legacy_body_hash: BodyHash,
+}
+
+impl PushFingerprint {
+    /// The request-id conflict key and envelope fingerprint: the leading eight bytes of
+    /// `canonical_sha256`, big-endian.
+    pub fn body_hash(&self) -> BodyHash {
+        BodyHash(u64::from_be_bytes(
+            self.canonical_sha256[..8]
+                .try_into()
+                .expect("SHA-256 prefix is eight bytes"),
+        ))
+    }
 }
 
 /// Planner result for a push. Constructors keep the representation typed and engine-validated.
@@ -690,7 +701,7 @@ impl<'a> MutationGenerationOverlay<'a> {
         }
         if let (Some(request_id), Some(fingerprint)) = (request.request_id.clone(), fingerprint) {
             self.request_fingerprints
-                .insert(request_id, fingerprint.legacy_body_hash);
+                .insert(request_id, fingerprint.body_hash());
         }
         MutationGenerationMemberOutcome::PushAccepted
     }
@@ -1562,21 +1573,6 @@ async fn planned_push<U: AsyncPushPlanner>(
     mut request: AsyncPushRequest,
 ) -> Result<PreparedPush, PushExecutionError> {
     let queue = request.shard.clone();
-    // Only legacy noncanonical gate bodies need a separate serialization.
-    // The ordinary empty/already-sorted gate path needs no original JSON copy.
-    let legacy_body_hash = if request.request_id.is_some()
-        && request
-            .items
-            .iter()
-            .any(|item| item.gate_keys.windows(2).any(|pair| pair[0] >= pair[1]))
-    {
-        Some(
-            crate::compose::push_body_hash(&request.items)
-                .map_err(PushExecutionError::BeforeCommit)?,
-        )
-    } else {
-        None
-    };
     canonicalize_push_gate_keys(&mut request.items);
     let definition = planner
         .queue_definition(queue.clone())
@@ -1587,16 +1583,7 @@ async fn planned_push<U: AsyncPushPlanner>(
     let fingerprint = request
         .request_id
         .as_ref()
-        .map(|_| {
-            if let Some(legacy_body_hash) = legacy_body_hash {
-                Ok(PushFingerprint {
-                    canonical_sha256: crate::push_specs_fingerprint_sha256(&request.items)?,
-                    legacy_body_hash,
-                })
-            } else {
-                crate::compose::push_specs_fingerprint(&request.items)
-            }
-        })
+        .map(|_| crate::compose::push_specs_fingerprint(&request.items))
         .transpose()
         .map_err(PushExecutionError::BeforeCommit)?;
     let plan = planner
@@ -1809,7 +1796,7 @@ fn validate_push_plan(
         || envelope.checksum != CommandChecksum(0)
         || envelope.created_at != requested.now
         || envelope.request_id != requested.request_id
-        || envelope.request_fingerprint != fingerprint.map(|hash| hash.legacy_body_hash.0)
+        || envelope.request_fingerprint != fingerprint.map(|hash| hash.body_hash().0)
         || envelope.request_outcome
             != requested.request_id.as_ref().map(|_| RequestOutcome::Push {
                 item_ids: item_ids.to_vec(),
@@ -3569,15 +3556,13 @@ mod tests {
                 let envelope = CommandEnvelope {
                     command_id: CommandId::new("push-command"),
                     request_id: request.request_id.clone(),
-                    request_fingerprint: fingerprint.map(|hash| hash.legacy_body_hash.0).map(
-                        |hash| {
-                            if matches!(mode, PushPlanMode::WrongFingerprint) {
-                                hash ^ 1
-                            } else {
-                                hash
-                            }
-                        },
-                    ),
+                    request_fingerprint: fingerprint.map(|hash| hash.body_hash().0).map(|hash| {
+                        if matches!(mode, PushPlanMode::WrongFingerprint) {
+                            hash ^ 1
+                        } else {
+                            hash
+                        }
+                    }),
                     request_outcome: request.request_id.as_ref().map(|_| RequestOutcome::Push {
                         item_ids: ids.clone(),
                     }),
@@ -5323,7 +5308,6 @@ mod tests {
         MutationGenerationWork::Push {
             fingerprint: Some(PushFingerprint {
                 canonical_sha256: [index; 32],
-                legacy_body_hash: BodyHash(index as u64),
             }),
             request,
         }

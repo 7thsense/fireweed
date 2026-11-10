@@ -9833,17 +9833,7 @@ impl PostgresRelational {
         ) {
             Ok(Some(ids)) => Ok(IdempotencyDecision::Replay(ids)),
             Ok(None) => Ok(IdempotencyDecision::Proceed),
-            Err(EngineError::RequestIdConflict) => match check_request_idempotency(
-                &mut tx,
-                shard,
-                IDEMPOTENCY_OPERATION_PUSH,
-                request_id,
-                &fingerprint.legacy_body_hash.0.to_be_bytes(),
-                ts_nanos(now),
-            ) {
-                Ok(Some(ids)) => Ok(IdempotencyDecision::Replay(ids)),
-                _ => Ok(IdempotencyDecision::Conflict),
-            },
+            Err(EngineError::RequestIdConflict) => Ok(IdempotencyDecision::Conflict),
             Err(error) => Err(error),
         };
         st(tx.commit())?;

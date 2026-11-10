@@ -2,11 +2,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fireweed_core::{
-    BodyHash, ClientItemKey, CohortId, CohortOnIncomplete, CohortPolicy, EligibilityPolicy,
-    GateKeyPolicy, GroupKey, IndexDeclaration, IndexDef, IndexType, ItemId, LeaseToken, Metadata,
-    MetadataValue, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, QueueIndex, RecurrencePolicy,
-    RequestId, RetryPolicy, TenantId, UtcTimestamp,
+    ClientItemKey, CohortId, CohortOnIncomplete, CohortPolicy, EligibilityPolicy, GateKeyPolicy,
+    GroupKey, IndexDeclaration, IndexDef, IndexType, ItemId, LeaseToken, Metadata, MetadataValue,
+    OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
+    PriorityValue, QueueDefinition, QueueId, QueueIndex, RecurrencePolicy, RequestId, RetryPolicy,
+    TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
     AsyncProjectionStore, ClaimCommand, ClaimCompatibility, CohortClaimCommand,
@@ -85,7 +85,6 @@ async fn push_preappend_and_durable_idempotency_are_native_async() {
                     "one@example.com",
                 )])
                 .unwrap(),
-                legacy_body_hash: BodyHash(42),
             },
             timestamp(2),
         )
@@ -100,7 +99,6 @@ async fn push_preappend_and_durable_idempotency_are_native_async() {
             request_id,
             PushFingerprint {
                 canonical_sha256: [43; 32],
-                legacy_body_hash: BodyHash(43),
             },
             timestamp(2),
         )
