@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   functional:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A cold build took about 10 minutes before the S3 and PostgreSQL product
     # tests ran for real; 40 leaves headroom for them and the fixture setup.
     timeout-minutes: 40
@@ -74,7 +74,9 @@ jobs:
           FIREWEED_S3_SECRET_DIR: ${{ runner.temp }}/fireweed-nightly-s3-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           bash scripts/ci/s3-qualification-endpoint.sh teardown
-          /usr/lib/postgresql/16/bin/pg_ctl -D "${RUNNER_TEMP}/fireweed-nightly-pg/data" -m immediate -w -t 30 stop || true
+          if [ -d "${RUNNER_TEMP}/fireweed-nightly-pg/data" ]; then
+            /usr/lib/postgresql/16/bin/pg_ctl -D "${RUNNER_TEMP}/fireweed-nightly-pg/data" -m immediate -w -t 30 stop
+          fi
 
   # The large-scale tier: Rust `::large::` lib tests and scripts/formal
   # large_test_*.py. Not run by ci.yml; nothing in the release gates waits on it.
