@@ -67,7 +67,7 @@ fi
 grep -Fq 'pull_request:' "${turso}"
 grep -Fq 'paths:' "${turso}"
 grep -Fq '1.99.0' "${turso}"
-grep -Fq 'storage_matrix_t0_t2_all_twelve_cells' "${turso}"
+grep -Fq 'simple_queue_postgres' "${turso}"
 # Zero-argument policy-verifier invocation (exact regression for P13t).
 grep -Fq 'bash scripts/ci/verify-github-actions-policy.sh' "${turso}"
 # Only the exact PostgreSQL service and owned, CAS-preflighted S3 fixture are
