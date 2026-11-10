@@ -105,8 +105,8 @@ pub use credential::{
 };
 #[allow(deprecated)]
 pub use relational::{
-    ComposedPostgresRelationalBackend, MetricsMigrationProgress, PostgresRelational,
-    PostgresRelationalBackend, composed_postgres_relational_in_schema,
+    ComposedPostgresRelationalBackend, PostgresRelational, PostgresRelationalBackend,
+    composed_postgres_relational_in_schema,
 };
 pub use runtime_safe::{DEFAULT_RUNTIME_SAFE_IN_FLIGHT, ProductBackend, RuntimeSafeBackend};
 

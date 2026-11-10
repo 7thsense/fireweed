@@ -539,33 +539,33 @@
       ],
       "lines": [
         239,
-        273,
-        281,
-        324,
-        331,
+        274,
+        282,
+        326,
         333,
-        334,
-        343,
-        348,
-        349,
-        395,
-        397,
-        416,
-        425,
-        426,
-        431,
-        444,
-        445,
-        446,
+        335,
+        336,
+        345,
+        350,
+        351,
+        398,
+        400,
+        419,
+        428,
+        429,
+        434,
         447,
-        477,
-        478,
-        479,
+        448,
+        449,
+        450,
+        480,
         481,
         482,
-        486,
-        491,
-        500
+        484,
+        485,
+        489,
+        494,
+        503
       ],
       "path": "crates/fireweed-conformance/src/queue_benchmark.rs",
       "symbol": "run"
@@ -575,14 +575,14 @@
         "evidence"
       ],
       "lines": [
-        2174,
-        2175,
-        2178,
+        2179,
         2180,
-        2190,
-        2191,
-        2192,
-        2193
+        2183,
+        2185,
+        2195,
+        2196,
+        2197,
+        2198
       ],
       "path": "crates/fireweed-engine/src/queue_administration/stream.rs",
       "symbol": "sink_receives_rejected_authority_after_overlap_and_detects_late_contradiction"
@@ -592,9 +592,359 @@
         "evidence"
       ],
       "lines": [
-        295,
-        299,
-        300
+        226,
+        227,
+        232,
+        233,
+        254,
+        257,
+        258,
+        298,
+        301,
+        308
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/fields/tests.rs",
+      "symbol": "selective_hydration_keeps_original_cut_and_drops_provisional_values"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        65,
+        66,
+        67,
+        68,
+        69,
+        73,
+        74,
+        78,
+        80
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_bodies_preserve_positions_aliases_empty_and_frame_ownership"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        131,
+        132,
+        140,
+        144
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_rejects_other_key_equal_bytes_valid_subspan_state_and_receipt"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        151,
+        156,
+        160,
+        170,
+        175,
+        177,
+        196
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_rejects_foreign_cut_job_offset_and_definition"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        223,
+        224,
+        225
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_rejects_independently_valid_same_job_mixed_cuts"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        270,
+        271,
+        279,
+        284,
+        297,
+        306,
+        307
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_preserve_accepts_old_replacement_with_current_newer_metadata"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        353
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_rejects_old_incarnation_and_future_command_version"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        410,
+        414,
+        418
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_second_alias_cannot_replace_complete_fact"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        357,
+        362,
+        363,
+        364,
+        365,
+        369
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/administrative.rs",
+      "symbol": "claim_and_release_owner_evidence_precedes_rejectable_predicate"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        59,
+        61,
+        62,
+        63,
+        73,
+        74,
+        75,
+        78,
+        79,
+        81,
+        83
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "source_state_values_preserve_aliases_empty_and_actual_frame_ownership"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        96,
+        103,
+        118,
+        136
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "source_state_values_reject_equal_bytes_old_version_and_literal_aliases"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        184,
+        188,
+        196,
+        200,
+        210,
+        213,
+        221,
+        223
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "source_state_values_reject_subspans_work_domains_and_foreign_authority"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        251,
+        252,
+        256,
+        260
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "source_state_values_mixed_equal_numbered_same_job_cuts_are_foreign"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        298,
+        303,
+        307,
+        312,
+        322
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "source_state_values_validate_second_alias_and_reject_zero_offset_at_entry"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        60,
+        61,
+        62,
+        63,
+        68,
+        73,
+        78,
+        89,
+        102,
+        119
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/key/membership/tests.rs",
+      "symbol": "live_key_memberships_preserve_full_domain_and_refuse_blank_or_foreign_evidence"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        75,
+        78
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original/batch.rs",
+      "symbol": "verify_source_originals"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        119,
+        127,
+        133,
+        137,
+        147,
+        149
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "source_original_retains_literal_domain_and_checked_historical_receipt_async"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        178,
+        221,
+        225
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_outcome_cannot_substitute_another_equal_receipt_or_valid_subspan_async"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        245,
+        252,
+        266,
+        278
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_scope_pin_offset_and_constructor_negatives_are_not_conflicts_async"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        390,
+        393,
+        395,
+        396
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_lookup_keeps_one_opaque_cut_for_presence_absence_and_advanced_epochs"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        516,
+        522,
+        531,
+        545
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_insert_and_claim_receipts_preserve_domain_and_literal_whitespace"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        670,
+        719,
+        721
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_claim_requires_command_to_lease_binding_after_valid_span_digest_and_decode"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        205,
+        208,
+        212,
+        214,
+        216
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/scope.rs",
+      "symbol": "equal_numeric_heads_and_prefix_keys_cannot_substitute_for_source_evidence"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        194,
+        198,
+        199,
+        200,
+        215,
+        218,
+        219,
+        220,
+        221,
+        225,
+        229
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/selection/producer/tests/keys.rs",
+      "symbol": "foreign_cut_absence_and_decisive_empty_cannot_hide_unresolved_points"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        319,
+        323,
+        324
       ],
       "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
       "symbol": "streaming_combined_decisions_match_unique_effect_oracle"
@@ -604,11 +954,11 @@
         "evidence"
       ],
       "lines": [
-        327,
-        348,
-        369,
-        379,
-        380
+        351,
+        372,
+        393,
+        403,
+        404
       ],
       "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
       "symbol": "administrative_collision_is_distinct_and_late_corruption_poisoned"
@@ -618,10 +968,10 @@
         "evidence"
       ],
       "lines": [
-        408,
-        410,
-        417,
-        419
+        432,
+        434,
+        441,
+        443
       ],
       "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
       "symbol": "repeated_large_exact_tuple_retains_constant_owner_admission"
@@ -631,14 +981,59 @@
         "evidence"
       ],
       "lines": [
-        427,
-        431,
-        441,
-        443,
-        453,
-        455,
-        468,
-        469
+        502,
+        503,
+        504
+      ],
+      "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
+      "symbol": "final_owner_callback_preserves_observation_release_reclaim_and_order"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        539,
+        540,
+        541,
+        544,
+        554,
+        559
+      ],
+      "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
+      "symbol": "collisions_and_poison_never_call_final_owner_callback"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        581,
+        585,
+        587,
+        588,
+        598,
+        601,
+        607,
+        613,
+        615
+      ],
+      "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
+      "symbol": "final_owner_callback_retains_credit_through_success_error_and_unwind"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        624,
+        628,
+        638,
+        640,
+        650,
+        652,
+        665,
+        666
       ],
       "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
       "symbol": "missing_authority_wrong_tuple_release_and_capacity_fail_closed"
@@ -677,28 +1072,175 @@
         "evidence"
       ],
       "lines": [
-        1358,
-        1366,
-        1367,
-        1368,
-        1369,
+        127,
+        149,
+        159,
+        163,
+        169,
+        177,
+        187,
+        195,
+        205,
+        225,
+        229,
+        230,
+        238,
+        244,
+        261,
+        262,
+        268,
+        276,
+        277,
+        283,
+        284,
+        292,
+        305,
+        306,
+        312,
+        313,
+        314,
+        322,
+        329
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests.rs",
+      "symbol": "source_pages_contract"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        861,
+        867,
+        875,
+        877,
+        884,
+        890,
+        892,
+        895,
+        908,
+        932,
+        933,
+        943,
+        948,
+        970,
+        977,
+        982,
+        1000,
+        1001,
+        1013,
+        1029
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests.rs",
+      "symbol": "compiled_genesis_contract"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        1632,
+        1636,
+        1650,
+        1655,
+        1656,
+        1663,
+        1682,
+        1685,
+        1686,
+        1699,
+        1700,
+        1711,
+        1712,
+        1718,
+        1723,
+        1728,
+        1730,
+        1734,
+        1736,
+        1744
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests.rs",
+      "symbol": "captured_source_preserves_fence_and_rejects_equal_head_foreign_evidence"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        707,
+        728,
+        730,
+        736,
+        737,
+        743,
+        744,
+        747,
+        749,
+        755,
+        761,
+        765,
+        769,
+        778,
+        785,
+        787,
+        803,
+        810,
+        814,
+        818,
+        826,
+        830
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests/original.rs",
+      "symbol": "drop"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        1076,
+        1094,
+        1118,
+        1124,
+        1127,
+        1144,
+        1147,
+        1163,
+        1166,
+        1175,
+        1179
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests/original.rs",
+      "symbol": "original_adapter_rejects_authenticated_valid_subspan_after_hydration_then_retries_same_ledger"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        1364,
+        1372,
+        1373,
+        1374,
         1375,
-        1379,
-        1380,
         1381,
         1385,
         1386,
-        1389,
-        1397,
-        1432,
-        1433,
-        1434,
-        1435,
-        1436,
-        1437,
+        1387,
+        1391,
+        1392,
+        1395,
+        1403,
         1438,
-        1454,
-        1456
+        1439,
+        1440,
+        1441,
+        1442,
+        1443,
+        1444,
+        1460,
+        1462
       ],
       "path": "crates/fireweed-postgres/src/queue_store/administration.rs",
       "symbol": "drop"
@@ -708,7 +1250,7 @@
         "evidence"
       ],
       "lines": [
-        5619
+        5398
       ],
       "path": "crates/fireweed-postgres/src/relational.rs",
       "symbol": "set_emission_cursor"
@@ -748,10 +1290,10 @@
         "evidence"
       ],
       "lines": [
-        183,
-        209,
-        213,
-        228
+        189,
+        215,
+        219,
+        234
       ],
       "path": "crates/fireweed-postgres/tests/queue_server_crash.rs",
       "symbol": "acknowledged_atomic_group_survives_postgresql_crash_recovery"
@@ -761,15 +1303,15 @@
         "evidence"
       ],
       "lines": [
-        7231,
-        7242,
-        7252,
-        7260,
-        7265,
-        7275,
-        7283,
-        7288,
-        7298
+        7594,
+        7605,
+        7615,
+        7623,
+        7628,
+        7638,
+        7646,
+        7651,
+        7661
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "td008_observed_terminal_reap_frontier_run"
@@ -779,11 +1321,11 @@
         "evidence"
       ],
       "lines": [
-        7317,
-        7323,
-        7333,
-        7338,
-        7348
+        7680,
+        7686,
+        7696,
+        7701,
+        7711
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "td008_observed_terminal_reap_no_premature_deletion"
@@ -793,11 +1335,11 @@
         "evidence"
       ],
       "lines": [
-        7363,
-        7369,
-        7379,
-        7383,
-        7388
+        7726,
+        7732,
+        7742,
+        7746,
+        7751
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "td008_observed_retention_only_reap_run"
@@ -807,12 +1349,12 @@
         "evidence"
       ],
       "lines": [
-        7403,
-        7407,
-        7414,
-        7423,
-        7433,
-        7437
+        7766,
+        7770,
+        7777,
+        7786,
+        7796,
+        7800
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "td008_observed_retention_only_ignores_emission_cursor"
@@ -822,16 +1364,16 @@
         "evidence"
       ],
       "lines": [
-        7503,
-        7504,
-        7505,
-        7506,
-        7507,
-        7508,
-        7512,
-        7513,
-        7522,
-        7523
+        7866,
+        7867,
+        7868,
+        7869,
+        7870,
+        7871,
+        7875,
+        7876,
+        7885,
+        7886
       ],
       "path": "crates/fireweed-projection/src/lib.rs",
       "symbol": "projection_image_roundtrips_full_projection_state"
@@ -841,27 +1383,27 @@
         "evidence"
       ],
       "lines": [
-        954,
-        973,
-        974,
-        975,
-        977,
-        978,
+        960,
+        979,
         980,
         981,
-        985,
+        983,
+        984,
         986,
-        1001,
-        1002,
-        1003,
-        1004,
-        1005,
-        1006,
-        1013,
-        1038,
-        1039,
-        1043,
-        1044
+        987,
+        991,
+        992,
+        1007,
+        1008,
+        1009,
+        1010,
+        1011,
+        1012,
+        1019,
+        1044,
+        1045,
+        1049,
+        1050
       ],
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "command_capture_limits_are_exact_and_overflow_continues_all_evidence"
@@ -871,18 +1413,18 @@
         "evidence"
       ],
       "lines": [
-        1065,
-        1070,
         1071,
-        1072,
-        1073,
+        1076,
         1077,
         1078,
         1079,
-        1082,
-        1087,
-        1089,
-        1090
+        1083,
+        1084,
+        1085,
+        1088,
+        1093,
+        1095,
+        1096
       ],
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "physical_command_sink_drains_5001_changes_and_replays_exact_metadata"
@@ -892,15 +1434,15 @@
         "evidence"
       ],
       "lines": [
-        1108,
-        1109,
-        1112,
-        1123,
-        1124,
-        1125,
-        1126,
+        1114,
+        1115,
+        1118,
+        1129,
         1130,
-        1131
+        1131,
+        1132,
+        1136,
+        1137
       ],
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "unchanged_one_mib_composite_dependency_and_body_are_absent_from_command"
@@ -910,12 +1452,12 @@
         "evidence"
       ],
       "lines": [
-        1150,
-        1151,
-        1152,
         1156,
+        1157,
         1158,
-        1159
+        1162,
+        1164,
+        1165
       ],
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "partial_command_append_after_evidence_permanently_invalidates_both_streams"
@@ -925,15 +1467,15 @@
         "evidence"
       ],
       "lines": [
-        1181,
-        1182,
-        1185,
+        1187,
         1188,
-        1192,
-        1207,
-        1208,
-        1212,
-        1213
+        1191,
+        1194,
+        1198,
+        1213,
+        1214,
+        1218,
+        1219
       ],
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "foreign_scan_job_summary_and_context_poison_the_operation"
@@ -943,11 +1485,11 @@
         "evidence"
       ],
       "lines": [
-        1295,
-        1296,
-        1297,
-        1300,
-        1301
+        1301,
+        1302,
+        1303,
+        1306,
+        1307
       ],
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "malformed_identity_envelope_fragment_and_late_file_damage_fail_closed"
@@ -957,14 +1499,14 @@
         "evidence"
       ],
       "lines": [
-        1321,
-        1326,
         1327,
-        1328,
-        1330,
+        1332,
+        1333,
         1334,
-        1337,
-        1338
+        1336,
+        1340,
+        1343,
+        1344
       ],
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "rejected_row_observations_override_provisional_sibling_collision"
@@ -974,10 +1516,10 @@
         "evidence"
       ],
       "lines": [
-        1371,
-        1374,
+        1377,
         1380,
-        1381
+        1386,
+        1387
       ],
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "valid_foreign_file_images_cannot_cross_operation_integrity_binding"
@@ -987,12 +1529,12 @@
         "evidence"
       ],
       "lines": [
-        1508,
-        1509,
-        1511,
-        1512,
-        1521,
-        1522
+        1514,
+        1515,
+        1517,
+        1518,
+        1527,
+        1528
       ],
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "legitimate_empty_and_noop_scans_seal_without_packets"
@@ -1977,7 +2519,8 @@
       "lines": [
         293,
         297,
-        304
+        303,
+        310
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "TestE3ReleaseGatesPassFmtClippyAndOperatorChecks"
@@ -1988,7 +2531,7 @@
         "release"
       ],
       "lines": [
-        325
+        331
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "production_generator_builds_and_semantically_verifies_the_full_matrix"
@@ -1999,8 +2542,8 @@
         "release"
       ],
       "lines": [
-        349,
-        350
+        355,
+        356
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_marker_only_recovery_and_recorder_controls"
@@ -2011,8 +2554,8 @@
         "release"
       ],
       "lines": [
-        363,
-        369
+        369,
+        375
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_recovery_without_canonical_order_or_production_checksum_proof"
@@ -2023,9 +2566,9 @@
         "release"
       ],
       "lines": [
-        381,
-        391,
-        398
+        387,
+        397,
+        404
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_missing_tampered_or_zero_recovery_load_batch_measurements"
@@ -2036,7 +2579,7 @@
         "release"
       ],
       "lines": [
-        408
+        414
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_zero_sqlite_command_count_without_panicking"
@@ -2047,7 +2590,7 @@
         "release"
       ],
       "lines": [
-        422
+        428
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_true_recorder_marker_without_matching_complete_state_fingerprints"
@@ -2058,9 +2601,9 @@
         "release"
       ],
       "lines": [
-        458,
-        472,
-        482
+        464,
+        478,
+        488
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_missing_or_invalid_interleaved_recorder_measurement"
@@ -2071,8 +2614,8 @@
         "release"
       ],
       "lines": [
-        495,
-        505
+        501,
+        511
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_lockstepped_or_forged_recorder_control_distribution"
@@ -2083,7 +2626,7 @@
         "release"
       ],
       "lines": [
-        522
+        528
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_profile_incorrect_canonical_recovery_command_count"
@@ -2094,7 +2637,7 @@
         "release"
       ],
       "lines": [
-        539
+        545
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_inexact_recovery_command_range_even_with_matching_state_digest"
@@ -2105,8 +2648,8 @@
         "release"
       ],
       "lines": [
-        579,
-        580
+        585,
+        586
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_unbounded_cardinality_dependent_work_and_inexact_recovery_state"
@@ -2117,7 +2660,7 @@
         "release"
       ],
       "lines": [
-        592
+        598
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_missing_profile"
@@ -2128,8 +2671,8 @@
         "release"
       ],
       "lines": [
-        632,
-        646
+        638,
+        652
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_missing_or_non_pass_ac"
@@ -2140,8 +2683,8 @@
         "release"
       ],
       "lines": [
-        674,
-        675
+        680,
+        681
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_source_revision_mismatch"
@@ -2152,7 +2695,7 @@
         "release"
       ],
       "lines": [
-        686
+        692
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_wrong_expected_revision"
@@ -2163,9 +2706,9 @@
         "release"
       ],
       "lines": [
-        701,
-        702,
-        712
+        707,
+        708,
+        718
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_non_governed_backend_suite_and_ac7_binding"
@@ -2176,7 +2719,7 @@
         "release"
       ],
       "lines": [
-        729
+        735
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_extra_tp002_evidence_id"
@@ -2187,7 +2730,7 @@
         "release"
       ],
       "lines": [
-        742
+        748
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_non_governed_e3_producer"
@@ -2198,9 +2741,9 @@
         "release"
       ],
       "lines": [
-        759,
-        769,
-        770
+        765,
+        775,
+        776
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_undeclared_topology_or_authority_mode_mismatched_to_manifest"
@@ -2211,8 +2754,8 @@
         "release"
       ],
       "lines": [
-        781,
-        791
+        787,
+        797
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_missing_or_false_portable_gate_markers_and_quiet_host_text"
@@ -2223,7 +2766,7 @@
         "release"
       ],
       "lines": [
-        808
+        814
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_host_speed_pass_bar_even_when_portable_markers_are_forged_true"
@@ -2234,7 +2777,7 @@
         "release"
       ],
       "lines": [
-        843
+        849
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_force_sealed_path_labeled_window_timed"
@@ -2245,11 +2788,11 @@
         "release"
       ],
       "lines": [
-        890,
-        891,
-        892,
-        893,
-        909
+        896,
+        897,
+        898,
+        899,
+        915
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "native_fence_builder_derives_pass_from_executed_outcomes"
@@ -2260,13 +2803,13 @@
         "release"
       ],
       "lines": [
-        926,
-        927,
-        931,
         932,
         933,
         937,
-        957
+        938,
+        939,
+        943,
+        963
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "transaction_builder_requires_executed_exact_revision_profile_bound_and_ac"
@@ -2277,9 +2820,9 @@
         "release"
       ],
       "lines": [
-        972,
-        976,
-        977
+        978,
+        982,
+        983
       ],
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "rejects_generic_transaction_row_reused_through_manifest"
@@ -2894,7 +3437,7 @@
         "evidence"
       ],
       "lines": [
-        1373
+        1307
       ],
       "path": "crates/fireweed-turso/src/local.rs",
       "symbol": "last_apply_statement_shape"
@@ -2904,16 +3447,16 @@
         "evidence"
       ],
       "lines": [
-        2032,
-        2040,
-        2049,
-        2055,
-        2057,
-        2067,
-        2075,
-        2076,
-        2077,
-        2078
+        1878,
+        1886,
+        1895,
+        1901,
+        1903,
+        1913,
+        1921,
+        1922,
+        1923,
+        1924
       ],
       "path": "crates/fireweed-turso/src/local.rs",
       "symbol": "serving_reader_fifo_select_advances_floor_without_apply"
@@ -2923,15 +3466,15 @@
         "evidence"
       ],
       "lines": [
-        2529,
-        2530,
-        2531,
-        2545,
-        2550,
-        2555,
-        2560,
-        2565,
-        2570
+        2375,
+        2376,
+        2377,
+        2391,
+        2396,
+        2401,
+        2406,
+        2411,
+        2416
       ],
       "path": "crates/fireweed-turso/src/local.rs",
       "symbol": "committed_reader_pool_candidate_semantics_and_settings"
@@ -2941,9 +3484,9 @@
         "evidence"
       ],
       "lines": [
-        2659,
-        2661,
-        2664
+        2505,
+        2507,
+        2510
       ],
       "path": "crates/fireweed-turso/src/local.rs",
       "symbol": "in_memory_reader_preserves_turso_07_post_commit_freshness_mode"
@@ -2953,17 +3496,17 @@
         "evidence"
       ],
       "lines": [
-        3078,
-        3092,
-        3096,
-        3115,
-        3119,
-        3129,
-        3134,
-        3138,
-        3141,
-        3148,
-        3153
+        2924,
+        2938,
+        2942,
+        2961,
+        2965,
+        2975,
+        2980,
+        2984,
+        2987,
+        2994,
+        2999
       ],
       "path": "crates/fireweed-turso/src/local.rs",
       "symbol": "outcome_work"
@@ -2973,9 +3516,9 @@
         "evidence"
       ],
       "lines": [
-        3343,
-        3344,
-        3345
+        3178,
+        3179,
+        3180
       ],
       "path": "crates/fireweed-turso/src/local.rs",
       "symbol": "verify_local_wal_benchmark_evidence"
@@ -2985,11 +3528,11 @@
         "evidence"
       ],
       "lines": [
-        1109,
-        1125,
+        1101,
+        1117,
+        1124,
         1132,
-        1140,
-        1151
+        1143
       ],
       "path": "crates/fireweed-turso/tests/qualification.rs",
       "symbol": "turso_local_wal_benchmark_evidence_verifier"
@@ -2999,21 +3542,21 @@
         "evidence"
       ],
       "lines": [
-        959,
-        962,
-        963,
-        970,
-        971,
-        975,
-        1032,
-        1033,
-        1034,
-        1054,
-        1055,
-        1056,
-        1057,
-        1059,
-        1065
+        1206,
+        1209,
+        1210,
+        1217,
+        1218,
+        1222,
+        1279,
+        1280,
+        1281,
+        1302,
+        1304,
+        1305,
+        1306,
+        1308,
+        1314
       ],
       "path": "crates/fireweed/src/generated_replay_tests.rs",
       "symbol": "generated_s3_turso_model_traces_match_every_observation"
@@ -3023,7 +3566,7 @@
         "evidence"
       ],
       "lines": [
-        4306
+        4347
       ],
       "path": "crates/fireweed/src/turso_compose.rs",
       "symbol": "drive_started_generation"
@@ -3618,14 +4161,14 @@
         "evidence"
       ],
       "lines": [
-        1977,
-        2002,
-        2016,
-        2030,
-        2048,
-        2058,
-        2115,
-        2122
+        1727,
+        1752,
+        1766,
+        1780,
+        1798,
+        1808,
+        1865,
+        1872
       ],
       "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
       "symbol": "callback_cohort_e2e"
@@ -3635,43 +4178,78 @@
         "evidence"
       ],
       "lines": [
-        2265,
-        2270,
-        2281,
-        2286,
-        2302,
-        2307,
-        2334,
-        2338,
-        2344,
-        2383,
-        2384,
-        2390,
-        2408,
-        2409,
-        2420,
-        2425
+        1983,
+        1985,
+        2007,
+        2027,
+        2028,
+        2033,
+        2037,
+        2048,
+        2057
       ],
       "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
-      "symbol": "noisy_neighbor_scale_e2e"
+      "symbol": "worker_crash_recovery_e2e"
     },
     {
       "groups": [
         "evidence"
       ],
       "lines": [
-        2522,
-        2524,
-        2546,
-        2566,
-        2567,
-        2572,
-        2576,
-        2587,
-        2596
+        2165,
+        2167,
+        2171,
+        2175,
+        2177,
+        2182,
+        2184,
+        2198,
+        2214,
+        2215,
+        2217,
+        2227,
+        2228,
+        2247,
+        2254,
+        2274,
+        2296,
+        2297,
+        2312,
+        2337,
+        2350,
+        2374,
+        2378,
+        2385,
+        2386,
+        2410,
+        2414,
+        2415
       ],
       "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
-      "symbol": "worker_crash_recovery_e2e"
+      "symbol": "operator_repair_redrive_e2e"
+    },
+    {
+      "groups": [
+        "evidence"
+      ],
+      "lines": [
+        2530,
+        2539,
+        2557,
+        2564,
+        2584,
+        2597,
+        2600,
+        2660,
+        2662,
+        2666,
+        2677,
+        2689,
+        2693,
+        2699
+      ],
+      "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
+      "symbol": "marketo_group_batching_e2e"
     },
     {
       "groups": [
@@ -3691,13 +4269,11 @@
         "script"
       ],
       "lines": [
-        1306,
         1334,
-        1348,
         1362,
         1376,
-        1418,
-        1432,
+        1390,
+        1404,
         1446,
         1460,
         1474,
@@ -3715,64 +4291,60 @@
         1642,
         1656,
         1670,
-        1684,
         1698,
         1712,
+        1726,
         1740,
         1754,
-        1768,
-        1782,
         1796,
+        1824,
         1838,
+        1852,
         1866,
         1880,
         1894,
-        1908,
-        1922,
-        1936,
+        2034,
         2090,
+        2104,
+        2132,
         2146,
-        2160,
-        2188,
-        2202,
-        2230,
-        2314,
+        2174,
+        2258,
+        2272,
+        2286,
+        2300,
         2328,
-        2342,
-        2356,
-        2384,
-        2454,
+        2398,
+        2412,
+        2440,
         2468,
         2496,
         2524,
+        2538,
         2552,
+        2566,
         2580,
-        2594,
         2608,
         2622,
-        2636,
-        2664,
-        2678,
-        2720,
-        2958,
-        2972,
-        2986,
-        3014,
+        2888,
+        2902,
+        2916,
+        2944,
+        3070,
+        3112,
+        3126,
+        3140,
         3154,
-        3196,
         3210,
-        3224,
         3238,
-        3294,
-        3322,
-        3336,
-        3350,
-        3364,
-        3532,
-        3546,
-        3784,
-        3966,
-        4078,
+        3252,
+        3266,
+        3280,
+        3448,
+        3462,
+        3700,
+        3882,
+        3994,
         6507,
         6563,
         6605,
@@ -3780,6 +4352,26 @@
       ],
       "path": "scripts/ci/storage-remediation-inventory.json",
       "symbol": "<module>"
+    },
+    {
+      "groups": [
+        "script"
+      ],
+      "lines": [
+        48
+      ],
+      "path": "scripts/ci/test_queue_pg_evidence.py",
+      "symbol": "setUp"
+    },
+    {
+      "groups": [
+        "script"
+      ],
+      "lines": [
+        105
+      ],
+      "path": "scripts/ci/test_queue_pg_evidence.py",
+      "symbol": "test_zero_ignored_extra_and_parent_missing_summary_fail"
     },
     {
       "groups": [
@@ -3804,6 +4396,38 @@
         170
       ],
       "path": "scripts/formal/check_api007.py",
+      "symbol": "run"
+    },
+    {
+      "groups": [
+        "script"
+      ],
+      "lines": [
+        172,
+        175,
+        188,
+        194,
+        206,
+        212,
+        224,
+        230,
+        242,
+        248,
+        259,
+        274,
+        277,
+        282,
+        284,
+        286,
+        288,
+        293,
+        295,
+        297,
+        302,
+        304,
+        306
+      ],
+      "path": "scripts/formal/source_group_gate.py",
       "symbol": "run"
     },
     {
@@ -3836,7 +4460,9 @@
     },
     {
       "call_depth": 0,
-      "calls": [],
+      "calls": [
+        "evidence_v4"
+      ],
       "line": 537,
       "path": "crates/fireweed/tests/ss_phased_capacity.rs",
       "symbol": "write_evidence"
@@ -3901,9 +4527,10 @@
     {
       "call_depth": 2,
       "calls": [
+        "reduce_evidence",
         "run"
       ],
-      "line": 1338,
+      "line": 1344,
       "path": "crates/fireweed-postgres/src/queue_store/administration.rs",
       "symbol": "drop"
     },
@@ -3919,7 +4546,9 @@
     {
       "call_depth": 2,
       "calls": [
-        "run"
+        "evidence",
+        "run",
+        "test"
       ],
       "line": 617,
       "path": "crates/fireweed-release/src/lib.rs",
@@ -3931,7 +4560,7 @@
         "run_owned",
         "write_e3_contract"
       ],
-      "line": 312,
+      "line": 318,
       "path": "crates/fireweed-release/tests/e3_contract_evidence_tests.rs",
       "symbol": "production_generator_builds_and_semantically_verifies_the_full_matrix"
     },
@@ -3968,7 +4597,7 @@
       "calls": [
         "run"
       ],
-      "line": 989,
+      "line": 992,
       "path": "scripts/ci/inventory-storage-remediation.py",
       "symbol": "public_release_gate_failures"
     },
@@ -3984,6 +4613,26 @@
     {
       "call_depth": 2,
       "calls": [
+        "run",
+        "run_owned"
+      ],
+      "line": 116,
+      "path": "scripts/ci/queue_pg_controls.py",
+      "symbol": "test"
+    },
+    {
+      "call_depth": 2,
+      "calls": [
+        "main",
+        "run"
+      ],
+      "line": 69,
+      "path": "scripts/ci/queue_pg_producer_controls.py",
+      "symbol": "close"
+    },
+    {
+      "call_depth": 2,
+      "calls": [
         "run"
       ],
       "line": 68,
@@ -3993,6 +4642,7 @@
     {
       "call_depth": 2,
       "calls": [
+        "point",
         "run"
       ],
       "line": 1,
@@ -4074,9 +4724,18 @@
     {
       "call_depth": 3,
       "calls": [
+        "test"
+      ],
+      "line": 1,
+      "path": ".github/workflows/turso.yml",
+      "symbol": "<module>"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
         "run_owned"
       ],
-      "line": 381,
+      "line": 383,
       "path": "crates/fireweed-bench/src/bin/fireweed-api007-reference.rs",
       "symbol": "execute"
     },
@@ -4101,6 +4760,15 @@
     {
       "call_depth": 3,
       "calls": [
+        "test"
+      ],
+      "line": 1,
+      "path": "crates/fireweed-bench/src/lib.rs",
+      "symbol": "<module>"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
         "output"
       ],
       "line": 425,
@@ -4111,7 +4779,8 @@
       "call_depth": 3,
       "calls": [
         "await_ready",
-        "output"
+        "output",
+        "point"
       ],
       "line": 635,
       "path": "crates/fireweed-bench/tests/performance_multi_node_object_log_e2_tests.rs",
@@ -4178,11 +4847,205 @@
     {
       "call_depth": 3,
       "calls": [
+        "err"
+      ],
+      "line": 148,
+      "path": "crates/fireweed-engine/src/queue_source_index/fields/tests.rs",
+      "symbol": "selective_hydration_keeps_original_cut_and_drops_provisional_values"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop",
+        "point"
+      ],
+      "line": 6,
+      "path": "crates/fireweed-engine/src/queue_source_index/group/body.rs",
+      "symbol": "work_fact"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
         "drop"
       ],
-      "line": 383,
+      "line": 10,
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "evidence"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop",
+        "evidence"
+      ],
+      "line": 46,
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_bodies_preserve_positions_aliases_empty_and_frame_ownership"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop",
+        "evidence"
+      ],
+      "line": 148,
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_rejects_foreign_cut_job_offset_and_definition"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop",
+        "evidence"
+      ],
+      "line": 367,
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_second_alias_cannot_replace_complete_fact"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop"
+      ],
+      "line": 300,
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/administrative.rs",
+      "symbol": "claim_and_release_owner_evidence_precedes_rejectable_predicate"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop"
+      ],
+      "line": 52,
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "source_state_values_preserve_aliases_empty_and_actual_frame_ownership"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop"
+      ],
+      "line": 87,
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "source_state_values_reject_equal_bytes_old_version_and_literal_aliases"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop"
+      ],
+      "line": 149,
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "source_state_values_reject_subspans_work_domains_and_foreign_authority"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "output",
+        "point"
+      ],
+      "line": 142,
+      "path": "crates/fireweed-engine/src/queue_source_index/predecessor/unique.rs",
+      "symbol": "finish"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop",
+        "point"
+      ],
+      "line": 31,
+      "path": "crates/fireweed-engine/src/queue_source_index/state_read.rs",
+      "symbol": "load_source_state_records"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop",
+        "finish"
+      ],
+      "line": 407,
       "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
       "symbol": "repeated_large_exact_tuple_retains_constant_owner_admission"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop"
+      ],
+      "line": 562,
+      "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
+      "symbol": "final_owner_callback_retains_credit_through_success_error_and_unwind"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "classify",
+        "drop"
+      ],
+      "line": 379,
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/original/batch.rs",
+      "symbol": "convert_original_batch_observing"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop"
+      ],
+      "line": 70,
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/provision.rs",
+      "symbol": "provision_record"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop",
+        "evidence"
+      ],
+      "line": 121,
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests.rs",
+      "symbol": "source_pages_contract"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop",
+        "err",
+        "evidence"
+      ],
+      "line": 830,
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests.rs",
+      "symbol": "compiled_genesis_contract"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop",
+        "evidence"
+      ],
+      "line": 1582,
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests.rs",
+      "symbol": "captured_source_preserves_fence_and_rejects_equal_head_foreign_evidence"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop"
+      ],
+      "line": 535,
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests/original.rs",
+      "symbol": "cancelled_original_mode"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop",
+        "err",
+        "resolve_original"
+      ],
+      "line": 1034,
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests/original.rs",
+      "symbol": "original_adapter_rejects_authenticated_valid_subspan_after_hydration_then_retries_same_ledger"
     },
     {
       "call_depth": 3,
@@ -4209,7 +5072,7 @@
       "calls": [
         "drop"
       ],
-      "line": 181,
+      "line": 187,
       "path": "crates/fireweed-postgres/tests/queue_server_crash.rs",
       "symbol": "acknowledged_atomic_group_survives_postgresql_crash_recovery"
     },
@@ -4218,25 +5081,27 @@
       "calls": [
         "drop"
       ],
-      "line": 936,
+      "line": 942,
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "command_capture_limits_are_exact_and_overflow_continues_all_evidence"
     },
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_evidence"
       ],
-      "line": 1048,
+      "line": 1054,
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "physical_command_sink_drains_5001_changes_and_replays_exact_metadata"
     },
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_evidence"
       ],
-      "line": 1093,
+      "line": 1099,
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "unchanged_one_mib_composite_dependency_and_body_are_absent_from_command"
     },
@@ -4245,59 +5110,65 @@
       "calls": [
         "drop"
       ],
-      "line": 1134,
+      "line": 1140,
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "partial_command_append_after_evidence_permanently_invalidates_both_streams"
     },
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_evidence"
       ],
-      "line": 1162,
+      "line": 1168,
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "foreign_scan_job_summary_and_context_poison_the_operation"
     },
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_evidence"
       ],
-      "line": 1217,
+      "line": 1223,
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "malformed_identity_envelope_fragment_and_late_file_damage_fail_closed"
     },
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_evidence"
       ],
-      "line": 1305,
+      "line": 1311,
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "rejected_row_observations_override_provisional_sibling_collision"
     },
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_evidence"
       ],
-      "line": 1341,
+      "line": 1347,
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "valid_foreign_file_images_cannot_cross_operation_integrity_binding"
     },
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_evidence"
       ],
-      "line": 1489,
+      "line": 1495,
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "legitimate_empty_and_noop_scans_seal_without_packets"
     },
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "finish"
       ],
       "line": 349,
       "path": "crates/fireweed-queue-spool/src/evidence.rs",
@@ -4306,7 +5177,8 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_unique_evidence"
       ],
       "line": 434,
       "path": "crates/fireweed-queue-spool/src/evidence.rs",
@@ -4315,7 +5187,8 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_unique_evidence"
       ],
       "line": 506,
       "path": "crates/fireweed-queue-spool/src/evidence.rs",
@@ -4324,7 +5197,8 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_unique_evidence"
       ],
       "line": 566,
       "path": "crates/fireweed-queue-spool/src/evidence.rs",
@@ -4333,7 +5207,8 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_unique_evidence"
       ],
       "line": 609,
       "path": "crates/fireweed-queue-spool/src/evidence.rs",
@@ -4342,7 +5217,8 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_unique_evidence"
       ],
       "line": 658,
       "path": "crates/fireweed-queue-spool/src/evidence.rs",
@@ -4351,7 +5227,8 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_unique_evidence"
       ],
       "line": 692,
       "path": "crates/fireweed-queue-spool/src/evidence.rs",
@@ -4360,7 +5237,8 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_unique_evidence"
       ],
       "line": 722,
       "path": "crates/fireweed-queue-spool/src/evidence.rs",
@@ -4369,7 +5247,8 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_unique_evidence"
       ],
       "line": 753,
       "path": "crates/fireweed-queue-spool/src/evidence.rs",
@@ -4378,7 +5257,8 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "reduce_unique_evidence"
       ],
       "line": 780,
       "path": "crates/fireweed-queue-spool/src/evidence.rs",
@@ -4405,6 +5285,15 @@
     {
       "call_depth": 3,
       "calls": [
+        "test"
+      ],
+      "line": 444,
+      "path": "crates/fireweed-server/tests/fjord_surface.rs",
+      "symbol": "fjord_surface_contract_verified_without_rdkafka"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
         "checkout_provenance"
       ],
       "line": 966,
@@ -4414,19 +5303,40 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop",
-        "execute"
+        "test"
       ],
-      "line": 2279,
+      "line": 237,
+      "path": "crates/fireweed-server/tests/production_s3_object_log_config.rs",
+      "symbol": "p1s_attestation_is_rustfs_native_cas_not_garage"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop",
+        "execute",
+        "test"
+      ],
+      "line": 2125,
       "path": "crates/fireweed-turso/src/local.rs",
       "symbol": "run_committed_reader_probe"
     },
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "run_committed_reader_probe",
+        "test"
       ],
-      "line": 3064,
+      "line": 2374,
+      "path": "crates/fireweed-turso/src/local.rs",
+      "symbol": "committed_reader_pool_candidate_semantics_and_settings"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop",
+        "test"
+      ],
+      "line": 2910,
       "path": "crates/fireweed-turso/src/local.rs",
       "symbol": "outcome_work"
     },
@@ -4435,14 +5345,29 @@
       "calls": [
         "drop"
       ],
-      "line": 4203,
+      "line": 4244,
       "path": "crates/fireweed/src/turso_compose.rs",
       "symbol": "drive_started_generation"
     },
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "cohort_evidence",
+        "test"
+      ],
+      "line": 754,
+      "path": "crates/fireweed/tests/ss_mixed_overlap.rs",
+      "symbol": "same_keyed_gate_cohort"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "compatible_mutation_cohort",
+        "drop",
+        "evidence",
+        "incompatible_claim_cohort",
+        "observation_cohort",
+        "same_keyed_gate_cohort"
       ],
       "line": 840,
       "path": "crates/fireweed/tests/ss_mixed_overlap.rs",
@@ -4451,7 +5376,11 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "compatible_mutation_cohort",
+        "drop",
+        "evidence",
+        "incompatible_claim_cohort",
+        "same_keyed_gate_cohort"
       ],
       "line": 1826,
       "path": "crates/fireweed/tests/ss_mixed_overlap.rs",
@@ -4460,7 +5389,8 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "test"
       ],
       "line": 2731,
       "path": "crates/fireweed/tests/ss_mixed_overlap.rs",
@@ -4469,7 +5399,8 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "test"
       ],
       "line": 2753,
       "path": "crates/fireweed/tests/ss_mixed_overlap.rs",
@@ -4478,7 +5409,10 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "evidence",
+        "s3m_live_below_cap_apply_traffic",
+        "test"
       ],
       "line": 2777,
       "path": "crates/fireweed/tests/ss_mixed_overlap.rs",
@@ -4487,7 +5421,8 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "drop",
+        "evidence"
       ],
       "line": 2835,
       "path": "crates/fireweed/tests/ss_mixed_overlap.rs",
@@ -4496,7 +5431,28 @@
     {
       "call_depth": 3,
       "calls": [
-        "drop"
+        "test"
+      ],
+      "line": 54,
+      "path": "crates/fireweed/tests/ss_phased_capacity.rs",
+      "symbol": "evidence"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "streaming_evidence_v1",
+        "test"
+      ],
+      "line": 723,
+      "path": "crates/fireweed/tests/ss_streaming.rs",
+      "symbol": "write_streaming_evidence"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
+        "drop",
+        "test",
+        "write_streaming_evidence"
       ],
       "line": 775,
       "path": "crates/fireweed/tests/ss_streaming.rs",
@@ -4532,6 +5488,15 @@
     {
       "call_depth": 3,
       "calls": [
+        "close"
+      ],
+      "line": 40,
+      "path": "scripts/ci/queue_pg_fixture_controls.py",
+      "symbol": "failed_listing"
+    },
+    {
+      "call_depth": 3,
+      "calls": [
         "run_fixture"
       ],
       "line": 41,
@@ -4550,6 +5515,35 @@
     {
       "call_depth": 4,
       "calls": [
+        "evidence"
+      ],
+      "line": 331,
+      "path": "crates/fireweed-bench/tests/performance_cross_queue_scale_out_tests.rs",
+      "symbol": "live_multi_node_object_log_turso_projection_e2"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "evidence",
+        "point"
+      ],
+      "line": 1,
+      "path": "crates/fireweed-bench/tests/queue_density_single_node_tests.rs",
+      "symbol": "<module>"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "evidence",
+        "point"
+      ],
+      "line": 551,
+      "path": "crates/fireweed-bench/tests/queue_density_single_node_tests.rs",
+      "symbol": "queue_density_single_node_durable_tests"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
         "ac_txn_3_commit_transition_request_id"
       ],
       "line": 1287,
@@ -4559,11 +5553,110 @@
     {
       "call_depth": 4,
       "calls": [
+        "finish"
+      ],
+      "line": 2130,
+      "path": "crates/fireweed-engine/src/queue_administration/stream.rs",
+      "symbol": "sink_receives_rejected_authority_after_overlap_and_detects_late_contradiction"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "evidence"
+      ],
+      "line": 83,
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_rejects_other_key_equal_bytes_valid_subspan_state_and_receipt"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "evidence"
+      ],
+      "line": 199,
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_rejects_independently_valid_same_job_mixed_cuts"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "evidence"
+      ],
+      "line": 258,
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_preserve_accepts_old_replacement_with_current_newer_metadata"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "evidence"
+      ],
+      "line": 319,
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_rejects_old_incarnation_and_future_command_version"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "work_fact"
+      ],
+      "line": 4,
+      "path": "crates/fireweed-engine/src/queue_source_index/group/work.rs",
+      "symbol": "load_work"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "finish"
+      ],
+      "line": 248,
+      "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
+      "symbol": "streaming_combined_decisions_match_unique_effect_oracle"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "finish"
+      ],
+      "line": 331,
+      "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
+      "symbol": "administrative_collision_is_distinct_and_late_corruption_poisoned"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "finish"
+      ],
+      "line": 619,
+      "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
+      "symbol": "missing_authority_wrong_tuple_release_and_capacity_fail_closed"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "evidence"
+      ],
+      "line": 230,
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/reader.rs",
+      "symbol": "point"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
         "execute"
       ],
-      "line": 5614,
+      "line": 5393,
       "path": "crates/fireweed-postgres/src/relational.rs",
       "symbol": "set_emission_cursor"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "finish"
+      ],
+      "line": 252,
+      "path": "crates/fireweed-queue-spool/src/evidence.rs",
+      "symbol": "reduce_evidence_checked"
     },
     {
       "call_depth": 4,
@@ -4577,29 +5670,92 @@
     {
       "call_depth": 4,
       "calls": [
+        "evidence"
+      ],
+      "line": 1,
+      "path": "crates/fireweed-release/src/attestation.rs",
+      "symbol": "<module>"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "evidence"
+      ],
+      "line": 745,
+      "path": "crates/fireweed-release/src/lib.rs",
+      "symbol": "fmt"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "evidence"
+      ],
+      "line": 91,
+      "path": "crates/fireweed-release/src/transaction.rs",
+      "symbol": "verify_transaction_evidence"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "evidence"
+      ],
+      "line": 2351,
+      "path": "crates/fireweed-resp/tests/e2e.rs",
+      "symbol": "cluster_bootstrap_over_the_wire"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
         "execute"
       ],
-      "line": 2031,
+      "line": 1877,
       "path": "crates/fireweed-turso/src/local.rs",
       "symbol": "serving_reader_fifo_select_advances_floor_without_apply"
     },
     {
       "call_depth": 4,
       "calls": [
-        "run_committed_reader_probe"
+        "execute"
       ],
-      "line": 2528,
-      "path": "crates/fireweed-turso/src/local.rs",
-      "symbol": "committed_reader_pool_candidate_semantics_and_settings"
+      "line": 1204,
+      "path": "crates/fireweed/src/generated_replay_tests.rs",
+      "symbol": "generated_s3_turso_model_traces_match_every_observation"
     },
     {
       "call_depth": 4,
       "calls": [
-        "execute"
+        "evidence"
       ],
-      "line": 957,
-      "path": "crates/fireweed/src/generated_replay_tests.rs",
-      "symbol": "generated_s3_turso_model_traces_match_every_observation"
+      "line": 266,
+      "path": "crates/fireweed/tests/ss_mixed_overlap.rs",
+      "symbol": "cohort_evidence"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "evidence"
+      ],
+      "line": 473,
+      "path": "crates/fireweed/tests/ss_mixed_overlap.rs",
+      "symbol": "observation_cohort"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "evidence"
+      ],
+      "line": 595,
+      "path": "crates/fireweed/tests/ss_phased_capacity.rs",
+      "symbol": "evidence_v4"
+    },
+    {
+      "call_depth": 4,
+      "calls": [
+        "evidence"
+      ],
+      "line": 280,
+      "path": "crates/fireweed/tests/ss_streaming.rs",
+      "symbol": "streaming_evidence_v1"
     },
     {
       "call_depth": 4,
@@ -4620,6 +5776,33 @@
       "symbol": "postgres_log_three_cells_t0_t2_retired_body"
     },
     {
+      "call_depth": 4,
+      "calls": [
+        "evidence"
+      ],
+      "line": 1,
+      "path": "scripts/release/promote-governed-evidence.sh",
+      "symbol": "<module>"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "point"
+      ],
+      "line": 27,
+      "path": "crates/fireweed-engine/src/queue_source_index/original.rs",
+      "symbol": "load_source_original"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "point"
+      ],
+      "line": 1,
+      "path": "crates/fireweed-loadgen/src/main.rs",
+      "symbol": "<module>"
+    },
+    {
       "call_depth": 5,
       "calls": [
         "reduce_evidence_union"
@@ -4627,6 +5810,213 @@
       "line": 365,
       "path": "crates/fireweed-queue-spool/src/administrative.rs",
       "symbol": "reduce_bound_ordinary"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "reduce_evidence_checked"
+      ],
+      "line": 242,
+      "path": "crates/fireweed-queue-spool/src/evidence.rs",
+      "symbol": "reduce_unique_evidence"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "verify_transaction_evidence"
+      ],
+      "line": 5,
+      "path": "crates/fireweed-release/src/bin/fireweed-verify-transaction-evidence.rs",
+      "symbol": "main"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "verify_transaction_evidence"
+      ],
+      "line": 16,
+      "path": "crates/fireweed-release/tests/transaction_evidence_tests.rs",
+      "symbol": "transaction_evidence_accepts_both_profiles_and_all_required_acs"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "verify_transaction_evidence"
+      ],
+      "line": 27,
+      "path": "crates/fireweed-release/tests/transaction_evidence_tests.rs",
+      "symbol": "transaction_evidence_rejects_profile_omission"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "verify_transaction_evidence"
+      ],
+      "line": 37,
+      "path": "crates/fireweed-release/tests/transaction_evidence_tests.rs",
+      "symbol": "transaction_evidence_rejects_ac_omission"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "verify_transaction_evidence"
+      ],
+      "line": 47,
+      "path": "crates/fireweed-release/tests/transaction_evidence_tests.rs",
+      "symbol": "transaction_evidence_rejects_non_pass_result"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "verify_transaction_evidence"
+      ],
+      "line": 57,
+      "path": "crates/fireweed-release/tests/transaction_evidence_tests.rs",
+      "symbol": "transaction_evidence_rejects_unjustified_na"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "verify_transaction_evidence"
+      ],
+      "line": 67,
+      "path": "crates/fireweed-release/tests/transaction_evidence_tests.rs",
+      "symbol": "transaction_evidence_rejects_bogus_structured_na"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "cohort_evidence"
+      ],
+      "line": 570,
+      "path": "crates/fireweed/tests/ss_mixed_overlap.rs",
+      "symbol": "compatible_mutation_cohort"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "cohort_evidence"
+      ],
+      "line": 656,
+      "path": "crates/fireweed/tests/ss_mixed_overlap.rs",
+      "symbol": "incompatible_claim_cohort"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "cohort_evidence"
+      ],
+      "line": 2520,
+      "path": "crates/fireweed/tests/ss_mixed_overlap.rs",
+      "symbol": "s3m_live_below_cap_apply_traffic"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "evidence_v4"
+      ],
+      "line": 613,
+      "path": "crates/fireweed/tests/ss_phased_capacity.rs",
+      "symbol": "ss_evidence_v4_measures_settlement_and_residual"
+    },
+    {
+      "call_depth": 5,
+      "calls": [
+        "streaming_evidence_v1"
+      ],
+      "line": 934,
+      "path": "crates/fireweed/tests/ss_streaming.rs",
+      "symbol": "ss_streaming_evidence_schema_reports_settled_rate_and_stage_latency"
+    },
+    {
+      "call_depth": 6,
+      "calls": [
+        "load_source_original"
+      ],
+      "line": 115,
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "source_original_retains_literal_domain_and_checked_historical_receipt_async"
+    },
+    {
+      "call_depth": 6,
+      "calls": [
+        "load_source_original"
+      ],
+      "line": 163,
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_outcome_cannot_substitute_another_equal_receipt_or_valid_subspan_async"
+    },
+    {
+      "call_depth": 6,
+      "calls": [
+        "load_source_original"
+      ],
+      "line": 242,
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_scope_pin_offset_and_constructor_negatives_are_not_conflicts_async"
+    },
+    {
+      "call_depth": 6,
+      "calls": [
+        "load_source_original"
+      ],
+      "line": 346,
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_lookup_keeps_one_opaque_cut_for_presence_absence_and_advanced_epochs"
+    },
+    {
+      "call_depth": 6,
+      "calls": [
+        "load_source_original"
+      ],
+      "line": 487,
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_insert_and_claim_receipts_preserve_domain_and_literal_whitespace"
+    },
+    {
+      "call_depth": 6,
+      "calls": [
+        "load_source_original"
+      ],
+      "line": 554,
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_claim_requires_command_to_lease_binding_after_valid_span_digest_and_decode"
+    },
+    {
+      "call_depth": 6,
+      "calls": [
+        "load_source_original"
+      ],
+      "line": 71,
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/original.rs",
+      "symbol": "resolve_original"
+    },
+    {
+      "call_depth": 6,
+      "calls": [
+        "load_source_original"
+      ],
+      "line": 138,
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/original/batch.rs",
+      "symbol": "classify"
+    },
+    {
+      "call_depth": 6,
+      "calls": [
+        "reduce_unique_evidence"
+      ],
+      "line": 430,
+      "path": "crates/fireweed-queue-spool/src/administrative.rs",
+      "symbol": "reduce_evidence"
+    },
+    {
+      "call_depth": 7,
+      "calls": [
+        "classify"
+      ],
+      "line": 209,
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/original/batch.rs",
+      "symbol": "resolve_original_batch"
     }
   ],
   "generated_by": "scripts/ci/inventory-evidence-source-io.sh",
@@ -4829,22 +6219,26 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "d434ad8be2f9ce164e26b20be74cab2e2fd6820f6a9a42fe4820f46465702c5b",
+  "scan_sha256": "ae667394271d60a97bce4f0aaa5c00af38c20d596eebb4c79489a5b4cdc4241f",
   "schema_version": 2,
   "source_surfaces": [
     {
-      "evidence_paths": [],
-      "first_match_line": 36,
+      "evidence_paths": [
+        "docs/perf/evidence/tp005/million-cycle-production/README.md"
+      ],
+      "first_match_line": 7,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 90,
+      "last_match_line": 164,
       "line": 1,
       "markers": [
-        "evidence"
+        "evidence",
+        "public_identity"
       ],
-      "match_count": 3,
+      "match_count": 8,
       "operations": [
+        "public_identity",
         "reader"
       ],
       "path": ".github/workflows/ci.yml",
@@ -4877,11 +6271,11 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 142,
+      "first_match_line": 168,
       "groups": [
         "matrix"
       ],
-      "last_match_line": 142,
+      "last_match_line": 168,
       "line": 1,
       "markers": [
         "matrix"
@@ -4913,12 +6307,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 433,
+      "first_match_line": 435,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 433,
-      "line": 381,
+      "last_match_line": 435,
+      "line": 383,
       "markers": [
         "evidence"
       ],
@@ -6416,7 +7810,7 @@
       "groups": [
         "conformance"
       ],
-      "last_match_line": 503,
+      "last_match_line": 506,
       "line": 237,
       "markers": [
         "evidence"
@@ -6613,12 +8007,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2127,
+      "first_match_line": 2132,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 2186,
-      "line": 2125,
+      "last_match_line": 2191,
+      "line": 2130,
       "markers": [
         "evidence"
       ],
@@ -6631,12 +8025,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2335,
+      "first_match_line": 2340,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 2335,
-      "line": 2325,
+      "last_match_line": 2340,
+      "line": 2330,
       "markers": [
         "evidence"
       ],
@@ -6649,12 +8043,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2451,
+      "first_match_line": 2456,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 2451,
-      "line": 2444,
+      "last_match_line": 2456,
+      "line": 2449,
       "markers": [
         "evidence"
       ],
@@ -6682,6 +8076,907 @@
       ],
       "path": "crates/fireweed-engine/src/queue_publication/administrative_frame.rs",
       "symbol": "measure_resolved_commands"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 33,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 53,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index.rs",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 18,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 25,
+      "line": 12,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/body.rs",
+      "symbol": "unknown"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 93,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 93,
+      "line": 92,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/body.rs",
+      "symbol": "verify_source_work_bodies"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 16,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 16,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/fields/selection.rs",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 224,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 224,
+      "line": 148,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/fields/tests.rs",
+      "symbol": "selective_hydration_keeps_original_cut_and_drops_provisional_values"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 243,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 243,
+      "line": 243,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/genesis.rs",
+      "symbol": "source_genesis_loader_retains_original_cut_and_full_key_evidence"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 4,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 4,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/body.rs",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 14,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 29,
+      "line": 6,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/body.rs",
+      "symbol": "work_fact"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 42,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 55,
+      "line": 39,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/body.rs",
+      "symbol": "load_bodies"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 9,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 9,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 10,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 24,
+      "line": 10,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "evidence"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 53,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 55,
+      "line": 46,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_bodies_preserve_positions_aliases_empty_and_frame_ownership"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 137,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 137,
+      "line": 83,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_rejects_other_key_equal_bytes_valid_subspan_state_and_receipt"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 152,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 196,
+      "line": 148,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_rejects_foreign_cut_job_offset_and_definition"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 201,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 219,
+      "line": 199,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_rejects_independently_valid_same_job_mixed_cuts"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 296,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 296,
+      "line": 258,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_preserve_accepts_old_replacement_with_current_newer_metadata"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 351,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 351,
+      "line": 319,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_rejects_old_incarnation_and_future_command_version"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 369,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 402,
+      "line": 367,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body.rs",
+      "symbol": "source_work_body_second_alias_cannot_replace_complete_fact"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 300,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 300,
+      "line": 300,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/administrative.rs",
+      "symbol": "claim_and_release_owner_evidence_precedes_rejectable_predicate"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 3,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 3,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 12,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 19,
+      "line": 12,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "state_evidence"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 59,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 60,
+      "line": 52,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "source_state_values_preserve_aliases_empty_and_actual_frame_ownership"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 92,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 135,
+      "line": 87,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 4,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "source_state_values_reject_equal_bytes_old_version_and_literal_aliases"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 182,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 193,
+      "line": 149,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "source_state_values_reject_subspans_work_domains_and_foreign_authority"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 229,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 241,
+      "line": 227,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "source_state_values_mixed_equal_numbered_same_job_cuts_are_foreign"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 266,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 313,
+      "line": 264,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/tests/body/state_value.rs",
+      "symbol": "source_state_values_validate_second_alias_and_reject_zero_offset_at_entry"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 12,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 72,
+      "line": 4,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 4,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/group/work.rs",
+      "symbol": "load_work"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 2,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 2,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/key/membership.rs",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 48,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 48,
+      "line": 48,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/key/membership/tests.rs",
+      "symbol": "live_key_memberships_preserve_full_domain_and_refuse_blank_or_foreign_evidence"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 1,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original.rs",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 19,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 19,
+      "line": 12,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original.rs",
+      "symbol": "unknown"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 33,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 75,
+      "line": 27,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 4,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original.rs",
+      "symbol": "load_source_original"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 22,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 22,
+      "line": 21,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original/batch.rs",
+      "symbol": "verify_source_originals"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 118,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 150,
+      "line": 115,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 13,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "source_original_retains_literal_domain_and_checked_historical_receipt_async"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 215,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 222,
+      "line": 163,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_outcome_cannot_substitute_another_equal_receipt_or_valid_subspan_async"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 256,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 279,
+      "line": 242,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "constant",
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_scope_pin_offset_and_constructor_negatives_are_not_conflicts_async"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 384,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 390,
+      "line": 346,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_lookup_keeps_one_opaque_cut_for_presence_absence_and_advanced_epochs"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 512,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 523,
+      "line": 487,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 4,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_insert_and_claim_receipts_preserve_domain_and_literal_whitespace"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 709,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 717,
+      "line": 554,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/original/tests.rs",
+      "symbol": "original_claim_requires_command_to_lease_binding_after_valid_span_digest_and_decode"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 8,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 24,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/predecessor/unique.rs",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 106,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 106,
+      "line": 98,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/predecessor/unique.rs",
+      "symbol": "retain"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 187,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 197,
+      "line": 142,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/predecessor/unique.rs",
+      "symbol": "finish"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 154,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 154,
+      "line": 141,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/scope.rs",
+      "symbol": "validate"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 168,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 168,
+      "line": 165,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/scope.rs",
+      "symbol": "value_for"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 179,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 179,
+      "line": 179,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/scope.rs",
+      "symbol": "equal_numeric_heads_and_prefix_keys_cannot_substitute_for_source_evidence"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 196,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 196,
+      "line": 188,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/selection/producer/tests/keys.rs",
+      "symbol": "foreign_cut_absence_and_decisive_empty_cannot_hide_unresolved_points"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 25,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 25,
+      "line": 14,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/state_read.rs",
+      "symbol": "scope"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 83,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 144,
+      "line": 31,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 11,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/state_read.rs",
+      "symbol": "load_source_state_records"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 16,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 25,
+      "line": 11,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/state_value.rs",
+      "symbol": "unknown"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 105,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 105,
+      "line": 104,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-engine/src/queue_source_index/state_value.rs",
+      "symbol": "verify_source_state_values"
     },
     {
       "evidence_paths": [],
@@ -6793,12 +9088,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 249,
+      "first_match_line": 273,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 266,
-      "line": 224,
+      "last_match_line": 290,
+      "line": 248,
       "markers": [
         "evidence"
       ],
@@ -6811,12 +9106,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 319,
+      "first_match_line": 343,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 375,
-      "line": 307,
+      "last_match_line": 399,
+      "line": 331,
       "markers": [
         "evidence"
       ],
@@ -6829,12 +9124,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 397,
+      "first_match_line": 421,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 401,
-      "line": 383,
+      "last_match_line": 425,
+      "line": 407,
       "markers": [
         "evidence"
       ],
@@ -6847,12 +9142,66 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 433,
+      "first_match_line": 464,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 461,
-      "line": 422,
+      "last_match_line": 487,
+      "line": 446,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 5,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
+      "symbol": "final_owner_callback_preserves_observation_release_reclaim_and_order"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 528,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 550,
+      "line": 509,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 4,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
+      "symbol": "collisions_and_poison_never_call_final_owner_callback"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 570,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 574,
+      "line": 562,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-engine/src/queue_unique_stream.rs",
+      "symbol": "final_owner_callback_retains_credit_through_success_error_and_unwind"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 630,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 658,
+      "line": 619,
       "markers": [
         "evidence"
       ],
@@ -6939,12 +9288,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 938,
+      "first_match_line": 786,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 938,
-      "line": 929,
+      "last_match_line": 786,
+      "line": 777,
       "markers": [
         "td008"
       ],
@@ -6957,12 +9306,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1382,
+      "first_match_line": 1241,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1382,
-      "line": 1365,
+      "last_match_line": 1241,
+      "line": 1224,
       "markers": [
         "td008"
       ],
@@ -6990,6 +9339,330 @@
       ],
       "path": "crates/fireweed-objectlog/src/maintenance.rs",
       "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 323,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 323,
+      "line": 240,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic.rs",
+      "symbol": "prepare_semantic_entries"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 332,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 332,
+      "line": 332,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic.rs",
+      "symbol": "evidence"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 20,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 20,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/original.rs",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 86,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 116,
+      "line": 71,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 10,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/original.rs",
+      "symbol": "resolve_original"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 4,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 4,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/original/batch.rs",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 105,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 105,
+      "line": 83,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/original/batch.rs",
+      "symbol": "original"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 162,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 200,
+      "line": 138,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/original/batch.rs",
+      "symbol": "classify"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 239,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 239,
+      "line": 209,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/original/batch.rs",
+      "symbol": "resolve_original_batch"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 259,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 269,
+      "line": 255,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/original/batch.rs",
+      "symbol": "verify_group"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 434,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 434,
+      "line": 379,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/original/batch.rs",
+      "symbol": "convert_original_batch_observing"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 102,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 102,
+      "line": 70,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/provision.rs",
+      "symbol": "provision_record"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 231,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 231,
+      "line": 230,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/reader.rs",
+      "symbol": "point"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 224,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 244,
+      "line": 121,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 4,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests.rs",
+      "symbol": "source_pages_contract"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 961,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 963,
+      "line": 830,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests.rs",
+      "symbol": "compiled_genesis_contract"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1582,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 1686,
+      "line": 1582,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 4,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests.rs",
+      "symbol": "captured_source_preserves_fence_and_rejects_equal_head_foreign_evidence"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 638,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 639,
+      "line": 535,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests/original.rs",
+      "symbol": "cancelled_original_mode"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 732,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 738,
+      "line": 654,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests/original.rs",
+      "symbol": "drop"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1145,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 1145,
+      "line": 1034,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed-objectlog/src/queue_native_log/semantic/tests/original.rs",
+      "symbol": "original_adapter_rejects_authenticated_valid_subspan_after_hydration_then_retries_same_ledger"
     },
     {
       "evidence_paths": [],
@@ -7031,12 +9704,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1375,
+      "first_match_line": 1381,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1375,
-      "line": 1338,
+      "last_match_line": 1381,
+      "line": 1344,
       "markers": [
         "evidence"
       ],
@@ -7068,30 +9741,30 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5598,
+      "first_match_line": 5377,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 5598,
-      "line": 5582,
+      "last_match_line": 5377,
+      "line": 5329,
       "markers": [
         "td008"
       ],
       "match_count": 1,
       "operations": [
-        "constant"
+        "reader"
       ],
       "path": "crates/fireweed-postgres/src/relational.rs",
-      "symbol": "migrate_metrics_batch_in_schema"
+      "symbol": "validate_cohort_lease"
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5646,
+      "first_match_line": 5425,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 5646,
-      "line": 5614,
+      "last_match_line": 5425,
+      "line": 5393,
       "markers": [
         "td008"
       ],
@@ -7140,12 +9813,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 211,
+      "first_match_line": 217,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 215,
-      "line": 181,
+      "last_match_line": 221,
+      "line": 187,
       "markers": [
         "evidence"
       ],
@@ -7195,12 +9868,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1667,
+      "first_match_line": 1682,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1667,
-      "line": 1625,
+      "last_match_line": 1682,
+      "line": 1640,
       "markers": [
         "tp003"
       ],
@@ -7213,12 +9886,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3893,
+      "first_match_line": 3891,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 3893,
-      "line": 3867,
+      "last_match_line": 3891,
+      "line": 3865,
       "markers": [
         "tp003"
       ],
@@ -7231,12 +9904,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 7223,
+      "first_match_line": 7586,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 7223,
-      "line": 7223,
+      "last_match_line": 7586,
+      "line": 7586,
       "markers": [
         "td008"
       ],
@@ -7249,12 +9922,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 7305,
+      "first_match_line": 7668,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 7305,
-      "line": 7305,
+      "last_match_line": 7668,
+      "line": 7668,
       "markers": [
         "td008"
       ],
@@ -7267,12 +9940,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 7355,
+      "first_match_line": 7718,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 7355,
-      "line": 7355,
+      "last_match_line": 7718,
+      "line": 7718,
       "markers": [
         "td008"
       ],
@@ -7285,12 +9958,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 7395,
+      "first_match_line": 7758,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 7395,
-      "line": 7395,
+      "last_match_line": 7758,
+      "line": 7758,
       "markers": [
         "td008"
       ],
@@ -7303,12 +9976,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 7526,
+      "first_match_line": 7889,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 7526,
-      "line": 7448,
+      "last_match_line": 7889,
+      "line": 7811,
       "markers": [
         "tp003"
       ],
@@ -7465,12 +10138,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 936,
+      "first_match_line": 942,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1038,
-      "line": 936,
+      "last_match_line": 1044,
+      "line": 942,
       "markers": [
         "evidence"
       ],
@@ -7483,12 +10156,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1065,
+      "first_match_line": 1071,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1065,
-      "line": 1048,
+      "last_match_line": 1071,
+      "line": 1054,
       "markers": [
         "evidence"
       ],
@@ -7501,12 +10174,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1108,
+      "first_match_line": 1114,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1111,
-      "line": 1093,
+      "last_match_line": 1117,
+      "line": 1099,
       "markers": [
         "evidence"
       ],
@@ -7519,12 +10192,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1134,
+      "first_match_line": 1140,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1151,
-      "line": 1134,
+      "last_match_line": 1157,
+      "line": 1140,
       "markers": [
         "evidence"
       ],
@@ -7537,12 +10210,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1208,
+      "first_match_line": 1214,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1208,
-      "line": 1162,
+      "last_match_line": 1214,
+      "line": 1168,
       "markers": [
         "evidence"
       ],
@@ -7555,12 +10228,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1297,
+      "first_match_line": 1303,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1297,
-      "line": 1217,
+      "last_match_line": 1303,
+      "line": 1223,
       "markers": [
         "evidence"
       ],
@@ -7573,12 +10246,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1331,
+      "first_match_line": 1337,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1331,
-      "line": 1305,
+      "last_match_line": 1337,
+      "line": 1311,
       "markers": [
         "evidence"
       ],
@@ -7591,12 +10264,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1373,
+      "first_match_line": 1379,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1374,
-      "line": 1341,
+      "last_match_line": 1380,
+      "line": 1347,
       "markers": [
         "evidence"
       ],
@@ -7609,12 +10282,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1513,
+      "first_match_line": 1519,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1513,
-      "line": 1489,
+      "last_match_line": 1519,
+      "line": 1495,
       "markers": [
         "evidence"
       ],
@@ -12210,12 +14883,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 303,
+      "first_match_line": 309,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 303,
+      "last_match_line": 309,
       "line": 291,
       "markers": [
         "e3"
@@ -12229,13 +14902,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 315,
+      "first_match_line": 321,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 324,
-      "line": 312,
+      "last_match_line": 330,
+      "line": 318,
       "markers": [
         "e3",
         "evidence",
@@ -12251,13 +14924,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 334,
+      "first_match_line": 340,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 334,
-      "line": 332,
+      "last_match_line": 340,
+      "line": 338,
       "markers": [
         "e3"
       ],
@@ -12271,13 +14944,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 359,
+      "first_match_line": 365,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 366,
-      "line": 357,
+      "last_match_line": 372,
+      "line": 363,
       "markers": [
         "e3"
       ],
@@ -12290,13 +14963,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 375,
+      "first_match_line": 381,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 394,
-      "line": 373,
+      "last_match_line": 400,
+      "line": 379,
       "markers": [
         "e3"
       ],
@@ -12309,13 +14982,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 404,
+      "first_match_line": 410,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 404,
-      "line": 402,
+      "last_match_line": 410,
+      "line": 408,
       "markers": [
         "e3"
       ],
@@ -12328,13 +15001,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 414,
+      "first_match_line": 420,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 414,
-      "line": 412,
+      "last_match_line": 420,
+      "line": 418,
       "markers": [
         "e3"
       ],
@@ -12348,13 +15021,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 431,
+      "first_match_line": 437,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 445,
-      "line": 429,
+      "last_match_line": 451,
+      "line": 435,
       "markers": [
         "e3"
       ],
@@ -12368,13 +15041,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 451,
+      "first_match_line": 457,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 475,
-      "line": 449,
+      "last_match_line": 481,
+      "line": 455,
       "markers": [
         "e3"
       ],
@@ -12388,13 +15061,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 488,
+      "first_match_line": 494,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 498,
-      "line": 486,
+      "last_match_line": 504,
+      "line": 492,
       "markers": [
         "e3"
       ],
@@ -12408,13 +15081,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 515,
+      "first_match_line": 521,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 515,
-      "line": 513,
+      "last_match_line": 521,
+      "line": 519,
       "markers": [
         "e3"
       ],
@@ -12428,13 +15101,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 532,
+      "first_match_line": 538,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 532,
-      "line": 530,
+      "last_match_line": 538,
+      "line": 536,
       "markers": [
         "e3"
       ],
@@ -12448,13 +15121,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 549,
+      "first_match_line": 555,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 549,
-      "line": 547,
+      "last_match_line": 555,
+      "line": 553,
       "markers": [
         "e3"
       ],
@@ -12468,13 +15141,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 595,
+      "first_match_line": 601,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 595,
-      "line": 584,
+      "last_match_line": 601,
+      "line": 590,
       "markers": [
         "e3"
       ],
@@ -12487,13 +15160,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 639,
+      "first_match_line": 645,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 649,
-      "line": 624,
+      "last_match_line": 655,
+      "line": 630,
       "markers": [
         "tp003"
       ],
@@ -12507,13 +15180,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 668,
+      "first_match_line": 674,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 675,
-      "line": 668,
+      "last_match_line": 681,
+      "line": 674,
       "markers": [
         "evidence",
         "source_guard"
@@ -12527,13 +15200,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 679,
+      "first_match_line": 685,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 681,
-      "line": 679,
+      "last_match_line": 687,
+      "line": 685,
       "markers": [
         "e3",
         "source_guard"
@@ -12548,13 +15221,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 705,
+      "first_match_line": 711,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 715,
-      "line": 694,
+      "last_match_line": 721,
+      "line": 700,
       "markers": [
         "tp003"
       ],
@@ -12568,13 +15241,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 720,
+      "first_match_line": 726,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 729,
-      "line": 720,
+      "last_match_line": 735,
+      "line": 726,
       "markers": [
         "e3",
         "evidence"
@@ -12589,13 +15262,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 733,
+      "first_match_line": 739,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 737,
-      "line": 733,
+      "last_match_line": 743,
+      "line": 739,
       "markers": [
         "e3"
       ],
@@ -12609,13 +15282,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 752,
+      "first_match_line": 758,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 765,
-      "line": 750,
+      "last_match_line": 771,
+      "line": 756,
       "markers": [
         "e3"
       ],
@@ -12628,13 +15301,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 776,
+      "first_match_line": 782,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 784,
-      "line": 774,
+      "last_match_line": 790,
+      "line": 780,
       "markers": [
         "e3"
       ],
@@ -12648,13 +15321,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 801,
+      "first_match_line": 807,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 803,
-      "line": 799,
+      "last_match_line": 809,
+      "line": 805,
       "markers": [
         "e3"
       ],
@@ -12668,13 +15341,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 846,
+      "first_match_line": 852,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 846,
-      "line": 838,
+      "last_match_line": 852,
+      "line": 844,
       "markers": [
         "evidence"
       ],
@@ -12687,13 +15360,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 889,
+      "first_match_line": 895,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 909,
-      "line": 888,
+      "last_match_line": 915,
+      "line": 894,
       "markers": [
         "e3",
         "evidence"
@@ -12707,13 +15380,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 915,
+      "first_match_line": 921,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 957,
-      "line": 913,
+      "last_match_line": 963,
+      "line": 919,
       "markers": [
         "e3",
         "evidence",
@@ -12728,13 +15401,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 964,
+      "first_match_line": 970,
       "groups": [
         "e3",
         "release"
       ],
-      "last_match_line": 967,
-      "line": 962,
+      "last_match_line": 973,
+      "line": 968,
       "markers": [
         "e3",
         "tp003"
@@ -14283,12 +16956,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1376,
+      "first_match_line": 1310,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1376,
-      "line": 1369,
+      "last_match_line": 1310,
+      "line": 1303,
       "markers": [
         "evidence"
       ],
@@ -14301,12 +16974,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2115,
+      "first_match_line": 1961,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 2115,
-      "line": 2031,
+      "last_match_line": 1961,
+      "line": 1877,
       "markers": [
         "evidence"
       ],
@@ -14319,12 +16992,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2280,
+      "first_match_line": 2126,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 2517,
-      "line": 2279,
+      "last_match_line": 2363,
+      "line": 2125,
       "markers": [
         "evidence"
       ],
@@ -14337,12 +17010,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2529,
+      "first_match_line": 2375,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 2587,
-      "line": 2528,
+      "last_match_line": 2433,
+      "line": 2374,
       "markers": [
         "evidence"
       ],
@@ -14355,12 +17028,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2690,
+      "first_match_line": 2536,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 2690,
-      "line": 2658,
+      "last_match_line": 2536,
+      "line": 2504,
       "markers": [
         "evidence"
       ],
@@ -14373,12 +17046,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3135,
+      "first_match_line": 2981,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 3135,
-      "line": 3064,
+      "last_match_line": 2981,
+      "line": 2910,
       "markers": [
         "evidence"
       ],
@@ -14391,12 +17064,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3268,
+      "first_match_line": 3103,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 3268,
-      "line": 3228,
+      "last_match_line": 3103,
+      "line": 3063,
       "markers": [
         "evidence"
       ],
@@ -14409,12 +17082,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 3269,
+      "first_match_line": 3104,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 3371,
-      "line": 3269,
+      "last_match_line": 3206,
+      "line": 3104,
       "markers": [
         "evidence"
       ],
@@ -14427,11 +17100,11 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1,
+      "first_match_line": 35,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1,
+      "last_match_line": 35,
       "line": 1,
       "markers": [
         "evidence"
@@ -14440,26 +17113,8 @@
       "operations": [
         "constant"
       ],
-      "path": "crates/fireweed-turso/src/queue_projection/presence.rs",
+      "path": "crates/fireweed-turso/src/queue_scratch/source.rs",
       "symbol": "<module>"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 13,
-      "groups": [
-        "evidence"
-      ],
-      "last_match_line": 13,
-      "line": 11,
-      "markers": [
-        "evidence"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "crates/fireweed-turso/src/queue_projection/presence.rs",
-      "symbol": "run"
     },
     {
       "evidence_paths": [],
@@ -14481,12 +17136,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1065,
+      "first_match_line": 1057,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1065,
-      "line": 1064,
+      "last_match_line": 1057,
+      "line": 1056,
       "markers": [
         "evidence"
       ],
@@ -14499,12 +17154,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1087,
+      "first_match_line": 1079,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1152,
-      "line": 1087,
+      "last_match_line": 1144,
+      "line": 1079,
       "markers": [
         "evidence"
       ],
@@ -14517,12 +17172,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1201,
+      "first_match_line": 1193,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1287,
-      "line": 1201,
+      "last_match_line": 1279,
+      "line": 1193,
       "markers": [
         "evidence"
       ],
@@ -14537,11 +17192,11 @@
       "evidence_paths": [
         "docs/perf/evidence/tp005/million-cycle-production/README.md"
       ],
-      "first_match_line": 155,
+      "first_match_line": 171,
       "groups": [
         "matrix"
       ],
-      "last_match_line": 156,
+      "last_match_line": 172,
       "line": 1,
       "markers": [
         "matrix"
@@ -14555,12 +17210,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 964,
+      "first_match_line": 1211,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1057,
-      "line": 957,
+      "last_match_line": 1306,
+      "line": 1204,
       "markers": [
         "evidence",
         "evidence_environment"
@@ -14576,11 +17231,11 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 35,
+      "first_match_line": 41,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 35,
+      "last_match_line": 41,
       "line": 1,
       "markers": [
         "evidence"
@@ -14594,12 +17249,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4317,
+      "first_match_line": 4358,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 4317,
-      "line": 4203,
+      "last_match_line": 4358,
+      "line": 4244,
       "markers": [
         "evidence"
       ],
@@ -15619,30 +18274,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1669,
+      "first_match_line": 1698,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1669,
-      "line": 1658,
-      "markers": [
-        "tp003"
-      ],
-      "match_count": 1,
-      "operations": [
-        "reader"
-      ],
-      "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
-      "symbol": "group_qdef"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 1948,
-      "groups": [
-        "evidence"
-      ],
-      "last_match_line": 1948,
-      "line": 1927,
+      "last_match_line": 1698,
+      "line": 1677,
       "markers": [
         "tp003"
       ],
@@ -15655,30 +18292,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2169,
+      "first_match_line": 1923,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 2169,
-      "line": 1966,
-      "markers": [
-        "tp003"
-      ],
-      "match_count": 1,
-      "operations": [
-        "constant"
-      ],
-      "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
-      "symbol": "callback_cohort_e2e"
-    },
-    {
-      "evidence_paths": [],
-      "first_match_line": 2462,
-      "groups": [
-        "evidence"
-      ],
-      "last_match_line": 2462,
-      "line": 2195,
+      "last_match_line": 1923,
+      "line": 1716,
       "markers": [
         "tp003"
       ],
@@ -15687,16 +18306,16 @@
         "reader"
       ],
       "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
-      "symbol": "noisy_neighbor_scale_e2e"
+      "symbol": "callback_cohort_e2e"
     },
     {
       "evidence_paths": [],
-      "first_match_line": 2627,
+      "first_match_line": 2088,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 2627,
-      "line": 2483,
+      "last_match_line": 2088,
+      "line": 1944,
       "markers": [
         "tp003"
       ],
@@ -15706,6 +18325,42 @@
       ],
       "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
       "symbol": "worker_crash_recovery_e2e"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 2489,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 2489,
+      "line": 2098,
+      "markers": [
+        "tp003"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
+      "symbol": "operator_repair_redrive_e2e"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 2741,
+      "groups": [
+        "evidence"
+      ],
+      "last_match_line": 2741,
+      "line": 2506,
+      "markers": [
+        "tp003"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "crates/fireweed/tests/whitebox/product_validation_tests.rs",
+      "symbol": "marketo_group_batching_e2e"
     },
     {
       "evidence_paths": [
@@ -16300,13 +18955,13 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 695,
+      "first_match_line": 698,
       "groups": [
         "e3",
         "script"
       ],
-      "last_match_line": 781,
-      "line": 659,
+      "last_match_line": 784,
+      "line": 662,
       "markers": [
         "e3",
         "source_guard"
@@ -16321,12 +18976,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 878,
+      "first_match_line": 881,
       "groups": [
         "script"
       ],
-      "last_match_line": 896,
-      "line": 860,
+      "last_match_line": 899,
+      "line": 863,
       "markers": [
         "evidence",
         "public_identity"
@@ -16341,12 +18996,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 993,
+      "first_match_line": 996,
       "groups": [
         "script"
       ],
-      "last_match_line": 1031,
-      "line": 989,
+      "last_match_line": 1034,
+      "line": 992,
       "markers": [
         "public_identity"
       ],
@@ -16560,16 +19215,16 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 47,
+      "first_match_line": 18,
       "groups": [
         "script"
       ],
-      "last_match_line": 51,
+      "last_match_line": 64,
       "line": 1,
       "markers": [
         "evidence"
       ],
-      "match_count": 4,
+      "match_count": 7,
       "operations": [
         "reader"
       ],
@@ -16632,6 +19287,222 @@
       ],
       "path": "scripts/ci/public-release-gate.py",
       "symbol": "output"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 20,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 20,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/queue-pg-execution.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 40,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 40,
+      "line": 29,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/ci/queue-pg-execution.py",
+      "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 221,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 221,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/ci/queue-pg-routes.json",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 139,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 140,
+      "line": 116,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/queue_pg_controls.py",
+      "symbol": "test"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 1,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/queue_pg_evidence.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 40,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 51,
+      "line": 35,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 5,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/queue_pg_evidence.py",
+      "symbol": "verify_report"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 52,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 52,
+      "line": 40,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/queue_pg_fixture_controls.py",
+      "symbol": "failed_listing"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 4,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 4,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/ci/queue_pg_producer_controls.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 75,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 95,
+      "line": 69,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/queue_pg_producer_controls.py",
+      "symbol": "close"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 1,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/ci/queue_pg_workflow.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 17,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 39,
+      "line": 2,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 4,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/queue_pg_workflow.py",
+      "symbol": "validate"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 48,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 59,
+      "line": 40,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/queue_pg_workflow.py",
+      "symbol": "self_test"
     },
     {
       "evidence_paths": [],
@@ -17064,7 +19935,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 96911,
+      "last_match_line": 121614,
       "line": 1,
       "markers": [
         "e3",
@@ -17075,7 +19946,7 @@
         "td008",
         "tp003"
       ],
-      "match_count": 1151,
+      "match_count": 1167,
       "operations": [
         "constant",
         "public_identity",
@@ -17084,6 +19955,190 @@
       ],
       "path": "scripts/ci/storage-remediation-inventory.json",
       "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [
+        "docs/perf/evidence/maintenance-verification-prepush-v0.31.28/manifest.json"
+      ],
+      "first_match_line": 17,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 17,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/storage-remediation-policy.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 266,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 266,
+      "line": 116,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/storage-remediation-policy.py",
+      "symbol": "validate_inventory"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 554,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 564,
+      "line": 546,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/storage-remediation-policy.py",
+      "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 9,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 13,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/ci/storage-remediation-policy.sh",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 1,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 13,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/ci/test_queue_pg_evidence.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 15,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 61,
+      "line": 14,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 11,
+      "operations": [
+        "writer"
+      ],
+      "path": "scripts/ci/test_queue_pg_evidence.py",
+      "symbol": "setUp"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 67,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 67,
+      "line": 64,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader",
+        "writer"
+      ],
+      "path": "scripts/ci/test_queue_pg_evidence.py",
+      "symbol": "verify"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 72,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 72,
+      "line": 71,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/test_queue_pg_evidence.py",
+      "symbol": "test_structural_and_stale_evidence_fails"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 116,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 120,
+      "line": 100,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader",
+        "writer"
+      ],
+      "path": "scripts/ci/test_queue_pg_evidence.py",
+      "symbol": "test_zero_ignored_extra_and_parent_missing_summary_fail"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 126,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 126,
+      "line": 121,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/ci/test_queue_pg_evidence.py",
+      "symbol": "test_other_test_content_under_expected_filename_fails"
     },
     {
       "evidence_paths": [
@@ -17135,7 +20190,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 255,
+      "last_match_line": 256,
       "line": 1,
       "markers": [
         "evidence",
@@ -17557,6 +20612,42 @@
       "operations": [
         "constant"
       ],
+      "path": "scripts/formal/check_source_group.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 57,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 57,
+      "line": 46,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/check_source_group.py",
+      "symbol": "main"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 2,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 2,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
       "path": "scripts/formal/conformance.py",
       "symbol": "<module>"
     },
@@ -17620,6 +20711,276 @@
     },
     {
       "evidence_paths": [],
+      "first_match_line": 11,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 11,
+      "line": 10,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/source_body_gate.py",
+      "symbol": "members"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 13,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 13,
+      "line": 12,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/source_body_gate.py",
+      "symbol": "scope_valid"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 17,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 20,
+      "line": 14,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/source_body_gate.py",
+      "symbol": "matching_valid"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 40,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 40,
+      "line": 24,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/source_body_gate.py",
+      "symbol": "view_body"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 25,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 107,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 10,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/source_body_models.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 178,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 178,
+      "line": 170,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/source_body_models.py",
+      "symbol": "transitions"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 211,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 246,
+      "line": 199,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/source_body_models.py",
+      "symbol": "refused"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 325,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 370,
+      "line": 167,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 3,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/formal/source_group_gate.py",
+      "symbol": "run"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 23,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 23,
+      "line": 1,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/source_group_models.py",
+      "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 126,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 126,
+      "line": 75,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/source_group_models.py",
+      "symbol": "expected"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 154,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 156,
+      "line": 136,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/formal/source_group_models.py",
+      "symbol": "transitions"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 842,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 842,
+      "line": 677,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/source_group_models.py",
+      "symbol": "violation"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 891,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 906,
+      "line": 867,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 2,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/formal/source_group_models.py",
+      "symbol": "capsule"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 953,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 953,
+      "line": 926,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/formal/source_group_models.py",
+      "symbol": "violation"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 138,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 138,
+      "line": 132,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/formal/source_original_models.py",
+      "symbol": "output"
+    },
+    {
+      "evidence_paths": [],
       "first_match_line": 1,
       "groups": [
         "script"
@@ -17671,6 +21032,96 @@
       ],
       "path": "scripts/formal/test_pack_publication.py",
       "symbol": "<module>"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 71,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 71,
+      "line": 66,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/test_source_body.py",
+      "symbol": "test_real_state_and_receipt_intervals_keep_work_fact_and_key"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 210,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 210,
+      "line": 209,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/formal/test_source_group.py",
+      "symbol": "test_header_recovery_late_unknown_does_not_hide_invalid_accepted_evidence"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 86,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 86,
+      "line": 86,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/test_source_original.py",
+      "symbol": "test_port_errors_cannot_become_evidence_even_before_later_unknown"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 92,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 92,
+      "line": 92,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "constant"
+      ],
+      "path": "scripts/formal/test_source_original_batch.py",
+      "symbol": "test_bad_intermediate_evidence_cannot_be_hidden_by_later_unknown_or_phase_names"
+    },
+    {
+      "evidence_paths": [],
+      "first_match_line": 160,
+      "groups": [
+        "script"
+      ],
+      "last_match_line": 160,
+      "line": 160,
+      "markers": [
+        "evidence"
+      ],
+      "match_count": 1,
+      "operations": [
+        "reader"
+      ],
+      "path": "scripts/formal/test_source_original_batch.py",
+      "symbol": "test_genuine_late_unknown_accepts_valid_prefix_and_rejects_corrupt_evidence"
     },
     {
       "evidence_paths": [],

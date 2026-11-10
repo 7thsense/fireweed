@@ -38,7 +38,6 @@ CREATE TABLE IF NOT EXISTS fireweed_workers (
     heartbeat_at BIGINT NOT NULL,                -- nanoseconds since epoch
     endpoint TEXT
 );
-ALTER TABLE fireweed_workers ADD COLUMN IF NOT EXISTS endpoint TEXT;
 CREATE TABLE IF NOT EXISTS fireweed_queue_owner (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     state TEXT NOT NULL,                          -- 'unassigned' | 'pending_fence' | 'assigned' | 'draining'
