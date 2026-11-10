@@ -141,3 +141,45 @@ fn late_presence_write_failure_cannot_turn_completed_earlier_types_into_a_leaf()
         assert!(f.scratch_alive.upgrade().is_none());
     });
 }
+#[test]
+fn field_presence_predicates_use_the_presence_leaf_like_present_nodes() {
+    futures::executor::block_on(async {
+        let mut f = fixture_contents(Signals::default(), false, FieldType::Integer, false, true);
+        let field_node = |predicate| {
+            WorkSelector::leaf(SelectorNode::Field {
+                name: "n".into(),
+                predicate,
+            })
+        };
+        let intent = AdministrativeIntent {
+            evaluated_at: 0,
+            before_fields: None,
+            operation: AdministrativeOperation::SelectFirst(
+                [
+                    ("present", field_node(Predicate::Present)),
+                    ("absent", field_node(Predicate::Absent)),
+                ]
+                .into_iter()
+                .map(|(id, selector)| AdministrativeClause {
+                    id: id.into(),
+                    selector,
+                    precondition: WorkSelector::all(vec![]),
+                    action: AdministrativeAction::Delete {
+                        lease_guard: AdministrativeLeaseGuard::RejectActive,
+                    },
+                })
+                .collect(),
+            ),
+        };
+        let (producer, present) = start_presence!(f, intent).presence(0, 0).await.unwrap();
+        let (producer, absent) = producer.presence(1, 0).await.unwrap();
+        assert_eq!(producer.presence_len(&present, 0, 0).unwrap(), 3);
+        assert_eq!(absent.set.0.rows, present.set.0.rows);
+        assert!(present.present);
+        assert!(!absent.present);
+        for clause in 0..2 {
+            // Presence probes are never scalar value occurrences.
+            assert!(producer._request.boolean_program(clause).unwrap().1 == 0);
+        }
+    });
+}

@@ -224,6 +224,23 @@ macro_rules! define_queue_source_oracle {
                         Vec::new(),
                     );
                 }
+                for name in definition
+                    .fields
+                    .keys()
+                    .filter(|name| !fields.contains_key(*name))
+                {
+                    output.insert(
+                        QueueSourceKey::ScalarPosting {
+                            collection: identity.collection.as_deref(),
+                            key: &identity.key,
+                            field: name,
+                            sort: &$engine::queue_source_index::QUEUE_SOURCE_ABSENT_SORT,
+                        }
+                        .encode()
+                        .unwrap(),
+                        Vec::new(),
+                    );
+                }
                 for (index, columns) in &definition.indexes {
                     let values: Vec<_> = columns.iter().map(|name| fields.get(name)).collect();
                     let sort = $engine::queue_index::ordered_key(&values).unwrap();

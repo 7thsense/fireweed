@@ -1,4 +1,5 @@
 use super::*;
+use crate::queue_source_index::QUEUE_SOURCE_ABSENT_SORT;
 use crate::{
     queue_admission::{OwnedQueueBufferCharge, QueueAdmission, QueueReservation},
     queue_index::ordered_key,
@@ -252,6 +253,25 @@ fn posting_markers_scope_and_full_namespace_must_match_before_candidate_use() {
     );
 }
 #[test]
+fn absence_sentinel_decodes_only_as_the_exact_scalar_posting() {
+    let f = Fixture::new();
+    let cut = f.cut();
+    let scalar = QueueSourcePostingFamily::Scalar {
+        collection: None,
+        field: "v",
+    };
+    let raw = key(scalar, &QUEUE_SOURCE_ABSENT_SORT, "k");
+    for kind in [FieldType::Integer, FieldType::Text] {
+        let decoded = scalar
+            .decode(&cut, cut.point_from_source(&raw, Some(&[])), &[kind])
+            .unwrap();
+        assert_eq!(
+            decoded.sort_bytes().collect::<Vec<_>>(),
+            QUEUE_SOURCE_ABSENT_SORT
+        );
+    }
+}
+#[test]
 fn noncanonical_nested_tuples_numbers_and_utf8_never_become_candidates() {
     let f = Fixture::new();
     let cut = f.cut();
@@ -262,7 +282,8 @@ fn noncanonical_nested_tuples_numbers_and_utf8_never_become_candidates() {
     let mut cases = vec![
         (vec![], FieldType::Integer),
         (vec![2], FieldType::Integer),
-        (vec![1, 0], FieldType::Integer),
+        (vec![1, 0, 0], FieldType::Integer),
+        (vec![1, 0, 1, 0], FieldType::Integer),
         (vec![1, 2], FieldType::Integer),
         (vec![1, 1, 0], FieldType::Integer),
         (vec![1, 1, 2, 2], FieldType::Boolean),

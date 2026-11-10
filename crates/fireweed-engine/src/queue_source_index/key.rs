@@ -9,7 +9,7 @@ pub use membership::{QueueSourceDecodedIdentity, QueueSourceDecodedWorkPosting, 
 mod ordered;
 mod posting;
 pub(super) use literal::text as text_literal;
-pub use posting::{QueueSourceDecodedPosting, QueueSourcePostingFamily};
+pub use posting::{QUEUE_SOURCE_ABSENT_SORT, QueueSourceDecodedPosting, QueueSourcePostingFamily};
 
 pub(super) const VERSION: u8 = 1;
 #[derive(Clone, Copy)]

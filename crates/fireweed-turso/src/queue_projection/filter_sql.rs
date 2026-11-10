@@ -190,6 +190,11 @@ fn probe_rows(
             Ok(())
         };
         match predicate {
+            Predicate::Present | Predicate::Absent => {
+                return Err(QueueError::Invalid(
+                    "presence predicates are not wired".into(),
+                ));
+            }
             Predicate::Equal(value) => equality(value)?,
             Predicate::In(values) => {
                 for value in values {

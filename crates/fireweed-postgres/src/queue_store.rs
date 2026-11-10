@@ -1783,6 +1783,11 @@ fn field_predicate_sql(
 ) -> QueueResult<String> {
     let mut sql = String::new();
     match predicate {
+        Predicate::Present | Predicate::Absent => {
+            return Err(QueueError::Invalid(
+                "presence predicates are not wired".into(),
+            ));
+        }
         Predicate::Equal(value) => {
             let bytes = ordered_key(&[Some(value)])?;
             let hp = params.bytes(probe_hash(&bytes));

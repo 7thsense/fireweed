@@ -358,8 +358,11 @@ impl Bound {
         }
     }
 }
-/// Predicates never match absent fields. Text/bytes compare bytewise; numeric
-/// fields compare numerically. No coercion or database collation is permitted.
+/// `Equal`, `In` and `Range` never match absent fields. `Present` matches any
+/// field that exists in the record (JSON null is a present value); `Absent`
+/// matches a declared field that the record lacks. Text/bytes compare
+/// bytewise; numeric fields compare numerically. No coercion or database
+/// collation is permitted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Predicate {
     Equal(FieldValue),
@@ -368,6 +371,11 @@ pub enum Predicate {
         lower: Option<Bound>,
         upper: Option<Bound>,
     },
+    /// The field exists in the record, with any value.
+    Present,
+    /// The declared field is missing from the record. Not admitted on fields
+    /// that are only admitted through `additional_field_prefixes`.
+    Absent,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 /// Each admitted declared-field predicate has an automatically provisioned
@@ -748,6 +756,12 @@ pub(crate) fn validate_field_predicate(
         return Err(invalid("undeclared filter field"));
     }
     match predicate {
+        Predicate::Present => {}
+        Predicate::Absent => {
+            if !definition.fields.contains_key(key) {
+                return Err(invalid("absence requires a declared field"));
+            }
+        }
         Predicate::Equal(value) => definition.validate_value(key, value)?,
         Predicate::In(values) => {
             if values.is_empty() {
@@ -805,10 +819,12 @@ pub fn compare_optional_fields(
 impl Predicate {
     pub fn matches(&self, value: Option<&FieldValue>) -> bool {
         let Some(value) = value else {
-            return false;
+            return matches!(self, Self::Absent);
         };
         use std::cmp::Ordering::{Equal, Greater, Less};
         match self {
+            Self::Present => true,
+            Self::Absent => false,
             Self::Equal(expected) => compare_fields(value, expected) == Some(Equal),
             Self::In(values) => values
                 .iter()
@@ -2060,6 +2076,65 @@ mod tests {
             upper: Some(Bound::Included(FieldValue::Integer(20))),
         };
         assert!(p.matches(Some(&FieldValue::Integer(20))));
+    }
+    #[test]
+    fn presence_predicates_match_only_by_existence() {
+        let value = FieldValue::Text(String::new());
+        assert!(Predicate::Present.matches(Some(&value)));
+        assert!(Predicate::Present.matches(Some(&FieldValue::Boolean(false))));
+        assert!(Predicate::Present.matches(Some(&FieldValue::Bytes(Vec::new().into()))));
+        assert!(!Predicate::Present.matches(None));
+        assert!(Predicate::Absent.matches(None));
+        assert!(!Predicate::Absent.matches(Some(&value)));
+        assert!(!Predicate::Absent.matches(Some(&FieldValue::Integer(0))));
+    }
+    #[test]
+    fn presence_predicates_validate_against_declared_and_prefix_fields() {
+        let mut definition = schema().work;
+        definition
+            .additional_field_prefixes
+            .insert("/payload/".into());
+        let valid =
+            |key: &str, predicate: Predicate| definition.validate_predicate(key, &predicate);
+        assert!(valid("kind", Predicate::Present).is_ok());
+        assert!(valid("kind", Predicate::Absent).is_ok());
+        assert!(valid("/payload/a", Predicate::Present).is_ok());
+        assert!(matches!(
+            valid("/payload/a", Predicate::Absent),
+            Err(QueueError::Invalid(message)) if message.contains("absence requires")
+        ));
+        for predicate in [Predicate::Present, Predicate::Absent] {
+            assert!(matches!(
+                valid("undeclared", predicate),
+                Err(QueueError::Invalid(_))
+            ));
+        }
+    }
+    #[test]
+    fn presence_predicates_keep_existing_wire_indices_and_fingerprints() {
+        let index = |predicate: &Predicate| postcard::to_allocvec(predicate).unwrap()[0];
+        assert_eq!(index(&Predicate::Equal(FieldValue::Integer(1))), 0);
+        assert_eq!(index(&Predicate::In(vec![FieldValue::Integer(1)])), 1);
+        assert_eq!(
+            index(&Predicate::Range {
+                lower: None,
+                upper: None
+            }),
+            2
+        );
+        assert_eq!(index(&Predicate::Present), 3);
+        assert_eq!(index(&Predicate::Absent), 4);
+        let with = |predicate: Predicate| {
+            let mut request = claim();
+            request.filter.fields.insert("kind".into(), predicate);
+            request.fingerprint().unwrap()
+        };
+        let equal = with(Predicate::Equal(FieldValue::Text("x".into())));
+        let present = with(Predicate::Present);
+        let absent = with(Predicate::Absent);
+        assert_ne!(equal, present);
+        assert_ne!(equal, absent);
+        assert_ne!(present, absent);
     }
     #[test]
     fn reserved_index_and_unbounded_receipt_reads_reject() {
