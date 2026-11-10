@@ -37,9 +37,6 @@ esac
 
 echo "=== pr-gate [mode=${MODE}] ==="
 
-echo "--- release artifact verifier fixtures ---"
-bash "${SCRIPT_DIR}/../release/verify-release-artifacts-test.sh"
-
 echo "--- release identity freeze fixtures (P17v) ---"
 bash "${SCRIPT_DIR}/../release/verify-release-identity-test.sh"
 

@@ -15,7 +15,7 @@ git -C "$CASE_ROOT" init -q source
 git -C "$repo" config user.name Test
 git -C "$repo" config user.email test@example.invalid
 git -C "$repo" remote add origin "https://example.invalid/fireweed.git"
-printf '%s\n' 'target/' '.ddx/agent-logs/' 'node_modules/' '__pycache__/' 'examples/python-resp/.venv/' >"$repo/.gitignore"
+printf '%s\n' 'target/' '.ddx/agent-logs/' 'node_modules/' '__pycache__/' >"$repo/.gitignore"
 printf 'seed\n' >"$repo/README.md"
 printf 'historical\n' >"$repo/docs/perf/evidence/historical.txt"
 git -C "$repo" add .

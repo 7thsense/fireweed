@@ -2,7 +2,7 @@ name: ci
 
 # Documentation-only changes do not start the Rust jobs. The ignore list holds only paths
 # that no job here reads by name. docs/helix (formal checks, topology gate),
-# docs/site, docs/operator and docs/deployment (microsite sources), docs/releases
+# docs/site and docs/operator (microsite sources), docs/releases
 # (release-identity checks), README.md and CONTRIBUTING.md (cargo host-safeguard
 # check, crate readme) still trigger CI. The public-identity scan in the
 # functional job walks every tracked file, so residue in an ignored path is

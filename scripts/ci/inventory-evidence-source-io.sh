@@ -188,8 +188,6 @@ def groups_for(path: str, body: str) -> list[str]:
         groups.add("e3")
     if "matrix" in lower_path or marker_patterns["matrix"].search(body):
         groups.add("matrix")
-    if path.startswith("crates/fireweed-server/"):
-        groups.add("server")
     if "public-identity" in lower_path or "public_identity" in lower_path:
         groups.add("identity")
     if path.startswith("crates/fireweed-conformance/"):
@@ -425,7 +423,7 @@ def validate() -> None:
         <= operations,
         f"missing source-I/O classes: {sorted({'reader', 'writer', 'deleter', 'constant', 'source_guard', 'public_identity'} - operations)}",
     )
-    for group in ("release", "e3", "matrix", "server", "identity"):
+    for group in ("release", "e3", "matrix", "identity"):
         require(
             any(group in surface["groups"] and "reader" in surface["operations"] for surface in surfaces),
             f"missing {group} reader inventory",

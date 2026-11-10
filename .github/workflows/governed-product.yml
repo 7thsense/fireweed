@@ -1,12 +1,11 @@
 # Governed product lane (P13a framework + P13 populated allowlist/services).
 #
-# Destination for service-backed storage-matrix, Helm/kind, supported S3, and
+# Destination for service-backed storage-matrix, supported S3, and
 # deterministic reduced-count functional/schema checks that must not run on the
 # bounded hosted ci.yml lane.
 #
 # Product-release readiness is NOT claimed by this lane alone:
-#   - P13 populates scripts/ci/governed-product-allowlist.json commands and
-#     scripts/ci/governed-product-services.json kafka image_digest/command.
+#   - P13 populates scripts/ci/governed-product-allowlist.json commands.
 #   - P13b provisions runner/credentials/ruleset and emits external proof.
 #   - TP-005 authoritative performance remains forbidden in all CI.
 #
@@ -53,68 +52,19 @@ jobs:
       - name: Verify workflow policy (zero-arg)
         run: bash scripts/ci/verify-github-actions-policy.sh
 
-      - name: Validate P13-populated allowlist + services
+      - name: Validate P13-populated allowlist
         run: |
           python3 scripts/ci/generate-governed-product-allowlist.py --check
           python3 - <<'PY'
           import json
-          import re
           from pathlib import Path
           allow = json.loads(Path("scripts/ci/governed-product-allowlist.json").read_text())
-          services = json.loads(Path("scripts/ci/governed-product-services.json").read_text())
           assert allow["product_release_readiness_claimed"] is False
-          assert len(allow["commands"]) >= 8
-          kafka = services["services"]["kafka_compatible_broker"]
-          assert kafka["authorized"] is True
-          assert re.fullmatch(r"sha256:[0-9a-f]{64}", kafka["image_digest"])
-          assert isinstance(kafka["command"], list) and kafka["command"][0] == "redpanda"
+          assert len(allow["commands"]) >= 5
           print(
               f"governed-product: {len(allow['commands'])} commands; "
-              f"kafka={kafka['image_repository']}@{kafka['image_digest'][:19]}…; "
               "product_release_readiness_claimed=false"
           )
-          PY
-
-      - name: Authorized kafka_compatible_broker pin (P8k / P13)
-        # Pin lives in scripts/ci/governed-product-services.json only. This step
-        # verifies the image is present (or pullable) and records the pin; the
-        # allowlist p8k-external-kafka-fixture-preflight entry owns readiness/
-        # sentinel produce-fetch on a run-owned ephemeral container.
-        run: |
-          python3 - <<'PY'
-          import json
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          services = json.loads(Path("scripts/ci/governed-product-services.json").read_text())
-          kafka = services["services"]["kafka_compatible_broker"]
-          assert kafka["authorized"] is True
-          digest = kafka["image_digest"]
-          pinned = kafka.get("image_pinned") or f"{kafka['image_repository']}@{digest}"
-          cmd = kafka["command"]
-          assert isinstance(cmd, list) and cmd[0] == "redpanda"
-          print(f"kafka_compatible_broker authorized pin: {pinned}")
-          print(f"static command: {' '.join(cmd)}")
-
-          inspect = subprocess.run(
-              ["docker", "image", "inspect", pinned],
-              capture_output=True,
-              text=True,
-          )
-          if inspect.returncode != 0:
-              print(f"pulling pinned image {pinned}", flush=True)
-              pull = subprocess.run(["docker", "pull", pinned], check=False)
-              if pull.returncode != 0:
-                  print(
-                      "WARNING: pinned Redpanda image not available locally; "
-                      "allowlist p8k preflight will fail closed if docker/image missing",
-                      file=sys.stderr,
-                  )
-              else:
-                  print("pinned image pulled")
-          else:
-              print("pinned image present locally")
           PY
 
       - name: Execute P13-populated allowlist commands

@@ -31,17 +31,12 @@ canonical_surfaces:
     - fireweed-sqlite
     - fireweed-postgres
     - fireweed-objectlog
-    - fireweed-resp
-    - fireweed-server
     - fireweed-release
-    - fireweed-loadgen
     - fireweed-conformance
     - fireweed-sim-support
     - fireweed-turso
     - fireweed-bench
   binaries:
-    - fireweed-service
-    - fireweed-loadgen
     - fireweed-bench
     - fireweed-verify-ledger
     - fireweed-verify-evidence-attestation
@@ -52,11 +47,6 @@ canonical_surfaces:
     - fireweed-cost-model
   repository:
     url: https://github.com/7thsense/fireweed.git
-  container:
-    image: ghcr.io/7thsense/fireweed-service
-  helm:
-    chart: fireweed-queue
-    path: charts/fireweed-queue
   runtime:
     state_root: /var/lib/fireweed
     object_log_root: /var/lib/fireweed/object-log

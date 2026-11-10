@@ -171,7 +171,7 @@ cargo test -p fireweed-objectlog -- --ignored   # only if suite documents S3-gat
 ### 3.3 Operator / release notes
 
 - Public support claims name **cells** with evidence on the release revision
-  (see `DEPLOYMENT-READINESS.md` and `public-preview-boundary.md`).
+  (see `public-preview-boundary.md`).
 - Class B cells in release notes carry an explicit durability disclaimer.
 - Class A claims require durable_log_replay (or documented relational-reconnect
   + log class where both apply) evidence for that cell — not “memory suite green”

@@ -8,8 +8,9 @@
 #   - fireweed-evidence  — read-only evidence commit E (tag peel)
 #   - fireweed-source    — measured source S from E promotion metadata only
 #
-# Service/kind work lives on governed-product.yml. This workflow retains only the
-# exact release Docker publication exception (GHCR push via docker/* actions).
+# Service-backed work lives on governed-product.yml. The release publishes the
+# verified source archive, SBOM, checksums and provenance (no binaries, images
+# or charts).
 name: release
 
 on:
@@ -25,7 +26,6 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
   channel:
@@ -95,7 +95,7 @@ jobs:
     if: needs.channel.outputs.channel == 'governed'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # No hosted service containers. Postgres/kind live on governed-product.yml (P13).
+    # No hosted service containers. Service-backed qualification lives on governed-product.yml (P13).
     steps:
       - name: Prepare external run-owned root
         id: run
@@ -109,9 +109,7 @@ jobs:
             echo "allowlist=${root}/allowlist"
             echo "scratch=${root}/scratch"
             echo "source_preview=${root}/out/source-preview-dist"
-            echo "release_dist=${root}/out/release-dist"
             echo "promoted_evidence=${root}/out/tp002-release"
-            echo "image_context=${root}/out/release-image"
           } >> "${GITHUB_OUTPUT}"
 
       # Bootstrap a minimal clone solely to resolve tag → E without trusting ambient SHA as S.
@@ -295,7 +293,6 @@ jobs:
         working-directory: /
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
-          sudo docker image prune --all --force >/dev/null 2>&1 || true
           df -h /
 
       - name: Verify release identity V at measured source S
@@ -313,7 +310,7 @@ jobs:
           # Tag targets E (not S); do not require tag peel == HEAD of S.
           test "$(git rev-parse HEAD)" = "${{ steps.identity.outputs.measured_source }}"
 
-      - name: Dry-run source archive, SBOM, checksums, and provenance
+      - name: Build and verify source archive, SBOM, checksums, and provenance
         shell: bash
         working-directory: fireweed-source
         run: |
@@ -337,16 +334,6 @@ jobs:
         working-directory: fireweed-source
       - run: cargo install --locked cargo-llvm-cov --version 0.8.2
         working-directory: fireweed-source
-
-      - name: Install Helm
-        uses: azure/setup-helm@v5
-        with:
-          version: v4.2.3
-
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v5
-        with:
-          version: v1.31.0
 
       - name: Functional and governed release gate
         working-directory: fireweed-source
@@ -373,120 +360,6 @@ jobs:
             --tag "${{ steps.identity.outputs.tag }}" \
             --commit "${{ steps.identity.outputs.measured_source }}"
 
-      - name: Deployment release gate
-        working-directory: fireweed-source
-        env:
-          FIREWEED_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
-        run: bash scripts/ci/deployment-release-gate.sh
-
-      - name: Package binaries
-        working-directory: fireweed-source
-        run: bash scripts/release/package-binaries.sh "${{ steps.identity.outputs.version }}"
-
-      - name: Package Helm chart
-        working-directory: fireweed-source
-        run: |
-          set -euo pipefail
-          mkdir -p target/release-dist "${{ steps.run.outputs.release_dist }}"
-          bash scripts/release/package-helm-chart.sh \
-            --version "${{ steps.identity.outputs.version }}" \
-            --tag "${{ steps.identity.outputs.tag }}" \
-            --destination target/release-dist
-          # Mirror package outputs into the external run-owned release dist.
-          cp -a target/release-dist/. "${{ steps.run.outputs.release_dist }}/"
-
-      - name: Stage container image context from S only
-        working-directory: fireweed-source
-        run: |
-          set -euo pipefail
-          rm -rf "${{ steps.run.outputs.image_context }}"
-          mkdir -p "${{ steps.run.outputs.image_context }}"
-          cp target/release/fireweed-service target/release/fireweed-verify-ledger \
-            "${{ steps.run.outputs.image_context }}/"
-          cp Dockerfile.prebuilt "${{ steps.run.outputs.image_context }}/Dockerfile"
-          chmod 0755 \
-            "${{ steps.run.outputs.image_context }}/fireweed-service" \
-            "${{ steps.run.outputs.image_context }}/fireweed-verify-ledger"
-
-      - name: Resolve container image coordinates (immutable sha-S)
-        id: container
-        shell: bash
-        run: |
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          image="ghcr.io/${owner}/fireweed-service"
-          s="${{ steps.identity.outputs.measured_source }}"
-          echo "image=${image}" >> "$GITHUB_OUTPUT"
-          echo "version_tag=${image}:${{ steps.identity.outputs.version }}" >> "$GITHUB_OUTPUT"
-          echo "sha_tag=${image}:sha-${s}" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Login to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Build and push Fireweed service image
-        id: container-build
-        uses: docker/build-push-action@v7
-        with:
-          context: ${{ steps.run.outputs.image_context }}
-          file: ${{ steps.run.outputs.image_context }}/Dockerfile
-          push: true
-          tags: |
-            ${{ steps.container.outputs.version_tag }}
-            ${{ steps.container.outputs.sha_tag }}
-
-      - name: Write container image release evidence
-        working-directory: fireweed-source
-        env:
-          IMAGE: ${{ steps.container.outputs.image }}
-          VERSION_TAG: ${{ steps.container.outputs.version_tag }}
-          SHA_TAG: ${{ steps.container.outputs.sha_tag }}
-          DIGEST: ${{ steps.container-build.outputs.digest }}
-          VERSION: ${{ steps.identity.outputs.version }}
-        run: |
-          mkdir -p target/release-dist
-          bash scripts/release/write-container-image-evidence.sh \
-            --image "$IMAGE" \
-            --version "$VERSION" \
-            --version-tag "$VERSION_TAG" \
-            --sha-tag "$SHA_TAG" \
-            --digest "$DIGEST" \
-            --commit "${{ steps.identity.outputs.measured_source }}" \
-            --dockerfile Dockerfile.prebuilt \
-            --output target/release-dist/fireweed-service-image.txt
-          bash scripts/release/write-checksums.sh target/release-dist
-          cp -a target/release-dist/. "${{ steps.run.outputs.release_dist }}/"
-
-      - name: Finalize deployment proof
-        working-directory: fireweed-source
-        env:
-          FIREWEED_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
-          FIREWEED_RELEASE_DIST: target/release-dist
-          FIREWEED_IMAGE_EVIDENCE_FILE: target/release-dist/fireweed-service-image.txt
-        run: |
-          bash scripts/ci/deployment-release-gate.sh --finalize-proof
-          install -m 0644 \
-            target/deployment-release-gate/deployment-proof.json \
-            target/release-dist/deployment-proof.json
-          install -m 0644 \
-            target/deployment-release-gate/deployment-proof.md \
-            target/release-dist/deployment-proof.md
-          bash scripts/release/write-checksums.sh target/release-dist
-          cp -a target/release-dist/. "${{ steps.run.outputs.release_dist }}/"
-
-      - name: Verify release artifact set
-        working-directory: fireweed-source
-        run: |
-          bash scripts/release/verify-release-artifacts.sh \
-            --version "${{ steps.identity.outputs.version }}" \
-            --commit "${{ steps.identity.outputs.measured_source }}" \
-            --dist target/release-dist
-
       - name: Publish release assets against tag (E ancestry)
         working-directory: fireweed-source
         env:
@@ -496,9 +369,9 @@ jobs:
           notes="docs/releases/v${{ steps.identity.outputs.version }}.md"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release edit "$tag" --title "$tag" --notes-file "$notes"
-            gh release upload "$tag" target/release-dist/* --clobber
+            gh release upload "$tag" "${{ steps.run.outputs.source_preview }}"/* --clobber
           else
-            gh release create "$tag" target/release-dist/* \
+            gh release create "$tag" "${{ steps.run.outputs.source_preview }}"/* \
               --title "$tag" \
               --notes-file "$notes" \
               --target "${{ steps.identity.outputs.evidence_commit }}"

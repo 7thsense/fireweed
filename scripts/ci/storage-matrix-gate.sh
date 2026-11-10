@@ -5,8 +5,7 @@
 # (log ∈ {memory,postgres,filesystem,s3} ×
 #  projection ∈ {memory,turso,postgres}).
 # This gate binds exact P10r functional-matrix source leaves (compile/list +
-# focused cargo invocations), legacy product-name hygiene, and Helm matrix
-# fixtures so a release cannot ship with a failed required cell.
+# focused cargo invocations) and fake-projection lifecycle hygiene so a release cannot ship with a failed required cell.
 #
 # Broad substring cargo filters are forbidden (P10r). Every cargo test filter is
 # an exact harness ID from:
@@ -14,7 +13,6 @@
 #
 # Governing bars:
 #   docs/helix/04-build/storage-matrix-completion-brief.md §2 (Phase 6)
-#   docs/helix/04-build/DEPLOYMENT-READINESS.md (product storage model)
 #   scripts/ci/s3-matrix-job-requirements.md (generated from authority manifest)
 #   scripts/ci/manifests/storage-authority-manifest.json
 #
@@ -36,8 +34,7 @@
 #   3. treat a missing fixture as gate failure (this script enforces that)
 #
 # Optional flags:
-#   --skip-helm     skip helm-gate.sh (matrix suite + legacy assert still run)
-#   --skip-cargo    skip cargo matrix suites (helm + legacy still run)
+#   --skip-cargo    omit cargo matrix suites (hygiene checks still run)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,13 +43,11 @@ cd "${REPO_ROOT}"
 
 CARGO="${CARGO:-rustup run 1.99.0 cargo}"
 REQUIRE_FULL="${FIREWEED_STORAGE_MATRIX_REQUIRE_FULL:-0}"
-SKIP_HELM=0
 SKIP_CARGO=0
 ROUTE_SOURCES="${REPO_ROOT}/scripts/ci/manifests/functional-matrix-route-sources.json"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --skip-helm) SKIP_HELM=1; shift ;;
         --skip-cargo) SKIP_CARGO=1; shift ;;
         -h|--help)
             sed -n '2,50p' "$0" | sed 's/^# \?//'
@@ -60,7 +55,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "storage-matrix-gate: unknown argument: $1" >&2
-            echo "usage: bash scripts/ci/storage-matrix-gate.sh [--skip-helm] [--skip-cargo]" >&2
+            echo "usage: bash scripts/ci/storage-matrix-gate.sh [--skip-cargo]" >&2
             exit 64
             ;;
     esac
@@ -110,11 +105,8 @@ fi
 python3 "${SCRIPT_DIR}/functional_matrix_route_sources.py" --check --self-test
 
 # ---------------------------------------------------------------------------
-# 1. Legacy product-name hygiene (always; fast fail)
+# 1. Fake-projection lifecycle hygiene (always; fast fail)
 # ---------------------------------------------------------------------------
-echo "--- assert-no-legacy-storage-product-names ---"
-bash "${SCRIPT_DIR}/assert-no-legacy-storage-product-names.sh"
-
 echo "--- forbid-fake-projection-lifecycle ---"
 bash "${SCRIPT_DIR}/forbid-fake-projection-lifecycle.sh" --self-test
 bash "${SCRIPT_DIR}/forbid-fake-projection-lifecycle.sh"
@@ -137,77 +129,12 @@ if ((SKIP_CARGO == 0)); then
     ${CARGO} test -p fireweed --features "${FIREWEED_FEATURES}" \
         --test storage_matrix_t0_t2 -- \
         storage_matrix_registers_exactly_12_distinct_cells --exact --nocapture
-
-    # Exact server --lib + external-kafka leaves: compile/list only (P10r boundary).
-    # Full execution of fixture-bound cells is owned by P10 after P2r bindings.
-    echo "--- exact fireweed-server --lib leaves (compile/list) ---"
-    REPO_ROOT="${REPO_ROOT}" CARGO="${CARGO}" python3 - <<'PY'
-import json
-import os
-import subprocess
-import sys
-from pathlib import Path
-
-root = Path(os.environ["REPO_ROOT"])
-registry = json.loads((root / "scripts/ci/manifests/functional-matrix-route-sources.json").read_text())
-cargo = os.environ.get("CARGO", "rustup run 1.99.0 cargo").split()
-kinds = {"class_b_server", "inline_lib", "external_kafka"}
-groups: dict[tuple[str, ...], list[tuple[str, str]]] = {}
-for leaf in registry["leaves"]:
-    if leaf["kind"] not in kinds:
-        continue
-    key = tuple(leaf["cargo_args"])
-    groups.setdefault(key, []).append((leaf["leaf_id"], leaf["test_filter"]))
-
-seen_kafka = set()
-for cargo_args, items in sorted(groups.items()):
-    list_cmd = cargo + list(cargo_args) + ["--", "--list"]
-    print("list:", " ".join(list_cmd), flush=True)
-    listed = subprocess.run(list_cmd, cwd=root, text=True, capture_output=True)
-    if listed.returncode != 0:
-        sys.stderr.write(listed.stdout + listed.stderr)
-        sys.exit(listed.returncode)
-    text = listed.stdout + listed.stderr
-    for leaf_id, filt in items:
-        short = filt.split("::")[-1]
-        if short not in text and filt not in text:
-            sys.stderr.write(f"exact leaf not listed: {leaf_id} filter={filt}\n")
-            sys.exit(1)
-        print(f"  listed {leaf_id}", flush=True)
-        # Registry leaf_ids use feature_on/feature_off (underscore); feature_tuple
-        # strings use hyphen. Accept either so the pair cannot silently empty-out.
-        if leaf_id.startswith("external_kafka:"):
-            if "feature_on" in leaf_id or "feature-on" in leaf_id:
-                seen_kafka.add("feature-on")
-            if "feature_off" in leaf_id or "feature-off" in leaf_id:
-                seen_kafka.add("feature-off")
-
-if seen_kafka != {"feature-on", "feature-off"}:
-    sys.stderr.write(f"external-kafka tuples incomplete: {seen_kafka}\n")
-    sys.exit(1)
-print("exact server --lib + external-kafka leaves listed")
-PY
 else
     if [[ "${REQUIRE_FULL}" == "1" || "${REQUIRE_FULL}" == "true" || "${REQUIRE_FULL}" == "yes" ]]; then
         err "refusing --skip-cargo under FIREWEED_STORAGE_MATRIX_REQUIRE_FULL (skip ≠ pass)"
         exit 1
     fi
     echo "--- cargo matrix suites: local-only skip (--skip-cargo; non-full local only) ---"
-fi
-
-# ---------------------------------------------------------------------------
-# 3. Helm gate — lint/render/kubeconform for all matrix CI values fixtures
-#    Deployment/T4 portion: 20 canonical cells, Turso default, topology variants.
-# ---------------------------------------------------------------------------
-if ((SKIP_HELM == 0)); then
-    echo "--- helm-gate (12-cell matrix fixtures + shared variants + turso default) ---"
-    bash "${SCRIPT_DIR}/helm-gate.sh"
-else
-    if [[ "${REQUIRE_FULL}" == "1" || "${REQUIRE_FULL}" == "true" || "${REQUIRE_FULL}" == "yes" ]]; then
-        err "refusing --skip-helm under FIREWEED_STORAGE_MATRIX_REQUIRE_FULL (skip ≠ pass)"
-        exit 1
-    fi
-    echo "--- helm-gate: local-only skip (--skip-helm; non-full local only) ---"
 fi
 
 echo "=== storage-matrix-gate: PASSED ==="

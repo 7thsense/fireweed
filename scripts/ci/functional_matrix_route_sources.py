@@ -12,9 +12,6 @@ Categories (manifest-derived cardinalities):
   - strict              12 ResponseBarrier::Strict cells
   - object_log_async    6 filesystem/s3 AsyncProjection cells
   - async_invalid       6 non-object-log AsyncProjection rejections
-  - class_b_server      server Class-B memory-log exact --lib leaves
-  - inline_lib          other server --lib matrix leaves (exact module paths)
-  - external_kafka      paired feature-on / feature-off tuples
 
 Does not author P2r route overlays or claim full matrix execution.
 """
@@ -41,21 +38,6 @@ CARGO = ["rustup", "run", "1.99.0", "cargo"]
 SCHEMA_VERSION = 1
 PLAN_KEY = "P10r"
 
-# Exact server --lib leaves (no substring filters). Module-qualified test IDs.
-CLASS_B_SERVER_LEAVES = [
-    "class_b_memory_log_tests::class_b_memory_memory_t0_t3",
-    "class_b_memory_log_tests::class_b_memory_turso_t0_t3",
-    "class_b_memory_log_tests::class_b_memory_postgres_t0_t3",
-    "class_b_memory_log_tests::class_b_all_cells_t0_t3",
-]
-
-INLINE_LIB_LEAVES = [
-    "postgres_log_matrix_tests::postgres_log_t3_evidence_axis_names_file_contract",
-    "postgres_log_matrix_tests::postgres_log_t4_helm_ci_values_and_gate",
-    "byte_admission_wiring_tests::filesystem_object_log_postgres_projection_backend_spec_and_composition_root",
-    "byte_admission_wiring_tests::s3_object_log_postgres_projection_backend_spec_and_composition_root",
-]
-
 # T0–T2 exact harness tests under fireweed --test storage_matrix_t0_t2
 T0_T2_LEAVES = [
     "storage_matrix_t0_t2_all_twelve_cells",
@@ -63,79 +45,8 @@ T0_T2_LEAVES = [
     "filesystem_log_three_cells_t0_t3_contract",
     "s3_log_three_cells_t0_t3_contract",
     "postgres_log_three_cells_t0_t2",
-    "s3_log_t3_t4_evidence_and_helm_values_present",
-    "postgres_log_t3_t4_evidence_and_helm_values_present",
-]
-
-# Paired external-kafka feature tuples (durability/availability negatives cannot alias).
-EXTERNAL_KAFKA_LEAVES = [
-    {
-        "leaf_id": "external_kafka:feature_off:change_record_sink_mode",
-        "package": "fireweed-server",
-        "kind": "external_kafka",
-        "feature_tuple": "feature-off",
-        "features": ["postgres"],
-        "cargo_args": ["test", "-p", "fireweed-server", "--features", "postgres", "--lib"],
-        "test_filter": "change_record_sink::tests::change_record_sink_external_kafka_mode_uses_rskafka",
-        "exact": True,
-        "notes": "Default-off external-kafka: mode classification and feature-off negatives",
-    },
-    {
-        "leaf_id": "external_kafka:feature_on:change_record_sink_mode",
-        "package": "fireweed-server",
-        "kind": "external_kafka",
-        "feature_tuple": "feature-on",
-        "features": ["postgres", "external-kafka"],
-        "cargo_args": [
-            "test",
-            "-p",
-            "fireweed-server",
-            "--features",
-            "postgres,external-kafka",
-            "--lib",
-        ],
-        "test_filter": "change_record_sink::tests::change_record_sink_external_kafka_mode_uses_rskafka",
-        "exact": True,
-        "notes": "Feature-on external-kafka: rskafka producer path cannot alias feature-off",
-    },
-    {
-        "leaf_id": "external_kafka:feature_off:p8c_class_boundary",
-        "package": "fireweed-server",
-        "kind": "external_kafka",
-        "feature_tuple": "feature-off",
-        "features": ["postgres"],
-        "cargo_args": [
-            "test",
-            "-p",
-            "fireweed-server",
-            "--features",
-            "postgres",
-            "--test",
-            "p8c_residual_delivery_cursor",
-        ],
-        "test_filter": "p8c_residual_external_kafka_feature_off_rejects_class_a_and_class_b",
-        "exact": True,
-        "notes": "Feature-off durability boundary for residual delivery cursor",
-    },
-    {
-        "leaf_id": "external_kafka:feature_on:p8cs_s3_boundary",
-        "package": "fireweed-server",
-        "kind": "external_kafka",
-        "feature_tuple": "feature-on",
-        "features": ["postgres", "external-kafka"],
-        "cargo_args": [
-            "test",
-            "-p",
-            "fireweed-server",
-            "--features",
-            "postgres,external-kafka",
-            "--test",
-            "p8cs_s3_delivery_cursor",
-        ],
-        "test_filter": "p8cs_external_kafka_feature_off_rejects_s3_class_a",
-        "exact": True,
-        "notes": "Paired S3 feature tuple; name retains historical feature-off assertion ID",
-    },
+    "s3_log_t3_t4_evidence_present",
+    "postgres_log_t3_t4_evidence_present",
 ]
 
 
@@ -368,49 +279,6 @@ def build_route_source_leaves(authority: dict) -> list[dict]:
                     )
                 )
 
-    # Class-B / server exact --lib leaves.
-    for name in CLASS_B_SERVER_LEAVES:
-        leaves.append(
-            leaf(
-                leaf_id=f"class_b_server:{name}",
-                kind="class_b_server",
-                package="fireweed-server",
-                cargo_args=["test", "-p", "fireweed-server", "--features", "postgres", "--lib"],
-                test_filter=name,
-                features=["postgres"],
-                notes="Server Class-B exact --lib leaf (P3v objectlog dev tuple consumed)",
-            )
-        )
-
-    # Inline --lib matrix leaves (exact paths; no substring filters).
-    for name in INLINE_LIB_LEAVES:
-        leaves.append(
-            leaf(
-                leaf_id=f"inline_lib:{name}",
-                kind="inline_lib",
-                package="fireweed-server",
-                cargo_args=["test", "-p", "fireweed-server", "--features", "postgres", "--lib"],
-                test_filter=name,
-                features=["postgres"],
-                notes="Server matrix/live exact --lib leaf",
-            )
-        )
-
-    # Paired external-kafka feature-on / feature-off tuples.
-    for row in EXTERNAL_KAFKA_LEAVES:
-        leaves.append(
-            leaf(
-                leaf_id=row["leaf_id"],
-                kind=row["kind"],
-                package=row["package"],
-                cargo_args=list(row["cargo_args"]),
-                test_filter=row["test_filter"],
-                features=list(row["features"]),
-                feature_tuple=row["feature_tuple"],
-                notes=row["notes"],
-            )
-        )
-
     # Provider-neutral guard leaf.
     leaves.append(
         leaf(
@@ -471,13 +339,6 @@ def validate_leaves(leaves: list[dict], authority: dict) -> None:
 
     require(by_kind.get("ac_txn_dry_run"), "missing ac_txn_dry_run leaves")
     require(by_kind.get("t0_t2"), "missing t0_t2 leaves")
-    require(by_kind.get("class_b_server"), "missing class_b_server leaves")
-    require(by_kind.get("inline_lib"), "missing inline_lib leaves")
-
-    kafka = by_kind.get("external_kafka", [])
-    tuples = {row["feature_tuple"] for row in kafka}
-    require(tuples == {"feature-on", "feature-off"}, "external-kafka must register both feature tuples")
-    require(len(kafka) >= 2, "external-kafka pair missing")
 
     # P4 leaves optional only if ownership map absent (should be present post-P4).
     require(OWNERSHIP.is_file(), "P4 ownership map required for p4_method_suite leaves")
@@ -505,8 +366,6 @@ def generate_document(leaves: list[dict], authority: dict) -> dict:
             "object_log_async": 6,
             "async_invalid": 6,
         },
-        "server_objectlog_dev_tuple": ["memory", "postgres", "objectlog"],
-        "external_kafka_feature_tuples": ["feature-on", "feature-off"],
         "broad_substring_filters_forbidden": True,
         "p2r_mappings_authored": False,
         "full_execution_claimed": False,
@@ -520,29 +379,26 @@ def generate_s3_requirements(authority: dict) -> str:
     rows = []
     for cell in s3_cells:
         _log, proj = cell.split(sep)
-        helm = f"charts/fireweed-queue/ci/s3-{proj}-values.yaml"
         t0 = "always"
         if proj == "postgres":
             live = "when S3 **and** Postgres fixtures present"
             t0 = "always (spec + composition root)"
         else:
             live = "when S3 fixture present"
-        rows.append((cell, t0, live, helm))
+        rows.append((cell, t0, live))
 
     table_lines = [
-        "| Cell | T0 construct (no network) | T1–T3 live lifecycle | T4 Helm |",
-        "|------|---------------------------|----------------------|---------|",
+        "| Cell | T0 construct (no network) | T1–T3 live lifecycle |",
+        "|------|---------------------------|----------------------|",
     ]
-    for cell, t0, live, helm in rows:
-        table_lines.append(f"| `{cell}` | {t0} | {live} | `{helm}` |")
+    for cell, t0, live in rows:
+        table_lines.append(f"| `{cell}` | {t0} | {live} |")
 
     leaf_commands = [
         "cargo test -p fireweed --features memory,objectlog,postgres,turso "
         "--test functional_matrix_route_sources -- --list strict_s3_memory --exact",
         "cargo test -p fireweed --features memory,objectlog,postgres,turso "
         "--test storage_matrix_t0_t2 -- --list s3_log_three_cells_t0_t3_contract --exact",
-        "cargo test -p fireweed-server --features postgres --lib "
-        "-- --list byte_admission_wiring_tests::s3_object_log_postgres_projection_backend_spec_and_composition_root --exact",
     ]
 
     body = f"""# Mandatory S3-compatible CI job requirements
@@ -639,7 +495,6 @@ Gate consumer: `bash scripts/ci/storage-matrix-gate.sh` reads
 | `scripts/ci/manifests/functional-matrix-route-sources.json` | Exact functional-matrix source leaf registry (P10r) |
 | `cargo test -p fireweed --test functional_matrix_route_sources` | Strict / async / invalid dry-run source leaves |
 | `cargo test -p fireweed --test storage_matrix_t0_t2` | Table-driven 12-cell T0–T2 harness including s3×{{memory,turso,postgres}} |
-| `scripts/ci/helm-gate.sh` | Renders s3×projection Helm CI values (+ shared multi-replica profiles) |
 | `docs/helix/04-build/storage-matrix-conformance-classes.md` §3 | Broader CI evidence layout |
 """
     return body
@@ -715,7 +570,7 @@ def list_required_leaves(leaves: list[dict], *, offline: bool = False) -> None:
             name = row["test_filter"]
             require(name in listed, f"missing listed leaf {name}")
 
-    # One exact list per distinct cargo_args group (covers t0_t2, server lib, kafka tuples, P4).
+    # One exact list per distinct cargo_args group (covers t0_t2, P4).
     seen_args: set[tuple[str, ...]] = set()
     for row in leaves:
         if row["kind"] in {"strict", "object_log_async", "async_invalid", "ac_txn_dry_run", "guard"}:
@@ -733,10 +588,6 @@ def self_test(document: dict, authority: dict) -> None:
     require(document["p2r_mappings_authored"] is False, "must not claim P2r mappings")
     require(document["full_execution_claimed"] is False, "must not claim full execution")
     require(document["broad_substring_filters_forbidden"] is True, "substring ban")
-    require(
-        set(document["external_kafka_feature_tuples"]) == {"feature-on", "feature-off"},
-        "kafka tuples",
-    )
     # Negative: broad filter cannot validate.
     broken = json.loads(json.dumps(document))
     broken["leaves"][0]["exact"] = False

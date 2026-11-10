@@ -109,14 +109,3 @@ examples:
         symbol: lifecycle_over_shapes_turso
       - path: crates/fireweed-bench/tests/e2e_shapes_tests.rs
         symbol: lifecycle_over_shapes_objectlog
-
-  - slug: resp-drain
-    title: Redis client drain over RESP
-    summary: >
-      Off-the-shelf redis crate against fireweed-resp: XADD, XREADGROUP, XACK
-      with priority-ordered drain semantics.
-    tags: [resp, redis, wire]
-    category: resp
-    sources:
-      - path: crates/fireweed-resp/tests/e2e.rs
-        symbol: drain_and_reconcile_with_offtheshelf_client

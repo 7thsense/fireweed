@@ -126,14 +126,6 @@ if git remote get-url origin >/dev/null 2>&1; then
     fi
 fi
 
-chart_version="$(sed -n 's/^version:[[:space:]]*//p' charts/fireweed-queue/Chart.yaml | head -n 1)"
-chart_app_version="$(sed -n 's/^appVersion:[[:space:]]*"\{0,1\}\([^"[:space:]]*\)"\{0,1\}[[:space:]]*$/\1/p' charts/fireweed-queue/Chart.yaml | head -n 1)"
-[[ -n "$chart_version" && -n "$chart_app_version" ]] || fail "unable to read chart versions"
-[[ "$chart_version" != "$VERSION" ]] ||
-    fail "Helm chart version was synchronized to package V=${VERSION}; must remain independent source default"
-[[ "$chart_app_version" != "$VERSION" ]] ||
-    fail "Helm chart appVersion was synchronized to package V=${VERSION}; must remain independent source default"
-
 bench_version="$({
     awk '
         /^\[package\]$/ { in_package = 1; next }
@@ -166,8 +158,6 @@ gates_ci_version="$(python3 -c 'import json; print(json.load(open("scripts/ci/pu
 inventory="$(bash "${SCRIPT_DIR}/list-public-version-sources.sh" "${TAG}")"
 printf '%s\n' "$inventory" | grep -Fq "treatment=release-synchronized; target=${VERSION}" ||
     fail "inventory missing synchronized workspace classification for ${VERSION}"
-printf '%s\n' "$inventory" | grep -Fq "treatment=independent source defaults" ||
-    fail "inventory missing independent Helm classification"
 printf '%s\n' "$inventory" | grep -Fq "treatment=independent tool coordinate" ||
     fail "inventory missing independent fireweed-bench classification"
 printf '%s\n' "$inventory" | grep -Fq "scripts/ci/public-release-gates.json" ||

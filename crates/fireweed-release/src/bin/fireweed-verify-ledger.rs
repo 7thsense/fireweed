@@ -9,7 +9,7 @@
 //! `--ledger-dir` remains available for generated smoke/gate output, not governed repository evidence.
 //! `--require-evidence` counts only RELEASE-tier rows; `--require-smoke-evidence` counts SMOKE-tier rows.
 //! Exit 0 if the ledger validates and every required id is present; non-zero with diagnostics otherwise.
-//! This is the CI gate's evidence check; it rebuilds the binary removed with fireweed-service.
+//! This is the CI gate's evidence check.
 
 use std::path::PathBuf;
 use std::process::ExitCode;

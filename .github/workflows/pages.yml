@@ -12,7 +12,6 @@ on:
     paths:
       - "docs/site/**"
       - "docs/helix/**"
-      - "docs/deployment/**"
       - "docs/operator/**"
       - "scripts/site/**"
       - ".github/workflows/pages.yml"

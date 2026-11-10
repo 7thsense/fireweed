@@ -7,7 +7,6 @@ set -euo pipefail
 #
 # Coordinate treatments (P17v):
 #   release-synchronized  — must equal the requested package SemVer V
-#   independent source defaults — Helm chart source version/appVersion
 #   independent tool coordinate — unpublished fireweed-bench package version
 #   independent gate-set identity — P13a /version fields (not package SemVer)
 #   reserved tag — vV must remain absent until product-ready P20pr
@@ -37,10 +36,6 @@ workspace_version="$({
     ' Cargo.toml
 })"
 
-chart_name="$(sed -n 's/^name:[[:space:]]*//p' charts/fireweed-queue/Chart.yaml | head -n 1)"
-chart_version="$(sed -n 's/^version:[[:space:]]*//p' charts/fireweed-queue/Chart.yaml | head -n 1)"
-chart_app_version="$(sed -n 's/^appVersion:[[:space:]]*"\{0,1\}\([^"[:space:]]*\)"\{0,1\}[[:space:]]*$/\1/p' charts/fireweed-queue/Chart.yaml | head -n 1)"
-
 bench_version="$({
     awk '
         /^\[package\]$/ { in_package = 1; next }
@@ -68,9 +63,6 @@ require_value() {
 }
 
 require_value "Cargo.toml workspace.package.version" "$workspace_version"
-require_value "charts/fireweed-queue/Chart.yaml name" "$chart_name"
-require_value "charts/fireweed-queue/Chart.yaml version" "$chart_version"
-require_value "charts/fireweed-queue/Chart.yaml appVersion" "$chart_app_version"
 require_value "crates/fireweed-bench/Cargo.toml version" "$bench_version"
 require_value "scripts/ci/public-release-gates.json /version" "$gates_version"
 require_value "scripts/ci/public-release-gates-ci.json /version" "$gates_ci_version"
@@ -78,19 +70,6 @@ require_value "scripts/ci/public-release-gates-ci.json /version" "$gates_ci_vers
 printf 'public version sources (ADR-020 target=%s)\n' "$target_release"
 printf 'Cargo.toml: workspace.package.version=%s; treatment=release-synchronized; target=%s\n' \
     "$workspace_version" "$target_version"
-
-while IFS= read -r coordinate; do
-    coordinate="${coordinate#"${coordinate%%[![:space:]]*}"}"
-    coordinate="${coordinate%;}"
-    printf 'README.md: %s; treatment=release-synchronized; target=%s\n' \
-        "$coordinate" "$target_release"
-done < <(sed -n '/^- container image /p; /ghcr\.io.*sha-<commit>/p; /^- Helm chart package /p; /^- binary archives /p' README.md)
-
-printf 'charts/fireweed-queue/Chart.yaml: name=%s version=%s appVersion=%s; treatment=independent source defaults; packaged release overrides version and appVersion to %s\n' \
-    "$chart_name" "$chart_version" "$chart_app_version" "$target_version"
-
-printf 'scripts/release/package-helm-chart.sh: input=--version; outputs=version,app_version,release_tag,release_asset_coordinate; evidence=fireweed-queue-helm-chart.txt; treatment=release-synchronized; target=%s\n' \
-    "$target_release"
 
 printf 'crates/fireweed-bench/Cargo.toml: package.version=%s; treatment=independent tool coordinate; never synchronize to package SemVer V by pattern\n' \
     "$bench_version"

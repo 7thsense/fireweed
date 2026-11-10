@@ -719,8 +719,7 @@
         "roots": [
           "target/",
           "scripts/site/node_modules/",
-          "__pycache__/",
-          "examples/python-resp/.venv/"
+          "__pycache__/"
         ],
         "required_proofs": [
           "tracked_rule",
@@ -778,12 +777,6 @@
       "state": "current_source_prose",
       "classification": "garage_provider_residue",
       "semantic_owner": "P19"
-    },
-    {
-      "path": "crates/fireweed-server/tests/production_s3_object_log_config.rs",
-      "state": "current_source",
-      "classification": "live_s3_provenance",
-      "semantic_owner": "P4s"
     },
     {
       "path": "docs/releases/v0.23.0.md",

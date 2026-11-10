@@ -8,11 +8,11 @@ Governing bar: [`docs/helix/04-build/storage-matrix-completion-brief.md`](../../
 
 Public matrix cells with log axis `s3` are Class A product cells:
 
-| Cell | T0 construct (no network) | T1–T3 live lifecycle | T4 Helm |
-|------|---------------------------|----------------------|---------|
-| `s3--memory` | always | when S3 fixture present | `charts/fireweed-queue/ci/s3-memory-values.yaml` |
-| `s3--turso` | always | when S3 fixture present | `charts/fireweed-queue/ci/s3-turso-values.yaml` |
-| `s3--postgres` | always (spec + composition root) | when S3 **and** Postgres fixtures present | `charts/fireweed-queue/ci/s3-postgres-values.yaml` |
+| Cell | T0 construct (no network) | T1–T3 live lifecycle |
+|------|---------------------------|----------------------|
+| `s3--memory` | always | when S3 fixture present |
+| `s3--turso` | always | when S3 fixture present |
+| `s3--postgres` | always (spec + composition root) | when S3 **and** Postgres fixtures present |
 
 ## Qualification endpoint (P1s)
 
@@ -84,7 +84,6 @@ P10r registers exact source leaves. List (do not execute) with:
 ```bash
 cargo test -p fireweed --features memory,objectlog,postgres,turso --test functional_matrix_route_sources -- --list strict_s3_memory --exact
 cargo test -p fireweed --features memory,objectlog,postgres,turso --test storage_matrix_t0_t2 -- --list s3_log_three_cells_t0_t3_contract --exact
-cargo test -p fireweed-server --features postgres --lib -- --list byte_admission_wiring_tests::s3_object_log_postgres_projection_backend_spec_and_composition_root --exact
 ```
 
 Gate consumer: `bash scripts/ci/storage-matrix-gate.sh` reads
@@ -98,5 +97,4 @@ Gate consumer: `bash scripts/ci/storage-matrix-gate.sh` reads
 | `scripts/ci/manifests/functional-matrix-route-sources.json` | Exact functional-matrix source leaf registry (P10r) |
 | `cargo test -p fireweed --test functional_matrix_route_sources` | Strict / async / invalid dry-run source leaves |
 | `cargo test -p fireweed --test storage_matrix_t0_t2` | Table-driven 12-cell T0–T2 harness including s3×{memory,turso,postgres} |
-| `scripts/ci/helm-gate.sh` | Renders s3×projection Helm CI values (+ shared multi-replica profiles) |
 | `docs/helix/04-build/storage-matrix-conformance-classes.md` §3 | Broader CI evidence layout |

@@ -1072,9 +1072,9 @@ async fn run_s3_cell_t0_t3(cell: MatrixCell) {
     assert_eq!(reopened.metrics(&key).await.unwrap().pending, 0);
 }
 
-/// T3/T4 linkage for s3 log cells: axis-named evidence file and Helm CI values exist.
+/// T3/T4 linkage for s3 log cells: axis-named evidence file exists.
 #[test]
-fn s3_log_t3_t4_evidence_and_helm_values_present() {
+fn s3_log_t3_t4_evidence_present() {
     let fixture = fireweed_release::Fixture::new(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tp003-s3-axis.jsonl"),
     )
@@ -1089,21 +1089,6 @@ fn s3_log_t3_t4_evidence_and_helm_values_present() {
         assert!(
             body.contains(axis),
             "TP-003 s3 pair evidence must name axis {axis}"
-        );
-    }
-
-    let chart_ci = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
-    for name in [
-        "s3-memory-values.yaml",
-        "s3-turso-values.yaml",
-        "s3-postgres-values.yaml",
-    ] {
-        let p = chart_ci.join(name);
-        assert!(p.is_file(), "T4 Helm CI values missing: {}", p.display());
-        let v = std::fs::read_to_string(&p).unwrap();
-        assert!(
-            v.contains("backend: s3"),
-            "{name} must set storage.log.backend=s3"
         );
     }
 
@@ -1196,9 +1181,9 @@ async fn postgres_log_three_cells_t0_t2_retired_body() {
     eprintln!("postgres_log_three_cells_t0_t2: ran={ran} skipped={skipped}/3");
 }
 
-/// T3/T4 linkage for postgres log cells: axis-named evidence file and Helm CI values exist.
+/// T3/T4 linkage for postgres log cells: axis-named evidence file exists.
 #[test]
-fn postgres_log_t3_t4_evidence_and_helm_values_present() {
+fn postgres_log_t3_t4_evidence_present() {
     let fixture = fireweed_release::Fixture::new(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tp003-postgres-axis.jsonl"),
     )
@@ -1215,21 +1200,6 @@ fn postgres_log_t3_t4_evidence_and_helm_values_present() {
         assert!(
             body.contains(axis) || body.contains(&escaped) || body.contains(&slash),
             "TP-003 postgres pair evidence must name axis {axis}"
-        );
-    }
-
-    let chart_ci = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../charts/fireweed-queue/ci");
-    for name in [
-        "postgres-memory-values.yaml",
-        "postgres-turso-values.yaml",
-        "postgres-postgres-values.yaml",
-    ] {
-        let p = chart_ci.join(name);
-        assert!(p.is_file(), "T4 Helm CI values missing: {}", p.display());
-        let v = std::fs::read_to_string(&p).unwrap();
-        assert!(
-            v.contains("backend: postgres"),
-            "{name} must set storage.log.backend=postgres"
         );
     }
 }

@@ -613,18 +613,6 @@ mod storage_conformance {
     }
 
     #[test]
-    fn storage_conformance_entity_schema_error_has_resp_token() {
-        let schema = json!({"type": "object", "required": ["x"]});
-        let cs = compile_entity_schema(&schema).expect("compiles");
-        let err = validate_entity(Some(&cs), Some(&json!({}))).unwrap_err();
-        assert_eq!(
-            err.resp_token(),
-            Some("-ERR fireweed entity_schema_violation"),
-            "RESP token must match ADR-011"
-        );
-    }
-
-    #[test]
     fn storage_conformance_schema_compile_error_on_invalid_schema() {
         let bad = json!({"type": "not-a-valid-type"});
         let result = compile_entity_schema(&bad);
