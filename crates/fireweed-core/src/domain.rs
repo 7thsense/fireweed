@@ -307,12 +307,6 @@ pub enum OrderingMode {
     BoundedRelaxed,
 }
 
-/// Default rank-error bound (strict-equivalent). A `0` bound means claim selection never deviates from
-/// strict priority order, so a `BoundedRelaxed` queue with a `0` bound behaves byte-for-byte like `Strict`.
-pub fn default_max_rank_error() -> u32 {
-    0
-}
-
 /// Structured metadata value. Nested maps and arrays are first-class — embedders do not need to
 /// stringify JSON into a [`MetadataValue::String`] (that path forced ~1.5–2× envelope inflation).
 ///
@@ -867,9 +861,7 @@ pub struct QueueDefinition {
     pub priority_model: PriorityModel,
     pub ordering_mode: OrderingMode,
     /// Maximum rank error (in priority-rank positions) tolerated on the claim path under
-    /// `OrderingMode::BoundedRelaxed` (see [`CreateQueue::max_rank_error`]). `#[serde(default)]` keeps
-    /// existing persisted definitions + the wire compatible (absent => `0`, i.e. strict-equivalent).
-    #[serde(default = "default_max_rank_error")]
+    /// `OrderingMode::BoundedRelaxed` (see [`CreateQueue::max_rank_error`]).
     pub max_rank_error: u32,
     pub progress_bound_ms: u64,
     pub eligibility_policy: EligibilityPolicy,
@@ -877,36 +869,20 @@ pub struct QueueDefinition {
     pub recurrence: RecurrencePolicy,
     pub request_id_retention_ms: u64,
     pub client_item_key_retention_ms: u64,
-    #[serde(default = "default_terminal_retention_ms")]
     pub terminal_retention_ms: u64,
     pub max_lease_duration_ms: u64,
     pub retry_policy: RetryPolicy,
     pub max_push_batch_size: u64,
     pub max_claim_batch_size: u64,
     pub max_eligible_group_size: Option<u64>,
-    /// Per-queue secondary indexes over configured item fields (ADR-010). Empty (default) = no indexes;
-    /// `#[serde(default)]` keeps existing persisted definitions and the wire compatible.
-    #[serde(default)]
+    /// Per-queue secondary indexes over configured item fields (ADR-010). Empty = no indexes.
     pub secondary_indexes: Vec<IndexSpec>,
     /// Optional ESF entity schema document (ADR-011). Absent = no payload validation.
-    /// `#[serde(default)]` keeps existing persisted definitions and the wire compatible.
-    #[serde(default)]
     pub entity_schema: Option<EntitySchemaDocument>,
     /// Typed secondary indexes (ADR-011), each wrapping an ESF declaration with a fireweed name.
-    /// `#[serde(default)]` keeps existing persisted definitions and the wire compatible.
-    #[serde(default)]
     pub typed_indexes: Vec<QueueIndex>,
     // Retained for stored definitions. Emission is off. History is the command log.
-    #[serde(default = "default_emit_change_records")]
     pub emit_change_records: bool,
-}
-
-fn default_terminal_retention_ms() -> u64 {
-    3_600_000
-}
-
-fn default_emit_change_records() -> bool {
-    false
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1755,9 +1731,6 @@ mod coverage_tests {
 
     #[test]
     fn small_helpers_and_constructors() {
-        assert_eq!(default_max_rank_error(), 0);
-        assert_eq!(default_terminal_retention_ms(), 3_600_000);
-
         let mut entries = BTreeMap::new();
         entries.insert("k".to_string(), MetadataValue::Bool(true));
         let md = Metadata::from_entries(entries);
@@ -1975,21 +1948,6 @@ mod coverage_tests {
         .validate(&policy())
         .unwrap();
         assert_eq!(definition.secondary_indexes.len(), 1);
-    }
-
-    #[test]
-    fn queue_definition_serde_defaults_terminal_retention() {
-        // A persisted definition missing terminal_retention_ms must rehydrate via the
-        // serde default (exercising default_terminal_retention_ms through serde).
-        let mut request = valid_create_queue();
-        request.terminal_retention_ms = 3_600_000;
-        let definition = request.validate(&policy()).unwrap();
-        let mut json: serde_json::Value = serde_json::to_value(&definition).unwrap();
-        json.as_object_mut()
-            .unwrap()
-            .remove("terminal_retention_ms");
-        let restored: QueueDefinition = serde_json::from_value(json).unwrap();
-        assert_eq!(restored.terminal_retention_ms, 3_600_000);
     }
 
     #[test]

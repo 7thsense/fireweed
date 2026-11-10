@@ -1012,15 +1012,10 @@ fn commit_request_fingerprint(entries: &[CommitTransitionEntry]) -> EngineResult
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredEntryRecovery {
     consumed_input_id: String,
-    #[serde(default)]
     additional_consumed_input_ids: Vec<String>,
-    #[serde(default)]
     instance: Option<(Vec<u8>, u64)>,
-    #[serde(default)]
     side_record_keys: Vec<Vec<u8>>,
-    #[serde(default)]
     lifecycle_item_ids: Vec<String>,
-    #[serde(default)]
     rejected: Option<(String, Option<String>)>,
 }
 
