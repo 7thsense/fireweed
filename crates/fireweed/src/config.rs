@@ -9,10 +9,6 @@ impl SecretValue {
     pub(crate) fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
 }
 
 impl fmt::Debug for SecretValue {

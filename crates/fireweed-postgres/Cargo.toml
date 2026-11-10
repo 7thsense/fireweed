@@ -21,7 +21,6 @@ fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 fireweed-queue-spool = { path = "../fireweed-queue-spool" }
 fireweed-projection = { path = "../fireweed-projection" }
-fireweed-objectlog = { path = "../fireweed-objectlog" }
 axon-esf.workspace = true
 postgres = "0.19"
 native-tls = { version = "0.2", optional = true }

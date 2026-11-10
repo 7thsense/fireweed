@@ -24,9 +24,8 @@ include = [
 [lib]
 path = "src/lib.rs"
 
-# The ergonomic Rust LIBRARY interface — one of the two faces of the engine (the other is RESP). A thin
-# composition over the engine ports: push/upsert/claim/ack/nack/peek/metrics. Depends on the domain
-# (engine + core) only; a concrete backend + clock are injected (hexagonal).
+# `queue::Queue` is the public library interface. Adapters are optional dependencies activated per
+# feature; the crate builds the chosen backend internally so a client never names a concrete backend.
 [dependencies]
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
@@ -35,17 +34,11 @@ bytes = "1"
 serde_json = "1"
 futures = "0.3"
 sha2 = "0.11"
-# Adapters are OPTIONAL deps, activated per feature. The published library is a thin composition root
-# that builds the chosen backend internally (ADR-009 §4a / B3) so a client never names a concrete backend
-# — the `open_*` functions are the construction path. This is the deliberate composition-root dependency inversion.
-fireweed-memory = { path = "../fireweed-memory", optional = true }
 fireweed-objectlog = { path = "../fireweed-objectlog", optional = true }
 fireweed-postgres = { path = "../fireweed-postgres", optional = true }
 fireweed-turso = { path = "../fireweed-turso", optional = true }
 # Only to parse a PostgreSQL URL before any I/O in `Queue::s3_turso`.
 tokio-postgres = { version = "0.7", optional = true }
-# Composition-root only: Class B MemoryLog pairings and object-log × memory projection assembly.
-fireweed-projection = { path = "../fireweed-projection", optional = true }
 # Optional: pulled by `objectlog` / `postgres` / `turso`. Workers need `rt` + I/O drivers for LogEngine.
 tokio = { version = "1", features = ["rt", "time", "fs", "io-util", "net", "sync"], optional = true }
 
@@ -54,37 +47,22 @@ tokio = { version = "1", features = ["rt", "time", "fs", "io-util", "net", "sync
 rustix = { version = "1", default-features = false, features = ["time"] }
 
 [features]
-# Public construction is object-log + Turso (ADR-024). Whitebox tests use
-# Turso `:memory:` (`TursoConfig::in_memory`), not `fireweed-memory`.
-# `memory` stays available as an opt-in crate feature and is not a public
-# projection. `postgres` is opt-in: the legacy facade uses it for the control
-# plane; API-007 queue::Queue also offers the native PostgreSQL baseline. It does
-# not restore retired PostgreSQL log/projection axes on the legacy facade.
+# `Queue::s3_turso` and `Queue::ephemeral_disk` (default); `postgres` adds `Queue::postgres`.
 default = ["s3-turso"]
-memory = ["dep:fireweed-memory", "dep:fireweed-projection"]
 # objectlog enables the shared Tokio reactor used by LogEngine I/O.
-objectlog = ["dep:fireweed-queue-spool", "dep:fireweed-objectlog", "dep:fireweed-projection", "dep:tokio"]
+objectlog = ["dep:fireweed-queue-spool", "dep:fireweed-objectlog", "dep:tokio"]
 postgres = ["dep:fireweed-postgres", "dep:tokio"]
-# Production queue storage: S3 object log, local Turso projection cache and the
-# PostgreSQL control plane (`queue::Queue::s3_turso`, `open_objectlog_turso_coordinated_async`).
-# It does not enable `postgres`, which is the PostgreSQL reference store.
+# Production queue storage: S3 object log, local Turso projection cache and the PostgreSQL control plane
+# (`queue::Queue::s3_turso`). It does not enable `postgres`, which is the PostgreSQL reference store.
 s3-turso = ["objectlog", "turso", "dep:fireweed-postgres", "dep:tokio-postgres"]
-# Local embedded Turso 0.7 ordinary-WAL projection (public default projection axis).
-turso = ["dep:fireweed-turso", "fireweed-turso/local", "dep:tokio", "dep:fireweed-projection"]
+# Local embedded Turso ordinary-WAL projection.
+turso = ["dep:fireweed-turso", "fireweed-turso/local", "dep:tokio"]
 
 [dev-dependencies]
 async-trait = "0.1"
-turso = { version = "0.8.2", default-features = false }
 fireweed-conformance = { path = "../fireweed-conformance" }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread", "time", "sync"] }
-# product_validation_tests (AC-E2E-* product workflows) emit verification-ledger rows.
-fireweed-release = { path = "../fireweed-release" }
 serde_json = "1"
-# The postgres-constructor smoke test drives the sync postgres client via a non-tokio executor.
-postgres = "0.19"
-# Integration tests use ManualClock. The memory feature stays off by default;
-# this dev-dependency is not a public projection.
-fireweed-memory = { path = "../fireweed-memory" }
 # The counting S3 proxy in the queue pipeline tests (already in the lockfile via the AWS SDK).
 hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
