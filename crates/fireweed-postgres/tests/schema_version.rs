@@ -418,3 +418,41 @@ fn components_sharing_one_schema_keep_separate_rows() {
         ]
     );
 }
+
+#[test]
+fn concurrent_sync_and_async_control_plane_opens_share_one_stamp() {
+    for round in 0..5 {
+        let schema = format!("fw_sv_cp_{round}_{}", nonce());
+        admin()
+            .batch_execute(&format!("CREATE SCHEMA {schema}"))
+            .unwrap();
+        let url = base_url();
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let (url, schema) = (url.clone(), schema.clone());
+                std::thread::spawn(move || {
+                    if index % 2 == 0 {
+                        open_control_plane(&url, &schema)
+                    } else {
+                        open_async_control_plane(&url, &schema)
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        let mut client = admin();
+        let count: i64 = client
+            .query_one(
+                &format!("SELECT count(*) FROM {schema}.fireweed_schema_version WHERE component='control_plane'"),
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        client
+            .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+}

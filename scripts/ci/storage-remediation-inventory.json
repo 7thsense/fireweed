@@ -74680,6 +74680,41 @@
         "default",
         "--test",
         "schema_version",
+        "concurrent_sync_and_async_control_plane_opens_share_one_stamp",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default"
+      ],
+      "harness_id": "concurrent_sync_and_async_control_plane_opens_share_one_stamp",
+      "id": "Cargo.toml::fireweed-postgres::schema_version::test::concurrent_sync_and_async_control_plane_opens_share_one_stamp",
+      "listed_kind": "test",
+      "package": "fireweed-postgres",
+      "target": "schema_version",
+      "target_kind": [
+        "test"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-postgres",
+        "--no-default-features",
+        "--features",
+        "default",
+        "--test",
+        "schema_version",
         "fresh_open_stamps_and_reopen_succeeds",
         "--",
         "--exact"
@@ -122278,7 +122313,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "f4bdb786845fec567b45de490910f8b14701e10b33d8576c4d9b6a6761e97519",
+  "source_inventory_sha256": "f27127ab63ea140b92162915cc2cb61dd41e78583d369ea173be8714a85910e9",
   "workspaces": [
     {
       "listing_error_sha256": "",

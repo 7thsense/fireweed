@@ -216,13 +216,16 @@ fn stamp_blocking(
     Ok(())
 }
 
-/// Async check inside the caller's transaction, after the caller took its own lock. Creates the version
+/// Async check inside the caller's transaction, after the caller took its own lock and set `search_path`. Creates the version
 /// table (and the component's schema) when absent, then decides. The caller runs the DDL when
 /// `run_ddl`, then [`stamp`] when `stamp`, in the same transaction.
 pub(crate) async fn gate(
     tx: &impl tokio_postgres::GenericClient,
     component: &SchemaComponent,
 ) -> Result<Gate, GateError<tokio_postgres::Error>> {
+    // The same lock `open_blocking` takes, so blocking and async opens of one schema serialize.
+    // The caller has already taken its own lock and set `search_path`.
+    tx.batch_execute(LOCK_SQL).await.map_err(GateError::Db)?;
     tx.batch_execute(&component.create_version_table_sql())
         .await
         .map_err(GateError::Db)?;

@@ -6219,7 +6219,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "ceece5befa38e87d5a0cf1e088ad90217d35192013fc3258624ee7555cbe9a68",
+  "scan_sha256": "eb046d50827a5ce54ce9f72a47b74c516b0545bda7967355c06f3ce98f821b99",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -19935,7 +19935,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 121800,
+      "last_match_line": 121835,
       "line": 1,
       "markers": [
         "e3",
