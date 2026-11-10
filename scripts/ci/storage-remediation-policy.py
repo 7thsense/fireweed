@@ -234,17 +234,8 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool,
     }
     require(set(registries) == required_registries, "debt registry set drift")
     machete_exceptions = registries["cargo_machete_exceptions"]
-    # P12a bound Turso as a real server feature dependency (`dep:fireweed-turso`); the
-    # cargo-machete ignore exception is retired. Empty is the only legal end state.
-    # While any residual ignore remains, it must still be the single P12a-owned Turso row.
-    if machete_exceptions:
-        require(
-            len(machete_exceptions) == 1
-            and machete_exceptions[0]["path"] == "crates/fireweed-server/Cargo.toml"
-            and machete_exceptions[0]["identity"] == "fireweed-turso"
-            and machete_exceptions[0]["dependency_chain"] == ["P12a", "P2f"],
-            "cargo-machete exceptions must be empty or the single P12a-bound Turso dependency",
-        )
+    # The cargo-machete ignore exception is retired. Empty is the only legal end state.
+    require(not machete_exceptions, "cargo-machete exceptions must be empty")
     eligible_queue_ids = {row['id'] for row in registries['ignored_tests']
         if row['status'] == 'debt' and row['category'] == 'ignored_test'
         and row['path'].startswith(('crates/fireweed-postgres/', 'crates/fireweed/'))}

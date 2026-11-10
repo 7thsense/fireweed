@@ -4,15 +4,14 @@
 # Crate map after the Phase-6 hexagonal migration (the ONLY crates this gate
 # references): fireweed-core / fireweed-engine / fireweed-projection /
 # fireweed-conformance / fireweed-memory / fireweed-turso / fireweed-postgres /
-# fireweed-objectlog / fireweed-resp / fireweed / fireweed-server / fireweed-release /
+# fireweed-objectlog / fireweed / fireweed-release /
 # fireweed-bench. The deleted pre-Fireweed service, storage, and Kafka crates
 # crates are NOT referenced anywhere below.
 #
 # WHAT THIS GATE PROVES:
 #   - fmt clean, clippy clean (-D warnings), and the selected workspace correctness suite is green.
-#   - Public 15-cell storage matrix (T0–T2 library harness + server matrix suites + legacy product-name
-#     ban) via scripts/ci/storage-matrix-gate.sh --skip-helm. Helm fixtures stay in deployment-release-gate
-#     / helm-gate.sh. Full-matrix fixture hard-fail is opt-in via FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1.
+#   - Public 15-cell storage matrix (T0–T2 library harness + route-source registry) via
+#     scripts/ci/storage-matrix-gate.sh. Full-matrix fixture hard-fail is opt-in via FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1.
 #   - Local mode emits into a CLEAN ledger dir and requires well-formed E2/E3 evidence. GitHub release
 #     jobs skip those workloads and consume exact-revision governed evidence instead.
 #   - The exact files named by the governed TP-002 release manifest semantically satisfy E0-E3. The E3
@@ -109,17 +108,15 @@ echo "--- fireweed-conformance suite ---"
 ${CARGO} test -p fireweed-conformance --lib
 
 # v0.25 headline proofs: integration targets are NOT covered by --workspace --lib --bins
-# on GitHub release jobs. Fail closed if these regress (P0 eligibility, claim-by-id, RESP).
-echo "--- claim_by_item_ids + eligibility recovery + RESP XCLAIM first-delivery ---"
+# on GitHub release jobs. Fail closed if these regress (P0 eligibility, claim-by-id).
+echo "--- claim_by_item_ids + eligibility recovery ---"
 ${CARGO} test -p fireweed-engine --test claim_by_item_ids
 ${CARGO} test -p fireweed --features objectlog,turso --test eligibility_index_recovery
-${CARGO} test -p fireweed-resp --test e2e xclaim_first_delivery_pending_ids
 
-# Public 15-cell StorageConfig matrix (Phase 6). Helm is owned by deployment-release-gate /
-# helm-gate.sh so this call skips helm. S3/PG cells skip when fixtures are unset unless
+# Public 15-cell StorageConfig matrix (Phase 6). S3/PG cells do not run when fixtures are unset unless
 # FIREWEED_STORAGE_MATRIX_REQUIRE_FULL=1 is set (then missing fixtures fail the gate).
-echo "--- storage matrix gate (15-cell public surface; helm deferred to deployment gate) ---"
-bash "${SCRIPT_DIR}/storage-matrix-gate.sh" --skip-helm
+echo "--- storage matrix gate (15-cell public surface) ---"
+bash "${SCRIPT_DIR}/storage-matrix-gate.sh"
 
 if [[ "${RUN_LOCAL_PERFORMANCE}" == true ]]; then
     echo "--- local performance evidence suites ---"

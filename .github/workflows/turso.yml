@@ -1,8 +1,8 @@
 # Focused Turso lane: path-filtered, policy-governed qualification of the public
 # default projection (ADR-016 / TD-010 / AC-TURSO-6).
 #
-# Turso is stock default (default feature closure on fireweed + fireweed-server).
-# This workflow proves adapter suite + public facade/server composition without
+# Turso is stock default (default feature closure on fireweed).
+# This workflow proves adapter suite + public facade composition without
 # treating turso-projection as an opt-in solely to obtain default behavior.
 name: turso projection
 
@@ -17,7 +17,6 @@ on:
       - crates/fireweed-objectlog/**
       - crates/fireweed-projection/**
       - crates/fireweed-relational/**
-      - crates/fireweed-server/**
       - crates/fireweed-turso/**
       - crates/fireweed-workload/**
       - .github/workflows/turso.yml
@@ -38,7 +37,6 @@ on:
       - crates/fireweed-objectlog/**
       - crates/fireweed-projection/**
       - crates/fireweed-relational/**
-      - crates/fireweed-server/**
       - crates/fireweed-turso/**
       - crates/fireweed-workload/**
       - .github/workflows/turso.yml
@@ -110,13 +108,6 @@ jobs:
       - name: fireweed-turso clippy (local)
         run: cargo +1.99.0 clippy -p fireweed-turso --all-targets --features local -- -D warnings
 
-      # Server: default feature closure (includes turso-projection) and all-features.
-      - name: fireweed-server clippy (default features)
-        run: cargo +1.99.0 clippy -p fireweed-server --all-targets -- -D warnings
-
-      - name: fireweed-server clippy (all features)
-        run: cargo +1.99.0 clippy -p fireweed-server --all-targets --all-features -- -D warnings
-
       - name: fireweed-turso tests (local)
         # Preserve the first panic if a later test aborts the process.
         run: cargo +1.99.0 test -p fireweed-turso --features local -- --nocapture
@@ -146,21 +137,7 @@ jobs:
       - name: Public workflow correctness and log recovery
         run: cargo +1.99.0 test -p fireweed-workload
 
-      # Broad live suites and Kafka remain in governed-product; the focused
-      # storage matrix above owns only its PostgreSQL/S3 correctness fixtures.
-      - name: Server configuration unit tests (default features)
-        run: cargo +1.99.0 test -p fireweed-server --lib env_config::tests -- --test-threads=1
-
-      - name: Server public configuration tests
-        run: cargo +1.99.0 test -p fireweed-server --test env_config -- --test-threads=1
-
-      - name: Repository shape test (public-default Turso lane)
-        run: >
-          cargo +1.99.0 test -p fireweed-server --test turso_workflow_shape
-          turso_workflow_qualifies_the_public_default_projection
-          -- --exact
-
-      # All-features tests: fireweed facade, then server.
+      # All-features tests: fireweed facade.
       # Fireweed facade: 12-cell register Turso route leaves + composition matrix.
       - name: Fireweed 12-cell Turso route tests
         run: >
@@ -178,43 +155,6 @@ jobs:
         run: >
           cargo +1.99.0 test -p fireweed --all-features --lib
           storage_config_matrix_tests::turso_projection_feature_and_recovery_boundaries
-          -- --exact
-
-      # Exact public default selector + Class A delete-rebuild from authoritative log.
-      - name: public default Turso env selector
-        run: >
-          cargo +1.99.0 test -p fireweed-server --all-features
-          env_config::tests::turso_projection_is_the_public_env_default
-          -- --exact
-
-      - name: public projection help/parser bijection
-        run: >
-          cargo +1.99.0 test -p fireweed-server --all-features
-          env_config::tests::public_projection_help_and_parser_are_bijective
-          -- --exact
-
-      - name: S3 and Turso form the public env cell
-        run: >
-          cargo +1.99.0 test -p fireweed-server --all-features
-          env_config::tests::s3_turso_is_the_public_env_cell
-          -- --exact
-
-      - name: Turso startup validation precedes storage I/O
-        run: >
-          cargo +1.99.0 test -p fireweed-server --all-features --test server
-          turso_startup_validation_precedes_storage_io
-          -- --exact
-
-      - name: objectlog Turso delete-rebuild from authoritative log
-        run: >
-          cargo +1.99.0 test -p fireweed-server --all-features --test server
-          objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_log
-          -- --exact
-
-      - name: memory × Turso server push/claim lifecycle
-        run: >
-          cargo +1.99.0 test -p fireweed-server --all-features --test server
-          memory_turso_server_push_claim_lifecycle
           -- --exact
 
       - name: Tear down matrix S3 fixture

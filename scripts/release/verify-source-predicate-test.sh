@@ -12,7 +12,7 @@ git -C "$CASE_ROOT" init -q repo
 git -C "$repo" config user.name Test
 git -C "$repo" config user.email test@example.invalid
 git -C "$repo" remote add origin "https://example.invalid/fireweed.git"
-printf '%s\n' 'target/' '.ddx/agent-logs/' 'node_modules/' '__pycache__/' 'examples/python-resp/.venv/' >"$repo/.gitignore"
+printf '%s\n' 'target/' '.ddx/agent-logs/' 'node_modules/' '__pycache__/' >"$repo/.gitignore"
 printf 'ok\n' >"$repo/README.md"
 git -C "$repo" add .
 git -C "$repo" commit -qm seed
