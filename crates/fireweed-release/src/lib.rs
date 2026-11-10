@@ -1180,7 +1180,7 @@ pub fn missing_smoke_evidence(summary: &LedgerSummary, required: &[String]) -> V
 /// TP-002 **E2** (cross-queue scale-out / ADR-008) release-bar judgment + ledger-row construction.
 ///
 /// This is the SHARED, PURE judgment behind the TP-002 E2 verification-ledger row. The in-cluster load
-/// generator (`fireweed-loadgen emit-row`) folds three per-owner-count measured scale points (owners 2/4/8)
+/// generator (retired) folds three per-owner-count measured scale points (owners 2/4/8)
 /// into one row; this module decides whether that sweep cleared the four release bars and, if so, whether
 /// the row is `release`-tier (counts toward the headline E0–E3 requirement) or `smoke`-tier. It is a pure
 /// function of the measured inputs so the judgment is unit-testable from `fireweed-bench` WITHOUT provisioning
@@ -1574,7 +1574,7 @@ pub mod e2 {
     /// Build the TP-002 E2 verification-ledger row from the MEASURED scale points + tuning + the judged
     /// [`E2Verdict`]. The row's `evidence_tier`/`scale` are `release` IFF [`E2Verdict::bars_met`], else
     /// `smoke` (never a faked release row). The row shape is byte-for-byte compatible with the live evidence
-    /// previously emitted by `fireweed-loadgen` (see `docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl`).
+    /// previously emitted by the retired in-cluster load generator (see `docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl`).
     ///
     /// `points` MUST cover the canonical owner counts (2/4/8); the per-owner-count values are read by owner
     /// count.
