@@ -530,9 +530,9 @@
           "P2f"
         ],
         "detail": "intentional_env_or_release_ignore",
-        "id": "e8c00602591babaa3aff",
+        "id": "b2eb1cee53718bda0084",
         "identity": "#[ignore = \"requires FIREWEED_API007_PG_TEST_URL and FIREWEED_S3_TEST_*\"]",
-        "line": 530,
+        "line": 621,
         "owner": "P10pf",
         "path": "crates/fireweed/src/queue/s3_turso/tests.rs",
         "status": "discovery_negative"
@@ -544,9 +544,9 @@
           "P2f"
         ],
         "detail": "intentional_env_or_release_ignore",
-        "id": "9267f2d16e6b5165fb07",
+        "id": "43b26ba22094adfbc0a2",
         "identity": "#[ignore = \"requires FIREWEED_API007_PG_TEST_URL and FIREWEED_S3_TEST_*\"]",
-        "line": 572,
+        "line": 663,
         "owner": "P10pf",
         "path": "crates/fireweed/src/queue/s3_turso/tests.rs",
         "status": "discovery_negative"
@@ -558,9 +558,9 @@
           "P2f"
         ],
         "detail": "intentional_env_or_release_ignore",
-        "id": "3b9735c0ad99e1e325bf",
+        "id": "b6832d77a01b0f5290da",
         "identity": "#[ignore = \"requires FIREWEED_API007_PG_TEST_URL and FIREWEED_S3_TEST_*\"]",
-        "line": 619,
+        "line": 710,
         "owner": "P10pf",
         "path": "crates/fireweed/src/queue/s3_turso/tests.rs",
         "status": "discovery_negative"
@@ -16838,6 +16838,26 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue::s3_turso::tests::ephemeral_disk_limits_round_trip_and_are_applied",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue::s3_turso::tests::ephemeral_disk_limits_round_trip_and_are_applied",
+        "target": "fireweed",
+        "test_id": "queue::s3_turso::tests::ephemeral_disk_limits_round_trip_and_are_applied"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue::s3_turso::tests::ephemeral_disk_public_constructor_uses_the_temp_directory",
           "--",
           "--exact"
@@ -16865,6 +16885,26 @@
         "id": "Cargo.toml::fireweed::fireweed::test::queue::s3_turso::tests::ephemeral_disk_round_trips_and_shutdown_removes_its_directory",
         "target": "fireweed",
         "test_id": "queue::s3_turso::tests::ephemeral_disk_round_trips_and_shutdown_removes_its_directory"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue::s3_turso::tests::ephemeral_disk_with_refuses_invalid_input_before_creating_a_directory",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue::s3_turso::tests::ephemeral_disk_with_refuses_invalid_input_before_creating_a_directory",
+        "target": "fireweed",
+        "test_id": "queue::s3_turso::tests::ephemeral_disk_with_refuses_invalid_input_before_creating_a_directory"
       },
       {
         "exact_invocation": [
@@ -104293,6 +104333,45 @@
         "--features",
         "default,memory,objectlog,postgres,s3-turso,turso",
         "--lib",
+        "queue::s3_turso::tests::ephemeral_disk_limits_round_trip_and_are_applied",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "memory",
+        "objectlog",
+        "postgres",
+        "s3-turso",
+        "turso"
+      ],
+      "harness_id": "queue::s3_turso::tests::ephemeral_disk_limits_round_trip_and_are_applied",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue::s3_turso::tests::ephemeral_disk_limits_round_trip_and_are_applied",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,memory,objectlog,postgres,s3-turso,turso",
+        "--lib",
         "queue::s3_turso::tests::ephemeral_disk_public_constructor_uses_the_temp_directory",
         "--",
         "--exact"
@@ -104347,6 +104426,45 @@
       ],
       "harness_id": "queue::s3_turso::tests::ephemeral_disk_round_trips_and_shutdown_removes_its_directory",
       "id": "Cargo.toml::fireweed::fireweed::test::queue::s3_turso::tests::ephemeral_disk_round_trips_and_shutdown_removes_its_directory",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,memory,objectlog,postgres,s3-turso,turso",
+        "--lib",
+        "queue::s3_turso::tests::ephemeral_disk_with_refuses_invalid_input_before_creating_a_directory",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "memory",
+        "objectlog",
+        "postgres",
+        "s3-turso",
+        "turso"
+      ],
+      "harness_id": "queue::s3_turso::tests::ephemeral_disk_with_refuses_invalid_input_before_creating_a_directory",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue::s3_turso::tests::ephemeral_disk_with_refuses_invalid_input_before_creating_a_directory",
       "listed_kind": "test",
       "package": "fireweed",
       "target": "fireweed",
@@ -122814,7 +122932,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "fde11834eebb45f10b8e455dd9c857cb8a7103e2009321202c77dfeb80bd8b5c",
+  "source_inventory_sha256": "23d0977712563c5a17cd824f133dc57ba215c0f379a255e235559c91133b84c8",
   "workspaces": [
     {
       "listing_error_sha256": "",

@@ -309,9 +309,14 @@ fn entries(directory: &Path) -> Vec<String> {
 async fn ephemeral_disk_round_trips_and_shutdown_removes_its_directory() {
     let parent = scratch_dir("ephemeral");
     std::fs::create_dir_all(&parent).unwrap();
-    let queue = Queue::ephemeral_disk_in(&parent, Arc::new(TestClock::default()))
-        .await
-        .unwrap();
+    let queue = Queue::ephemeral_disk_in(
+        &parent,
+        QueueLimits::default(),
+        QueueRuntimeOptions::default(),
+        Arc::new(TestClock::default()),
+    )
+    .await
+    .unwrap();
     let created = entries(&parent);
     assert_eq!(created.len(), 1, "{created:?}");
     let own = parent.join(&created[0]);
@@ -343,12 +348,22 @@ async fn ephemeral_disk_round_trips_and_shutdown_removes_its_directory() {
 async fn ephemeral_disk_drop_removes_its_directory_and_handles_are_separate() {
     let parent = scratch_dir("ephemeral-drop");
     std::fs::create_dir_all(&parent).unwrap();
-    let first = Queue::ephemeral_disk_in(&parent, Arc::new(TestClock::default()))
-        .await
-        .unwrap();
-    let second = Queue::ephemeral_disk_in(&parent, Arc::new(TestClock::default()))
-        .await
-        .unwrap();
+    let first = Queue::ephemeral_disk_in(
+        &parent,
+        QueueLimits::default(),
+        QueueRuntimeOptions::default(),
+        Arc::new(TestClock::default()),
+    )
+    .await
+    .unwrap();
+    let second = Queue::ephemeral_disk_in(
+        &parent,
+        QueueLimits::default(),
+        QueueRuntimeOptions::default(),
+        Arc::new(TestClock::default()),
+    )
+    .await
+    .unwrap();
     let names = entries(&parent);
     assert_eq!(names.len(), 2, "two handles, two directories");
     // The same address is a different queue in each handle.
@@ -370,6 +385,82 @@ async fn ephemeral_disk_public_constructor_uses_the_temp_directory() {
         .unwrap();
     round_trip(&queue, address(nonce(), "public")).await;
     queue.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn ephemeral_disk_limits_round_trip_and_are_applied() {
+    let default = Queue::ephemeral_disk(Arc::new(TestClock::default()))
+        .await
+        .unwrap();
+    assert_eq!(default.limits(), QueueLimits::default());
+    let clone = default.clone();
+    assert_eq!(clone.limits(), QueueLimits::default());
+    default.shutdown().await.unwrap();
+
+    let custom = QueueLimits {
+        max_records: 16,
+        ..QueueLimits::default()
+    };
+    let queue = Queue::ephemeral_disk_with(
+        custom,
+        QueueRuntimeOptions::default(),
+        Arc::new(TestClock::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(queue.limits(), custom);
+    let queue_address = address(nonce(), "custom-limits");
+    queue
+        .provision(ProvisionRequest {
+            queue: queue_address.clone(),
+            schema: suite::schema(),
+        })
+        .await
+        .unwrap();
+    let refused = queue
+        .insert(InsertRequest {
+            queue: queue_address,
+            request_id: "too-many".into(),
+            mode: InsertMode::InsertOnly,
+            items: (0..17)
+                .map(|n| suite::item(&format!("i{n}"), "job", n, 10))
+                .collect(),
+            issued_at: 0,
+        })
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(QueueError::Invalid(_)) | Err(QueueError::TooLarge)
+        ),
+        "{refused:?}"
+    );
+    queue.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn ephemeral_disk_with_refuses_invalid_input_before_creating_a_directory() {
+    let parent = scratch_dir("ephemeral-invalid");
+    std::fs::create_dir_all(&parent).unwrap();
+    let bad_limits = QueueLimits {
+        max_records: 0,
+        ..QueueLimits::default()
+    };
+    let bad_runtime = QueueRuntimeOptions {
+        operations: 0,
+        ..QueueRuntimeOptions::default()
+    };
+    for (limits, runtime) in [
+        (bad_limits, QueueRuntimeOptions::default()),
+        (QueueLimits::default(), bad_runtime),
+    ] {
+        let result =
+            Queue::ephemeral_disk_in(&parent, limits, runtime, Arc::new(TestClock::default()))
+                .await;
+        assert!(matches!(result, Err(QueueError::Invalid(_))), "{result:?}");
+        assert!(entries(&parent).is_empty(), "{:?}", entries(&parent));
+    }
+    std::fs::remove_dir_all(parent).unwrap();
 }
 
 /// Everything after `run` that a rebuild or reopen must preserve.
