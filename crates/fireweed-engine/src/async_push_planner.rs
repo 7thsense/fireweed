@@ -107,7 +107,7 @@ where
             let envelope = CommandEnvelope {
                 command_id: ids.next_command_id(),
                 request_id: request.request_id.clone(),
-                request_fingerprint: fingerprint.map(|hash| hash.legacy_body_hash.0),
+                request_fingerprint: fingerprint.map(|hash| hash.body_hash().0),
                 request_outcome: request.request_id.as_ref().map(|_| RequestOutcome::Push {
                     item_ids: item_ids.clone(),
                 }),
@@ -234,8 +234,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use fireweed_core::{
-        BodyHash, EligibilityPolicy, GateKeyPolicy, ItemId, ItemState, OrderingMode, PriorityModel,
-        QueueId, RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp,
+        BodyHash, EligibilityPolicy, ItemId, ItemState, OrderingMode, PriorityModel, QueueId,
+        RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp,
     };
 
     use super::*;
@@ -389,7 +389,7 @@ mod tests {
             self.enter_snapshot("push_idempotency");
             let decision = match self.replays.lock().unwrap().get(&request_id) {
                 None => IdempotencyDecision::Proceed,
-                Some((stored, ids)) if *stored == fingerprint.legacy_body_hash => {
+                Some((stored, ids)) if *stored == fingerprint.body_hash() => {
                     IdempotencyDecision::Replay(ids.clone())
                 }
                 Some(_) => IdempotencyDecision::Conflict,
@@ -599,68 +599,6 @@ mod tests {
             crate::AsyncPushError::BeforeCommit(EngineError::RequestIdConflict)
         );
         assert_eq!(commits.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn legacy_gate_order_fingerprint_replays_after_canonical_normalization() {
-        let request_id = RequestId::new("legacy-gate-order").unwrap();
-        let original = vec![PushSpec {
-            gate_keys: vec!["z".to_string(), "a".to_string()],
-            ..PushSpec::default()
-        }];
-        let legacy = crate::compose::push_body_hash(&original).unwrap();
-        let replayed_id = ItemId::mint(7, 1, 99);
-        let mut definition = definition();
-        definition.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
-        let axes = Arc::new(TestAxes {
-            definition,
-            epoch: 7,
-            next_command: AtomicU64::new(0),
-            replays: Mutex::new(HashMap::from([(
-                request_id.clone(),
-                (legacy, vec![replayed_id]),
-            )])),
-            validated: AtomicU64::new(0),
-            events: Mutex::new(Vec::new()),
-            snapshot_held: AtomicBool::new(false),
-            object_log_during_snapshot: AtomicBool::new(false),
-        });
-        let commits = Arc::new(AtomicU64::new(0));
-        let planner = ProjectionPushPlanner::from_shared(
-            axes.clone(),
-            axes.clone(),
-            axes.clone(),
-            axes.clone(),
-            Arc::new(QueueCounters::default()),
-            1,
-        );
-        let backend = AsyncComposedBackend::new_with_planners(
-            ApplyingStrategy {
-                axes: axes.clone(),
-                commits: commits.clone(),
-            },
-            InlineDispatcher::default(),
-            crate::NoAsyncClaimPlanner,
-            planner,
-            4,
-        );
-
-        let replay = futures::executor::block_on(backend.push(AsyncPushRequest {
-            shard: crate::QueueKey::new(
-                TenantId::new("tenant").unwrap(),
-                QueueId::new("queue").unwrap(),
-            ),
-            request_id: Some(request_id),
-            items: original,
-            now: UtcTimestamp::new(2, 0).unwrap(),
-            expected_epoch: Some(7),
-        }))
-        .unwrap();
-
-        assert!(replay.is_replayed());
-        assert_eq!(replay.item_ids, vec![replayed_id]);
-        assert_eq!(commits.load(Ordering::SeqCst), 0);
-        assert_eq!(axes.validated.load(Ordering::SeqCst), 0);
     }
 
     fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {

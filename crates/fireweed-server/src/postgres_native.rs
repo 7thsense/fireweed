@@ -41,7 +41,7 @@ use fireweed_engine::{
     PushSpec, QueueKey, QueueMetrics, ReassignLeasePort, ReclaimDriver, RenewLeasePort,
     TerminalEmissionMetrics, TickReport, UpsertOutcome, UpsertPort,
 };
-use fireweed_postgres::{PostgresBackend, PostgresConnectConfig, PostgresRelationalBackend};
+use fireweed_postgres::{PostgresConnectConfig, PostgresRelationalBackend};
 use fireweed_resp::RespBackend;
 use futures::StreamExt;
 
@@ -177,10 +177,6 @@ enum ExecutionMode {
     BlockingWholeOperation,
     NativeAsync,
 }
-
-/// Back-compat alias for callers that explicitly wrap the monolithic [`PostgresBackend`]. Production's
-/// postgres/postgres profile uses [`fixed_postgres_relational_pool`] and the unified relational backend.
-pub type PostgresNativeBackend = PostgresWholeOperationAdapter<PostgresBackend>;
 
 /// Shared production construction seam for the fixed unified PostgreSQL relational pool.
 pub fn fixed_postgres_relational_pool(

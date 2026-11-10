@@ -71,8 +71,7 @@ pub use env_config::ConfigError;
 
 mod postgres_native;
 pub use postgres_native::{
-    PostgresBlockingLifecycle, PostgresNativeBackend, PostgresWholeOperationAdapter,
-    fixed_postgres_relational_pool,
+    PostgresBlockingLifecycle, PostgresWholeOperationAdapter, fixed_postgres_relational_pool,
 };
 
 /// The durable command-LOG axis (ADR-012): which substrate holds the command log + the co-located
@@ -84,7 +83,7 @@ pub enum LogSpec {
     /// Segmented group-commit object log over the explicitly selected local or shared object-store profile.
     ObjectLog(ObjectLogSpec),
     /// SYNC postgres durable-log adapter (atomic class), driven through the blocking-safe
-    /// [`PostgresNativeBackend`] wrapper so no sync postgres client call runs on a Tokio worker thread.
+    /// [`PostgresWholeOperationAdapter`] wrapper so no sync postgres client call runs on a Tokio worker thread.
     /// `url` is a libpq/postgres connection string (URL or `key=value` DSN, with a native password); with the
     /// `tls` feature an `sslmode=require|prefer` url connects over native-tls (Lakebase / cloud postgres).
     /// `credentials` optionally injects a Databricks service-principal/PAT credential at connect (the

@@ -16,8 +16,6 @@
 #   bash scripts/ci/verify-build-closure.sh --mode candidate --fixture scripts/ci/fixtures/closure/all-closed.json
 #   bash scripts/ci/verify-build-closure.sh --mode candidate --fixture path.json --aggregate NAME
 #   bash scripts/ci/verify-build-closure.sh --mode operator --aggregate pqueue-131eadfa
-#   bash scripts/ci/verify-build-closure.sh --fixture path.json            # legacy → candidate
-#   bash scripts/ci/verify-build-closure.sh --aggregate pqueue-131eadfa    # legacy → operator
 #
 # Exit codes:
 #   0  closure verified
@@ -58,16 +56,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Legacy flag combinations → mode selection.
 if [[ -z "$MODE" ]]; then
-    if [[ -n "$FIXTURE" ]]; then
-        MODE="candidate"
-    elif [[ -n "$AGGREGATE" ]]; then
-        MODE="operator"
-    else
-        echo "verify-build-closure: require --mode candidate|operator (or legacy --fixture / --aggregate)" >&2
-        exit 2
-    fi
+    echo "verify-build-closure: require --mode candidate|operator" >&2
+    exit 2
 fi
 
 case "$MODE" in

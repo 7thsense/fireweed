@@ -119,13 +119,7 @@ impl SeparateReplayCommitter for ObjectLogEngineProjectionCommitter {
                 None => None,
             };
             let positions = match log
-                .packed_append_owned(
-                    shard.clone(),
-                    commands.clone(),
-                    expected_epoch,
-                    reservation.as_ref().map(|reserved| reserved.id()),
-                    false,
-                )
+                .packed_append(shard.clone(), commands.clone(), expected_epoch)
                 .await
             {
                 Ok(outcome) => outcome.positions,

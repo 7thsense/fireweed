@@ -1884,9 +1884,9 @@ pub(crate) async fn push_idempotency_on(
         return Ok(IdempotencyDecision::Expired);
     }
     let stored = blob(&row[0])?;
-    if stored != fingerprint.canonical_sha256
-        && stored != fingerprint.legacy_body_hash.0.to_be_bytes()
-    {
+    // The durable envelope carries the eight-byte prefix of the canonical fingerprint, and the
+    // relational apply persists exactly that.
+    if stored != fingerprint.body_hash().0.to_be_bytes() {
         return Ok(IdempotencyDecision::Conflict);
     }
     let raw: Vec<String> = serde_json::from_str(&text(&row[1])?).map_err(storage)?;
@@ -5004,7 +5004,7 @@ mod deterministic_cancellation_tests {
     use std::sync::Arc;
 
     use fireweed_conformance::{envelope, item, qdef, ts};
-    use fireweed_core::{BodyHash, ItemId, ItemState, RequestId};
+    use fireweed_core::{ItemId, ItemState, RequestId};
     use fireweed_engine::{
         AsyncProjectionStore, CommandPosition, IdempotencyDecision, PushCommand, PushFingerprint,
         QueueCommand, QueueKey, RequestOutcome, push_items_fingerprint_sha256,
@@ -5037,12 +5037,11 @@ mod deterministic_cancellation_tests {
         let ids = items.iter().map(|item| item.item_id).collect::<Vec<_>>();
         let fingerprint = PushFingerprint {
             canonical_sha256: push_items_fingerprint_sha256(&items).unwrap(),
-            legacy_body_hash: BodyHash(7),
         };
         let request_id = RequestId::new(request_id).unwrap();
         let mut command = envelope(QueueCommand::Push(PushCommand { items }), ids.clone());
         command.request_id = Some(request_id.clone());
-        command.request_fingerprint = Some(fingerprint.legacy_body_hash.0);
+        command.request_fingerprint = Some(fingerprint.body_hash().0);
         command.request_outcome = Some(RequestOutcome::Push { item_ids: ids });
         (
             CommandPosition::new(shard.clone(), 0, sequence),
@@ -5176,7 +5175,6 @@ mod deterministic_cancellation_tests {
                 request_id,
                 PushFingerprint {
                     canonical_sha256: [0xff; 32],
-                    legacy_body_hash: BodyHash(u64::MAX),
                 },
             )
             .await,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use fireweed_conformance::{envelope, item, qdef};
-use fireweed_core::{BodyHash, ItemId, ItemState, RequestId};
+use fireweed_core::{ItemId, ItemState, RequestId};
 use fireweed_engine::{
     AsyncProjectionStore, CommandPosition, IdempotencyDecision, PushCommand, PushFingerprint,
     QueueCommand, QueueKey, RequestOutcome, push_items_fingerprint_sha256,
@@ -41,11 +41,10 @@ fn replayable_push(
     };
     let fingerprint = PushFingerprint {
         canonical_sha256: push_items_fingerprint_sha256(&push.items).unwrap(),
-        legacy_body_hash: BodyHash(7),
     };
     let request_id = RequestId::new(request_id).unwrap();
     command.request_id = Some(request_id.clone());
-    command.request_fingerprint = Some(fingerprint.legacy_body_hash.0);
+    command.request_fingerprint = Some(fingerprint.body_hash().0);
     command.request_outcome = Some(RequestOutcome::Push { item_ids: vec![id] });
     (position, command, request_id, fingerprint)
 }
@@ -121,7 +120,6 @@ async fn cancellation_cuts_leave_zero_or_one_replayable_outcome_and_no_waiter_lo
             );
             let conflicting = PushFingerprint {
                 canonical_sha256: [0xff; 32],
-                legacy_body_hash: BodyHash(u64::MAX),
             };
             assert!(matches!(
                 replay_decision(store.as_ref(), &shard, raced_request_id, conflicting).await,

@@ -1942,7 +1942,7 @@ where
                 .expect("push idempotency mutex poisoned");
             Ok(guard
                 .get(&shard)
-                .map(|c| c.check(&request_id, fingerprint.legacy_body_hash, now))
+                .map(|c| c.check(&request_id, fingerprint.body_hash(), now))
                 .unwrap_or(IdempotencyDecision::Proceed))
         };
         std::future::ready(result)
@@ -2675,9 +2675,9 @@ mod tests {
     use std::time::Duration;
 
     use fireweed_core::{
-        BodyHash, CohortId, EligibilityPolicy, LeaseToken, OrderingMode, PriorityDirection,
-        PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId,
-        RecurrencePolicy, RetryPolicy, TenantId,
+        CohortId, EligibilityPolicy, LeaseToken, OrderingMode, PriorityDirection, PriorityModel,
+        PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy,
+        RetryPolicy, TenantId,
     };
 
     use super::*;
@@ -2918,7 +2918,6 @@ mod tests {
             RequestId::new("request").unwrap(),
             PushFingerprint {
                 canonical_sha256: [1; 32],
-                legacy_body_hash: BodyHash(1),
             },
             UtcTimestamp::new(0, 0).unwrap(),
         ));
@@ -3016,7 +3015,6 @@ mod tests {
                 RequestId::new("request").unwrap(),
                 PushFingerprint {
                     canonical_sha256: [1; 32],
-                    legacy_body_hash: BodyHash(1)
                 },
                 UtcTimestamp::new(0, 0).unwrap(),
             )),

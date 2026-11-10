@@ -21,7 +21,7 @@
 //! runtime"), it does not merely starve. The conformance/durability tests therefore drive the backend
 //! with a NON-tokio executor (`futures::executor::block_on`), each scenario on its own connection. For a
 //! PRODUCTION `fireweed-server` (whose RESP loop + reclaim driver run under tokio), this backend MUST be
-//! driven off the runtime. That is now done: `fireweed-server`'s `PostgresNativeBackend` wrapper (behind its
+//! driven off the runtime. That is now done: `fireweed-server`'s `PostgresWholeOperationAdapter` wrapper (behind its
 //! `postgres` cargo feature) delegates every engine-port call — and the initial `connect` and the final
 //! `Client` drop — to `tokio::task::spawn_blocking` / a non-reactor OS thread, so no sync postgres call
 //! ever runs on a tokio worker. The launch posture remains a single-node durable-log + in-memory projection
@@ -103,11 +103,7 @@ pub use credential::{
     DatabricksCredentialProvider, RefreshingCredentialProvider, databricks_fetcher_with_runner,
     parse_databricks_credential_response,
 };
-#[allow(deprecated)]
-pub use relational::{
-    ComposedPostgresRelationalBackend, PostgresRelational, PostgresRelationalBackend,
-    composed_postgres_relational_in_schema,
-};
+pub use relational::{PostgresRelational, PostgresRelationalBackend};
 pub use runtime_safe::{DEFAULT_RUNTIME_SAFE_IN_FLIGHT, ProductBackend, RuntimeSafeBackend};
 
 const SCHEMA: &str = r#"

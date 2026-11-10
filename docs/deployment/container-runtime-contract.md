@@ -97,7 +97,7 @@ Defaults are `filesystem` × `turso` (TD-010). The documented Turso path env is
 demoted Hybrid projection paths are hard-rejected by the env adapter (no
 long-lived aliases). The stock `fireweed-service` binary ships the full public
 matrix at runtime (Turso default-on; postgres via the blocking-safe
-`PostgresNativeBackend`); selecting a cell is injection only — no rebuild.
+`PostgresWholeOperationAdapter`); selecting a cell is injection only — no rebuild.
 Lakebase / cloud postgres with `sslmode=require` still requires a `tls`-built
 image (`--features tls`); a non-tls binary fails closed on TLS-requiring DSNs
 (no plaintext downgrade). Unsupported pairings fail at startup with an explicit

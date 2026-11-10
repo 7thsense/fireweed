@@ -3132,9 +3132,9 @@
         "server"
       ],
       "lines": [
-        4913,
-        4919,
-        4921
+        4912,
+        4918,
+        4920
       ],
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "evidence_output"
@@ -3144,10 +3144,10 @@
         "server"
       ],
       "lines": [
-        5073,
-        5077,
-        5079,
-        5083
+        5072,
+        5076,
+        5078,
+        5082
       ],
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "postgres_log_t3_evidence_axis_names_file_contract"
@@ -3566,7 +3566,7 @@
         "evidence"
       ],
       "lines": [
-        4347
+        4316
       ],
       "path": "crates/fireweed/src/turso_compose.rs",
       "symbol": "drive_started_generation"
@@ -4569,7 +4569,7 @@
       "calls": [
         "run"
       ],
-      "line": 605,
+      "line": 604,
       "path": "crates/fireweed-server/src/lib.rs",
       "symbol": "spawn_embedded_fjord_broker"
     },
@@ -5345,7 +5345,7 @@
       "calls": [
         "drop"
       ],
-      "line": 4244,
+      "line": 4213,
       "path": "crates/fireweed/src/turso_compose.rs",
       "symbol": "drive_started_generation"
     },
@@ -6219,7 +6219,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "c85e96fdebd84133dac6229de135f8576380d2ea5716e40e4c374ab01b9504a9",
+  "scan_sha256": "c66551e6c773390763079e9f8ff68933b754f4066ad63d43d5cedc20f7893667",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -9270,12 +9270,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 336,
+      "first_match_line": 330,
       "groups": [
         "e3"
       ],
-      "last_match_line": 336,
-      "line": 329,
+      "last_match_line": 330,
+      "line": 323,
       "markers": [
         "e3"
       ],
@@ -9306,12 +9306,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1241,
+      "first_match_line": 1211,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1241,
-      "line": 1224,
+      "last_match_line": 1211,
+      "line": 1194,
       "markers": [
         "td008"
       ],
@@ -16243,12 +16243,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 362,
+      "first_match_line": 361,
       "groups": [
         "server"
       ],
-      "last_match_line": 362,
-      "line": 334,
+      "last_match_line": 361,
+      "line": 333,
       "markers": [
         "td008"
       ],
@@ -16261,12 +16261,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 695,
+      "first_match_line": 694,
       "groups": [
         "server"
       ],
-      "last_match_line": 695,
-      "line": 605,
+      "last_match_line": 694,
+      "line": 604,
       "markers": [
         "td008"
       ],
@@ -16279,12 +16279,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 963,
+      "first_match_line": 962,
       "groups": [
         "server"
       ],
-      "last_match_line": 963,
-      "line": 883,
+      "last_match_line": 962,
+      "line": 882,
       "markers": [
         "td008"
       ],
@@ -16297,12 +16297,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1141,
+      "first_match_line": 1140,
       "groups": [
         "server"
       ],
-      "last_match_line": 1141,
-      "line": 1119,
+      "last_match_line": 1140,
+      "line": 1118,
       "markers": [
         "td008"
       ],
@@ -16316,12 +16316,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4867,
+      "first_match_line": 4866,
       "groups": [
         "server"
       ],
-      "last_match_line": 4883,
-      "line": 4848,
+      "last_match_line": 4882,
+      "line": 4847,
       "markers": [
         "evidence",
         "tp003"
@@ -16335,12 +16335,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4909,
+      "first_match_line": 4908,
       "groups": [
         "server"
       ],
-      "last_match_line": 4921,
-      "line": 4908,
+      "last_match_line": 4920,
+      "line": 4907,
       "markers": [
         "evidence",
         "tp003"
@@ -16354,12 +16354,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5034,
+      "first_match_line": 5033,
       "groups": [
         "server"
       ],
-      "last_match_line": 5053,
-      "line": 5032,
+      "last_match_line": 5052,
+      "line": 5031,
       "markers": [
         "evidence"
       ],
@@ -16372,12 +16372,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5068,
+      "first_match_line": 5067,
       "groups": [
         "server"
       ],
-      "last_match_line": 5087,
-      "line": 5068,
+      "last_match_line": 5086,
+      "line": 5067,
       "markers": [
         "evidence",
         "tp003"
@@ -16391,12 +16391,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5193,
+      "first_match_line": 5192,
       "groups": [
         "server"
       ],
-      "last_match_line": 5193,
-      "line": 5191,
+      "last_match_line": 5192,
+      "line": 5190,
       "markers": [
         "evidence"
       ],
@@ -17249,12 +17249,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 4358,
+      "first_match_line": 4327,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 4358,
-      "line": 4244,
+      "last_match_line": 4327,
+      "line": 4213,
       "markers": [
         "evidence"
       ],
@@ -19828,11 +19828,11 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 142,
+      "first_match_line": 132,
       "groups": [
         "script"
       ],
-      "last_match_line": 268,
+      "last_match_line": 258,
       "line": 45,
       "markers": [
         "evidence"
@@ -19935,7 +19935,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 121673,
+      "last_match_line": 121613,
       "line": 1,
       "markers": [
         "e3",
@@ -20165,11 +20165,11 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 24,
+      "first_match_line": 22,
       "groups": [
         "script"
       ],
-      "last_match_line": 195,
+      "last_match_line": 186,
       "line": 1,
       "markers": [
         "evidence"

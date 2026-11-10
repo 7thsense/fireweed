@@ -9833,17 +9833,7 @@ impl PostgresRelational {
         ) {
             Ok(Some(ids)) => Ok(IdempotencyDecision::Replay(ids)),
             Ok(None) => Ok(IdempotencyDecision::Proceed),
-            Err(EngineError::RequestIdConflict) => match check_request_idempotency(
-                &mut tx,
-                shard,
-                IDEMPOTENCY_OPERATION_PUSH,
-                request_id,
-                &fingerprint.legacy_body_hash.0.to_be_bytes(),
-                ts_nanos(now),
-            ) {
-                Ok(Some(ids)) => Ok(IdempotencyDecision::Replay(ids)),
-                _ => Ok(IdempotencyDecision::Conflict),
-            },
+            Err(EngineError::RequestIdConflict) => Ok(IdempotencyDecision::Conflict),
             Err(error) => Err(error),
         };
         st(tx.commit())?;
@@ -10894,27 +10884,6 @@ impl AsOfProjectionStore for PostgresRelational {
     ) -> EngineResult<Self::AsOfProjection> {
         Err(EngineError::Unavailable)
     }
-}
-
-/// Retired legacy alias retained for source compatibility. `PostgresRelational` is projection-only; the
-/// selectable unified atomic implementation is [`PostgresRelationalBackend`].
-#[deprecated(
-    since = "0.19.5",
-    note = "use PostgresRelationalBackend; PostgresRelational is projection-only and must not be composed with itself"
-)]
-pub type ComposedPostgresRelationalBackend = PostgresRelationalBackend;
-
-/// The former same-value log/projection composition was not atomic and is no longer selectable.
-#[deprecated(
-    since = "0.19.5",
-    note = "use PostgresRelationalBackend::connect_in_schema for the unified atomic backend"
-)]
-#[allow(deprecated)]
-pub fn composed_postgres_relational_in_schema(
-    url: &str,
-    schema: &str,
-) -> EngineResult<ComposedPostgresRelationalBackend> {
-    PostgresRelationalBackend::connect_in_schema(url, schema)
 }
 
 #[cfg(test)]

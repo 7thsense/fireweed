@@ -220,7 +220,6 @@ probe_postgres() {
 
 export_mapped_env() {
   # Emit shell assignments for eval; values come from already-loaded env.
-  # Also map into legacy Snorri live harness names still used on Snorri main.
   cat <<EOF
 export FIREWEED_S3_TEST_ENDPOINT=$(printf '%q' "${FIREWEED_S3_TEST_ENDPOINT}")
 export FIREWEED_S3_TEST_BUCKET=$(printf '%q' "${FIREWEED_S3_TEST_BUCKET}")
@@ -233,13 +232,6 @@ export SNORRI_S3_TEST_BUCKET=$(printf '%q' "${FIREWEED_S3_TEST_BUCKET}")
 export SNORRI_S3_TEST_REGION=$(printf '%q' "${FIREWEED_S3_TEST_REGION}")
 export SNORRI_S3_TEST_ACCESS_KEY=$(printf '%q' "${FIREWEED_S3_TEST_ACCESS_KEY}")
 export SNORRI_S3_TEST_SECRET_KEY=$(printf '%q' "${FIREWEED_S3_TEST_SECRET_KEY}")
-# Legacy Snorri main live harness names (provider must still be the P1s-qualified RustFS).
-export SNORRI_GARAGE_S3_ENDPOINT=$(printf '%q' "${FIREWEED_S3_TEST_ENDPOINT}")
-export SNORRI_GARAGE_S3_BUCKET=$(printf '%q' "${FIREWEED_S3_TEST_BUCKET}")
-export SNORRI_GARAGE_S3_REGION=$(printf '%q' "${FIREWEED_S3_TEST_REGION}")
-export SNORRI_GARAGE_S3_ACCESS_KEY=$(printf '%q' "${FIREWEED_S3_TEST_ACCESS_KEY}")
-export SNORRI_GARAGE_S3_SECRET_KEY=$(printf '%q' "${FIREWEED_S3_TEST_SECRET_KEY}")
-export SNORRI_GARAGE_TEST=1
 export SNORRI_S3_TEST=1
 EOF
 }
