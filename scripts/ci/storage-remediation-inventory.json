@@ -82,9 +82,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "8a31f565d91c24baa2c7",
+        "id": "f22d657005a20109fc6e",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2527,
+        "line": 2779,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -96,9 +96,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "1122c2e2ef1aff22c3df",
+        "id": "01b6e954cb5510a7b70a",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2709,
+        "line": 2961,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -110,9 +110,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "a02ba5b297058a02d46e",
+        "id": "55f72e22f83f82bf325f",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2783,
+        "line": 3035,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -124,9 +124,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "c001f434d804c5dd9851",
+        "id": "3703686b0cb717e4b943",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 2886,
+        "line": 3138,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -138,9 +138,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "d5d1bbb854882f9aa10f",
+        "id": "b57cbaab5f3d625c247c",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 3226,
+        "line": 3493,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -152,9 +152,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "981d301c6e3d15f5e5a8",
+        "id": "6a32417922262160a0f0",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 3273,
+        "line": 3540,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -166,9 +166,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "4196cc788e1e682199a9",
+        "id": "ae7229cac4325afa82cf",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 3278,
+        "line": 3545,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -180,9 +180,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "ec354e95b0d35df5317e",
+        "id": "677d6c4b4179c1f1ce50",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 4072,
+        "line": 4339,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -194,9 +194,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "b5862332e448592e95ae",
+        "id": "2c65838444cc2cb2c61f",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 4286,
+        "line": 4559,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -208,9 +208,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "c88ed7b4bf21f82471a3",
+        "id": "c2974d01db366e4e50f7",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 4437,
+        "line": 4716,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -222,9 +222,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "e5878602c18a365b571d",
+        "id": "9f5ec9a0e6d18e6f67ec",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 4519,
+        "line": 4798,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -236,9 +236,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "67111dad739b2b833ae9",
+        "id": "ac1ac00865f589f4aebf",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 4564,
+        "line": 4843,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/src/queue_store.rs",
         "status": "debt"
@@ -418,9 +418,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "318ee59f9c5e74c286e0",
+        "id": "14aa657039edd52717c0",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 292,
+        "line": 295,
         "owner": "P10pp",
         "path": "crates/fireweed-postgres/tests/queue_contract.rs",
         "status": "debt"
@@ -530,9 +530,9 @@
           "P2f"
         ],
         "detail": "intentional_env_or_release_ignore",
-        "id": "c49e254b5f41c3a4054e",
+        "id": "e8c00602591babaa3aff",
         "identity": "#[ignore = \"requires FIREWEED_API007_PG_TEST_URL and FIREWEED_S3_TEST_*\"]",
-        "line": 524,
+        "line": 530,
         "owner": "P10pf",
         "path": "crates/fireweed/src/queue/s3_turso/tests.rs",
         "status": "discovery_negative"
@@ -544,9 +544,9 @@
           "P2f"
         ],
         "detail": "intentional_env_or_release_ignore",
-        "id": "b9206dc5ed8fb3f381e8",
+        "id": "9267f2d16e6b5165fb07",
         "identity": "#[ignore = \"requires FIREWEED_API007_PG_TEST_URL and FIREWEED_S3_TEST_*\"]",
-        "line": 566,
+        "line": 572,
         "owner": "P10pf",
         "path": "crates/fireweed/src/queue/s3_turso/tests.rs",
         "status": "discovery_negative"
@@ -558,9 +558,9 @@
           "P2f"
         ],
         "detail": "intentional_env_or_release_ignore",
-        "id": "6c0c48cbb45bf17d4a88",
+        "id": "3b9735c0ad99e1e325bf",
         "identity": "#[ignore = \"requires FIREWEED_API007_PG_TEST_URL and FIREWEED_S3_TEST_*\"]",
-        "line": 613,
+        "line": 619,
         "owner": "P10pf",
         "path": "crates/fireweed/src/queue/s3_turso/tests.rs",
         "status": "discovery_negative"
@@ -810,9 +810,9 @@
           "P2f"
         ],
         "detail": "",
-        "id": "412251da3ba8ed6dfad2",
+        "id": "912c803f0be9ddb97623",
         "identity": "#[ignore = \"requires isolated FIREWEED_API007_PG_TEST_URL\"]",
-        "line": 218,
+        "line": 254,
         "owner": "P10pf",
         "path": "crates/fireweed/tests/simple_queue_postgres.rs",
         "status": "debt"
@@ -16032,7 +16032,7 @@
     "cargo_status": "listed",
     "errors": [],
     "generated_by": "scripts/ci/fireweed_test_placement.py",
-    "input_sha256": "c8935bf6c5a3bf8f15f767648bdd17ca95ac1ba2e79a4b925bf15582a2edd5e4",
+    "input_sha256": "f537647192dcdefe5de232364a59b9b0754883026b7e0b502cf25f5a29bd9556",
     "private_surface": [
       {
         "declaration_kind": "fn",
@@ -17938,6 +17938,46 @@
           "fireweed",
           "--all-features",
           "--lib",
+          "queue_recovery_pipeline::tests::native_store_request_horizon_survives_rebuild_local",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_store_request_horizon_survives_rebuild_local",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::native_store_request_horizon_survives_rebuild_local"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::native_store_request_horizon_survives_rebuild_real_s3",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_store_request_horizon_survives_rebuild_real_s3",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::native_store_request_horizon_survives_rebuild_real_s3"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
           "queue_recovery_pipeline::tests::native_store_retired_deletion_survives_rebuild_local",
           "--",
           "--exact"
@@ -18905,6 +18945,46 @@
         "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::record_counts::reopen_rebuilds_from_log_real_s3",
         "target": "fireweed",
         "test_id": "queue_recovery_pipeline::tests::record_counts::reopen_rebuilds_from_log_real_s3"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::retention::a_failed_pass_costs_no_foreground_request_local",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::retention::a_failed_pass_costs_no_foreground_request_local",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::retention::a_failed_pass_costs_no_foreground_request_local"
+      },
+      {
+        "exact_invocation": [
+          "rustup",
+          "run",
+          "1.99.0",
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "fireweed",
+          "--all-features",
+          "--lib",
+          "queue_recovery_pipeline::tests::retention::a_pass_is_offered_once_per_interval_of_store_time_local",
+          "--",
+          "--exact"
+        ],
+        "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::retention::a_pass_is_offered_once_per_interval_of_store_time_local",
+        "target": "fireweed",
+        "test_id": "queue_recovery_pipeline::tests::retention::a_pass_is_offered_once_per_interval_of_store_time_local"
       },
       {
         "exact_invocation": [
@@ -47612,6 +47692,96 @@
       "features": [],
       "harness_id": "queue_recovery::tests::invalid_histories_fail_closed_and_cannot_skip_to_eof",
       "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_recovery::tests::invalid_histories_fail_closed_and_cannot_skip_to_eof",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--no-default-features",
+        "--lib",
+        "queue_retention::tests::a_keep_forever_window_never_advances_the_horizon",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "queue_retention::tests::a_keep_forever_window_never_advances_the_horizon",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_retention::tests::a_keep_forever_window_never_advances_the_horizon",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--no-default-features",
+        "--lib",
+        "queue_retention::tests::claim_liveness_includes_the_skew",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "queue_retention::tests::claim_liveness_includes_the_skew",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_retention::tests::claim_liveness_includes_the_skew",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--no-default-features",
+        "--lib",
+        "queue_retention::tests::horizon_is_monotone_and_held_by_live_claims",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "queue_retention::tests::horizon_is_monotone_and_held_by_live_claims",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_retention::tests::horizon_is_monotone_and_held_by_live_claims",
       "listed_kind": "test",
       "package": "fireweed-engine",
       "target": "fireweed_engine",
@@ -98346,6 +98516,181 @@
         "--features",
         "default,local",
         "--lib",
+        "queue_projection::retention::tests::a_pass_advances_the_horizon_and_removes_only_requests_older_than_it",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "local"
+      ],
+      "harness_id": "queue_projection::retention::tests::a_pass_advances_the_horizon_and_removes_only_requests_older_than_it",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::retention::tests::a_pass_advances_the_horizon_and_removes_only_requests_older_than_it",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--no-default-features",
+        "--features",
+        "default,local",
+        "--lib",
+        "queue_projection::retention::tests::large::retained_rows_stay_flat_under_churn",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "local"
+      ],
+      "harness_id": "queue_projection::retention::tests::large::retained_rows_stay_flat_under_churn",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::retention::tests::large::retained_rows_stay_flat_under_churn",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--no-default-features",
+        "--features",
+        "default,local",
+        "--lib",
+        "queue_projection::retention::tests::one_record_removes_at_most_its_budget",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "local"
+      ],
+      "harness_id": "queue_projection::retention::tests::one_record_removes_at_most_its_budget",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::retention::tests::one_record_removes_at_most_its_budget",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--no-default-features",
+        "--features",
+        "default,local",
+        "--lib",
+        "queue_projection::retention::tests::retired_rows_go_after_their_window_and_the_floor_keeps_versions_rising",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "local"
+      ],
+      "harness_id": "queue_projection::retention::tests::retired_rows_go_after_their_window_and_the_floor_keeps_versions_rising",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::retention::tests::retired_rows_go_after_their_window_and_the_floor_keeps_versions_rising",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--no-default-features",
+        "--features",
+        "default,local",
+        "--lib",
+        "queue_projection::retention::tests::the_same_log_rebuilds_to_the_same_horizon_and_rows",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "local"
+      ],
+      "harness_id": "queue_projection::retention::tests::the_same_log_rebuilds_to_the_same_horizon_and_rows",
+      "id": "Cargo.toml::fireweed-turso::fireweed_turso::test::queue_projection::retention::tests::the_same_log_rebuilds_to_the_same_horizon_and_rows",
+      "listed_kind": "test",
+      "package": "fireweed-turso",
+      "target": "fireweed_turso",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-turso",
+        "--no-default-features",
+        "--features",
+        "default,local",
+        "--lib",
         "queue_projection::selection::tests::native_ordering_uses_schedule_age_and_exact_unsigned_sequence",
         "--",
         "--exact"
@@ -106093,6 +106438,84 @@
         "--features",
         "default,memory,objectlog,postgres,s3-turso,turso",
         "--lib",
+        "queue_recovery_pipeline::tests::native_store_request_horizon_survives_rebuild_local",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "memory",
+        "objectlog",
+        "postgres",
+        "s3-turso",
+        "turso"
+      ],
+      "harness_id": "queue_recovery_pipeline::tests::native_store_request_horizon_survives_rebuild_local",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_store_request_horizon_survives_rebuild_local",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,memory,objectlog,postgres,s3-turso,turso",
+        "--lib",
+        "queue_recovery_pipeline::tests::native_store_request_horizon_survives_rebuild_real_s3",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "memory",
+        "objectlog",
+        "postgres",
+        "s3-turso",
+        "turso"
+      ],
+      "harness_id": "queue_recovery_pipeline::tests::native_store_request_horizon_survives_rebuild_real_s3",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::native_store_request_horizon_survives_rebuild_real_s3",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,memory,objectlog,postgres,s3-turso,turso",
+        "--lib",
         "queue_recovery_pipeline::tests::native_store_retired_deletion_survives_rebuild_local",
         "--",
         "--exact"
@@ -107980,6 +108403,84 @@
       ],
       "harness_id": "queue_recovery_pipeline::tests::record_counts::reopen_rebuilds_from_log_real_s3",
       "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::record_counts::reopen_rebuilds_from_log_real_s3",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,memory,objectlog,postgres,s3-turso,turso",
+        "--lib",
+        "queue_recovery_pipeline::tests::retention::a_failed_pass_costs_no_foreground_request_local",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "memory",
+        "objectlog",
+        "postgres",
+        "s3-turso",
+        "turso"
+      ],
+      "harness_id": "queue_recovery_pipeline::tests::retention::a_failed_pass_costs_no_foreground_request_local",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::retention::a_failed_pass_costs_no_foreground_request_local",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,memory,objectlog,postgres,s3-turso,turso",
+        "--lib",
+        "queue_recovery_pipeline::tests::retention::a_pass_is_offered_once_per_interval_of_store_time_local",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "memory",
+        "objectlog",
+        "postgres",
+        "s3-turso",
+        "turso"
+      ],
+      "harness_id": "queue_recovery_pipeline::tests::retention::a_pass_is_offered_once_per_interval_of_store_time_local",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue_recovery_pipeline::tests::retention::a_pass_is_offered_once_per_interval_of_store_time_local",
       "listed_kind": "test",
       "package": "fireweed",
       "target": "fireweed",
@@ -122313,7 +122814,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "f27127ab63ea140b92162915cc2cb61dd41e78583d369ea173be8714a85910e9",
+  "source_inventory_sha256": "fde11834eebb45f10b8e455dd9c857cb8a7103e2009321202c77dfeb80bd8b5c",
   "workspaces": [
     {
       "listing_error_sha256": "",

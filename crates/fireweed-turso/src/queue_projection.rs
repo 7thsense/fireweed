@@ -27,6 +27,7 @@ mod receipt_authority;
 mod receipt_metadata;
 mod receipts;
 mod replay;
+mod retention;
 mod selection;
 mod snapshot;
 mod state_authority;
@@ -101,12 +102,14 @@ async fn catch_apply_panic<F: std::future::Future>(future: F) -> QueueResult<F::
     .await
 }
 const DDL: &str = r#"
-CREATE TABLE IF NOT EXISTS q7_queues(id INTEGER PRIMARY KEY,address_hash BLOB NOT NULL,tenant BLOB NOT NULL,name BLOB NOT NULL,definition BLOB NOT NULL,cursor_secret BLOB NOT NULL,next_sequence BLOB NOT NULL,applied_next_offset INTEGER NOT NULL,last_record_epoch BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS q7_queues(id INTEGER PRIMARY KEY,address_hash BLOB NOT NULL,tenant BLOB NOT NULL,name BLOB NOT NULL,definition BLOB NOT NULL,cursor_secret BLOB NOT NULL,next_sequence BLOB NOT NULL,applied_next_offset INTEGER NOT NULL,last_record_epoch BLOB NOT NULL,horizon INTEGER NOT NULL,deleted_before INTEGER NOT NULL,version_floor BLOB NOT NULL);
 CREATE INDEX IF NOT EXISTS q7_address ON q7_queues(address_hash);
-CREATE TABLE IF NOT EXISTS q7_records(id INTEGER PRIMARY KEY,queue_id INTEGER NOT NULL,collection INTEGER NOT NULL,key_hash BLOB NOT NULL,key BLOB NOT NULL,version BLOB NOT NULL,active INTEGER NOT NULL,lifecycle INTEGER NOT NULL,priority INTEGER NOT NULL,available_at INTEGER NOT NULL,eligible_since INTEGER NOT NULL,attempts INTEGER NOT NULL,lease_until INTEGER,lease_hash BLOB,insertion_sequence BLOB NOT NULL,last_change_offset INTEGER NOT NULL,prior_highwater BLOB NOT NULL,deleted_at INTEGER);
+CREATE TABLE IF NOT EXISTS q7_records(id INTEGER PRIMARY KEY,queue_id INTEGER NOT NULL,collection INTEGER NOT NULL,key_hash BLOB NOT NULL,key BLOB NOT NULL,version BLOB NOT NULL,active INTEGER NOT NULL,lifecycle INTEGER NOT NULL,priority INTEGER NOT NULL,available_at INTEGER NOT NULL,eligible_since INTEGER NOT NULL,attempts INTEGER NOT NULL,lease_until INTEGER,lease_hash BLOB,insertion_sequence BLOB NOT NULL,last_change_offset INTEGER NOT NULL,prior_highwater BLOB NOT NULL,deleted_at INTEGER,lease_claim_issued_at INTEGER);
+CREATE INDEX IF NOT EXISTS q7_lease_expiry ON q7_records(queue_id,lease_until) WHERE active=1 AND lifecycle=1;
 CREATE INDEX IF NOT EXISTS q7_record_key ON q7_records(queue_id,collection,key_hash);
 CREATE INDEX IF NOT EXISTS q7_claim_priority ON q7_records(queue_id,priority,insertion_sequence) WHERE active=1 AND collection=0;
 CREATE INDEX IF NOT EXISTS q7_claim_due ON q7_records(queue_id,available_at,insertion_sequence) WHERE active=1 AND collection=0;
+CREATE INDEX IF NOT EXISTS q7_deleted_work ON q7_records(queue_id,deleted_at,id) WHERE active=0 AND collection=0;
 CREATE TABLE IF NOT EXISTS q7_bodies(record_id INTEGER PRIMARY KEY,value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS q7_fields(record_id INTEGER NOT NULL,queue_id INTEGER NOT NULL,collection INTEGER NOT NULL,field INTEGER NOT NULL,prefix BLOB NOT NULL,hash BLOB NOT NULL,full_key BLOB NOT NULL,value BLOB NOT NULL,PRIMARY KEY(record_id,field));
 CREATE INDEX IF NOT EXISTS q7_field_equal ON q7_fields(queue_id,collection,field,hash,record_id);
@@ -118,8 +121,9 @@ CREATE INDEX IF NOT EXISTS q7_additional_range ON q7_additional(queue_id,collect
 CREATE TABLE IF NOT EXISTS q7_indexes(record_id INTEGER NOT NULL,queue_id INTEGER NOT NULL,collection INTEGER NOT NULL,index_no INTEGER NOT NULL,prefix BLOB NOT NULL,hash BLOB NOT NULL,full_key BLOB NOT NULL,is_unique INTEGER NOT NULL,PRIMARY KEY(record_id,index_no));
 CREATE INDEX IF NOT EXISTS q7_index_equal ON q7_indexes(queue_id,collection,index_no,hash,record_id);
 CREATE INDEX IF NOT EXISTS q7_index_order ON q7_indexes(queue_id,collection,index_no,prefix,record_id);
-CREATE TABLE IF NOT EXISTS q7_requests(id INTEGER PRIMARY KEY,queue_id INTEGER NOT NULL,domain INTEGER NOT NULL,identity_hash BLOB NOT NULL,identity BLOB NOT NULL,fingerprint_format INTEGER NOT NULL,fingerprint BLOB NOT NULL,outcome BLOB NOT NULL,expired INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS q7_requests(id INTEGER PRIMARY KEY,queue_id INTEGER NOT NULL,domain INTEGER NOT NULL,identity_hash BLOB NOT NULL,identity BLOB NOT NULL,fingerprint_format INTEGER NOT NULL,fingerprint BLOB NOT NULL,outcome BLOB NOT NULL,expired INTEGER NOT NULL DEFAULT 0,issued_at INTEGER NOT NULL,live_until INTEGER);
 CREATE INDEX IF NOT EXISTS q7_request_identity ON q7_requests(queue_id,domain,identity_hash);
+CREATE INDEX IF NOT EXISTS q7_request_issued ON q7_requests(queue_id,issued_at,id);
 "#;
 /// Page cache of one projection database, in KiB (SQLite's negative `cache_size`).
 const CACHE_KIB: i64 = 1024;
@@ -165,6 +169,8 @@ impl QueueProjection {
 }
 pub struct AppliedQueueRecord {
     pub next_offset: u64,
+    /// Rows a retention record removed; zero for every other record.
+    pub removed: u64,
     _charge: OwnedQueueBufferCharge,
 }
 /// One admitted native snapshot, bound to the original genesis payload authority.
@@ -448,7 +454,8 @@ impl ApplyWorker {
     }
     async fn execute_inner(&mut self) -> QueueResult<AppliedQueueRecord> {
         let projection = Arc::clone(&self.projection);
-        owned_native_transaction(&projection, TransactionBehavior::Immediate, self).await?;
+        let removed =
+            owned_native_transaction(&projection, TransactionBehavior::Immediate, self).await?;
         {
             let writer = projection.writer.lock().await;
             let connection = writer
@@ -461,6 +468,7 @@ impl ApplyWorker {
             return Err(unknown("injected lost apply reply after commit"));
         }
         Ok(AppliedQueueRecord {
+            removed,
             next_offset: u64::try_from(self.offset)
                 .map_err(unknown)?
                 .checked_add(1)
@@ -478,8 +486,8 @@ trait NativeTransactionWork {
     async fn before_commit(&mut self) {}
 }
 impl NativeTransactionWork for ApplyWorker {
-    type Output = ();
-    async fn run(&mut self, connection: &Connection) -> QueueResult<()> {
+    type Output = u64;
+    async fn run(&mut self, connection: &Connection) -> QueueResult<u64> {
         apply_transaction(
             connection,
             &self.record,
@@ -618,9 +626,10 @@ async fn apply_transaction(
     offset: i64,
     job: &Arc<QueueReservation>,
     #[cfg(test)] panic_after_command: bool,
-) -> QueueResult<()> {
+) -> QueueResult<u64> {
     let view = record.view()?;
     let address = view.address();
+    let mut removed = 0;
     match view.payload() {
         QueueLogPayload::Genesis(genesis) => {
             let metadata = queue_row(connection, address.tenant, address.queue).await?;
@@ -629,7 +638,15 @@ async fn apply_transaction(
             }
             let address_hash = discovery_digest(&encode(&(address.tenant, address.queue))?);
             let _definition = genesis.validate_definition(job)?;
-            connection.execute("INSERT INTO q7_queues(address_hash,tenant,name,definition,cursor_secret,next_sequence,applied_next_offset,last_record_epoch) VALUES(?1,?2,?3,?4,?5,?6,1,?7)", vec![blob(&address_hash),blob(address.tenant.as_bytes()),blob(address.queue.as_bytes()),blob(genesis.definition_bytes()),blob(genesis.cursor_secret()),number(0),number(view.epoch())]).await.map_err(unknown)?;
+            connection.execute("INSERT INTO q7_queues(address_hash,tenant,name,definition,cursor_secret,next_sequence,applied_next_offset,last_record_epoch,horizon,deleted_before,version_floor) VALUES(?1,?2,?3,?4,?5,?6,1,?7,?8,?9,?10)", vec![blob(&address_hash),blob(address.tenant.as_bytes()),blob(address.queue.as_bytes()),blob(genesis.definition_bytes()),blob(genesis.cursor_secret()),number(0),number(view.epoch()),Value::Integer(i64::MIN),Value::Integer(i64::MIN),number(0)]).await.map_err(unknown)?;
+        }
+        QueueLogPayload::Retention(retention) => {
+            let metadata = queue_row(connection, address.tenant, address.queue)
+                .await?
+                .ok_or_else(|| unknown("retention has no projected genesis"))?;
+            let queue_id = check_record_point(&metadata, offset, view.epoch())?;
+            removed = retention::apply_retention(connection, queue_id, retention, job).await?;
+            advance_cursor(connection, queue_id, offset, view.epoch()).await?;
         }
         payload => {
             let entries: Vec<EntryParts<'_, '_>> = match payload {
@@ -640,7 +657,7 @@ async fn apply_transaction(
                     .iter()
                     .map(|entry| (entry.frame(), entry.claim()))
                     .collect(),
-                QueueLogPayload::Genesis(_) => unreachable!(),
+                QueueLogPayload::Genesis(_) | QueueLogPayload::Retention(_) => unreachable!(),
             };
             let metadata = queue_row(connection, address.tenant, address.queue)
                 .await?
@@ -661,7 +678,7 @@ async fn apply_transaction(
             advance_cursor(connection, queue_id, offset, view.epoch()).await?;
         }
     }
-    Ok(())
+    Ok(removed)
 }
 /// Apply one entry: its commands, the unique-key check over what they touched
 /// and its receipts. The applied cursor is the record's business, not the
@@ -772,12 +789,12 @@ async fn apply_entry(
         )
         .await?;
         // These are fixed FWQP outcome bytes, explicitly not Postcard.
-        connection.execute("INSERT INTO q7_requests(queue_id,domain,identity_hash,identity,fingerprint_format,fingerprint,outcome) VALUES(?1,?2,?3,?4,?5,?6,?7)", vec![Value::Integer(queue_id),Value::Integer(domain),blob(&identity),blob(receipt.request_id.as_bytes()),Value::Integer(i64::from(receipt.fingerprint_format)),blob(receipt.fingerprint),blob(receipt.encoded_outcome())]).await.map_err(unknown)?;
+        connection.execute("INSERT INTO q7_requests(queue_id,domain,identity_hash,identity,fingerprint_format,fingerprint,outcome,issued_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", vec![Value::Integer(queue_id),Value::Integer(domain),blob(&identity),blob(receipt.request_id.as_bytes()),Value::Integer(i64::from(receipt.fingerprint_format)),blob(receipt.fingerprint),blob(receipt.encoded_outcome()),Value::Integer(receipt.issued_at)]).await.map_err(unknown)?;
     }
     if let Some(claim) = claim {
         let identity = discovery_digest(claim.request_id().as_bytes());
         if one(connection,"SELECT id FROM q7_requests WHERE queue_id=?1 AND domain=1 AND identity_hash=?2 AND identity=?3",vec![Value::Integer(queue_id),blob(&identity),blob(claim.request_id().as_bytes())],1).await?.is_some() {return Err(unknown("claim receipt is not fresh immutable authority"));}
-        connection.execute("INSERT INTO q7_requests(queue_id,domain,identity_hash,identity,fingerprint_format,fingerprint,outcome) VALUES(?1,1,?2,?3,?4,?5,?6)",vec![Value::Integer(queue_id),blob(&identity),blob(claim.request_id().as_bytes()),Value::Integer(i64::from(claim.fingerprint_format())),blob(claim.fingerprint()),blob(claim.receipt_bytes())]).await.map_err(unknown)?;
+        connection.execute("INSERT INTO q7_requests(queue_id,domain,identity_hash,identity,fingerprint_format,fingerprint,outcome,issued_at,live_until) VALUES(?1,1,?2,?3,?4,?5,?6,?7,?8)",vec![Value::Integer(queue_id),blob(&identity),blob(claim.request_id().as_bytes()),Value::Integer(i64::from(claim.fingerprint_format())),blob(claim.fingerprint()),blob(claim.receipt_bytes()),Value::Integer(claim.issued_at()),Value::Integer(claim.expires_at())]).await.map_err(unknown)?;
     }
     if connection
         .execute(
@@ -1249,6 +1266,15 @@ async fn apply_command(
                 write_body(connection, record_id, body, job).await?;
             }
             connection.execute("UPDATE q7_records SET version=?2,active=1,lifecycle=?3,priority=?4,available_at=?5,eligible_since=?6,attempts=?7,lease_until=?8,lease_hash=?9,insertion_sequence=?10,last_change_offset=?11,prior_highwater=?12,deleted_at=NULL WHERE id=?1",vec![Value::Integer(record_id),number(command.output_highwater),Value::Integer(i64::from(encode_lifecycle(metadata.lifecycle))),Value::Integer(metadata.priority),Value::Integer(metadata.available_at),Value::Integer(metadata.eligible_since),Value::Integer(i64::from(metadata.attempts)),metadata.lease_expires_at.map_or(Value::Null,Value::Integer),metadata.lease_hash.map_or(Value::Null,|value|blob(value)),number(metadata.insertion_sequence),Value::Integer(offset),number(highwater)]).await.map_err(unknown)?;
+            if let Some((claim, _)) = context.claim {
+                connection
+                    .execute(
+                        "UPDATE q7_records SET lease_claim_issued_at=?2 WHERE id=?1",
+                        vec![Value::Integer(record_id), Value::Integer(claim.issued_at())],
+                    )
+                    .await
+                    .map_err(unknown)?;
+            }
         }
         EffectRef::StatePut { fields, value } => {
             let owned = field_change(FieldsCommandRef::Replace(fields), definition, job)?;
@@ -1608,7 +1634,11 @@ mod tests {
             },
         }
     }
-    fn authorize(snapshot: &mut RecordSnapshot, group: &CommitGroup, schema: &QueueSchema) {
+    pub(super) fn authorize(
+        snapshot: &mut RecordSnapshot,
+        group: &CommitGroup,
+        schema: &QueueSchema,
+    ) {
         snapshot
             .unique_probes_loaded
             .extend(prospective_unique_probes(group, snapshot, schema).unwrap());
@@ -2630,7 +2660,16 @@ mod tests {
                     .unwrap(),
                     request: ReceiptReadRequest {
                         queue: queue.clone(),
-                        request_ids: vec!["admin-v2".into(), "admin-too-large".into()],
+                        request_ids: vec![
+                            ReceiptReadId {
+                                request_id: "admin-v2".into(),
+                                issued_at: 0,
+                            },
+                            ReceiptReadId {
+                                request_id: "admin-too-large".into(),
+                                issued_at: 0,
+                            },
+                        ],
                         max_bytes: encoded_len(&expected_public).unwrap(),
                     },
                     limits: QueueLimits::default(),

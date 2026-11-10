@@ -244,7 +244,10 @@ async fn namespace_elected_with_an_empty_head_is_absent_until_provisioned() {
     let read = || {
         store.read_commit(ReceiptReadRequest {
             queue: queue.clone(),
-            request_ids: vec!["none".into()],
+            request_ids: vec![ReceiptReadId {
+                request_id: "none".into(),
+                issued_at: 0,
+            }],
             max_bytes: 1 << 20,
         })
     };
@@ -296,7 +299,10 @@ async fn oversized_genesis_is_a_definite_error_and_leaves_the_queue_absent() {
         ordinary
             .read_commit(ReceiptReadRequest {
                 queue: queue.clone(),
-                request_ids: vec!["none".into()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: "none".into(),
+                    issued_at: 0
+                }],
                 max_bytes: 1 << 20,
             })
             .await,

@@ -851,8 +851,15 @@ impl ProvisionRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiptReadRequest {
     pub queue: QueueAddress,
-    pub request_ids: Vec<String>,
+    pub request_ids: Vec<ReceiptReadId>,
     pub max_bytes: u64,
+}
+/// A request id and the `issued_at` it was first issued with. An id older than
+/// the queue's retention horizon is `ReceiptLookup::Expired` with no lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiptReadId {
+    pub request_id: String,
+    pub issued_at: i64,
 }
 impl ReceiptReadRequest {
     pub fn validate(&self, limits: &QueueLimits) -> QueueResult<()> {
@@ -865,7 +872,7 @@ impl ReceiptReadRequest {
             return Err(invalid("invalid receipt read limits"));
         }
         for id in &self.request_ids {
-            name(id)?;
+            name(&id.request_id)?;
         }
         byte_limit(self, limits.max_request_bytes)
     }
@@ -2064,7 +2071,13 @@ mod tests {
         assert!(definition.validate().is_err());
         let request = ReceiptReadRequest {
             queue: queue(),
-            request_ids: vec!["id".into(); 4097],
+            request_ids: vec![
+                ReceiptReadId {
+                    request_id: "id".into(),
+                    issued_at: 0
+                };
+                4097
+            ],
             max_bytes: 1024,
         };
         assert!(request.validate(&QueueLimits::default()).is_err());

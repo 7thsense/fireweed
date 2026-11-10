@@ -458,7 +458,10 @@ async fn absent_queue_holds_nothing() {
     assert_eq!(
         a.read_commit(ReceiptReadRequest {
             queue: queue.clone(),
-            request_ids: vec!["none".into()],
+            request_ids: vec![ReceiptReadId {
+                request_id: "none".into(),
+                issued_at: 0
+            }],
             max_bytes: 1 << 20,
         })
         .await,

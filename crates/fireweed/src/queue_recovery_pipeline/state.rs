@@ -16,6 +16,7 @@ impl QueueRecoveryPipeline {
         self: &Arc<Self>,
         request: StateReadRequest,
         limits: QueueLimits,
+        clock: Arc<dyn Clock>,
         job: Arc<QueueReservation>,
     ) -> QueueResult<AdmittedStateRecords> {
         request.preflight(&limits)?;
@@ -24,14 +25,8 @@ impl QueueRecoveryPipeline {
             request.headers()?,
             &job,
         )?;
-        self.submit(
-            StatePlan { request },
-            limits,
-            self.ownership.clock(),
-            job,
-            input,
-        )
-        .await
+        self.submit(StatePlan { request }, limits, clock, job, input)
+            .await
     }
 }
 impl Plan for StatePlan {

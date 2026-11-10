@@ -28,6 +28,72 @@ pub fn is_retired(retention: &QueueRetention, deleted_at: i64, now: i64) -> bool
     }
 }
 
+/// A request issued before the retention horizon has no lookup and no effect.
+/// Callers run this after `check_issued_at` and before any receipt lookup.
+pub fn check_horizon(issued_at: i64, horizon: i64) -> QueueResult<()> {
+    if issued_at < horizon {
+        return Err(QueueError::RequestExpired);
+    }
+    Ok(())
+}
+
+/// Where one queue's cleanup stands. Both are monotone: a pass never lowers
+/// either, whatever its `at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionState {
+    /// Requests, receipts and claim records issued before this are removed or
+    /// refused with no lookup. `i64::MIN` until the first pass.
+    pub horizon: i64,
+    /// Retired deleted keys deleted before this are removable. `i64::MIN` until
+    /// the first pass, and always so for `Reusable`.
+    pub deleted_before: i64,
+}
+impl RetentionState {
+    pub const INITIAL: Self = Self {
+        horizon: i64::MIN,
+        deleted_before: i64::MIN,
+    };
+}
+
+/// The state after a cleanup pass at store time `at`. `H = at - request_id_nanos`,
+/// held back to `oldest_live_claim`: the earliest `issued_at` of a claim whose
+/// lease, plus the skew, has not ended at `at`. Native replays this from the log
+/// and Postgres runs it in the cleanup transaction, so both advance alike.
+pub fn plan_retention(
+    retention: &QueueRetention,
+    current: RetentionState,
+    at: i64,
+    oldest_live_claim: Option<i64>,
+) -> RetentionState {
+    // `nanos` is never negative, so the difference can only fall below
+    // `i64::MIN`. That clamps to `i64::MIN`: nothing is expired or removed.
+    let back = |nanos: u64| i64::try_from(i128::from(at) - i128::from(nanos)).unwrap_or(i64::MIN);
+    let mut horizon = back(retention.request_id_nanos);
+    if let Some(claim) = oldest_live_claim {
+        horizon = horizon.min(claim);
+    }
+    let deleted_before = match retention.deleted_keys {
+        DeletedKeyPolicy::Reusable => i64::MIN,
+        DeletedKeyPolicy::Retired { window_nanos } => back(window_nanos),
+    };
+    RetentionState {
+        horizon: current.horizon.max(horizon),
+        deleted_before: current.deleted_before.max(deleted_before),
+    }
+}
+
+/// A claim whose leases end after this is live at `at`: the lease end plus the
+/// skew has not passed. Only a live claim holds the horizon back.
+pub fn live_claim_cutoff(at: i64) -> i64 {
+    i64::try_from(i128::from(at) - i128::from(ISSUED_AT_SKEW_NANOS)).unwrap_or(i64::MIN)
+}
+
+/// Most rows one cleanup pass removes. A pass that removes this many has more
+/// to do, and the next one continues it.
+pub const RETENTION_BUDGET_ROWS: u32 = 1000;
+/// Store time between the cleanup passes a queue is offered: one minute.
+pub const RETENTION_INTERVAL_NANOS: i64 = 60_000_000_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,6 +108,74 @@ mod tests {
         ));
         assert!(check_issued_at(i64::MAX, i64::MAX).is_ok());
         assert!(check_issued_at(i64::MIN, i64::MAX).is_ok());
+    }
+    #[test]
+    fn horizon_is_monotone_and_held_by_live_claims() {
+        let retention = QueueRetention {
+            request_id_nanos: 100,
+            deleted_keys: DeletedKeyPolicy::Retired { window_nanos: 500 },
+        };
+        let first = plan_retention(&retention, RetentionState::INITIAL, 1_000, None);
+        assert_eq!((first.horizon, first.deleted_before), (900, 500));
+        // An earlier `at` never lowers either.
+        let back = plan_retention(&retention, first, 10, None);
+        assert_eq!(back, first);
+        // A live claim holds the horizon, but never below where it already is.
+        let held = plan_retention(&retention, first, 2_000, Some(950));
+        assert_eq!(held.horizon, 950);
+        let older = plan_retention(&retention, held, 3_000, Some(10));
+        assert_eq!(older.horizon, 950);
+        let free = plan_retention(&retention, older, 3_000, None);
+        assert_eq!(free.horizon, 2_900);
+        assert!(check_horizon(2_900, free.horizon).is_ok());
+        assert_eq!(
+            check_horizon(2_899, free.horizon),
+            Err(QueueError::RequestExpired)
+        );
+        let reusable = QueueRetention {
+            request_id_nanos: 100,
+            deleted_keys: DeletedKeyPolicy::Reusable,
+        };
+        assert_eq!(
+            plan_retention(&reusable, RetentionState::INITIAL, 1_000, None).deleted_before,
+            i64::MIN
+        );
+        assert_eq!(
+            plan_retention(&reusable, RetentionState::INITIAL, i64::MIN, None).horizon,
+            i64::MIN
+        );
+    }
+    #[test]
+    fn a_keep_forever_window_never_advances_the_horizon() {
+        let forever = |deleted_keys| QueueRetention {
+            request_id_nanos: u64::MAX,
+            deleted_keys,
+        };
+        for retention in [
+            forever(DeletedKeyPolicy::Reusable),
+            forever(DeletedKeyPolicy::Retired {
+                window_nanos: u64::MAX,
+            }),
+        ] {
+            for at in [1, 1_000_000, i64::MAX] {
+                let state = plan_retention(&retention, RetentionState::INITIAL, at, None);
+                assert_eq!(state, RetentionState::INITIAL, "at {at}");
+                assert!(check_horizon(0, state.horizon).is_ok());
+                assert!(check_horizon(i64::MIN, state.horizon).is_ok());
+            }
+        }
+        let retired = forever(DeletedKeyPolicy::Retired {
+            window_nanos: u64::MAX,
+        });
+        assert!(is_retired(&retired, 0, i64::MAX));
+    }
+    #[test]
+    fn claim_liveness_includes_the_skew() {
+        let skew = i64::try_from(ISSUED_AT_SKEW_NANOS).unwrap();
+        let live = |live_until: i64, at: i64| live_until > live_claim_cutoff(at);
+        assert!(live(100, 100 + skew - 1));
+        assert!(!live(100, 100 + skew));
+        assert_eq!(live_claim_cutoff(i64::MIN), i64::MIN);
     }
     #[test]
     fn retired_window_boundary() {

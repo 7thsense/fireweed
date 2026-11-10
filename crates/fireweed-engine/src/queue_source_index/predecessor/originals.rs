@@ -32,7 +32,9 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
         let expected = match self.checked.view().payload() {
             QueueLogPayload::Publication(publication) => publication.summary().receipts,
             QueueLogPayload::Claim(_) => 1,
-            QueueLogPayload::Genesis(_) | QueueLogPayload::Entries(_) => {
+            QueueLogPayload::Genesis(_)
+            | QueueLogPayload::Entries(_)
+            | QueueLogPayload::Retention(_) => {
                 unreachable!("context rejects genesis and entry lists")
             }
         };
@@ -70,7 +72,9 @@ impl<'a, R: QueueSourceReader> QueueSourcePublicationContext<'a, R> {
                 .await?;
                 processed = 1;
             }
-            QueueLogPayload::Genesis(_) | QueueLogPayload::Entries(_) => {
+            QueueLogPayload::Genesis(_)
+            | QueueLogPayload::Entries(_)
+            | QueueLogPayload::Retention(_) => {
                 unreachable!("context rejects genesis and entry lists")
             }
         }

@@ -279,7 +279,10 @@ async fn mandatory_shared_queue_contract_and_reopen() {
     let receipt = reopened
         .read_commit(ReceiptReadRequest {
             queue,
-            request_ids: vec!["transition".into()],
+            request_ids: vec![ReceiptReadId {
+                request_id: "transition".into(),
+                issued_at: 0,
+            }],
             max_bytes: 1 << 20,
         })
         .await
@@ -320,10 +323,63 @@ async fn mandatory_competition_expiry_and_long_ordering() {
     suite::issued_at_skew_and_conflict(&a, &clock, q("issued-at")).await;
     suite::retired_keys_refuse_reinsert_within_window(&a, &clock, q("retired-keys")).await;
     suite::reusable_keys_reinsert_at_once(&a, &clock, q("reusable-keys")).await;
+    // What cleanup retains is counted on a connection of its own.
+    let (counter, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    let counter_driver = tokio::spawn(connection);
+    let counter = Arc::new(counter);
+    let retained = |queue: QueueAddress| {
+        let counter = Arc::clone(&counter);
+        move || -> std::pin::Pin<Box<dyn std::future::Future<Output = i64> + Send>> {
+            let counter = Arc::clone(&counter);
+            let queue = queue.clone();
+            Box::pin(async move {
+                counter
+                    .query_one(
+                        "SELECT (SELECT count(*) FROM fireweed_api007.requests r JOIN fireweed_api007.queues q ON q.id=r.queue_id WHERE q.name=$1)+(SELECT count(*) FROM fireweed_api007.records r JOIN fireweed_api007.queues q ON q.id=r.queue_id WHERE q.name=$1 AND r.collection=0)",
+                        &[&queue.queue.as_bytes()],
+                    )
+                    .await
+                    .unwrap()
+                    .get(0)
+            })
+        }
+    };
+    let budget_queue = q("budget");
+    suite::one_pass_removes_at_most_its_budget(
+        &a,
+        &clock,
+        budget_queue.clone(),
+        &retained(budget_queue),
+        1000,
+    )
+    .await;
+    let churn_queue = q("churn");
+    suite::retained_rows_stay_flat_under_churn(
+        &a,
+        &clock,
+        churn_queue.clone(),
+        &retained(churn_queue),
+        150,
+    )
+    .await;
+    drop(counter);
+    counter_driver.abort();
+    suite::request_horizon_expires_old_requests(&a, &clock, q("request-horizon")).await;
+    suite::horizon_never_passes_a_live_claim(&a, &clock, q("live-claim-horizon")).await;
+    suite::removed_deleted_keys_keep_versions_rising(&a, &clock, q("removed-keys")).await;
     suite::retired_keys_cover_every_deletion_route(&a, &clock, q("retired-routes"), true).await;
     suite::ordered_insert_uniqueness(&a, q("insert-uniqueness")).await;
     suite::shrinking_upsert_index_amplification(&a, q("shrinking-index-upsert")).await;
     suite::unrestricted_names_obey_response_bounds(&a, q("names-bounds")).await;
+    let horizon = suite::prepare_request_horizon(&a, &clock, q("horizon-reopen")).await;
     a.shutdown().await.unwrap();
+    // The horizon is stored with the queue, not held by the store that set it.
+    let reopened = PostgresQueueStore::connect(&url, clock.clone(), QueueLimits::default(), 2)
+        .await
+        .unwrap();
+    suite::verify_request_horizon(&reopened, &clock, horizon).await;
+    reopened.shutdown().await.unwrap();
     b.shutdown().await.unwrap();
 }

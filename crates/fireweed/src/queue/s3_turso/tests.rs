@@ -285,7 +285,10 @@ async fn round_trip(queue: &Queue, queue_address: QueueAddress) {
     let found = queue
         .read_commit(ReceiptReadRequest {
             queue: queue_address,
-            request_ids: vec!["finish".into()],
+            request_ids: vec![ReceiptReadId {
+                request_id: "finish".into(),
+                issued_at: 0,
+            }],
             max_bytes: 1 << 20,
         })
         .await
@@ -392,6 +395,9 @@ async fn contract(queue: &Queue, clock: &TestClock, id: u128) -> Prepared {
     suite::issued_at_skew_and_conflict(queue, clock, a("issued-at")).await;
     suite::retired_keys_refuse_reinsert_within_window(queue, clock, a("retired-keys")).await;
     suite::reusable_keys_reinsert_at_once(queue, clock, a("reusable-keys")).await;
+    suite::request_horizon_expires_old_requests(queue, clock, a("request-horizon")).await;
+    suite::horizon_never_passes_a_live_claim(queue, clock, a("live-claim-horizon")).await;
+    suite::removed_deleted_keys_keep_versions_rising(queue, clock, a("removed-keys")).await;
     suite::retired_keys_cover_every_deletion_route(
         queue,
         clock,
@@ -425,7 +431,7 @@ async fn contract(queue: &Queue, clock: &TestClock, id: u128) -> Prepared {
         let found = queue
             .read_commit(ReceiptReadRequest {
                 queue: a(name),
-                request_ids: ids.clone(),
+                request_ids: fireweed_conformance::queue_contract::read_ids(ids.clone()),
                 max_bytes: 1 << 20,
             })
             .await
@@ -667,7 +673,7 @@ async fn s3_turso_two_handles_share_a_queue_and_run_the_api007_contract() {
         let found = reopened
             .read_commit(ReceiptReadRequest {
                 queue: queue_address,
-                request_ids: ids,
+                request_ids: fireweed_conformance::queue_contract::read_ids(ids),
                 max_bytes: 1 << 20,
             })
             .await

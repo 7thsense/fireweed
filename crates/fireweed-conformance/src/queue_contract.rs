@@ -5,6 +5,16 @@ use fireweed_core::queue_contract::*;
 use fireweed_engine::queue_contract::QueueStore;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Receipt lookups for ids issued at time zero, which is what the shared
+/// request builders stamp.
+pub fn read_ids<S: Into<String>>(ids: impl IntoIterator<Item = S>) -> Vec<ReceiptReadId> {
+    ids.into_iter()
+        .map(|request_id| ReceiptReadId {
+            request_id: request_id.into(),
+            issued_at: 0,
+        })
+        .collect()
+}
 pub fn schema() -> QueueSchema {
     let work = CollectionDefinition {
         additional_field_prefixes: BTreeSet::new(),
@@ -199,7 +209,10 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) -> CommitBatch {
         store
             .read_commit(ReceiptReadRequest {
                 queue: queue.clone(),
-                request_ids: vec![checks.request_id.clone()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: checks.request_id.clone(),
+                    issued_at: checks.issued_at
+                }],
                 max_bytes: 1 << 20,
             })
             .await
@@ -356,7 +369,20 @@ pub async fn run(store: &dyn QueueStore, queue: QueueAddress) -> CommitBatch {
     let lookup = store
         .read_commit(ReceiptReadRequest {
             queue: queue.clone(),
-            request_ids: vec!["transition".into(), "absent".into(), "transition".into()],
+            request_ids: vec![
+                ReceiptReadId {
+                    request_id: "transition".into(),
+                    issued_at: 0,
+                },
+                ReceiptReadId {
+                    request_id: "absent".into(),
+                    issued_at: 0,
+                },
+                ReceiptReadId {
+                    request_id: "transition".into(),
+                    issued_at: 0,
+                },
+            ],
             max_bytes: 1 << 20,
         })
         .await
@@ -564,6 +590,9 @@ pub struct TestClock(std::sync::atomic::AtomicI64);
 impl TestClock {
     pub fn set(&self, nanos: i64) {
         self.0.store(nanos, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn get(&self) -> i64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 impl fireweed_engine::Clock for TestClock {
@@ -1561,7 +1590,10 @@ pub async fn verify_process_loss(
     let receipts = store
         .read_commit(ReceiptReadRequest {
             queue: queue.clone(),
-            request_ids: vec!["crash-transition".into()],
+            request_ids: vec![ReceiptReadId {
+                request_id: "crash-transition".into(),
+                issued_at: 0,
+            }],
             max_bytes: 1 << 20,
         })
         .await
@@ -1639,7 +1671,10 @@ pub async fn verify_process_loss(
         store
             .read_commit(ReceiptReadRequest {
                 queue,
-                request_ids: vec!["crash-transition".into()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: "crash-transition".into(),
+                    issued_at: 0
+                }],
                 max_bytes: 1 << 20
             })
             .await
@@ -2427,7 +2462,10 @@ pub async fn atomic_administration_preview_and_replay(store: &dyn QueueStore, qu
         store
             .read_commit(ReceiptReadRequest {
                 queue: queue.clone(),
-                request_ids: vec![transition.request_id.clone()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: transition.request_id.clone(),
+                    issued_at: transition.issued_at
+                }],
                 max_bytes: 1 << 20
             })
             .await
@@ -2512,7 +2550,10 @@ pub async fn atomic_administration_preview_and_replay(store: &dyn QueueStore, qu
         store
             .read_commit(ReceiptReadRequest {
                 queue,
-                request_ids: vec!["admin-transition".into()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: "admin-transition".into(),
+                    issued_at: 0
+                }],
                 max_bytes: 1 << 20
             })
             .await
@@ -2676,7 +2717,10 @@ pub async fn administrative_size_siblings_and_preflight(
         store
             .read_commit(ReceiptReadRequest {
                 queue: queue.clone(),
-                request_ids: vec!["wide-accepted".into()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: "wide-accepted".into(),
+                    issued_at: 0
+                }],
                 max_bytes: 1 << 20
             })
             .await
@@ -2698,7 +2742,10 @@ pub async fn administrative_size_siblings_and_preflight(
         store
             .read_commit(ReceiptReadRequest {
                 queue: queue.clone(),
-                request_ids: vec![valid.request_id.clone()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: valid.request_id.clone(),
+                    issued_at: valid.issued_at
+                }],
                 max_bytes: 1 << 20
             })
             .await
@@ -3501,4 +3548,686 @@ pub async fn retired_keys_cover_every_deletion_route(
     let deletion =
         prepare_retired_deletion_through(store, clock, queue, broad_administration).await;
     verify_retired_deletion(store, clock, deletion).await;
+}
+
+/// Advances the store's cleanup schedule: any operation counts, and a read of no
+/// ids stores nothing. A pass that this operation starts runs after it, and the
+/// next operation on the queue follows it.
+async fn tick(store: &dyn QueueStore, queue: &QueueAddress) {
+    store
+        .read_commit(ReceiptReadRequest {
+            queue: queue.clone(),
+            request_ids: vec![],
+            max_bytes: 1 << 20,
+        })
+        .await
+        .unwrap();
+}
+fn read_id_at(id: &str, issued_at: i64) -> ReceiptReadId {
+    ReceiptReadId {
+        request_id: id.into(),
+        issued_at,
+    }
+}
+
+/// Cleanup advances a horizon `request_id_nanos` behind the store clock, offered
+/// once a minute of store time, and a request issued before it is
+/// `RequestExpired` with no lookup and no effect. An id at the horizon still
+/// replays its recorded outcome. `read_commit`
+/// answers `Expired` for an id older than the horizon, `Absent` for a newer one
+/// nobody sent, and `Invalid` for one beyond the skew.
+pub async fn request_horizon_expires_old_requests(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+) {
+    let window = 30 * MINUTE;
+    let t0 = 100 * HOUR;
+    clock.set(t0);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention(window, DeletedKeyPolicy::Reusable)),
+        })
+        .await
+        .unwrap();
+    tick(store, &queue).await;
+    let insert = insert_request(&queue, "horizon-insert", InsertMode::InsertOnly, "h1", t0);
+    let inserted = store.insert(insert.clone()).await.unwrap();
+    let mut grouped = group("horizon-group");
+    grouped.issued_at = t0;
+    grouped.work_inserts.push(item("h2", "retention", 0, 0));
+    let committed = commit_one(store, &queue, grouped.clone()).await.unwrap();
+    assert!(matches!(committed.outcome, GroupOutcome::Committed { .. }));
+    let first_claim = ClaimRequest {
+        issued_at: t0,
+        ..claim(&queue, "horizon-claim", "retention")
+    };
+    assert_eq!(store.claim(first_claim.clone()).await.unwrap().len(), 2);
+
+    // The horizon reaches `t0` exactly: an id issued then is not older than it.
+    clock.set(t0 + window);
+    tick(store, &queue).await;
+    assert_eq!(store.insert(insert.clone()).await.unwrap(), inserted);
+    assert_eq!(
+        commit_one(store, &queue, grouped.clone()).await.unwrap(),
+        committed
+    );
+    assert_eq!(
+        store
+            .read_commit(ReceiptReadRequest {
+                queue: queue.clone(),
+                request_ids: vec![read_id_at("horizon-group", t0)],
+                max_bytes: 1 << 20,
+            })
+            .await
+            .unwrap(),
+        vec![ReceiptLookup::Found(committed.clone())]
+    );
+
+    // A schedule interval later (one minute) it has passed them all.
+    let horizon = t0 + MINUTE;
+    let now = t0 + window + MINUTE;
+    clock.set(now);
+    tick(store, &queue).await;
+    assert_eq!(
+        store.insert(insert.clone()).await,
+        Err(QueueError::RequestExpired)
+    );
+    assert_eq!(
+        commit_one(store, &queue, grouped.clone())
+            .await
+            .unwrap()
+            .outcome,
+        GroupOutcome::RequestExpired
+    );
+    assert_eq!(
+        store.claim(first_claim.clone()).await,
+        Err(QueueError::RequestExpired)
+    );
+    // Preview applies the same horizon as commit.
+    assert_eq!(
+        store
+            .preview(PreviewRequest {
+                queue: queue.clone(),
+                group: grouped.clone(),
+            })
+            .await,
+        Err(QueueError::RequestExpired)
+    );
+    assert_eq!(
+        store
+            .read_commit(ReceiptReadRequest {
+                queue: queue.clone(),
+                request_ids: vec![
+                    read_id_at("horizon-group", t0),
+                    read_id_at("never-sent", t0),
+                    read_id_at("never-sent", now),
+                ],
+                max_bytes: 1 << 20,
+            })
+            .await
+            .unwrap(),
+        vec![
+            ReceiptLookup::Expired,
+            ReceiptLookup::Expired,
+            ReceiptLookup::Absent
+        ]
+    );
+    assert!(matches!(
+        store
+            .read_commit(ReceiptReadRequest {
+                queue: queue.clone(),
+                request_ids: vec![read_id_at("too-early", now + SKEW + 1)],
+                max_bytes: 1 << 20,
+            })
+            .await,
+        Err(QueueError::Invalid(_))
+    ));
+
+    // Refused with no lookup and no effect: the key was never created.
+    assert_eq!(
+        store
+            .insert(insert_request(
+                &queue,
+                "ghost-old",
+                InsertMode::InsertOnly,
+                "ghost",
+                t0
+            ))
+            .await,
+        Err(QueueError::RequestExpired)
+    );
+    assert_eq!(
+        inserted_version(
+            &store
+                .insert(insert_request(
+                    &queue,
+                    "ghost-new",
+                    InsertMode::InsertOnly,
+                    "ghost",
+                    now
+                ))
+                .await
+                .unwrap()
+        ),
+        1
+    );
+    // An id at the horizon is new, and replays once recorded.
+    let at_horizon = insert_request(
+        &queue,
+        "at-horizon",
+        InsertMode::InsertOnly,
+        "at-horizon-key",
+        horizon,
+    );
+    let recorded = store.insert(at_horizon.clone()).await.unwrap();
+    assert_eq!(store.insert(at_horizon).await.unwrap(), recorded);
+    // The expired claim yielded nothing; a claim that is not expired gets the work.
+    let fresh = store
+        .claim(ClaimRequest {
+            issued_at: now,
+            ..claim(&queue, "horizon-claim-fresh", "retention")
+        })
+        .await
+        .unwrap();
+    assert_eq!(fresh.len(), 4);
+}
+
+/// The horizon never passes a claim whose lease is live: its id still replays
+/// the same work, and once the lease and the skew are over it expires.
+/// Claims, then renews past the first lease end. Returns the claim and the
+/// replay it must keep producing, for [`verify_renewed_claim_after_rebuild`].
+pub async fn prepare_renewed_claim(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+) -> (ClaimRequest, Vec<ClaimedWork>) {
+    let before = clock.get();
+    let t = 300 * HOUR;
+    clock.set(t);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention(30 * MINUTE, DeletedKeyPolicy::Reusable)),
+        })
+        .await
+        .unwrap();
+    tick(store, &queue).await;
+    store
+        .insert(insert_request(
+            &queue,
+            "renewed-seed",
+            InsertMode::InsertOnly,
+            "r1",
+            t,
+        ))
+        .await
+        .unwrap();
+    let request = ClaimRequest {
+        issued_at: t,
+        lease_nanos: u64::try_from(HOUR).unwrap(),
+        ..claim(&queue, "renewed-rebuild-claim", "retention")
+    };
+    let granted = store.claim(request.clone()).await.unwrap();
+    assert_eq!(granted.len(), 1);
+    clock.set(t + 30 * MINUTE);
+    let mut renewal = group("renew-rebuild-claim");
+    renewal.issued_at = t + 30 * MINUTE;
+    renewal.claimed_updates = granted
+        .iter()
+        .map(|work| {
+            let mut change = update(work);
+            change.disposition = Disposition::Retain {
+                renew_nanos: Some(u64::try_from(HOUR).unwrap()),
+            };
+            change
+        })
+        .collect();
+    committed(&commit_one(store, &queue, renewal).await.unwrap());
+    let renewed = store.claim(request.clone()).await.unwrap();
+    assert!(renewed[0].record.lease_expires_at > granted[0].record.lease_expires_at);
+    // Later steps of the caller's run keep the clock they had.
+    clock.set(before);
+    (request, renewed)
+}
+/// After a restart or a cold rebuild from the log: the renewed lease replays
+/// unchanged and still holds the horizon at the claim's `issued_at`.
+pub async fn verify_renewed_claim_after_rebuild(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+    request: ClaimRequest,
+    expected: Vec<ClaimedWork>,
+) {
+    clock.set(request.issued_at + 30 * MINUTE);
+    assert_eq!(store.claim(request.clone()).await.unwrap(), expected);
+    // Past the first lease, its skew and the request window; only the renewal is live.
+    clock.set(request.issued_at + HOUR + SKEW + MINUTE);
+    tick(store, &queue).await;
+    assert_eq!(store.claim(request.clone()).await.unwrap(), expected);
+    assert!(
+        store
+            .insert(insert_request(
+                &queue,
+                "after-rebuild",
+                InsertMode::InsertOnly,
+                "r2",
+                request.issued_at
+            ))
+            .await
+            .is_ok()
+    );
+    clock.set(request.issued_at + 30 * MINUTE + HOUR + SKEW + 1);
+    tick(store, &queue).await;
+    assert_eq!(store.claim(request).await, Err(QueueError::RequestExpired));
+}
+pub async fn horizon_never_passes_a_live_claim(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+) {
+    let window = 30 * MINUTE;
+    let t0 = 100 * HOUR;
+    clock.set(t0);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention(window, DeletedKeyPolicy::Reusable)),
+        })
+        .await
+        .unwrap();
+    tick(store, &queue).await;
+    let seed = insert_request(&queue, "live-seed", InsertMode::InsertOnly, "l1", t0);
+    let seeded = store.insert(seed.clone()).await.unwrap();
+    let live = ClaimRequest {
+        issued_at: t0,
+        lease_nanos: u64::try_from(HOUR).unwrap(),
+        ..claim(&queue, "live-claim", "retention")
+    };
+    let claimed = store.claim(live.clone()).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    // The request horizon would be `t0 + 20 minutes`; the live claim holds it at `t0`.
+    clock.set(t0 + 50 * MINUTE);
+    tick(store, &queue).await;
+    assert_eq!(store.claim(live.clone()).await.unwrap(), claimed);
+    assert_eq!(store.insert(seed.clone()).await.unwrap(), seeded);
+    assert_eq!(
+        store
+            .insert(insert_request(
+                &queue,
+                "before-claim",
+                InsertMode::InsertOnly,
+                "l0",
+                t0 - 1
+            ))
+            .await,
+        Err(QueueError::RequestExpired)
+    );
+    let between = insert_request(
+        &queue,
+        "between",
+        InsertMode::InsertOnly,
+        "l2",
+        t0 + 10 * MINUTE,
+    );
+    let between_outcome = store.insert(between.clone()).await.unwrap();
+    assert_eq!(inserted_version(&between_outcome), 1);
+
+    // Past the lease and the skew the claim is no longer live, and the horizon moves on.
+    clock.set(t0 + 2 * HOUR);
+    tick(store, &queue).await;
+    assert_eq!(
+        store.claim(live.clone()).await,
+        Err(QueueError::RequestExpired)
+    );
+    assert_eq!(store.insert(between).await, Err(QueueError::RequestExpired));
+    // The expired claim gave no work and the key is still claimable by a new one.
+    let again = store
+        .claim(ClaimRequest {
+            issued_at: t0 + 2 * HOUR,
+            ..claim(&queue, "live-claim-again", "retention")
+        })
+        .await
+        .unwrap();
+    assert_eq!(again.len(), 2);
+
+    // A renewal moves the lease on the work row only. The renewed claim must
+    // keep holding the horizon after its own first lease and the request window
+    // are both behind the clock.
+    let t1 = 200 * HOUR;
+    clock.set(t1);
+    tick(store, &queue).await;
+    let renewed_claim = ClaimRequest {
+        issued_at: t1,
+        lease_nanos: u64::try_from(HOUR).unwrap(),
+        ..claim(&queue, "renewed-claim", "retention")
+    };
+    let granted = store.claim(renewed_claim.clone()).await.unwrap();
+    assert!(!granted.is_empty());
+    clock.set(t1 + 30 * MINUTE);
+    let mut renewal = group("renew-held-claim");
+    renewal.issued_at = t1 + 30 * MINUTE;
+    renewal.claimed_updates = granted
+        .iter()
+        .map(|work| {
+            let mut change = update(work);
+            change.disposition = Disposition::Retain {
+                renew_nanos: Some(u64::try_from(HOUR).unwrap()),
+            };
+            change
+        })
+        .collect();
+    committed(&commit_one(store, &queue, renewal).await.unwrap());
+    let renewed = store.claim(renewed_claim.clone()).await.unwrap();
+    assert_eq!(renewed.len(), granted.len());
+    // Past the first lease and its skew, and past `issued_at + window + skew`;
+    // only the renewed lease is still live.
+    clock.set(t1 + HOUR + SKEW + MINUTE);
+    tick(store, &queue).await;
+    assert_eq!(store.claim(renewed_claim.clone()).await.unwrap(), renewed);
+    assert!(
+        store
+            .insert(insert_request(
+                &queue,
+                "at-renewed-claim",
+                InsertMode::InsertOnly,
+                "l3",
+                t1
+            ))
+            .await
+            .is_ok()
+    );
+    // Once the renewed lease and the skew are behind the clock the claim goes.
+    clock.set(t1 + 30 * MINUTE + HOUR + SKEW + 1);
+    tick(store, &queue).await;
+    assert_eq!(
+        store.claim(renewed_claim).await,
+        Err(QueueError::RequestExpired)
+    );
+}
+
+/// After cleanup removes a retired deleted row, the key may be inserted again
+/// and its version still rises above every version it had.
+pub async fn removed_deleted_keys_keep_versions_rising(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+) {
+    let window = 2 * HOUR;
+    let start = 10 * HOUR;
+    clock.set(start);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention(
+                HOUR,
+                DeletedKeyPolicy::Retired {
+                    window_nanos: u64::try_from(window).unwrap(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+    tick(store, &queue).await;
+    let mut last = 0;
+    for round in 0..3 {
+        let base = start + round * 5 * HOUR;
+        clock.set(base);
+        tick(store, &queue).await;
+        let inserted = inserted_version(
+            &store
+                .insert(insert_request(
+                    &queue,
+                    &format!("seed-{round}"),
+                    InsertMode::InsertOnly,
+                    "a",
+                    base,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(inserted > last, "round {round}: {inserted} after {last}");
+        let deleted = claim_and_delete(store, &queue, "a", &format!("delete-{round}"), base).await;
+        assert!(deleted > inserted);
+        // Inside the window the key is refused, whatever cleanup has done.
+        clock.set(base + window - 2 * MINUTE);
+        tick(store, &queue).await;
+        let early = insert_request(
+            &queue,
+            &format!("early-{round}"),
+            InsertMode::InsertOnly,
+            "a",
+            base + window - 2 * MINUTE,
+        );
+        assert!(already_exists(&store.insert(early).await.unwrap()));
+        // After it cleanup removes the row, and the key comes back above its versions.
+        clock.set(base + window + 1);
+        tick(store, &queue).await;
+        last = deleted;
+    }
+    clock.set(start + 3 * 5 * HOUR);
+    tick(store, &queue).await;
+    let again = inserted_version(
+        &store
+            .insert(insert_request(
+                &queue,
+                "after-last",
+                InsertMode::InsertOnly,
+                "a",
+                start + 3 * 5 * HOUR,
+            ))
+            .await
+            .unwrap(),
+    );
+    assert!(again > last);
+}
+
+/// What `prepare_request_horizon` leaves for a store rebuilt from the same log.
+pub struct RequestHorizon {
+    queue: QueueAddress,
+    old_insert: InsertRequest,
+    old_group: CommitGroup,
+    at_horizon: InsertRequest,
+    recorded: Vec<InsertOutcome>,
+    now: i64,
+}
+/// Records requests before and at a horizon, then lets cleanup advance it past
+/// the first and not the second. The clock is left at the time of the last pass.
+pub async fn prepare_request_horizon(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+) -> RequestHorizon {
+    let window = 30 * MINUTE;
+    let t0 = 100 * HOUR;
+    clock.set(t0);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention(window, DeletedKeyPolicy::Reusable)),
+        })
+        .await
+        .unwrap();
+    let old_insert = insert_request(&queue, "old-insert", InsertMode::InsertOnly, "o1", t0);
+    store.insert(old_insert.clone()).await.unwrap();
+    let mut old_group = group("old-group");
+    old_group.issued_at = t0;
+    old_group.work_inserts.push(item("o2", "retention", 0, 0));
+    committed(&commit_one(store, &queue, old_group.clone()).await.unwrap());
+    let horizon = t0 + MINUTE;
+    let at_horizon = insert_request(&queue, "at-horizon", InsertMode::InsertOnly, "o3", horizon);
+    // Recorded before the horizon reaches it, so the clock has to be there.
+    clock.set(horizon);
+    let recorded = store.insert(at_horizon.clone()).await.unwrap();
+    let now = t0 + window + MINUTE;
+    clock.set(now);
+    // The pass this starts moves the horizon to the at-horizon request, no further.
+    tick(store, &queue).await;
+    RequestHorizon {
+        queue,
+        old_insert,
+        old_group,
+        at_horizon,
+        recorded,
+        now,
+    }
+}
+/// A store rebuilt from the log answers exactly as the one that ran cleanup: the
+/// horizon, and what it expires, come from the log and not from a clock.
+pub async fn verify_request_horizon(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    prepared: RequestHorizon,
+) {
+    // Time stands where it did, so no pass of the rebuilt store changes anything.
+    clock.set(prepared.now);
+    let queue = &prepared.queue;
+    assert_eq!(
+        store.insert(prepared.old_insert.clone()).await,
+        Err(QueueError::RequestExpired)
+    );
+    assert_eq!(
+        commit_one(store, queue, prepared.old_group.clone())
+            .await
+            .unwrap()
+            .outcome,
+        GroupOutcome::RequestExpired
+    );
+    assert_eq!(
+        store.insert(prepared.at_horizon.clone()).await.unwrap(),
+        prepared.recorded
+    );
+    assert_eq!(
+        store
+            .read_commit(ReceiptReadRequest {
+                queue: queue.clone(),
+                request_ids: vec![
+                    read_id_at("old-group", prepared.old_group.issued_at),
+                    read_id_at("fresh", prepared.now),
+                ],
+                max_bytes: 1 << 20,
+            })
+            .await
+            .unwrap(),
+        vec![ReceiptLookup::Expired, ReceiptLookup::Absent]
+    );
+}
+
+/// Counts what a backend retains: request, receipt and claim rows plus work rows.
+pub type RetainedRows<'a> =
+    &'a (dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = i64> + Send>> + Sync);
+
+/// One cleanup pass removes at most its budget, and the rest follow in later
+/// passes. A backend that can count what it retains drives this.
+pub async fn one_pass_removes_at_most_its_budget(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+    retained: RetainedRows<'_>,
+    budget: i64,
+) {
+    let window = 30 * MINUTE;
+    let t0 = 100 * HOUR;
+    clock.set(t0);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention(window, DeletedKeyPolicy::Reusable)),
+        })
+        .await
+        .unwrap();
+    tick(store, &queue).await;
+    let total = budget + budget / 10;
+    let mut next = 0;
+    while next < total {
+        let groups = (total - next).min(64);
+        let batch = (0..groups)
+            .map(|n| {
+                let mut grouped = group(&format!("budget-{}", next + n));
+                grouped.issued_at = t0;
+                grouped.work_inserts.push(item(
+                    &format!("budget-key-{}", next + n),
+                    "retention",
+                    0,
+                    0,
+                ));
+                grouped
+            })
+            .collect();
+        for receipt in store
+            .commit(CommitBatch {
+                queue: queue.clone(),
+                groups: batch,
+            })
+            .await
+            .unwrap()
+        {
+            committed(&receipt);
+        }
+        next += groups;
+    }
+    assert_eq!(retained().await, 2 * total);
+    // The horizon passes every request; one pass removes only its budget.
+    clock.set(t0 + window + MINUTE);
+    tick(store, &queue).await;
+    tick(store, &queue).await;
+    assert_eq!(retained().await, 2 * total - budget);
+    clock.set(t0 + window + 2 * MINUTE);
+    tick(store, &queue).await;
+    tick(store, &queue).await;
+    // Only the work rows are left, which cleanup never removes.
+    assert_eq!(retained().await, total);
+}
+
+/// Requests and retired deleted keys churn through a queue for far longer than
+/// the windows last, and the rows it retains stay where the windows hold them.
+pub async fn retained_rows_stay_flat_under_churn(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+    retained: RetainedRows<'_>,
+    rounds: i64,
+) {
+    let step = 6 * MINUTE;
+    let start = 100 * HOUR;
+    clock.set(start);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention(
+                30 * MINUTE,
+                DeletedKeyPolicy::Retired {
+                    window_nanos: u64::try_from(HOUR).unwrap(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+    let mut peak = 0;
+    for round in 0..rounds {
+        let at = start + round * step;
+        clock.set(at);
+        let key = format!("churn-{round}");
+        store
+            .insert(insert_request(
+                &queue,
+                &format!("churn-insert-{round}"),
+                InsertMode::InsertOnly,
+                &key,
+                at,
+            ))
+            .await
+            .unwrap();
+        claim_and_delete(store, &queue, &key, &format!("churn-delete-{round}"), at).await;
+        // The pass this tick starts finishes before the count.
+        tick(store, &queue).await;
+        tick(store, &queue).await;
+        peak = peak.max(retained().await);
+    }
+    // Per round: an insert, a claim and a delete request, and one deleted row. The
+    // request window holds five rounds and the deleted key window ten.
+    assert!(peak < 80, "peak {peak} after {rounds} rounds");
+    assert!(retained().await < 80);
 }

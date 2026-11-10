@@ -47,19 +47,21 @@ pub(crate) const DDL: &str = r#"
 CREATE SCHEMA IF NOT EXISTS fireweed_api007;
 CREATE TABLE IF NOT EXISTS fireweed_api007.queues (
  id BIGSERIAL PRIMARY KEY, address_hash BYTEA NOT NULL, tenant BYTEA NOT NULL, name BYTEA NOT NULL,
- definition BYTEA NOT NULL, next_sequence NUMERIC(20,0) NOT NULL DEFAULT 0, cursor_secret BYTEA NOT NULL);
+ definition BYTEA NOT NULL, next_sequence NUMERIC(20,0) NOT NULL DEFAULT 0, cursor_secret BYTEA NOT NULL,
+ horizon BIGINT NOT NULL, deleted_before BIGINT NOT NULL, version_floor NUMERIC(20,0) NOT NULL);
 CREATE INDEX IF NOT EXISTS queue_address_probe ON fireweed_api007.queues(address_hash);
 CREATE TABLE IF NOT EXISTS fireweed_api007.records (
  id BIGSERIAL PRIMARY KEY, queue_id BIGINT NOT NULL REFERENCES fireweed_api007.queues(id), collection INT NOT NULL,
  key_hash BYTEA NOT NULL, key BYTEA NOT NULL, version NUMERIC(20,0) NOT NULL, active BOOLEAN NOT NULL,
  lifecycle SMALLINT NOT NULL DEFAULT 0, priority BIGINT NOT NULL DEFAULT 0, available_at BIGINT NOT NULL DEFAULT 0,
  eligible_since BIGINT NOT NULL DEFAULT 0, attempts BIGINT NOT NULL DEFAULT 0, lease_until BIGINT, lease_hash BYTEA,
- insertion_sequence NUMERIC(20,0) NOT NULL DEFAULT 0, deleted_at BIGINT);
+ insertion_sequence NUMERIC(20,0) NOT NULL DEFAULT 0, deleted_at BIGINT, lease_claim_issued_at BIGINT);
 CREATE INDEX IF NOT EXISTS record_key_probe ON fireweed_api007.records(queue_id,collection,key_hash);
 CREATE INDEX IF NOT EXISTS claim_priority ON fireweed_api007.records(queue_id,priority,insertion_sequence) WHERE active AND collection=0;
 CREATE INDEX IF NOT EXISTS claim_due ON fireweed_api007.records(queue_id,available_at,insertion_sequence) WHERE active AND collection=0;
 CREATE INDEX IF NOT EXISTS claim_age ON fireweed_api007.records(queue_id,eligible_since,insertion_sequence) WHERE active AND collection=0;
 CREATE INDEX IF NOT EXISTS lease_expiry ON fireweed_api007.records(queue_id,lease_until) WHERE active AND lifecycle=1;
+CREATE INDEX IF NOT EXISTS deleted_work ON fireweed_api007.records(queue_id,deleted_at,id) WHERE NOT active AND collection=0;
 CREATE TABLE IF NOT EXISTS fireweed_api007.bodies(record_id BIGINT PRIMARY KEY REFERENCES fireweed_api007.records(id), value BYTEA NOT NULL);
 CREATE TABLE IF NOT EXISTS fireweed_api007.fields (
  record_id BIGINT NOT NULL REFERENCES fireweed_api007.records(id), queue_id BIGINT NOT NULL, collection INT NOT NULL,
@@ -83,8 +85,9 @@ CREATE INDEX IF NOT EXISTS index_order_probe ON fireweed_api007.indexes(queue_id
 CREATE TABLE IF NOT EXISTS fireweed_api007.requests (
  id BIGSERIAL PRIMARY KEY, queue_id BIGINT NOT NULL REFERENCES fireweed_api007.queues(id), domain SMALLINT NOT NULL,
  identity_hash BYTEA NOT NULL, identity BYTEA NOT NULL, fingerprint BYTEA NOT NULL, expired BOOLEAN NOT NULL DEFAULT false,
- outcome BYTEA NOT NULL);
+ outcome BYTEA NOT NULL, issued_at BIGINT NOT NULL, live_until BIGINT);
 CREATE INDEX IF NOT EXISTS request_identity_probe ON fireweed_api007.requests(queue_id,domain,identity_hash);
+CREATE INDEX IF NOT EXISTS request_issued_probe ON fireweed_api007.requests(queue_id,issued_at,id);
 "#;
 const RECORD_COLUMNS: &str = "r.id,r.collection,r.key,r.version::text,r.active,r.lifecycle,r.priority,r.available_at,r.eligible_since,r.attempts,r.lease_until,CASE WHEN r.lease_hash IS NULL OR octet_length(r.lease_hash)=32 THEN r.lease_hash ELSE ''::bytea END,r.insertion_sequence::text,r.deleted_at";
 /// A request issued beyond the skew ahead of the store clock has no effect and
@@ -133,6 +136,15 @@ struct Inner {
     scratch_workers: fireweed_queue_spool::ScratchWorkers,
     scratch_quota: Arc<fireweed_queue_spool::ScratchDiskQuota>,
     scratch_root: Arc<fireweed_queue_spool::ScratchRoot>,
+    /// Cleanup schedule of each queue this store has served.
+    passes: std::sync::Mutex<BTreeMap<QueueAddress, Arc<PassState>>>,
+}
+/// When a queue's next cleanup pass is offered, and the gate a running pass
+/// holds. An operation on the queue waits at the gate, so it never races the
+/// pass that its own store started.
+struct PassState {
+    due_at: std::sync::atomic::AtomicI64,
+    gate: Arc<Mutex<()>>,
 }
 /// Uses real SQL transactions and indexed selection, not the old blocking
 /// PostgreSQL adapter or an in-memory projection. The concrete consumer facade
@@ -274,8 +286,165 @@ impl PostgresQueueStore {
                 scratch_workers,
                 scratch_quota,
                 scratch_root,
+                passes: std::sync::Mutex::new(BTreeMap::new()),
             }),
         })
+    }
+    fn pass_state(&self, queue: &QueueAddress) -> Arc<PassState> {
+        let mut passes = match self.inner.passes.lock() {
+            Ok(passes) => passes,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        Arc::clone(passes.entry(queue.clone()).or_insert_with(|| {
+            Arc::new(PassState {
+                due_at: std::sync::atomic::AtomicI64::new(i64::MIN),
+                gate: Arc::new(Mutex::new(())),
+            })
+        }))
+    }
+    /// Wait for a cleanup pass of `queue` that this store is running.
+    async fn await_pass(&self, queue: &QueueAddress) {
+        let state = self.pass_state(queue);
+        drop(state.gate.lock().await);
+    }
+    /// After a successful operation, start a cleanup pass in the background when
+    /// the queue's schedule says one is due. The first operation of a store fixes
+    /// the schedule and starts nothing. A pass that fails changes nothing: the
+    /// operation that started it has already succeeded, and the next one is
+    /// offered after the interval.
+    fn offer_pass(&self, queue: &QueueAddress) {
+        use fireweed_engine::queue_retention::{RETENTION_BUDGET_ROWS, RETENTION_INTERVAL_NANOS};
+        let Ok(now) = timestamp_nanos(self.inner.clock.now()) else {
+            return;
+        };
+        let state = self.pass_state(queue);
+        let due = state.due_at.load(Ordering::SeqCst);
+        if due == i64::MIN {
+            state.due_at.store(
+                now.saturating_add(RETENTION_INTERVAL_NANOS),
+                Ordering::SeqCst,
+            );
+            return;
+        }
+        if now < due {
+            return;
+        }
+        let Ok(guard) = Arc::clone(&state.gate).try_lock_owned() else {
+            return;
+        };
+        state.due_at.store(
+            now.saturating_add(RETENTION_INTERVAL_NANOS),
+            Ordering::SeqCst,
+        );
+        let store = self.clone();
+        let queue = queue.clone();
+        tokio::spawn(async move {
+            let _gate = guard;
+            // A full budget means more is waiting: offer the next pass as soon as
+            // the clock moves, not a schedule interval later.
+            if let Ok(removed) = store.retention_pass(&queue).await
+                && removed >= u64::from(RETENTION_BUDGET_ROWS)
+            {
+                state.due_at.store(now.saturating_add(1), Ordering::SeqCst);
+            }
+        });
+    }
+    /// One cleanup pass in one transaction behind the queue's row lock: advance
+    /// the horizon to `now - request_id_nanos`, held back to the oldest live
+    /// claim, then remove at most `RETENTION_BUDGET_ROWS` rows. Requests, receipts
+    /// and claim records issued before the horizon go first, then retired deleted
+    /// work, whose highest version moves into the queue's version floor.
+    async fn retention_pass(&self, queue_address: &QueueAddress) -> QueueResult<u64> {
+        use fireweed_engine::queue_retention::{
+            RETENTION_BUDGET_ROWS, RetentionState, live_claim_cutoff, plan_retention,
+        };
+        let clock = Arc::clone(&self.inner.clock);
+        let queue_address = queue_address.clone();
+        self.dispatch(65_536, move |client, reservation| {
+            Box::pin(async move {
+                let _owned_job = reservation;
+                let tx = client.transaction().await.map_err(storage)?;
+                let queue = queue_row(&tx, &queue_address, &_owned_job).await?;
+                let now = timestamp_nanos(clock.now())?;
+                // A claim is live while its own `live_until` is, or while any
+                // lease it granted is: renewals move the work row's lease, not
+                // the claim row, so the leased rows carry the claim's `issued_at`.
+                let oldest_live_claim: Option<i64> = tx
+                    .query_one(
+                        "SELECT min(issued_at) FROM (SELECT issued_at FROM fireweed_api007.requests WHERE queue_id=$1 AND domain=1 AND live_until>$2 \
+                         UNION ALL SELECT lease_claim_issued_at FROM fireweed_api007.records WHERE queue_id=$1 AND active AND lifecycle=1 AND lease_until>$2 AND lease_claim_issued_at IS NOT NULL) live",
+                        &[&queue.id, &live_claim_cutoff(now)],
+                    )
+                    .await
+                    .map_err(storage)?
+                    .get(0);
+                let current = RetentionState {
+                    horizon: queue.horizon,
+                    deleted_before: queue.deleted_before,
+                };
+                let next = plan_retention(
+                    &queue.schema.retention,
+                    current,
+                    now,
+                    oldest_live_claim,
+                );
+                let budget = i64::from(RETENTION_BUDGET_ROWS);
+                let mut removed = tx
+                    .execute(
+                        "DELETE FROM fireweed_api007.requests WHERE id IN (SELECT id FROM fireweed_api007.requests WHERE queue_id=$1 AND issued_at<$2 ORDER BY issued_at,id LIMIT $3)",
+                        &[&queue.id, &next.horizon, &budget],
+                    )
+                    .await
+                    .map_err(storage)?;
+                let left = budget - i64::try_from(removed).map_err(storage)?;
+                let mut floor = queue.version_floor;
+                if left > 0 && next.deleted_before > i64::MIN {
+                    let rows = tx
+                        .query(
+                            "SELECT id,version::text FROM fireweed_api007.records WHERE queue_id=$1 AND collection=0 AND NOT active AND deleted_at<$2 ORDER BY deleted_at,id LIMIT $3",
+                            &[&queue.id, &next.deleted_before, &left],
+                        )
+                        .await
+                        .map_err(storage)?;
+                    let mut ids: Vec<i64> = vec![];
+                    for row in &rows {
+                        ids.push(row.get(0));
+                        floor = floor.max(version(row.get(1))?);
+                    }
+                    removed += u64::try_from(ids.len()).map_err(storage)?;
+                    if !ids.is_empty() {
+                        for table in ["bodies", "fields", "additional_fields", "indexes"] {
+                            tx.execute(
+                                &format!("DELETE FROM fireweed_api007.{table} WHERE record_id=ANY($1)"),
+                                &[&ids],
+                            )
+                            .await
+                            .map_err(storage)?;
+                        }
+                        tx.execute(
+                            "DELETE FROM fireweed_api007.records WHERE id=ANY($1) AND queue_id=$2",
+                            &[&ids, &queue.id],
+                        )
+                        .await
+                        .map_err(storage)?;
+                    }
+                }
+                if next.horizon != queue.horizon
+                    || next.deleted_before != queue.deleted_before
+                    || floor != queue.version_floor
+                {
+                    tx.execute(
+                        "UPDATE fireweed_api007.queues SET horizon=$2,deleted_before=$3,version_floor=$4::text::numeric WHERE id=$1",
+                        &[&queue.id, &next.horizon, &next.deleted_before, &floor.to_string()],
+                    )
+                    .await
+                    .map_err(storage)?;
+                }
+                tx.commit().await.map_err(storage)?;
+                Ok(removed)
+            })
+        })
+        .await
     }
     async fn dispatch<T, F>(&self, bytes: u64, job: F) -> QueueResult<T>
     where
@@ -317,6 +486,12 @@ struct QueueRow<'a> {
     definition_pin: DefinitionPin,
     next_sequence: u64,
     secret: Vec<u8>,
+    /// Requests issued before this are refused with no lookup.
+    horizon: i64,
+    /// Retired deleted keys deleted before this are removable.
+    deleted_before: i64,
+    /// A key with no row starts above this version.
+    version_floor: u64,
     // Retain schema admission until all owned payloads have dropped.
     _schema_charge: QueueBufferCharge<'a>,
     _schema_headers: QueueBufferCharge<'a>,
@@ -327,7 +502,7 @@ async fn queue_row<'a>(
     reservation: &'a QueueReservation,
 ) -> QueueResult<QueueRow<'a>> {
     let address_hash = probe_hash(&encode(address)?);
-    let rows=tx.query("SELECT id,octet_length(definition),next_sequence::text,cursor_secret FROM fireweed_api007.queues WHERE address_hash=$1 AND tenant=$2 AND name=$3 FOR UPDATE",&[&address_hash,&address.tenant.as_bytes(),&address.queue.as_bytes()]).await.map_err(storage)?;
+    let rows=tx.query("SELECT id,octet_length(definition),next_sequence::text,cursor_secret,horizon,deleted_before,version_floor::text FROM fireweed_api007.queues WHERE address_hash=$1 AND tenant=$2 AND name=$3 FOR UPDATE",&[&address_hash,&address.tenant.as_bytes(),&address.queue.as_bytes()]).await.map_err(storage)?;
     if rows.len() != 1 {
         return Err(if rows.is_empty() {
             QueueError::QueueNotFound
@@ -361,6 +536,9 @@ async fn queue_row<'a>(
         definition_pin: DefinitionPin::from_persisted_bytes(&definition),
         next_sequence: version(row.get(2))?,
         secret: row.get(3),
+        horizon: row.get(4),
+        deleted_before: row.get(5),
+        version_floor: version(row.get(6))?,
     })
 }
 
@@ -401,16 +579,24 @@ async fn receipt<'a, T: DeserializeOwned + PersistedStructure>(
     value.validate_persisted()?;
     Ok(Some(value))
 }
+/// `live_until` is the end of the lease a claim first granted; no other request
+/// has one. Renewals extend the lease on the work row, which carries
+/// `lease_claim_issued_at` so cleanup also holds the horizon for a renewed lease.
+struct ReceiptTimes {
+    issued_at: i64,
+    live_until: Option<i64>,
+}
 async fn save_receipt<T: Serialize>(
     tx: &Transaction<'_>,
     queue: i64,
     domain: i16,
     id: &str,
     fp: &[u8],
+    times: ReceiptTimes,
     value: &T,
 ) -> QueueResult<()> {
-    tx.execute("INSERT INTO fireweed_api007.requests(queue_id,domain,identity_hash,identity,fingerprint,outcome) VALUES($1,$2,$3,$4,$5,$6)",
-        &[&queue,&domain,&probe_hash(id.as_bytes()),&id.as_bytes(),&fp,&encode(value)?]).await.map_err(storage)?;
+    tx.execute("INSERT INTO fireweed_api007.requests(queue_id,domain,identity_hash,identity,fingerprint,outcome,issued_at,live_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+        &[&queue,&domain,&probe_hash(id.as_bytes()),&id.as_bytes(),&fp,&encode(value)?,&times.issued_at,&times.live_until]).await.map_err(storage)?;
     Ok(())
 }
 fn selected_ordinals(
@@ -800,6 +986,7 @@ async fn load_group_with_fields<'a>(
     let mut bodies = load_bodies(tx, &body_ids).await?;
     let mut snapshot = RecordSnapshot {
         next_sequence: queue.next_sequence,
+        version_floor: queue.version_floor,
         ..RecordSnapshot::default()
     };
     let mut ids = BTreeMap::new();
@@ -1759,8 +1946,8 @@ impl QueueStore for PostgresQueueStore {
                 }else{
                     let token=fireweed_engine::generate_query_lease_token().map_err(storage)?;
                     let secret=Sha256::digest(token.as_str().as_bytes()).to_vec();
-                    tx.execute("INSERT INTO fireweed_api007.queues(address_hash,tenant,name,definition,cursor_secret) VALUES($1,$2,$3,$4,$5)",
-                        &[&address_hash,&request.queue.tenant.as_bytes(),&request.queue.queue.as_bytes(),&encoded,&secret]).await.map_err(storage)?;
+                    tx.execute("INSERT INTO fireweed_api007.queues(address_hash,tenant,name,definition,cursor_secret,horizon,deleted_before,version_floor) VALUES($1,$2,$3,$4,$5,$6,$7,0)",
+                        &[&address_hash,&request.queue.tenant.as_bytes(),&request.queue.queue.as_bytes(),&encoded,&secret,&i64::MIN,&i64::MIN]).await.map_err(storage)?;
                 }tx.commit().await.map_err(storage)?;Ok(())
             })).await
         })
@@ -1769,6 +1956,8 @@ impl QueueStore for PostgresQueueStore {
         Box::pin(async move {
             request.preflight(&self.inner.limits)?;
             administrative_envelope_preflight(&request, &self.inner.limits)?;
+            self.await_pass(&request.queue).await;
+            let queue_address = request.queue.clone();
             let limits = self.inner.limits;
             let clock = Arc::clone(&self.inner.clock);
             for group in &request.groups {
@@ -1783,7 +1972,7 @@ impl QueueStore for PostgresQueueStore {
                 .and_then(|n| n.checked_add(limits.max_response_bytes))
                 .and_then(|n| n.checked_add(incoming_headers))
                 .ok_or(QueueError::TooLarge)?;
-            self.dispatch(charge, move |client, reservation| {
+            let result = self.dispatch(charge, move |client, reservation| {
                 Box::pin(async move {
                     let reservation = Arc::new(reservation);
                     let tx = client.transaction().await.map_err(storage)?;
@@ -1795,6 +1984,16 @@ impl QueueStore for PostgresQueueStore {
                     let mut known = vec![];
                     for group in &request.groups {
                         let fp = group.fingerprint(&request.queue)?;
+                        if group.issued_at < queue.horizon {
+                            known.push((
+                                fp,
+                                Some(CommitReceipt {
+                                    request_id: group.request_id.clone(),
+                                    outcome: GroupOutcome::RequestExpired,
+                                }),
+                            ));
+                            continue;
+                        }
                         let outcome = match receipt::<CommitReceipt>(
                             &tx,
                             queue.id,
@@ -1852,7 +2051,7 @@ impl QueueStore for PostgresQueueStore {
                             .await?;
                             let (receipt, next_sequence, charge) = admitted.into_parts();
                             fresh_receipt_charges.push(charge);
-                            save_receipt(&tx, queue.id, 2, &group.request_id, &fp, &receipt)
+                            save_receipt(&tx, queue.id, 2, &group.request_id, &fp, ReceiptTimes { issued_at: group.issued_at, live_until: None }, &receipt)
                                 .await?;
                             #[cfg(test)]
                             check_group_boundary(&tx, queue.id).await?;
@@ -1874,7 +2073,7 @@ impl QueueStore for PostgresQueueStore {
                                 .ok_or(QueueError::TooLarge)?,
                         )?;
                         persist_delta(&tx, &queue, &delta, &before, &mut loaded).await?;
-                        save_receipt(&tx, queue.id, 2, &group.request_id, &fp, &delta.receipt)
+                        save_receipt(&tx, queue.id, 2, &group.request_id, &fp, ReceiptTimes { issued_at: group.issued_at, live_until: None }, &delta.receipt)
                             .await?;
                         #[cfg(test)]
                         check_group_boundary(&tx, queue.id).await?;
@@ -1890,7 +2089,11 @@ impl QueueStore for PostgresQueueStore {
                     Ok(out)
                 })
             })
-            .await
+            .await;
+            if result.is_ok() {
+                self.offer_pass(&queue_address);
+            }
+            result
         })
     }
     fn preview(&self, request: PreviewRequest) -> QueueFuture<'_, PreviewResult> {
@@ -1918,6 +2121,10 @@ impl QueueStore for PostgresQueueStore {
                     let tx = client.transaction().await.map_err(storage)?;
                     let queue = queue_row(&tx, &request.queue, &reservation).await?;
                     request.validate(&queue.schema, &limits)?;
+                    fireweed_engine::queue_retention::check_horizon(
+                        request.group.issued_at,
+                        queue.horizon,
+                    )?;
                     // Preview never consults or writes execution identity receipts.
                     let mut administrative_charge = None;
                     let outcome = if request.group.administration.is_some() {
@@ -1970,6 +2177,8 @@ impl QueueStore for PostgresQueueStore {
     fn insert(&self, request: InsertRequest) -> QueueFuture<'_, Vec<InsertOutcome>> {
         Box::pin(async move {
             request.preflight(&self.inner.limits)?;
+            self.await_pass(&request.queue).await;
+            let queue_address = request.queue.clone();
             let limits = self.inner.limits;
             let clock = Arc::clone(&self.inner.clock);
             check_issued_at(clock.as_ref(), request.issued_at)?;
@@ -1979,74 +2188,100 @@ impl QueueStore for PostgresQueueStore {
                 .and_then(|n| n.checked_add(limits.max_response_bytes))
                 .and_then(|n| n.checked_add(incoming_headers))
                 .ok_or(QueueError::TooLarge)?;
-            self.dispatch(charge, move |client, reservation| {
-                Box::pin(async move {
-                    let tx = client.transaction().await.map_err(storage)?;
-                    let queue = queue_row(&tx, &request.queue, &reservation).await?;
-                    request.validate(&queue.schema, &limits)?;
-                    let fp = fingerprint("insert", &request)?;
-                    let mut receipt_charges = vec![];
-                    if let Some(found) = receipt(
-                        &tx,
-                        queue.id,
-                        0,
-                        &request.request_id,
-                        &fp,
-                        &reservation,
-                        &mut receipt_charges,
-                    )
-                    .await?
-                    {
-                        return Ok(found);
-                    }
-                    let read_set = CommitGroup {
-                        administration: None,
-                        request_id: "insert-read-set".into(),
-                        claimed_updates: vec![],
-                        state_updates: vec![],
-                        work_inserts: request.items.clone(),
-                        work_updates: vec![],
-                        issued_at: 0,
-                    };
-                    let mut loaded = load_group(&tx, &queue, &read_set, &reservation).await?;
-                    let before = loaded.snapshot.clone();
-                    // Reserve tuple/name amplification before materializing all
-                    // prospective insert keys. SQL authority loads once per vector;
-                    // the shared planner still decides each item in request order.
-                    loaded
-                        ._probe_charges
-                        .push(reservation.buffer(group_expansion_budget(
-                            &read_set,
-                            &loaded.snapshot,
+            let result = self
+                .dispatch(charge, move |client, reservation| {
+                    Box::pin(async move {
+                        let tx = client.transaction().await.map_err(storage)?;
+                        let queue = queue_row(&tx, &request.queue, &reservation).await?;
+                        request.validate(&queue.schema, &limits)?;
+                        fireweed_engine::queue_retention::check_horizon(
+                            request.issued_at,
+                            queue.horizon,
+                        )?;
+                        let fp = fingerprint("insert", &request)?;
+                        let mut receipt_charges = vec![];
+                        if let Some(found) = receipt(
+                            &tx,
+                            queue.id,
+                            0,
+                            &request.request_id,
+                            &fp,
+                            &reservation,
+                            &mut receipt_charges,
+                        )
+                        .await?
+                        {
+                            return Ok(found);
+                        }
+                        let read_set = CommitGroup {
+                            administration: None,
+                            request_id: "insert-read-set".into(),
+                            claimed_updates: vec![],
+                            state_updates: vec![],
+                            work_inserts: request.items.clone(),
+                            work_updates: vec![],
+                            issued_at: 0,
+                        };
+                        let mut loaded = load_group(&tx, &queue, &read_set, &reservation).await?;
+                        let before = loaded.snapshot.clone();
+                        // Reserve tuple/name amplification before materializing all
+                        // prospective insert keys. SQL authority loads once per vector;
+                        // the shared planner still decides each item in request order.
+                        loaded
+                            ._probe_charges
+                            .push(reservation.buffer(group_expansion_budget(
+                                &read_set,
+                                &loaded.snapshot,
+                                &queue.schema,
+                            )?)?);
+                        let probes =
+                            insert_unique_probes(&request.items, &loaded.snapshot, &queue.schema)?
+                                .into_iter()
+                                .collect();
+                        load_unique_authority(&tx, &queue, &mut loaded, probes, &reservation)
+                            .await?;
+                        let (deltas, outcomes) = plan_insert_vector(
+                            &request,
+                            &mut loaded.snapshot,
                             &queue.schema,
-                        )?)?);
-                    let probes =
-                        insert_unique_probes(&request.items, &loaded.snapshot, &queue.schema)?
-                            .into_iter()
-                            .collect();
-                    load_unique_authority(&tx, &queue, &mut loaded, probes, &reservation).await?;
-                    let (deltas, outcomes) =
-                        plan_insert_vector(&request, &mut loaded.snapshot, &queue.schema, || {
-                            timestamp_nanos(clock.now())
-                        })?;
-                    let combined = combine_deltas(&deltas, queue.next_sequence)?;
-                    let _charge = reservation.buffer(
-                        encoded_len(&combined)?
-                            .checked_mul(4)
-                            .ok_or(QueueError::TooLarge)?,
-                    )?;
-                    persist_delta(&tx, &queue, &combined, &before, &mut loaded).await?;
-                    save_receipt(&tx, queue.id, 0, &request.request_id, &fp, &outcomes).await?;
-                    tx.commit().await.map_err(storage)?;
-                    Ok(outcomes)
+                            || timestamp_nanos(clock.now()),
+                        )?;
+                        let combined = combine_deltas(&deltas, queue.next_sequence)?;
+                        let _charge = reservation.buffer(
+                            encoded_len(&combined)?
+                                .checked_mul(4)
+                                .ok_or(QueueError::TooLarge)?,
+                        )?;
+                        persist_delta(&tx, &queue, &combined, &before, &mut loaded).await?;
+                        save_receipt(
+                            &tx,
+                            queue.id,
+                            0,
+                            &request.request_id,
+                            &fp,
+                            ReceiptTimes {
+                                issued_at: request.issued_at,
+                                live_until: None,
+                            },
+                            &outcomes,
+                        )
+                        .await?;
+                        tx.commit().await.map_err(storage)?;
+                        Ok(outcomes)
+                    })
                 })
-            })
-            .await
+                .await;
+            if result.is_ok() {
+                self.offer_pass(&queue_address);
+            }
+            result
         })
     }
     fn claim(&self, request: ClaimRequest) -> QueueFuture<'_, Vec<ClaimedWork>> {
         Box::pin(async move {
             request.preflight(&self.inner.limits)?;
+            self.await_pass(&request.queue).await;
+            let queue_address = request.queue.clone();
             let limits = self.inner.limits;
             let clock = Arc::clone(&self.inner.clock);
             check_issued_at(clock.as_ref(), request.issued_at)?;
@@ -2056,9 +2291,10 @@ impl QueueStore for PostgresQueueStore {
                 .and_then(|n| n.checked_add(request.max_bytes.checked_mul(4)?))
                 .and_then(|n| n.checked_add(incoming_headers))
                 .ok_or(QueueError::TooLarge)?;
-            self.dispatch(charge,move |client,reservation|Box::pin(async move {
+            let result = self.dispatch(charge,move |client,reservation|Box::pin(async move {
                 let _owned_job=reservation;
                 let tx=client.transaction().await.map_err(storage)?;let queue=queue_row(&tx,&request.queue,&_owned_job).await?;request.validate(&queue.schema,&limits)?;
+                fireweed_engine::queue_retention::check_horizon(request.issued_at,queue.horizon)?;
                 let fp=request.fingerprint()?;let now=timestamp_nanos(clock.now())?;
                 let mut receipt_charges=vec![];
                 if let Some(replay)=receipt::<ClaimReplay>(&tx,queue.id,1,&request.request_id,&fp,&_owned_job,&mut receipt_charges).await? {
@@ -2116,9 +2352,13 @@ impl QueueStore for PostgresQueueStore {
                     out.push(claimed);
                     let id:i64=row.get(0);ids.push(id);token_hashes.push(lease_hash(&token).to_vec());versions.push(out.last().ok_or_else(||storage("missing claim"))?.record.version.to_string());attempts.push(i64::from(out.last().ok_or_else(||storage("missing claim"))?.record.attempts));replay.items.push((id,token));
                 }
-                if !ids.is_empty(){tx.execute("UPDATE fireweed_api007.records r SET lifecycle=1,lease_until=$1,lease_hash=x.hash,version=x.version::numeric,attempts=x.attempts FROM UNNEST($2::bigint[],$3::bytea[],$4::text[],$5::bigint[]) AS x(id,hash,version,attempts) WHERE r.id=x.id AND r.queue_id=$6",&[&expiry,&ids,&token_hashes,&versions,&attempts,&queue.id]).await.map_err(storage)?;}
-                save_receipt(&tx,queue.id,1,&request.request_id,&fp,&replay).await?;tx.commit().await.map_err(storage)?;Ok(out)
-            })).await
+                if !ids.is_empty(){tx.execute("UPDATE fireweed_api007.records r SET lifecycle=1,lease_until=$1,lease_hash=x.hash,version=x.version::numeric,attempts=x.attempts,lease_claim_issued_at=$7 FROM UNNEST($2::bigint[],$3::bytea[],$4::text[],$5::bigint[]) AS x(id,hash,version,attempts) WHERE r.id=x.id AND r.queue_id=$6",&[&expiry,&ids,&token_hashes,&versions,&attempts,&queue.id,&request.issued_at]).await.map_err(storage)?;}
+                save_receipt(&tx,queue.id,1,&request.request_id,&fp,ReceiptTimes{issued_at:request.issued_at,live_until:Some(expiry)},&replay).await?;tx.commit().await.map_err(storage)?;Ok(out)
+            })).await;
+            if result.is_ok() {
+                self.offer_pass(&queue_address);
+            }
+            result
         })
     }
     fn read_state(&self, request: StateReadRequest) -> QueueFuture<'_, Vec<Option<StateRecord>>> {
@@ -2159,29 +2399,41 @@ impl QueueStore for PostgresQueueStore {
     fn read_commit(&self, request: ReceiptReadRequest) -> QueueFuture<'_, Vec<ReceiptLookup>> {
         Box::pin(async move {
             request.validate(&self.inner.limits)?;
+            for id in &request.request_ids {
+                check_issued_at(self.inner.clock.as_ref(), id.issued_at)?;
+            }
+            self.await_pass(&request.queue).await;
+            let queue_address = request.queue.clone();
             let incoming_headers = incoming_headers(&request)?;
             let charge = encoded_len(&request)?
                 .checked_mul(4)
                 .and_then(|n| n.checked_add(request.max_bytes.checked_mul(4)?))
                 .and_then(|n| n.checked_add(incoming_headers))
                 .ok_or(QueueError::TooLarge)?;
-            self.dispatch(charge,move |client,reservation|Box::pin(async move {
+            let result = self.dispatch(charge,move |client,reservation|Box::pin(async move {
                 let _owned_job=reservation;
                 let tx=client.transaction().await.map_err(storage)?;let queue=queue_row(&tx,&request.queue,&_owned_job).await?;
-                let ids:Vec<Vec<u8>>=request.request_ids.iter().map(|s|s.as_bytes().to_vec()).collect();let hashes:Vec<_>=ids.iter().map(|s|probe_hash(s)).collect();
+                // An id older than the horizon is expired with no lookup, whether or
+                // not cleanup has removed its row yet.
+                let expired:Vec<bool>=request.request_ids.iter().map(|id|id.issued_at<queue.horizon).collect();
+                let ids:Vec<Vec<u8>>=request.request_ids.iter().zip(&expired).filter(|(_,expired)|!**expired).map(|(id,_)|id.request_id.as_bytes().to_vec()).collect();let hashes:Vec<_>=ids.iter().map(|s|probe_hash(s)).collect();
                 let size=tx.query_one("SELECT COALESCE(sum(octet_length(outcome)),0)::bigint FROM fireweed_api007.requests WHERE queue_id=$1 AND domain=2 AND identity_hash=ANY($2) AND identity=ANY($3) AND NOT expired",&[&queue.id,&hashes,&ids]).await.map_err(storage)?.get::<_,i64>(0);
                 if size as u64>request.max_bytes{return Err(QueueError::TooLarge);}
                 let rows=tx.query("SELECT identity,expired,CASE WHEN expired THEN NULL ELSE outcome END FROM fireweed_api007.requests WHERE queue_id=$1 AND domain=2 AND identity_hash=ANY($2) AND identity=ANY($3)",&[&queue.id,&hashes,&ids]).await.map_err(storage)?;
                 let mut receipt_charges=vec![];
                 let mut found=BTreeMap::new();for row in rows {let id=key(row.get(0))?;let outcome=if row.get::<_,bool>(1){ReceiptLookup::Expired}else{let raw=row.get::<_,Vec<u8>>(2);receipt_charges.push(_owned_job.buffer(CommitReceipt::stored_headers(&raw)?)?);ReceiptLookup::Found({ let receipt: CommitReceipt = decode(&raw)?; receipt.validate_persisted()?; receipt })};
                     if found.insert(id,outcome).is_some(){return Err(storage("duplicate receipt identity"));}}
-                let absent=ReceiptLookup::Absent;let borrowed:Vec<_>=request.request_ids.iter().map(|id|found.get(id).unwrap_or(&absent)).collect();
+                let absent=ReceiptLookup::Absent;let gone=ReceiptLookup::Expired;let borrowed:Vec<_>=request.request_ids.iter().zip(&expired).map(|(id,expired)|if *expired{&gone}else{found.get(&id.request_id).unwrap_or(&absent)}).collect();
                 if encoded_len(&borrowed)?>request.max_bytes{return Err(QueueError::TooLarge);}
                 let headers=borrowed.iter().try_fold(0u64,|n,lookup|{let bytes=match lookup {ReceiptLookup::Found(receipt)=>receipt_headers(receipt)?,_=>256};n.checked_add(bytes).ok_or(QueueError::TooLarge)})?;
                 let _result_headers=_owned_job.buffer(headers)?;
                 let out:Vec<_>=borrowed.into_iter().cloned().collect();
                 if encoded_len(&out)?>request.max_bytes{return Err(QueueError::TooLarge);}Ok(out)
-            })).await
+            })).await;
+            if result.is_ok() {
+                self.offer_pass(&queue_address);
+            }
+            result
         })
     }
     fn shutdown(&self) -> QueueFuture<'_, ()> {
@@ -3070,7 +3322,10 @@ mod tests {
             store
                 .read_commit(ReceiptReadRequest {
                     queue: address.clone(),
-                    request_ids: vec![transition.request_id.clone()],
+                    request_ids: vec![ReceiptReadId {
+                        request_id: transition.request_id.clone(),
+                        issued_at: transition.issued_at
+                    }],
                     max_bytes: 1 << 20
                 })
                 .await
@@ -3102,7 +3357,10 @@ mod tests {
             store
                 .read_commit(ReceiptReadRequest {
                     queue: address.clone(),
-                    request_ids: vec!["preview-then-execute".into()],
+                    request_ids: vec![ReceiptReadId {
+                        request_id: "preview-then-execute".into(),
+                        issued_at: 0
+                    }],
                     max_bytes: 1 << 20
                 })
                 .await
@@ -3133,7 +3391,7 @@ mod tests {
         let tx = client.transaction().await.unwrap();
         let id = "large-before-replay";
         let fp = [17u8; 32];
-        tx.execute("INSERT INTO fireweed_api007.requests(queue_id,domain,identity_hash,identity,fingerprint,outcome) VALUES($1,2,$2,$3,$4,$5)",
+        tx.execute("INSERT INTO fireweed_api007.requests(queue_id,domain,identity_hash,identity,fingerprint,outcome,issued_at) VALUES($1,2,$2,$3,$4,$5,0)",
             &[&queue_id, &probe_hash(id.as_bytes()), &id.as_bytes(), &fp.as_slice(), &vec![255u8; 1 << 20]]).await.unwrap();
         let admission = QueueAdmission::new(1, 1 << 20).unwrap();
         let job = admission.reserve(0).unwrap();
@@ -3186,7 +3444,16 @@ mod tests {
             store
                 .read_commit(ReceiptReadRequest {
                     queue: address.clone(),
-                    request_ids: vec!["late-first".into(), "late-last".into()],
+                    request_ids: vec![
+                        ReceiptReadId {
+                            request_id: "late-first".into(),
+                            issued_at: 0
+                        },
+                        ReceiptReadId {
+                            request_id: "late-last".into(),
+                            issued_at: 0
+                        }
+                    ],
                     max_bytes: 1 << 20
                 })
                 .await
@@ -4212,7 +4479,13 @@ mod tests {
                     store
                         .read_commit(ReceiptReadRequest {
                             queue: queue.clone(),
-                            request_ids: groups.iter().map(|g| g.request_id.clone()).collect(),
+                            request_ids: groups
+                                .iter()
+                                .map(|g| ReceiptReadId {
+                                    request_id: g.request_id.clone(),
+                                    issued_at: g.issued_at,
+                                })
+                                .collect(),
                             max_bytes: 1 << 20
                         })
                         .await
@@ -4373,7 +4646,10 @@ mod tests {
                 .clone()
                 .read_commit(ReceiptReadRequest {
                     queue: queue.clone(),
-                    request_ids: vec!["owned-commit".into()],
+                    request_ids: vec![ReceiptReadId {
+                        request_id: "owned-commit".into(),
+                        issued_at: 0
+                    }],
                     max_bytes: 1024,
                 })
                 .await,
@@ -4394,7 +4670,10 @@ mod tests {
         let receipt = reopened
             .read_commit(ReceiptReadRequest {
                 queue: queue.clone(),
-                request_ids: vec!["owned-commit".into()],
+                request_ids: vec![ReceiptReadId {
+                    request_id: "owned-commit".into(),
+                    issued_at: 0,
+                }],
                 max_bytes: 1 << 20,
             })
             .await

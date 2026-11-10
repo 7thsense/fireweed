@@ -153,6 +153,13 @@ pub(super) async fn classify_originals(
         .validate(native.definition.schema(), input.limits)?;
     let mut known = Vec::new();
     for group in &input.request.groups {
+        if group.issued_at < native.horizon {
+            known.push(Some(CommitReceipt {
+                request_id: group.request_id.clone(),
+                outcome: GroupOutcome::RequestExpired,
+            }));
+            continue;
+        }
         let format = if group.administration.is_some() { 4 } else { 3 };
         let raw = super::receipt_authority::load_raw(
             connection,

@@ -95,7 +95,15 @@ mod tests {
         };
         let binding = PublicationReceipt::commit(&queue, &group, &receipt).unwrap();
         let mut header = Sink::Count(0);
-        write_receipt_header(&mut header, 2, &group.request_id, 3, &binding.fingerprint).unwrap();
+        write_receipt_header(
+            &mut header,
+            2,
+            &group.request_id,
+            3,
+            &binding.fingerprint,
+            binding.issued_at,
+        )
+        .unwrap();
         let Sink::Count(start) = header else {
             unreachable!()
         };

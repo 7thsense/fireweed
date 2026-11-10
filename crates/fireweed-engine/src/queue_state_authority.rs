@@ -348,7 +348,7 @@ impl ColdStateTracker {
                     return Err(unknown("claim before genesis"));
                 }
             }
-            QueueLogPayload::Entries(_) => {
+            QueueLogPayload::Entries(_) | QueueLogPayload::Retention(_) => {
                 return Err(unknown("entry-list records are not source-indexed"));
             }
         }
@@ -1123,7 +1123,20 @@ mod tests {
         let expected = fold(&request, &records, &job);
         let lookup = ReceiptReadRequest {
             queue: request.queue.clone(),
-            request_ids: vec!["put".into(), "absent".into(), "put".into()],
+            request_ids: vec![
+                ReceiptReadId {
+                    request_id: "put".into(),
+                    issued_at: 0,
+                },
+                ReceiptReadId {
+                    request_id: "absent".into(),
+                    issued_at: 0,
+                },
+                ReceiptReadId {
+                    request_id: "put".into(),
+                    issued_at: 0,
+                },
+            ],
             max_bytes: 65536,
         };
         let declared = CommitGroup {
@@ -1171,14 +1184,14 @@ mod tests {
         for (position, id) in lookup.request_ids.iter().enumerate() {
             assert_eq!(
                 originals
-                    .position(position, id)
+                    .position(position, &id.request_id)
                     .unwrap()
-                    .validate(&lookup.queue, id, &records[0], cut, &job)
+                    .validate(&lookup.queue, &id.request_id, &records[0], cut, &job)
                     .unwrap(),
                 legacy_originals
-                    .position(position, id)
+                    .position(position, &id.request_id)
                     .unwrap()
-                    .validate(&lookup.queue, id, &records[0], cut, &job)
+                    .validate(&lookup.queue, &id.request_id, &records[0], cut, &job)
                     .unwrap()
             );
         }

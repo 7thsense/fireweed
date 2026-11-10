@@ -46,7 +46,7 @@ macro_rules! define_queue_source_oracle {
                         );
                         continue;
                     }
-                    QueueLogPayload::Entries(_) => {
+                    QueueLogPayload::Entries(_) | QueueLogPayload::Retention(_) => {
                         panic!("entry-list records are not source-indexed")
                     }
                     QueueLogPayload::Publication(publication) => {

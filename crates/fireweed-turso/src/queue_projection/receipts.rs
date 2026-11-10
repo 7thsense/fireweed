@@ -103,12 +103,16 @@ impl QueueProjection {
         let fingerprint = original.group.fingerprint(&original.queue)?;
         let lookup_queue = original.queue.clone();
         let lookup_identity = original.group.request_id.clone();
+        let lookup_issued_at = original.group.issued_at;
         self.dispatch_receipts(
             ReceiptReadInput {
                 genesis: input.genesis,
                 request: ReceiptReadRequest {
                     queue: lookup_queue,
-                    request_ids: vec![lookup_identity],
+                    request_ids: vec![ReceiptReadId {
+                        request_id: lookup_identity,
+                        issued_at: lookup_issued_at,
+                    }],
                     max_bytes: input.limits.max_response_bytes,
                 },
                 limits: input.limits,
@@ -225,10 +229,16 @@ impl NativeTransactionWork for ReceiptWorker {
         // cannot decide the public Postcard response budget.
         let mut raw = Vec::new();
         for identity in &self.input.request.request_ids {
+            // An id older than the horizon is expired with no lookup, whether or
+            // not cleanup has removed its row yet.
+            if identity.issued_at < snapshot.horizon {
+                raw.push(Some((3, None)));
+                continue;
+            }
             let value = super::receipt_authority::load_raw(
                 connection,
                 snapshot.queue_id,
-                identity,
+                &identity.request_id,
                 self.expected,
                 &self.job,
                 &mut self.charges,
@@ -254,7 +264,7 @@ impl NativeTransactionWork for ReceiptWorker {
                         )?,
                     );
                     ReceiptLookupProjection::Found(CommitReceiptProjection {
-                        request_id: identity,
+                        request_id: &identity.request_id,
                         outcome: commit,
                     })
                 }
@@ -311,7 +321,13 @@ mod tests {
                 .unwrap(),
             request: ReceiptReadRequest {
                 queue: address(),
-                request_ids: ids,
+                request_ids: ids
+                    .into_iter()
+                    .map(|request_id| ReceiptReadId {
+                        request_id,
+                        issued_at: 0,
+                    })
+                    .collect(),
                 max_bytes,
             },
             limits: QueueLimits::default(),

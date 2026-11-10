@@ -25,7 +25,7 @@ One concrete asynchronous Fireweed handle, selected at construction, provides:
 | `stats` | Queue, filter, requested grouping | Pending, leased, completed, failed counts, oldest eligible age and operational as_of |
 | `read_state` | Queue, typed collection and keys | Input-correlated state values and versions |
 | `query` | Queue, declared work/state index, filter, order, opaque cursor, limits | Bounded page of records and next cursor |
-| `read_commit` | Queue and group request ids | Recorded outcomes or explicit absent/expired outcomes |
+| `read_commit` | Queue and group request ids, each with the `issued_at` it was first issued with | Recorded outcomes, or explicit absent/expired outcomes. An id older than the retention horizon is `Expired` with no lookup |
 | `preview` | Queue and administrative intent, including evaluated_at | Non-durable planned outcomes from the current covered snapshot; no identity retention |
 
 Queue provisioning declares work fields, an explicit mandatory-indexed additional
@@ -75,14 +75,48 @@ unit of `eligible_at`, and it is covered by the request fingerprint.
   window is decided against the queue's clock when the inserting request is
   planned. The decision is logged as an ordinary outcome, so a rebuild never reads
   a clock.
-- Deleted rows are not removed under this policy, so a deleted key's version
-  high-water is unchanged and versions never repeat.
+
+Cleanup bounds what the policy retains. A declared policy is the authorization:
+there is no cleanup method and no new error. The queue's owner (S3/Turso) and the
+store (PostgreSQL) offer a pass in the background on a bounded schedule, at most
+one a minute of the queue's clock, and a pass that fails costs no request.
+
+- Horizon: a pass at time `at` advances the queue's horizon `H` to
+  `at - request_id_nanos`, held back so that it never passes a claim whose lease,
+  plus the 5 minute skew, has not ended. `H` never decreases. On S3/Turso `at` is
+  carried by a logged `Retention` record, and applying it reads no clock, so every
+  rebuild of the log reaches the same horizon and the same rows. On PostgreSQL
+  `at` is the store clock inside the cleanup transaction, and `H` is stored with
+  the queue.
+- Requests older than the horizon: a request with `issued_at < H` returns
+  `RequestExpired` with no lookup and no effect, for insert, claim and commit
+  groups, and `read_commit` returns `Expired` for its id. An id at or after `H`
+  still replays its recorded outcome, or conflicts if its body changed.
+
+  | Case | Result |
+  |---|---|
+  | `issued_at` older than `H` | `RequestExpired`, with no lookup |
+  | `issued_at` beyond `now + skew` | `Invalid`, and the same id may be retried later |
+  | Same id, different `issued_at`, row present | `RequestConflict` |
+  | Row removed | Only once `issued_at < H`, so nothing slips between removal and refusal |
+
+- Rows removed: requests, receipts and claim records with `issued_at < H` are
+  removed, and under `Retired` a deleted work row is removed once
+  `deleted_at < at - window_nanos`. One pass removes at most 1000 rows, and a pass
+  that removes that many is offered again as soon as the clock moves, until
+  nothing is left. Under
+  `Reusable` a deleted row is kept. Terminal work is never removed automatically;
+  deleting it is a commit with `Delete`. The log itself is not truncated.
+- Versions: each queue keeps a `version_floor`, the highest version of any row
+  cleanup removed. A key with no row starts above it, so versions never repeat for
+  a key even after its deleted row is gone.
 
 ## 2. Records and selection
 
 Work has a stable caller key, version, priority, eligibility time, lifecycle,
 declared and admitted additional typed fields, and opaque body. State has a collection, stable key, version,
-declared query fields, and opaque value. Versions never repeat for a key, including across deletion and reinsertion,
+declared query fields, and opaque value. Versions never repeat for a key, including across deletion and reinsertion
+and after its deleted row is removed, using the queue version floor,
 so stale CAS cannot match a replacement record (ABA). State is never claimable. Both are
 first-class records with documented schemas, keyed reads, and indexed queries;
 there is no consumer-facing side-record API or backend position.
@@ -218,9 +252,11 @@ per item. Packing/logging groups together never changes their independence.
   full body. Replay returns the original outcome without rechecking expired
   leases or duplicating effects. Rebatching unchanged groups preserves replay.
   Different body with the same id is a conflict.
-- Receipts remain durable until explicit caller-authorized retention cleanup.
-  Cleanup leaves an expired identity marker: an expired id is rejected, never
-  silently treated as new. No implicit 24-hour loss of migration/recovery dedup.
+- Receipts remain durable until the provisioned retention window passes. Cleanup
+  advances a horizon; an id older than it is rejected as expired, with no retained
+  marker, and never silently treated as new. Callers retry with the original
+  `issued_at`. There is no implicit loss of migration/recovery dedup inside the
+  window.
 - Claim identity is durable and scoped to queue, with a canonical fingerprint
   covering filter, order, eligibility time, duration, count/byte limits and fields.
   Same id with any changed body is a conflict. Empty selection is retained and
@@ -229,8 +265,8 @@ per item. Packing/logging groups together never changes their independence.
   every selected item remains attached to a live original lease;
   partial settlement/release or expiry returns ClaimExpired, never new work.
   Renewal preserves identity and reports the current durable expiry on replay.
-  Claim tombstones survive cleanup so an expired id cannot issue another claim.
-  Renewal is explicit and bounded.
+  A request issued before the claim horizon cannot issue another claim. The claim
+  horizon never passes a live lease. Renewal is explicit and bounded.
 - Dropping a future does not roll back admitted work. Storage owns completion
   and its resource charge until a terminal outcome; shutdown drains or safely
   resolves owned operations. Post-publication faults cannot become known rejection.
@@ -363,7 +399,8 @@ Separate backend fault hooks may differ; assertions and consumer calls do not.
 | CancellationShutdown | Lost caller, publication ambiguity, shutdown and ownership handoff preserve outcomes and bounded resource ownership |
 | StatsAndQueryParity | Identical filters/counts/grouping/page order; bounded indexed reads |
 | EnvelopeBoundaries | Current Snorri output/fanout/projection sizes; at/beyond byte and count limits; no partial oversized group |
-| DurableReplayRetention | Old migration/recovery retry safe; explicit cleanup returns expired, never reexecutes |
+| DurableReplayRetention | Old migration/recovery retry safe inside the window; past the horizon it returns expired, never reexecutes |
+| RetentionHorizon | Cleanup advances the horizon: an older insert, claim or commit group is `RequestExpired` with no lookup and no effect; an id at the horizon replays; `read_commit` gives `Expired` for an older id and `Absent` for a newer one; the horizon never passes a live claim, and an expired claim yields no work; rebuild reaches the same horizon and rows; one pass removes at most its budget and retained rows stay flat under churn; a removed retired key returns above its old versions |
 
 Run Snorri's shared StateStore conformance unchanged in business assertions on
 both implementations, including scalar/batch transitions, external deliveries,

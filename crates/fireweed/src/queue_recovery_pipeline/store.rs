@@ -135,10 +135,11 @@ impl QueueStore for NativeQueueStore {
             request.validate(&self.inner.limits)?;
             let bytes = self.input(encoded_len(&request)?, incoming_headers(&request)?)?;
             let limits = self.inner.limits;
+            let clock = self.inner.clock.clone();
             self.dispatch(bytes, move |pipeline, job| async move {
                 let charge = job.owned_buffer(bytes)?;
                 pipeline
-                    .provision(request.clone(), limits, job.clone(), charge)
+                    .provision(request.clone(), limits, clock, job.clone(), charge)
                     .await?;
                 Ok(OwnedQueueValue::new((), (request, job)))
             })
@@ -189,7 +190,7 @@ impl QueueStore for NativeQueueStore {
         StateReadRequest,
         Vec<Option<StateRecord>>,
         read_state,
-        false
+        true
     );
     operation!(query, QueryRequest, QueryPage, query, true);
     fn read_commit(&self, request: ReceiptReadRequest) -> QueueFuture<'_, Vec<ReceiptLookup>> {
@@ -197,9 +198,10 @@ impl QueueStore for NativeQueueStore {
             request.validate(&self.inner.limits)?;
             let bytes = self.input(encoded_len(&request)?, incoming_headers(&request)?)?;
             let limits = self.inner.limits;
+            let clock = self.inner.clock.clone();
             self.dispatch(bytes, move |pipeline, job| async move {
                 pipeline
-                    .read_commit(request, limits, job)
+                    .read_commit(request, limits, clock, job)
                     .await
                     .map(|response| response.into_owned())
             })
