@@ -60,6 +60,27 @@ retain full unsigned versions/sequences and exact signed timestamps. Key version
 high-water survives deletion; complete names/values disambiguate all hash probes.
 Metadata-only operations preserve omitted bodies/fields without hydration.
 
+### Stored schema version
+
+Every PostgreSQL DDL family (queue store, relational projection, relational
+command log, relational queue metrics, control plane, postgres backend, compose
+log) is a named component with a version constant in
+`crates/fireweed-postgres/src/schema_version.rs`. Each PostgreSQL schema holds
+one `fireweed_schema_version (component TEXT PRIMARY KEY, version BIGINT NOT
+NULL)` table. At open, under an advisory lock and in one transaction, a
+component with no tables and no row is created and stamped together; a row equal
+to the build's version continues; a different row, or component tables with no
+row (a database from before the check), fail the open before any component table
+is touched. The error names the component, the found version or `none`, and the
+expected version, and says the database must be recreated; for the queue store it
+is `QueueError::Invalid`, elsewhere the site's storage error. There is no
+migration or upgrade path.
+
+To change a component's DDL, bump its `*_SCHEMA_VERSION` and update that
+component's pin (version and SHA-256 of the DDL text) in the
+`ddl_digests_pin_component_versions` test; the test fails on any DDL edit
+without both.
+
 ## Security and Diagnostics
 
 Bind complete tenant/queue scope in every storage operation. Typed configuration
