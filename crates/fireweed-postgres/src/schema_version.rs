@@ -277,7 +277,7 @@ mod tests {
         (
             "queue_store",
             2,
-            "32f81875b9a133b89aa273481c54dfe38c32421280a91a640ea97dc20cfa872b",
+            "99c2a9f456dbceede1040d869ba3ac23decd340b0cabc4a2d4d74ce252129332",
         ),
         (
             "relational",

@@ -342,6 +342,9 @@ async fn native_port_identical_contract(s3: bool) {
             .await;
     }
     let acknowledged = suite::prepare_process_loss(&queue, address("acknowledged-reopen")).await;
+    let renewed_queue = address("renewed-rebuild");
+    let (renewed_request, renewed_claim) =
+        suite::prepare_renewed_claim(&queue, &clock, renewed_queue.clone()).await;
     let receipts = |name: &str, ids: Vec<ReceiptReadId>| ReceiptReadRequest {
         queue: address(name),
         request_ids: ids,
@@ -371,8 +374,13 @@ async fn native_port_identical_contract(s3: bool) {
         Err(QueueError::Busy)
     );
     // Cold projection rebuild is part of the same suite, not cached DB reuse.
-    let reopened =
-        native_port_fixture(&root, "cold-rebuild-projections", prefix.as_deref(), clock).await;
+    let reopened = native_port_fixture(
+        &root,
+        "cold-rebuild-projections",
+        prefix.as_deref(),
+        clock.clone(),
+    )
+    .await;
     assert_eq!(
         reopened
             .read_commit(receipts("contract", original_ids()))
@@ -402,6 +410,15 @@ async fn native_port_identical_contract(s3: bool) {
     );
     eprintln!("native contract {s3}: verify_process_loss");
     suite::verify_process_loss(&reopened, acknowledged).await;
+    eprintln!("native contract {s3}: verify_renewed_claim_after_rebuild");
+    suite::verify_renewed_claim_after_rebuild(
+        &reopened,
+        &clock,
+        renewed_queue,
+        renewed_request,
+        renewed_claim,
+    )
+    .await;
     reopened.shutdown().await.unwrap();
     drop(reopened);
     drop(clone);

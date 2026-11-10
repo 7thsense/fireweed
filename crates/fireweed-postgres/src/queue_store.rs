@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS fireweed_api007.records (
  key_hash BYTEA NOT NULL, key BYTEA NOT NULL, version NUMERIC(20,0) NOT NULL, active BOOLEAN NOT NULL,
  lifecycle SMALLINT NOT NULL DEFAULT 0, priority BIGINT NOT NULL DEFAULT 0, available_at BIGINT NOT NULL DEFAULT 0,
  eligible_since BIGINT NOT NULL DEFAULT 0, attempts BIGINT NOT NULL DEFAULT 0, lease_until BIGINT, lease_hash BYTEA,
- insertion_sequence NUMERIC(20,0) NOT NULL DEFAULT 0, deleted_at BIGINT);
+ insertion_sequence NUMERIC(20,0) NOT NULL DEFAULT 0, deleted_at BIGINT, lease_claim_issued_at BIGINT);
 CREATE INDEX IF NOT EXISTS record_key_probe ON fireweed_api007.records(queue_id,collection,key_hash);
 CREATE INDEX IF NOT EXISTS claim_priority ON fireweed_api007.records(queue_id,priority,insertion_sequence) WHERE active AND collection=0;
 CREATE INDEX IF NOT EXISTS claim_due ON fireweed_api007.records(queue_id,available_at,insertion_sequence) WHERE active AND collection=0;
@@ -366,9 +366,13 @@ impl PostgresQueueStore {
                 let tx = client.transaction().await.map_err(storage)?;
                 let queue = queue_row(&tx, &queue_address, &_owned_job).await?;
                 let now = timestamp_nanos(clock.now())?;
+                // A claim is live while its own `live_until` is, or while any
+                // lease it granted is: renewals move the work row's lease, not
+                // the claim row, so the leased rows carry the claim's `issued_at`.
                 let oldest_live_claim: Option<i64> = tx
                     .query_one(
-                        "SELECT min(issued_at) FROM fireweed_api007.requests WHERE queue_id=$1 AND domain=1 AND live_until>$2",
+                        "SELECT min(issued_at) FROM (SELECT issued_at FROM fireweed_api007.requests WHERE queue_id=$1 AND domain=1 AND live_until>$2 \
+                         UNION ALL SELECT lease_claim_issued_at FROM fireweed_api007.records WHERE queue_id=$1 AND active AND lifecycle=1 AND lease_until>$2 AND lease_claim_issued_at IS NOT NULL) live",
                         &[&queue.id, &live_claim_cutoff(now)],
                     )
                     .await
@@ -575,8 +579,9 @@ async fn receipt<'a, T: DeserializeOwned + PersistedStructure>(
     value.validate_persisted()?;
     Ok(Some(value))
 }
-/// `live_until` is the end of the last lease a claim granted; no other request
-/// has one.
+/// `live_until` is the end of the lease a claim first granted; no other request
+/// has one. Renewals extend the lease on the work row, which carries
+/// `lease_claim_issued_at` so cleanup also holds the horizon for a renewed lease.
 struct ReceiptTimes {
     issued_at: i64,
     live_until: Option<i64>,
@@ -2347,7 +2352,7 @@ impl QueueStore for PostgresQueueStore {
                     out.push(claimed);
                     let id:i64=row.get(0);ids.push(id);token_hashes.push(lease_hash(&token).to_vec());versions.push(out.last().ok_or_else(||storage("missing claim"))?.record.version.to_string());attempts.push(i64::from(out.last().ok_or_else(||storage("missing claim"))?.record.attempts));replay.items.push((id,token));
                 }
-                if !ids.is_empty(){tx.execute("UPDATE fireweed_api007.records r SET lifecycle=1,lease_until=$1,lease_hash=x.hash,version=x.version::numeric,attempts=x.attempts FROM UNNEST($2::bigint[],$3::bytea[],$4::text[],$5::bigint[]) AS x(id,hash,version,attempts) WHERE r.id=x.id AND r.queue_id=$6",&[&expiry,&ids,&token_hashes,&versions,&attempts,&queue.id]).await.map_err(storage)?;}
+                if !ids.is_empty(){tx.execute("UPDATE fireweed_api007.records r SET lifecycle=1,lease_until=$1,lease_hash=x.hash,version=x.version::numeric,attempts=x.attempts,lease_claim_issued_at=$7 FROM UNNEST($2::bigint[],$3::bytea[],$4::text[],$5::bigint[]) AS x(id,hash,version,attempts) WHERE r.id=x.id AND r.queue_id=$6",&[&expiry,&ids,&token_hashes,&versions,&attempts,&queue.id,&request.issued_at]).await.map_err(storage)?;}
                 save_receipt(&tx,queue.id,1,&request.request_id,&fp,ReceiptTimes{issued_at:request.issued_at,live_until:Some(expiry)},&replay).await?;tx.commit().await.map_err(storage)?;Ok(out)
             })).await;
             if result.is_ok() {

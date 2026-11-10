@@ -88,7 +88,10 @@ pub(super) async fn apply_retention(
     let current = read_row(connection, queue_id).await?;
     let oldest_live_claim = one(
         connection,
-        "SELECT MIN(issued_at) FROM q7_requests WHERE queue_id=?1 AND domain=1 AND live_until>?2",
+        // A renewal moves the work row's lease, not the claim row's
+        // `live_until`; leased rows carry their claim's `issued_at`.
+        "SELECT MIN(issued_at) FROM (SELECT issued_at FROM q7_requests WHERE queue_id=?1 AND domain=1 AND live_until>?2 \
+         UNION ALL SELECT lease_claim_issued_at FROM q7_records WHERE queue_id=?1 AND active=1 AND lifecycle=1 AND lease_until>?2 AND lease_claim_issued_at IS NOT NULL)",
         vec![
             Value::Integer(queue_id),
             Value::Integer(live_claim_cutoff(retention.at())),

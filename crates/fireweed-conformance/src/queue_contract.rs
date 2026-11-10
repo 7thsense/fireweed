@@ -591,6 +591,9 @@ impl TestClock {
     pub fn set(&self, nanos: i64) {
         self.0.store(nanos, std::sync::atomic::Ordering::SeqCst);
     }
+    pub fn get(&self) -> i64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 impl fireweed_engine::Clock for TestClock {
     fn now(&self) -> fireweed_core::UtcTimestamp {
@@ -3733,6 +3736,92 @@ pub async fn request_horizon_expires_old_requests(
 
 /// The horizon never passes a claim whose lease is live: its id still replays
 /// the same work, and once the lease and the skew are over it expires.
+/// Claims, then renews past the first lease end. Returns the claim and the
+/// replay it must keep producing, for [`verify_renewed_claim_after_rebuild`].
+pub async fn prepare_renewed_claim(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+) -> (ClaimRequest, Vec<ClaimedWork>) {
+    let before = clock.get();
+    let t = 300 * HOUR;
+    clock.set(t);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: schema_with(retention(30 * MINUTE, DeletedKeyPolicy::Reusable)),
+        })
+        .await
+        .unwrap();
+    tick(store, &queue).await;
+    store
+        .insert(insert_request(
+            &queue,
+            "renewed-seed",
+            InsertMode::InsertOnly,
+            "r1",
+            t,
+        ))
+        .await
+        .unwrap();
+    let request = ClaimRequest {
+        issued_at: t,
+        lease_nanos: u64::try_from(HOUR).unwrap(),
+        ..claim(&queue, "renewed-rebuild-claim", "retention")
+    };
+    let granted = store.claim(request.clone()).await.unwrap();
+    assert_eq!(granted.len(), 1);
+    clock.set(t + 30 * MINUTE);
+    let mut renewal = group("renew-rebuild-claim");
+    renewal.issued_at = t + 30 * MINUTE;
+    renewal.claimed_updates = granted
+        .iter()
+        .map(|work| {
+            let mut change = update(work);
+            change.disposition = Disposition::Retain {
+                renew_nanos: Some(u64::try_from(HOUR).unwrap()),
+            };
+            change
+        })
+        .collect();
+    committed(&commit_one(store, &queue, renewal).await.unwrap());
+    let renewed = store.claim(request.clone()).await.unwrap();
+    assert!(renewed[0].record.lease_expires_at > granted[0].record.lease_expires_at);
+    // Later steps of the caller's run keep the clock they had.
+    clock.set(before);
+    (request, renewed)
+}
+/// After a restart or a cold rebuild from the log: the renewed lease replays
+/// unchanged and still holds the horizon at the claim's `issued_at`.
+pub async fn verify_renewed_claim_after_rebuild(
+    store: &dyn QueueStore,
+    clock: &TestClock,
+    queue: QueueAddress,
+    request: ClaimRequest,
+    expected: Vec<ClaimedWork>,
+) {
+    clock.set(request.issued_at + 30 * MINUTE);
+    assert_eq!(store.claim(request.clone()).await.unwrap(), expected);
+    // Past the first lease, its skew and the request window; only the renewal is live.
+    clock.set(request.issued_at + HOUR + SKEW + MINUTE);
+    tick(store, &queue).await;
+    assert_eq!(store.claim(request.clone()).await.unwrap(), expected);
+    assert!(
+        store
+            .insert(insert_request(
+                &queue,
+                "after-rebuild",
+                InsertMode::InsertOnly,
+                "r2",
+                request.issued_at
+            ))
+            .await
+            .is_ok()
+    );
+    clock.set(request.issued_at + 30 * MINUTE + HOUR + SKEW + 1);
+    tick(store, &queue).await;
+    assert_eq!(store.claim(request).await, Err(QueueError::RequestExpired));
+}
 pub async fn horizon_never_passes_a_live_claim(
     store: &dyn QueueStore,
     clock: &TestClock,
@@ -3803,6 +3892,60 @@ pub async fn horizon_never_passes_a_live_claim(
         .await
         .unwrap();
     assert_eq!(again.len(), 2);
+
+    // A renewal moves the lease on the work row only. The renewed claim must
+    // keep holding the horizon after its own first lease and the request window
+    // are both behind the clock.
+    let t1 = 200 * HOUR;
+    clock.set(t1);
+    tick(store, &queue).await;
+    let renewed_claim = ClaimRequest {
+        issued_at: t1,
+        lease_nanos: u64::try_from(HOUR).unwrap(),
+        ..claim(&queue, "renewed-claim", "retention")
+    };
+    let granted = store.claim(renewed_claim.clone()).await.unwrap();
+    assert!(!granted.is_empty());
+    clock.set(t1 + 30 * MINUTE);
+    let mut renewal = group("renew-held-claim");
+    renewal.issued_at = t1 + 30 * MINUTE;
+    renewal.claimed_updates = granted
+        .iter()
+        .map(|work| {
+            let mut change = update(work);
+            change.disposition = Disposition::Retain {
+                renew_nanos: Some(u64::try_from(HOUR).unwrap()),
+            };
+            change
+        })
+        .collect();
+    committed(&commit_one(store, &queue, renewal).await.unwrap());
+    let renewed = store.claim(renewed_claim.clone()).await.unwrap();
+    assert_eq!(renewed.len(), granted.len());
+    // Past the first lease and its skew, and past `issued_at + window + skew`;
+    // only the renewed lease is still live.
+    clock.set(t1 + HOUR + SKEW + MINUTE);
+    tick(store, &queue).await;
+    assert_eq!(store.claim(renewed_claim.clone()).await.unwrap(), renewed);
+    assert!(
+        store
+            .insert(insert_request(
+                &queue,
+                "at-renewed-claim",
+                InsertMode::InsertOnly,
+                "l3",
+                t1
+            ))
+            .await
+            .is_ok()
+    );
+    // Once the renewed lease and the skew are behind the clock the claim goes.
+    clock.set(t1 + 30 * MINUTE + HOUR + SKEW + 1);
+    tick(store, &queue).await;
+    assert_eq!(
+        store.claim(renewed_claim).await,
+        Err(QueueError::RequestExpired)
+    );
 }
 
 /// After cleanup removes a retired deleted row, the key may be inserted again
