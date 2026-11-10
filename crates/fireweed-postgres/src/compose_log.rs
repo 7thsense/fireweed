@@ -42,7 +42,7 @@ use postgres::Client;
 
 use crate::connect::{PostgresConnectConfig, connect};
 
-const SCHEMA: &str = r#"
+pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS log_epochs (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     assignment_epoch BIGINT NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
@@ -193,7 +193,8 @@ impl PostgresLog {
     }
 
     fn from_client(mut client: Client) -> EngineResult<Self> {
-        st(client.batch_execute(SCHEMA))?;
+        crate::schema_version::open_blocking(&mut client, &[&crate::schema_version::COMPOSE_LOG])
+            .map_err(crate::schema_version::into_engine)?;
         Ok(Self {
             client: RefCell::new(Some(client)),
         })

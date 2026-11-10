@@ -3,7 +3,7 @@
   "scope": "correctness_only_not_tp005",
   "entries": [
     {
-      "debt_id": "e9079f5a23187f64e4f2",
+      "debt_id": "8a31f565d91c24baa2c7",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::ordinary_commit_and_preview_sample_clock_after_prospective_unique_authority",
       "package": "fireweed-postgres",
@@ -13,7 +13,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "36b158fff3644267edfd",
+      "debt_id": "1122c2e2ef1aff22c3df",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::retained_ordinary_receipt_rejects_administrative_only_disposition",
       "package": "fireweed-postgres",
@@ -23,7 +23,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "03f19dc5f0ce8ea907da",
+      "debt_id": "a02ba5b297058a02d46e",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::replay_rejects_oversized_raw_lease_hash_before_payload_hydration",
       "package": "fireweed-postgres",
@@ -33,7 +33,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "9e93d581c4f951fa9024",
+      "debt_id": "c001f434d804c5dd9851",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::public_preview_never_allocates_ids_and_late_admin_failure_rolls_back_receipts",
       "package": "fireweed-postgres",
@@ -43,7 +43,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "a26c273a7319c9322962",
+      "debt_id": "d5d1bbb854882f9aa10f",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::shutdown_waits_for_final_worker_reservation_after_dispatch_root_returns",
       "package": "fireweed-postgres",
@@ -53,7 +53,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "b255f857edaf7834aa64",
+      "debt_id": "981d301c6e3d15f5e5a8",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::selective_loader_and_writer_avoid_unrelated_payload",
       "package": "fireweed-postgres",
@@ -63,7 +63,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "707f0bc943d05461e2eb",
+      "debt_id": "4196cc788e1e682199a9",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::selective_writer_disambiguates_colliding_names_and_values",
       "package": "fireweed-postgres",
@@ -73,7 +73,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "e1cdf1ec11127d1b3de4",
+      "debt_id": "ec354e95b0d35df5317e",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::fresh_groups_read_prior_sql_writes_and_storage_failure_rolls_back",
       "package": "fireweed-postgres",
@@ -83,7 +83,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "8aff5c90d4a010458911",
+      "debt_id": "b5862332e448592e95ae",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::admitted_caller_cancellation_drains_and_reopens_complete_group",
       "package": "fireweed-postgres",
@@ -93,7 +93,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "edcc7eb9f1fb1eb5a22c",
+      "debt_id": "c88ed7b4bf21f82471a3",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::full_values_disambiguate_all_discovery_hash_collisions",
       "package": "fireweed-postgres",
@@ -103,7 +103,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "eee817fec08a849e6b7c",
+      "debt_id": "e5878602c18a365b571d",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::reopening_schema_fences_writers_before_dependent_tables",
       "package": "fireweed-postgres",
@@ -113,7 +113,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "be44a93f6dbfed2d80e8",
+      "debt_id": "67111dad739b2b833ae9",
       "path": "crates/fireweed-postgres/src/queue_store.rs",
       "test": "queue_store::tests::invalid_envelope_precedes_saturated_admission",
       "package": "fireweed-postgres",

@@ -82,6 +82,7 @@ pub use async_control_plane::AsyncPostgresControlPlane;
 mod credential;
 mod relational;
 mod runtime_safe;
+mod schema_version;
 pub use async_log::{AsyncPostgresLog, DEFAULT_ASYNC_LOG_MAILBOX_CAPACITY};
 pub use async_log_replay::{
     async_composed_postgres_backend, async_composed_postgres_backend_in_schema,
@@ -106,7 +107,7 @@ pub use credential::{
 pub use relational::{PostgresRelational, PostgresRelationalBackend};
 pub use runtime_safe::{DEFAULT_RUNTIME_SAFE_IN_FLIGHT, ProductBackend, RuntimeSafeBackend};
 
-const SCHEMA: &str = r#"
+pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS queues (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, definition TEXT NOT NULL,
     assignment_epoch BIGINT NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
@@ -614,7 +615,8 @@ impl PostgresBackend {
     }
 
     fn from_client(mut client: Client) -> EngineResult<Self> {
-        st(client.batch_execute(SCHEMA))?;
+        schema_version::open_blocking(&mut client, &[&schema_version::BACKEND])
+            .map_err(schema_version::into_engine)?;
         let mut inner = Inner {
             client,
             projections: HashMap::new(),

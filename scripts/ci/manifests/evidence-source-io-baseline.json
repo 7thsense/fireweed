@@ -1250,7 +1250,7 @@
         "evidence"
       ],
       "lines": [
-        5393
+        5394
       ],
       "path": "crates/fireweed-postgres/src/relational.rs",
       "symbol": "set_emission_cursor"
@@ -5645,7 +5645,7 @@
       "calls": [
         "execute"
       ],
-      "line": 5388,
+      "line": 5389,
       "path": "crates/fireweed-postgres/src/relational.rs",
       "symbol": "set_emission_cursor"
     },
@@ -6219,7 +6219,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "32b76d99ddb2a9234212869be0d9a64ebcff996c6c6f3bcec42d4135e6d20679",
+  "scan_sha256": "eb046d50827a5ce54ce9f72a47b74c516b0545bda7967355c06f3ce98f821b99",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -9741,12 +9741,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5372,
+      "first_match_line": 5373,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 5372,
-      "line": 5324,
+      "last_match_line": 5373,
+      "line": 5325,
       "markers": [
         "td008"
       ],
@@ -9759,12 +9759,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 5420,
+      "first_match_line": 5421,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 5420,
-      "line": 5388,
+      "last_match_line": 5421,
+      "line": 5389,
       "markers": [
         "td008"
       ],
@@ -19935,7 +19935,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 121522,
+      "last_match_line": 121835,
       "line": 1,
       "markers": [
         "e3",

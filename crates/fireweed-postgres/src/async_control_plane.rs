@@ -4,6 +4,7 @@ use crate::control_plane::{
     SELECT_LEASE_COLS, nanos_ts, optional_lease, parse_state, parts, row_to_lease, st, state_str,
     ts_nanos,
 };
+use crate::schema_version;
 use async_trait::async_trait;
 use fireweed_core::{OwnerId, UtcTimestamp};
 use fireweed_engine::{
@@ -74,7 +75,17 @@ impl AsyncPostgresControlPlane {
                 "CREATE SCHEMA IF NOT EXISTS \"{schema}\"; SET search_path TO \"{schema}\";"
             ))
             .await)?;
-        st(tx.batch_execute(CONTROL_PLANE_SCHEMA).await)?;
+        let gate = schema_version::gate(&tx, &schema_version::CONTROL_PLANE)
+            .await
+            .map_err(schema_version::into_engine)?;
+        if gate.run_ddl {
+            st(tx.batch_execute(CONTROL_PLANE_SCHEMA).await)?;
+        }
+        if gate.stamp {
+            schema_version::stamp(&tx, &schema_version::CONTROL_PLANE)
+                .await
+                .map_err(schema_version::into_engine)?;
+        }
         st(tx.commit().await)?;
         Ok(Self {
             config,
