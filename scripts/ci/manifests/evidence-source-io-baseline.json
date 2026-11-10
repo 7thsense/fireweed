@@ -3320,7 +3320,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "cbf6171c4725d37d14b9360505f54e8ecc191cf610338544c32c07fe58b850d2",
+  "scan_sha256": "6c3beb28d69d262fb776f7d2e6bbb1b6151e863727d53777272c10a61ac84300",
   "schema_version": 2,
   "source_surfaces": [
     {
