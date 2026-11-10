@@ -47714,6 +47714,36 @@
         "fireweed-engine",
         "--no-default-features",
         "--lib",
+        "queue_retention::tests::a_keep_forever_window_never_advances_the_horizon",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [],
+      "harness_id": "queue_retention::tests::a_keep_forever_window_never_advances_the_horizon",
+      "id": "Cargo.toml::fireweed-engine::fireweed_engine::test::queue_retention::tests::a_keep_forever_window_never_advances_the_horizon",
+      "listed_kind": "test",
+      "package": "fireweed-engine",
+      "target": "fireweed_engine",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed-engine",
+        "--no-default-features",
+        "--lib",
         "queue_retention::tests::claim_liveness_includes_the_skew",
         "--",
         "--exact"
@@ -122784,7 +122814,7 @@
     }
   ],
   "schema_version": 1,
-  "source_inventory_sha256": "93ed19fcdaeafdca9a54089db2fe2a6952af5552b78a372bda09a591b9ae5c66",
+  "source_inventory_sha256": "fde11834eebb45f10b8e455dd9c857cb8a7103e2009321202c77dfeb80bd8b5c",
   "workspaces": [
     {
       "listing_error_sha256": "",

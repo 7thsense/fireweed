@@ -65,10 +65,9 @@ pub fn plan_retention(
     at: i64,
     oldest_live_claim: Option<i64>,
 ) -> RetentionState {
-    let back = |nanos: u64| {
-        i64::try_from(i128::from(at) - i128::from(nanos).min(i128::from(u64::MAX)))
-            .unwrap_or(if at < 0 { i64::MIN } else { i64::MAX })
-    };
+    // `nanos` is never negative, so the difference can only fall below
+    // `i64::MIN`. That clamps to `i64::MIN`: nothing is expired or removed.
+    let back = |nanos: u64| i64::try_from(i128::from(at) - i128::from(nanos)).unwrap_or(i64::MIN);
     let mut horizon = back(retention.request_id_nanos);
     if let Some(claim) = oldest_live_claim {
         horizon = horizon.min(claim);
@@ -145,6 +144,30 @@ mod tests {
             plan_retention(&reusable, RetentionState::INITIAL, i64::MIN, None).horizon,
             i64::MIN
         );
+    }
+    #[test]
+    fn a_keep_forever_window_never_advances_the_horizon() {
+        let forever = |deleted_keys| QueueRetention {
+            request_id_nanos: u64::MAX,
+            deleted_keys,
+        };
+        for retention in [
+            forever(DeletedKeyPolicy::Reusable),
+            forever(DeletedKeyPolicy::Retired {
+                window_nanos: u64::MAX,
+            }),
+        ] {
+            for at in [1, 1_000_000, i64::MAX] {
+                let state = plan_retention(&retention, RetentionState::INITIAL, at, None);
+                assert_eq!(state, RetentionState::INITIAL, "at {at}");
+                assert!(check_horizon(0, state.horizon).is_ok());
+                assert!(check_horizon(i64::MIN, state.horizon).is_ok());
+            }
+        }
+        let retired = forever(DeletedKeyPolicy::Retired {
+            window_nanos: u64::MAX,
+        });
+        assert!(is_retired(&retired, 0, i64::MAX));
     }
     #[test]
     fn claim_liveness_includes_the_skew() {
