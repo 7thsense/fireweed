@@ -52,7 +52,6 @@ target package names are intentionally identical.
 | fireweed-conformance | fireweed-conformance | private | - | - | test-only | Maintainer backend contract suite. |
 | fireweed-release | fireweed-release | private | - | - | release tooling only | Maintainer verification-ledger and evidence tools. |
 | fireweed-sim-support | fireweed-sim-support | private | - | - | test-only | Deterministic simulation support with no product API. |
-| fireweed-workload | fireweed-workload | private | - | - | public API workflow qualification | Original-row campaign, primitive and log-recovery workload runner. |
 <!-- workspace-package-inventory:end -->
 <!-- markdownlint-enable MD013 -->
 
