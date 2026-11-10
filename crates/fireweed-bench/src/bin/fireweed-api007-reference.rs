@@ -327,7 +327,7 @@ async fn construct(c: &Config) -> QueueResult<Constructed> {
                     ),
                 ))),
                 fireweed_core::OwnerId::new("bench").map_err(|e| QueueError::Invalid(e.to_string()))?,
-                Arc::new(fireweed_bench::SystemClock),
+                Arc::new(fireweed::SystemClock),
                 Arc::new(SystemLeaseClock),
                 std::time::Duration::from_millis(
                     fireweed_engine::ControlPlaneConfig::default().lease_ttl_ms,

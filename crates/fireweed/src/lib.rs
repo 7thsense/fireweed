@@ -52,8 +52,14 @@ pub mod queue;
 #[cfg(all(feature = "objectlog", feature = "turso"))]
 pub mod queue_recovery_pipeline;
 
+mod clock;
+mod config;
 mod facade;
 mod operator;
+
+pub use clock::SystemClock;
+pub use config::ConfigSecret;
+use config::SecretValue;
 #[cfg(all(test, feature = "objectlog", feature = "turso"))]
 mod terminal_purge_tests;
 #[cfg(feature = "turso")]
@@ -681,41 +687,6 @@ impl std::error::Error for EnsureQueueError {
     }
 }
 
-/// Wall-clock [`Clock`] for production use — pass `Arc::new(SystemClock)` to any `open_*` constructor.
-/// Tests inject a controllable clock instead (e.g. `fireweed_memory::ManualClock`). Provided here so a
-/// consumer depending on `fireweed` alone has a ready clock without naming `fireweed-engine`.
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> UtcTimestamp {
-        let d = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        UtcTimestamp::new(d.as_secs() as i64, d.subsec_nanos()).expect("valid unix ts")
-    }
-}
-
-/// An owned secret used by composed storage configuration. Its value is redacted from `Debug` and has
-/// no public accessor; the composition root consumes it internally.
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct SecretValue(String);
-
-impl SecretValue {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-impl fmt::Debug for SecretValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SecretValue(<redacted>)")
-    }
-}
-
 /// Authoritative command-log storage selected by an composed deployment.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum ObjectLogConfig {
@@ -897,21 +868,6 @@ pub(crate) struct ComposedStorageConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ObjectLogAuthorityConfig {
     NativeConditionalWrite,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct ConfigSecret(SecretValue);
-
-impl ConfigSecret {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(SecretValue::new(value))
-    }
-}
-
-impl fmt::Debug for ConfigSecret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ConfigSecret(<redacted>)")
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
