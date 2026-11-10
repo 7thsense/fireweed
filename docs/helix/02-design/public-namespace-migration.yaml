@@ -41,7 +41,6 @@ canonical_surfaces:
     - fireweed-bench
   binaries:
     - fireweed-service
-    - fireweed-postgres-migrate
     - fireweed-loadgen
     - fireweed-bench
     - fireweed-verify-ledger

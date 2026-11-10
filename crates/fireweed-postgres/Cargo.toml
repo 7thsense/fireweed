@@ -9,10 +9,6 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
-[[bin]]
-name = "fireweed-postgres-migrate"
-path = "src/bin/fireweed-postgres-migrate.rs"
-
 # Driven adapter: postgres (atomic durability class). Durable command LOG in postgres tables; the
 # priority-ordered projection is the shared `fireweed-projection` materialization, rebuilt from the log.
 # Uses the synchronous PostgreSQL client behind the runtime-safe storage boundary.
