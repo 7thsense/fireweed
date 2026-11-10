@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Work stays ineligible until not_before; advancing the clock unlocks delivery. Finalization maps complete, fail, retry, release, and rearm." />
-    <title>Scheduled delivery with not_before — Fireweed Queue</title>
+    <meta name="description" content="Work stays ineligible until available_at; a claimed item is sent back with Disposition::RetryAt and becomes claimable again once its time passes." />
+    <title>Scheduled delivery and retry — Fireweed Queue</title>
     <link rel="stylesheet" href="../assets/site.css" />
   </head>
   <body>
@@ -33,138 +33,57 @@
       <main>
 
         <div class="page-intro">
-          <h2>Scheduled delivery with not_before</h2>
-          <p>Work stays ineligible until not_before; advancing the clock unlocks delivery. Finalization maps complete, fail, retry, release, and rearm.</p>
+          <h2>Scheduled delivery and retry</h2>
+          <p>Work stays ineligible until available_at; a claimed item is sent back with Disposition::RetryAt and becomes claimable again once its time passes.</p>
         </div>
         <div class="example-meta">
           <span class="badge neutral">eligibility</span>
-          <span>Provenance: <code>crates/fireweed/tests/whitebox/product_validation_tests.rs::scheduled_batch_delivery_profile</code></span>
+          <span>Provenance: <code>crates/fireweed/examples/queue_lifecycle.rs::retry_and_schedule</code></span>
         </div>
-        <div class="tag-list" style="margin-bottom:16px"><span class="tag">eligibility</span><span class="tag">scheduling</span><span class="tag">product-ac</span></div>
+        <div class="tag-list" style="margin-bottom:16px"><span class="tag">eligibility</span><span class="tag">scheduling</span><span class="tag">retry</span></div>
         <div class="code-block">
   <div class="label"><span>docs/site/examples/src/scheduled-delivery.rs</span><span>rust</span></div>
-  <pre><code>// Provenance: crates/fireweed/tests/whitebox/product_validation_tests.rs::scheduled_batch_delivery_profile
+  <pre><code>// Provenance: crates/fireweed/examples/queue_lifecycle.rs::retry_and_schedule
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
-async fn scheduled_batch_delivery_profile&lt;B: LibBackend&gt;(
-    fireweed: &amp;RuntimeCore&lt;B&gt;,
-    clock: Arc&lt;ManualClock&gt;,
-    tenant: &amp;str,
-) -&gt; ScheduledProfileEvidence {
-    let q = qk(tenant, &quot;campaign&quot;);
-    fireweed
-        .create_queue(qdef_scheduled_actions(
-            tenant,
-            &quot;campaign&quot;,
-            PriorityDirection::Ascending,
-            OrderingMode::Strict,
+async fn retry_and_schedule(queue: &amp;Queue, address: &amp;QueueAddress) -&gt; QueueResult&lt;()&gt; {
+    let later = now() + 3_600_000_000_000;
+    queue
+        .insert(InsertRequest {
+            queue: address.clone(),
+            request_id: &quot;load-2&quot;.into(),
+            mode: InsertMode::InsertOnly,
+            items: vec![job(&quot;flaky&quot;, 1, 0), job(&quot;nightly&quot;, 1, later)],
+            issued_at: now(),
+        })
+        .await?;
+
+    // `nightly` is not eligible for an hour, so only `flaky` is delivered.
+    let claimed = queue
+        .claim(claim_request(address, &quot;claim-2&quot;, now()))
+        .await?;
+    assert_eq!(claimed.len(), 1);
+    let retry_at = now() + 60_000_000_000;
+    queue
+        .commit(settle(
+            address,
+            &quot;retry-1&quot;,
+            &amp;claimed[0],
+            Disposition::RetryAt(retry_at),
         ))
-        .await
-        .unwrap();
+        .await?;
 
-    let actions = [
-        (&quot;complete&quot;, 10i64),
-        (&quot;fail&quot;, 20),
-        (&quot;retry&quot;, 30),
-        (&quot;release&quot;, 40),
-        (&quot;rearm&quot;, 50),
-    ];
-    for &amp;(outcome, due) in &amp;actions {
-        let key = ClientItemKey::new(format!(&quot;{tenant}-{outcome}&quot;)).unwrap();
-        let item = NewItem {
-            client_item_key: Some(key),
-            priority: Some(PriorityValue::Int64(due)),
-            not_before: Some(ts(due)),
-            payload: Some(Bytes::from(outcome.as_bytes().to_vec())),
-            ..Default::default()
-        };
-        fireweed.push(&amp;q, item).await.unwrap();
-    }
+    // Neither item is eligible yet; both become claimable once the clock passes their times.
     assert!(
-        fireweed.claim(&amp;q, 10, 60_000).await.unwrap().is_empty(),
-        &quot;not_before prevents early delivery&quot;
+        queue
+            .claim(claim_request(address, &quot;claim-3&quot;, now()))
+            .await?
+            .is_empty()
     );
-
-    clock.set(100);
-    let mut delivered_order = Vec::new();
-    let mut delivered_ids = Vec::new();
-    let mut max_items_pacing_observed = true;
-    let mut stable_client_keys_observed = true;
-
-    let complete = claim_one(fireweed, &amp;q, &amp;mut delivered_order, &amp;mut delivered_ids).await;
-    assert_eq!(payload_label(&amp;complete), &quot;complete&quot;);
-    assert_eq!(
-        complete.client_item_key.as_str(),
-        format!(&quot;{tenant}-complete&quot;)
-    );
-    fireweed.ack(&amp;q, [complete.item_id]).await.unwrap();
-
-    let failed = claim_one(fireweed, &amp;q, &amp;mut delivered_order, &amp;mut delivered_ids).await;
-    assert_eq!(payload_label(&amp;failed), &quot;fail&quot;);
-    stable_client_keys_observed &amp;= failed.client_item_key.as_str() == format!(&quot;{tenant}-fail&quot;);
-    fireweed.fail(&amp;q, [failed.item_id]).await.unwrap();
-
-    let retry = claim_one(fireweed, &amp;q, &amp;mut delivered_order, &amp;mut delivered_ids).await;
-    assert_eq!(payload_label(&amp;retry), &quot;retry&quot;);
-    stable_client_keys_observed &amp;= retry.client_item_key.as_str() == format!(&quot;{tenant}-retry&quot;);
-    fireweed
-        .nack(
-            &amp;q,
-            [retry.item_id],
-            Nack::Retry {
-                not_before: Some(ts(130)),
-            },
-        )
-        .await
-        .unwrap();
-
-    let release = claim_one(fireweed, &amp;q, &amp;mut delivered_order, &amp;mut delivered_ids).await;
-    assert_eq!(payload_label(&amp;release), &quot;release&quot;);
-    stable_client_keys_observed &amp;= release.client_item_key.as_str() == format!(&quot;{tenant}-release&quot;);
-    fireweed
-        .nack(&amp;q, [release.item_id], Nack::Release)
-        .await
-        .unwrap();
-    let release_again = fireweed.claim(&amp;q, 1, 60_000).await.unwrap();
-    max_items_pacing_observed &amp;= release_again.len() == 1;
-    assert_eq!(release_again[0].item_id, release.item_id);
-    fireweed.ack(&amp;q, [release_again[0].item_id]).await.unwrap();
-
-    let rearm = claim_one(fireweed, &amp;q, &amp;mut delivered_order, &amp;mut delivered_ids).await;
-    assert_eq!(payload_label(&amp;rearm), &quot;rearm&quot;);
-    stable_client_keys_observed &amp;= rearm.client_item_key.as_str() == format!(&quot;{tenant}-rearm&quot;);
-    fireweed.rearm(&amp;q, [rearm.item_id]).await.unwrap();
-    let rearm_again = fireweed.claim(&amp;q, 1, 60_000).await.unwrap();
-    max_items_pacing_observed &amp;= rearm_again.len() == 1;
-    assert_eq!(rearm_again[0].item_id, rearm.item_id);
-    fireweed.ack(&amp;q, [rearm_again[0].item_id]).await.unwrap();
-
-    clock.set(120);
-    assert!(
-        fireweed.claim(&amp;q, 1, 60_000).await.unwrap().is_empty(),
-        &quot;retry backoff is caller-chosen not_before, not fireweed rate admission&quot;
-    );
-    clock.set(130);
-    let retry_again = fireweed.claim(&amp;q, 1, 60_000).await.unwrap();
-    max_items_pacing_observed &amp;= retry_again.len() == 1;
-    assert_eq!(retry_again[0].item_id, retry.item_id);
-    fireweed.ack(&amp;q, [retry_again[0].item_id]).await.unwrap();
-
-    let m = fireweed.metrics(&amp;q).await.unwrap();
-    assert_eq!(
-        (m.complete, m.failed, m.pending, m.leased),
-        (4, 1, 0, 0),
-        &quot;all scheduled actions reached terminal state after the five outcome mappings&quot;
-    );
-
-    delivered_ids.sort();
-    delivered_ids.dedup();
-    ScheduledProfileEvidence {
-        scheduled_actions: actions.len(),
-        delivered_in_schedule_order: delivered_order == [10, 20, 30, 40, 50],
-        unique_deliveries: delivered_ids.len(),
-        max_items_pacing_observed,
-        stable_client_keys_observed,
-    }
+    let due = queue
+        .claim(claim_request(address, &quot;claim-4&quot;, later + 1))
+        .await?;
+    assert_eq!(due.len(), 2);
+    Ok(())
 }</code></pre>
 </div>
         <div class="prose">
@@ -174,7 +93,7 @@ async fn scheduled_batch_delivery_profile&lt;B: LibBackend&gt;(
           </p>
           <p>
             <a href="index.html">All examples</a> ·
-            Next: <a href="retry-delays.html">Absolute and relative retry delays</a>
+            Next: <a href="durable-open.html">Open the production queue</a>
           </p>
         </div>
 

@@ -41,37 +41,29 @@
             or production-readiness claim.
           </p>
           <p>
-            Storage is the public 4×3 matrix: log
-            (<code>memory</code> | <code>postgres</code> |
-            <code>filesystem</code> | <code>s3</code>) × projection
-            (<code>memory</code> | <code>turso</code> (default) |
-            <code>postgres</code>). Hybrid and legacy profile names are not product values.
+            The public API is <code>fireweed::queue::Queue</code> (API-007). There is one
+            production storage composition and one reference store.
           </p>
         </div>
         <div class="table-wrap"><table class="data">
-          <thead><tr><th>Log × projection</th><th>Status</th><th>Notes</th></tr></thead>
+          <thead><tr><th>Constructor</th><th>Status</th><th>Notes</th></tr></thead>
           <tbody>
-            <tr><td><code>memory</code> × <code>memory</code> | <code>turso</code> | <code>postgres</code></td><td><span class="badge ok">supported</span></td><td>Class B: durability limited to the projection after process death; no Class A log replay.</td></tr>
-            <tr><td><code>postgres</code> × all three projections</td><td><span class="badge ok">supported</span></td><td>Class A; the optional postgres cargo feature must fail closed when omitted.</td></tr>
-            <tr><td><code>filesystem</code> × all three projections</td><td><span class="badge ok">supported</span></td><td>Class A local/NAS object log.</td></tr>
-            <tr><td><code>s3</code> × all three projections</td><td><span class="badge ok">supported</span></td><td>Class A object log; NativeConditionalWrite S3 only—provider brands are not product SKUs.</td></tr>
-            <tr><td><code>turso</code> projection (any log)</td><td><span class="badge ok">supported default</span></td><td>Embedded/local Turso 0.7 WAL; public default when projection is unset. Remote/sync/MVCC modes are out of scope.</td></tr>
-            <tr><td><code>hybrid</code> / <code>hybrid-async</code> / <code>hybrid-strict</code></td><td><span class="badge blocked">retired</span></td><td>Not public selectors; hard-rejected. Historical evidence only.</td></tr>
-            <tr><td><code>objectlog</code> / <code>inmemory</code> aliases</td><td><span class="badge blocked">retired</span></td><td>Use <code>filesystem</code>|<code>s3</code> and <code>memory</code>.</td></tr>
+            <tr><td><code>Queue::s3_turso</code></td><td><span class="badge ok">supported</span></td><td>Production: S3 object log (native conditional write), disposable local Turso projection per owned queue, PostgreSQL queue leases. Provider brands are not product SKUs.</td></tr>
+            <tr><td><code>Queue::postgres</code></td><td><span class="badge ok">supported</span></td><td>Native PostgreSQL reference store; opt-in cargo feature <code>postgres</code>.</td></tr>
+            <tr><td><code>Queue::ephemeral_disk</code></td><td><span class="badge neutral">development</span></td><td>Throwaway on-disk store for development and tests; nothing survives shutdown.</td></tr>
           </tbody>
         </table></div>
         <div class="prose">
           <h2>What this source tree ships</h2>
           <ul>
             <li>Workspace package identity v0.30.0 (source tree; tag cut is a separate release step)</li>
-            <li>Concrete <code>Fireweed</code> Rust facade (<code>open</code> / <code>open_async(StorageConfig)</code>)</li>
+            <li>The <code>Queue</code> Rust API (<code>fireweed::queue</code>)</li>
             <li>Issues-only contribution policy; MIT OR Apache-2.0</li>
           </ul>
           <h2>Explicitly deferred</h2>
           <ul>
             <li>crates.io package publication</li>
             <li>Universal performance bounds, multi-region failover, provider certification</li>
-            <li>Historical query (<code>read_as_of</code>) as a supported facade API</li>
             <li>Remote / sync / MVCC Turso modes</li>
           </ul>
           <h2>Public examples</h2>

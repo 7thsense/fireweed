@@ -73,3 +73,8 @@ bytes = "1"
 name = "simple_queue_postgres"
 path = "tests/simple_queue_postgres.rs"
 required-features = ["postgres"]
+
+[[example]]
+name = "queue_lifecycle"
+path = "examples/queue_lifecycle.rs"
+required-features = ["s3-turso"]

@@ -73,11 +73,10 @@ checker. Rust visibility protects private ownership. Semantic review additionall
 checks invariant bypass, DTO/SDK leakage and policy duplication.
 
 Fireweed is pre-release and keeps no compatibility with data or formats from
-earlier builds; old data is refused. Existing legacy facade and alternate-backend
-modules require exact source/target exceptions with an owner and removal trigger. Exceptions
-cover only recorded debt; new violations and expanded baselines fail. Test-only
-adapter→facade edges may exercise public conformance; they do not permit a
-production cycle. Remove legacy consumer exports after the single-adapter cutover.
+earlier builds; old data is refused. The pre-`Queue` facade has been retired; `Queue` is the only public entry point.
+No legacy-edge exceptions remain: any adapter dependency outside the allowed set fails
+the boundary check. Test-only adapter→`Queue` edges may exercise public conformance;
+they do not permit a production cycle.
 
 ## Deployment
 
