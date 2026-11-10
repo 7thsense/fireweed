@@ -1,5 +1,6 @@
 //! Native asynchronous PostgreSQL baseline for API-007. Complete operation jobs
 //! retain admission and connection ownership after caller cancellation.
+use crate::schema_version;
 use fireweed_core::queue_contract::*;
 #[cfg(test)]
 use fireweed_engine::queue_admission::QueueAdmission;
@@ -42,7 +43,7 @@ use std::sync::{
 use tokio::sync::{Mutex, Semaphore};
 use tokio_postgres::{Client, GenericClient, Row, Transaction, types::ToSql};
 
-const DDL: &str = r#"
+pub(crate) const DDL: &str = r#"
 CREATE SCHEMA IF NOT EXISTS fireweed_api007;
 CREATE TABLE IF NOT EXISTS fireweed_api007.queues (
  id BIGSERIAL PRIMARY KEY, address_hash BYTEA NOT NULL, tenant BYTEA NOT NULL, name BYTEA NOT NULL,
@@ -90,6 +91,12 @@ const RECORD_COLUMNS: &str = "r.id,r.collection,r.key,r.version::text,r.active,r
 /// may be retried with the same id later. Runs before any lookup.
 fn check_issued_at(clock: &dyn Clock, issued_at: i64) -> QueueResult<()> {
     fireweed_engine::queue_retention::check_issued_at(issued_at, timestamp_nanos(clock.now())?)
+}
+fn queue_gate_error(error: schema_version::GateError<tokio_postgres::Error>) -> QueueError {
+    match error {
+        schema_version::GateError::Refused(message) => QueueError::Invalid(message),
+        schema_version::GateError::Db(error) => storage(error),
+    }
 }
 fn storage(error: impl std::fmt::Display) -> QueueError {
     QueueError::OutcomeUnknown(error.to_string())
@@ -229,6 +236,9 @@ impl PostgresQueueStore {
                 // every operation reads queues first and retains that lock until
                 // commit. Otherwise DDL's queues->records lock order can deadlock
                 // a writer that updates records before its queue sequence row.
+                let gate = schema_version::gate(&tx, &schema_version::QUEUE_STORE)
+                    .await
+                    .map_err(queue_gate_error)?;
                 let exists: bool = tx
                     .query_one(
                         "SELECT to_regclass('fireweed_api007.queues') IS NOT NULL",
@@ -243,6 +253,11 @@ impl PostgresQueueStore {
                         .map_err(storage)?;
                 }
                 tx.batch_execute(DDL).await.map_err(storage)?;
+                if gate.stamp {
+                    schema_version::stamp(&tx, &schema_version::QUEUE_STORE)
+                        .await
+                        .map_err(queue_gate_error)?;
+                }
                 tx.commit().await.map_err(storage)?;
             }
             clients.push(Mutex::new(Some(client)));

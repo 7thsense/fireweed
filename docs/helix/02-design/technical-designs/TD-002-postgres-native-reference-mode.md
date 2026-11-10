@@ -3,18 +3,14 @@ ddx:
   id: td-postgres-native-reference-mode
   depends_on: [architecture, api-queue-claim-commit-contract, td-storage-architecture-backend-contracts, contract-construction-config, contract-durable-queue-records]
   review:
-    self_hash: 1b657638258f7d3fa15e46b7536d33d766ade1a0948a32598dc5c9ae65b7828b
+    self_hash: 80778e507024702cedc72601827f3baa40e639f1207421d7ad8e676882f5e2dc
     deps:
-      adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
-      adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
-      adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
-      adr-queue-as-shard-unit-and-projection-families: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
-      adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
-      api-native-client-interface: ae6c682dbf6e269b6792351f1677477f2324fb24cb4cc4f85392f6369fd43b0b
-      concerns: 52b6bbb92cff001a75227115afb20f4d0a73781ec98f49ab446a6866c17284dc
-      prd: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
-      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
-    reviewed_at: "2026-07-20T00:01:26Z"
+      api-queue-claim-commit-contract: d7981b6ff3af923cf6d6d6fa3065d12186867ec47ef09613ac2c030277b332a1
+      architecture: 0fb7e5ddb84e59f909e455b130450962d98e5be6ab0306ea4add9e0cbb192060
+      contract-construction-config: f332fd8165cabf9c37ccf6a5d42ae34fc9f6dd50152202ab9178d81bff69df62
+      contract-durable-queue-records: 0df994edd33ee1d243dbe2b725caa20d1c398eefe136494c99101b5b24e79475
+      td-storage-architecture-backend-contracts: 5cc10b490a657e03c427507f9eee6d522698655edf0dc68b9841edbe77ba4615
+    reviewed_at: "2026-11-10T14:29:59Z"
 ---
 
 # TD-002: Native PostgreSQL queue baseline
@@ -59,6 +55,27 @@ indexes, request fingerprints/results and expired identities. Numeric columns
 retain full unsigned versions/sequences and exact signed timestamps. Key version
 high-water survives deletion; complete names/values disambiguate all hash probes.
 Metadata-only operations preserve omitted bodies/fields without hydration.
+
+### Stored schema version
+
+Every PostgreSQL DDL family (queue store, relational projection, relational
+command log, relational queue metrics, control plane, postgres backend, compose
+log) is a named component with a version constant in
+`crates/fireweed-postgres/src/schema_version.rs`. Each PostgreSQL schema holds
+one `fireweed_schema_version (component TEXT PRIMARY KEY, version BIGINT NOT
+NULL)` table. At open, under an advisory lock and in one transaction, a
+component with no tables and no row is created and stamped together; a row equal
+to the build's version continues; a different row, or component tables with no
+row (a database from before the check), fail the open before any component table
+is touched. The error names the component, the found version or `none`, and the
+expected version, and says the database must be recreated; for the queue store it
+is `QueueError::Invalid`, elsewhere the site's storage error. There is no
+migration or upgrade path.
+
+To change a component's DDL, bump its `*_SCHEMA_VERSION` and update that
+component's pin (version and SHA-256 of the DDL text) in the
+`ddl_digests_pin_component_versions` test; the test fails on any DDL edit
+without both.
 
 ## Security and Diagnostics
 

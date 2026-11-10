@@ -30,6 +30,7 @@ use fireweed_engine::{
 };
 use postgres::Client;
 
+use crate::schema_version;
 use crate::{PostgresConnectConfig, connect};
 
 pub(crate) const CONTROL_PLANE_SCHEMA: &str = r#"
@@ -363,7 +364,8 @@ impl PostgresControlPlane {
     }
 
     fn from_client(mut client: Client, config: ControlPlaneConfig) -> EngineResult<Self> {
-        st(client.batch_execute(CONTROL_PLANE_SCHEMA))?;
+        schema_version::open_blocking(&mut client, &[&schema_version::CONTROL_PLANE])
+            .map_err(schema_version::into_engine)?;
         Ok(PostgresControlPlane {
             config,
             inner: Mutex::new(RuntimeIsolatedClient(Some(client))),

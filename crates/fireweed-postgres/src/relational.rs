@@ -104,6 +104,7 @@ use fireweed_projection::{
     ProjectionData, ProjectionImage, ProjectionImageItem, query_projection_from_index_keys,
 };
 
+use crate::schema_version;
 use crate::{PostgresConnectConfig, connect};
 
 #[cfg(test)]
@@ -397,7 +398,7 @@ CREATE INDEX IF NOT EXISTS fireweed_group_due_pending_frontier_idx
     ON fireweed_group_due_pending (tenant_id,queue_id,due_at,created_seq,item_id);
 "#;
 
-const COMMAND_LOG_SCHEMA: &str = r#"
+pub(crate) const COMMAND_LOG_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS fireweed_commands (
     tenant TEXT NOT NULL,
     queue TEXT NOT NULL,
@@ -456,7 +457,7 @@ const BASELINE_RELATIONS: &[(&str, &str, &str)] = &[
     ("fireweed_instance_fences", "tenant_id", "queue_id"),
 ];
 
-const QUEUE_METRICS_SCHEMA: &str = r#"
+pub(crate) const QUEUE_METRICS_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS fireweed_queue_metrics_v2 (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL,
     pending BIGINT NOT NULL DEFAULT 0, leased BIGINT NOT NULL DEFAULT 0,
@@ -5504,8 +5505,16 @@ impl PostgresRelationalBackend {
     }
 
     fn from_client(mut client: Client) -> EngineResult<Self> {
-        let fresh: bool =
-            st(client.query_one("SELECT to_regclass('fireweed_items') IS NULL", &[]))?.get(0);
+        let gates = schema_version::open_blocking(
+            &mut client,
+            &[
+                &schema_version::RELATIONAL,
+                &schema_version::COMMAND_LOG,
+                &schema_version::QUEUE_METRICS,
+            ],
+        )
+        .map_err(schema_version::into_engine)?;
+        let fresh = gates[0].run_ddl;
         if !fresh {
             let command_log_ready: bool = st(client.query_one(
                 "SELECT NOT EXISTS ( \
@@ -5534,10 +5543,6 @@ impl PostgresRelationalBackend {
                     "postgres command log baseline/head integrity check failed".into(),
                 ));
             }
-        } else {
-            st(client.batch_execute(RELATIONAL_SCHEMA))?;
-            st(client.batch_execute(COMMAND_LOG_SCHEMA))?;
-            st(client.batch_execute(QUEUE_METRICS_SCHEMA))?;
         }
         let mut inner = Inner {
             client,
@@ -9339,8 +9344,11 @@ impl PostgresRelational {
         st(client.batch_execute(
             "SELECT pg_advisory_lock(hashtextextended('fireweed-projection-schema:' || current_schema(), 0))",
         ))?;
-        st(client.batch_execute(RELATIONAL_SCHEMA))?;
-        st(client.batch_execute(QUEUE_METRICS_SCHEMA))?;
+        schema_version::open_blocking(
+            &mut client,
+            &[&schema_version::RELATIONAL, &schema_version::QUEUE_METRICS],
+        )
+        .map_err(schema_version::into_engine)?;
         let mut inner = Inner {
             client,
             queues: HashMap::new(),
