@@ -146,7 +146,7 @@ aws s3 ls "s3://$BUCKET/$NAMESPACE_PREFIX/" --recursive | head
 Look for:
 
 - **FWSG:** `…/t/<hex>/q/<hex>/seg_candidates/…`, `…/manifest_head/…`, `….seg`
-- **LogEngine:** `…/fwlog/…`, `…/fwmeta/catalog.json`, `…/fwmeta/manifest/…`
+- **LogEngine:** `…/fwlog/…`, `…/fwmeta/queue_definitions/…`, `…/fwmeta/manifest/…`
 
 ### Embedder checklist (Snorri and peers)
 

@@ -230,7 +230,7 @@ mod tests {
             "t/aa/q/bb/manifest_head/00000000000000000001"
         ));
         assert!(key_looks_like_fwsg("ns/t/aa/q/bb/authority_protocol_v1"));
-        assert!(!key_looks_like_fwsg("fwmeta/catalog.json"));
+        assert!(!key_looks_like_fwsg("fwmeta/queue_definitions/q.json"));
         assert!(!key_looks_like_fwsg("fwlog/part-0"));
     }
 
@@ -303,7 +303,7 @@ mod tests {
     async fn mixed_fwsg_and_logengine_fails_with_mixed_token() {
         let blob: Arc<dyn BlobStore> = Arc::new(MemoryBlobStore::new());
         blob.put(
-            "fwmeta/catalog.json",
+            "fwmeta/queue_definitions/q.json",
             bytes::Bytes::from_static(b"{\"definitions\":[]}"),
         )
         .await
