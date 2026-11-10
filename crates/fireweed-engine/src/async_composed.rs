@@ -189,7 +189,7 @@ pub enum PreparedClaim {
 }
 
 impl PreparedClaim {
-    /// Stamp `authority_first` on new item Claim envelopes. Legacy outbox recoveries stay false.
+    /// Stamp `authority_first` on new item Claim envelopes.
     pub fn with_item_authority_first(self) -> Self {
         match self {
             Self::Empty => Self::Empty,

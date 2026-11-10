@@ -10,6 +10,10 @@ CREATE TABLE IF NOT EXISTS queues (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, definition TEXT NOT NULL,
     paused INTEGER NOT NULL DEFAULT 0,
     pause_drain_intake INTEGER NOT NULL DEFAULT 0,
+    resident_pending INTEGER NOT NULL DEFAULT 0 CHECK(typeof(resident_pending)='integer' AND resident_pending>=0),
+    resident_leased INTEGER NOT NULL DEFAULT 0 CHECK(typeof(resident_leased)='integer' AND resident_leased>=0),
+    resident_complete INTEGER NOT NULL DEFAULT 0 CHECK(typeof(resident_complete)='integer' AND resident_complete>=0),
+    resident_failed INTEGER NOT NULL DEFAULT 0 CHECK(typeof(resident_failed)='integer' AND resident_failed>=0),
     PRIMARY KEY (tenant, queue)
 );
 CREATE TABLE IF NOT EXISTS fireweed_items (
@@ -25,7 +29,6 @@ CREATE TABLE IF NOT EXISTS fireweed_items (
     group_key TEXT,
     cohort_size INTEGER,
     recurrence_until INTEGER,
-    payload BLOB,
     fields TEXT NOT NULL DEFAULT '{}',
     metadata TEXT NOT NULL DEFAULT '{}',
     entity_document TEXT,
@@ -53,8 +56,7 @@ CREATE TABLE IF NOT EXISTS fireweed_items (
     PRIMARY KEY (tenant_id, queue_id, item_id)
 );
 -- Payload lives off the hot row so Claim/Complete/schedule UPDATEs do not
--- rewrite blobs. fireweed_items.payload stays for legacy rows and is NULL on
--- new inserts.
+-- rewrite blobs.
 CREATE TABLE IF NOT EXISTS fireweed_item_payloads (
     tenant_id TEXT NOT NULL,
     queue_id TEXT NOT NULL,
@@ -69,16 +71,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS fireweed_items_active_key
 -- insertion, purge, or replacement; lifecycle transitions keep its keys stable.
 CREATE INDEX IF NOT EXISTS fireweed_items_retained_numeric_idx
     ON fireweed_items (tenant_id, queue_id, length(item_id), item_id) WHERE superseded = 0;
--- The campaign experiment found this index's write cost did not improve the
--- complete workload. Remove it from projections opened by that candidate too.
-DROP INDEX IF EXISTS fireweed_items_lifecycle_counts_idx;
 -- One pending FIFO index for Claim and peek. group_due and active_scope
 -- duplicated that order and made every Complete rewrite three Pending B-trees.
-DROP INDEX IF EXISTS fireweed_items_group_due_idx;
-DROP INDEX IF EXISTS fireweed_items_active_scope_idx;
 -- Eligibility is covered so future-dated pending work does not require a hot-row
 -- lookup for every candidate skipped by a priority claim.
-DROP INDEX IF EXISTS fireweed_items_pending_order_idx;
 CREATE INDEX IF NOT EXISTS fireweed_items_pending_eligible_order_idx
     ON fireweed_items (tenant_id, queue_id, priority_sort, created_seq, item_id,
                       not_before, eligible_since, cohort_size)
@@ -88,14 +84,10 @@ CREATE INDEX IF NOT EXISTS fireweed_items_pending_eligible_order_idx
 CREATE INDEX IF NOT EXISTS fireweed_items_pending_group_nonnull_idx
     ON fireweed_items (tenant_id, queue_id, group_key, priority_sort, created_seq, item_id)
     WHERE lifecycle_state = 'Pending' AND superseded = 0 AND group_key IS NOT NULL;
--- Ungrouped rows do not need a second copy of the pending priority index.
-DROP INDEX IF EXISTS fireweed_items_pending_group_idx;
 -- Native expiry and pending-lease reads are queue-scoped. One leased tree
 -- supports both in item-ID order. Cover expiry filters and pending-view fields;
 -- keep fenced/cohort leases visible to the broader view. Maintaining one tree
 -- avoids duplicate index writes for ordinary claim transitions.
-DROP INDEX IF EXISTS fireweed_items_expired_lease_idx;
-DROP INDEX IF EXISTS fireweed_items_global_expired_lease_idx;
 CREATE INDEX IF NOT EXISTS fireweed_items_leased_scope_idx
     ON fireweed_items (tenant_id, queue_id, item_id, lease_expires_at,
                       retry_count, cohort_size, fenced, superseded)
@@ -118,9 +110,6 @@ CREATE TABLE IF NOT EXISTS fireweed_id_high_water (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     item_id TEXT NOT NULL,
     PRIMARY KEY (tenant, queue)
-);
-CREATE TABLE IF NOT EXISTS fireweed_schema_migrations (
-    migration_name TEXT NOT NULL PRIMARY KEY
 );
 CREATE TABLE IF NOT EXISTS relational_emission_cursor (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
@@ -190,15 +179,6 @@ BEGIN
     SELECT NEW.tenant_id,NEW.queue_id,NEW.request_id,value
     FROM json_each(NEW.response_payload,'$.item_ids');
 END;
--- One-time upgrade bridge for replay rows written before the normalized reverse index existed.  Normal
--- steady-state opens hit the migration marker and do no replay-history work.
-INSERT OR IGNORE INTO fireweed_claim_replay_items (tenant_id,queue_id,request_id,item_id)
-SELECT r.tenant_id,r.queue_id,r.request_id,j.value
-FROM fireweed_request_idempotency r,json_each(r.response_payload,'$.item_ids') j
-WHERE r.operation='claim_by_query'
-  AND NOT EXISTS (SELECT 1 FROM fireweed_schema_migrations
-                  WHERE migration_name='claim_replay_items_v1');
-INSERT OR IGNORE INTO fireweed_schema_migrations (migration_name) VALUES ('claim_replay_items_v1');
 -- TD-002 §cohort lifecycle projection. The group_key is the logical cohort key; cohort_id is the stable
 -- generation identity returned to callers and changes only after terminal retention permits group reuse.
 CREATE TABLE IF NOT EXISTS fireweed_cohorts (
@@ -264,19 +244,15 @@ CREATE TABLE IF NOT EXISTS fireweed_item_index (
 );
 -- Prefix lookups on (tenant, queue, index_name, index_key) use the ASC keyset
 -- index below. A separate key-only index doubled insert cost (19×batch rows).
-DROP INDEX IF EXISTS fireweed_item_index_key_idx;
 -- API-004 hot scans use `(index_key,item_id)` as their stable keyset.  Keep both
 -- physical directions because reversing an ASC index also reverses `item_id`, while
 -- the public cursor contract always uses item id ascending as its final tiebreaker.
 -- Item ids are canonical decimal u64 text. Length followed by text is their numeric order,
--- including values beyond signed i64. Versioned names migrate existing stores exactly once;
--- reopening an already-migrated projection does not rebuild either covering index.
+-- including values beyond signed i64.
 CREATE INDEX IF NOT EXISTS fireweed_item_index_key_numeric_asc_idx
     ON fireweed_item_index (tenant_id, queue_id, index_name, index_key ASC, length(item_id) ASC, item_id ASC);
 CREATE INDEX IF NOT EXISTS fireweed_item_index_key_numeric_desc_idx
     ON fireweed_item_index (tenant_id, queue_id, index_name, index_key DESC, length(item_id) ASC, item_id ASC);
-DROP INDEX IF EXISTS fireweed_item_index_key_item_asc_idx;
-DROP INDEX IF EXISTS fireweed_item_index_key_item_desc_idx;
 -- objectlog/async-projection logical checkpoint lineage (bead pqueue-16b85e28, plan §Snapshot Authority).
 -- The async relational checkpoint worker records, per queue, the object-log lineage the relational
 -- projection was last advanced from: the LOGICAL high-water it reached (relational_cursor.next_seq at
@@ -295,25 +271,6 @@ CREATE TABLE IF NOT EXISTS fireweed_checkpoint_lineage (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (tenant, queue)
 );
--- Legacy Claim outbox retained for one migration release. New object-log × Turso
--- serving is log-first and writes no rows; reopen still drains pre-upgrade leases.
-CREATE TABLE IF NOT EXISTS fireweed_claim_outbox (
-    tenant_id TEXT NOT NULL,
-    queue_id TEXT NOT NULL,
-    outbox_id TEXT NOT NULL,
-    item_ids TEXT NOT NULL,
-    lease_token TEXT NOT NULL,
-    lease_expires_at INTEGER NOT NULL,
-    request_id TEXT,
-    request_fingerprint INTEGER,
-    worker_id TEXT,
-    claim_unit TEXT NOT NULL DEFAULT 'item',
-    cohort_id TEXT,
-    created_at INTEGER NOT NULL,
-    PRIMARY KEY (tenant_id, queue_id, outbox_id)
-);
-CREATE INDEX IF NOT EXISTS fireweed_claim_outbox_queue_idx
-    ON fireweed_claim_outbox (tenant_id, queue_id, created_at);
 -- Bearer tokens for consumer listing. Not stored on fireweed_items (hash only there).
 CREATE TABLE IF NOT EXISTS fireweed_lease_bearers (
     tenant_id TEXT NOT NULL,
@@ -329,7 +286,6 @@ CREATE INDEX IF NOT EXISTS fireweed_lease_bearers_token_idx
 /// Application tables owned by a disposable relational projection, in dependency-safe drop order.
 pub const OWNED_PROJECTION_TABLES: &[&str] = &[
     "fireweed_lease_bearers",
-    "fireweed_claim_outbox",
     "fireweed_checkpoint_lineage",
     "fireweed_item_index",
     "fireweed_instance_fences",

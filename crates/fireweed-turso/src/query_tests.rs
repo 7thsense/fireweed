@@ -1693,91 +1693,6 @@ async fn native_bounded_mutation_existing_unique_collision_has_page_independent_
 }
 
 #[tokio::test]
-async fn native_numeric_tie_indexes_migrate_once_and_preserve_existing_keys() {
-    let directory = tempfile::tempdir().unwrap();
-    let config = crate::TursoConfig::local(directory.path().join("numeric-index-migration.db"));
-    let store = TursoRelational::open(config.clone()).await.unwrap();
-    let definition = definition();
-    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    AsyncProjectionStore::ensure_shard(&store, definition)
-        .await
-        .unwrap();
-    let items = vec![
-        recipient(10, "send", "same", Some(1), 0),
-        recipient(2, "send", "same", Some(1), 0),
-    ];
-    apply(
-        &store,
-        &shard,
-        &mut 0,
-        QueueCommand::Push(PushCommand { items }),
-        vec![ItemId::from_u64(10), ItemId::from_u64(2)],
-        1,
-    )
-    .await;
-    {
-        let writer = store.writer.lock().await;
-        writer.execute("CREATE INDEX fireweed_item_index_key_item_asc_idx ON fireweed_item_index(tenant_id,queue_id,index_name,index_key ASC,item_id ASC)", ()).await.unwrap();
-        writer.execute("CREATE INDEX fireweed_item_index_key_item_desc_idx ON fireweed_item_index(tenant_id,queue_id,index_name,index_key DESC,item_id ASC)", ()).await.unwrap();
-        writer
-            .execute("DROP INDEX fireweed_item_index_key_numeric_asc_idx", ())
-            .await
-            .unwrap();
-        writer
-            .execute("DROP INDEX fireweed_item_index_key_numeric_desc_idx", ())
-            .await
-            .unwrap();
-    }
-    drop(store);
-    let store = TursoRelational::open(config).await.unwrap();
-    let indexes = store.schema_report().await.unwrap().indexes;
-    assert!(
-        indexes
-            .iter()
-            .any(|name| name == "fireweed_item_index_key_numeric_asc_idx")
-    );
-    assert!(
-        indexes
-            .iter()
-            .any(|name| name == "fireweed_item_index_key_numeric_desc_idx")
-    );
-    assert!(
-        !indexes
-            .iter()
-            .any(|name| name == "fireweed_item_index_key_item_asc_idx"
-                || name == "fireweed_item_index_key_item_desc_idx")
-    );
-    let before = {
-        let connection = store.reader.lock().await;
-        rows_on(&connection, "PRAGMA schema_version", Vec::new())
-            .await
-            .unwrap()
-    };
-    store.migrate().await.unwrap();
-    let after = {
-        let connection = store.reader.lock().await;
-        rows_on(&connection, "PRAGMA schema_version", Vec::new())
-            .await
-            .unwrap()
-    };
-    assert_eq!(
-        before, after,
-        "repeat migration must not rebuild the physical indexes"
-    );
-    let found = store
-        .server_index_lookup(&shard, "by_label", &[b"same".to_vec()])
-        .await
-        .unwrap();
-    assert_eq!(
-        found
-            .iter()
-            .map(|hit| hit.item_id.as_u64())
-            .collect::<Vec<_>>(),
-        vec![2, 10]
-    );
-}
-
-#[tokio::test]
 async fn native_ordinary_claim_filters_gates_before_limit_and_unblocks_after_hint_reset() {
     let mut first = recipient(1, "send", "blocked-first", Some(1), 0);
     first.gate_keys = vec!["blocked".into(), "open".into()];
@@ -2221,27 +2136,4 @@ async fn addressed_claim_queries_seek_ids_and_preserve_due_tenant_and_duplicate_
     }
     assert_eq!(gate_keys, vec!["gate-a", "gate-b"]);
     drop(rows);
-    let update = fireweed_relational::class_s_lease_update_sql(3, true);
-    let mut rows = writer
-        .query(
-            &format!("EXPLAIN QUERY PLAN {update}"),
-            vec![
-                Value::Blob(vec![0; 32]),
-                Value::Integer(100),
-                Value::Null,
-                Value::Integer(0),
-                shard.tenant_id.as_str().to_string().into(),
-                shard.queue_id.as_str().to_string().into(),
-                "1".into(),
-                "2".into(),
-                "999".into(),
-            ],
-        )
-        .await
-        .unwrap();
-    let mut details = String::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        details.push_str(&row.get::<String>(3).unwrap());
-    }
-    assert!(details.contains("SEARCH i USING INDEX sqlite_autoindex_fireweed_items_1 (tenant_id=? AND queue_id=? AND item_id=?)"),"{details}");
 }

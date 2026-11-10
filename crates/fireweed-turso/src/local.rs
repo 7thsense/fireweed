@@ -8,21 +8,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use crate::tx::TursoRel;
 use bytes::Bytes;
 use fireweed_core::{
     ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, QueueDefinition, QueueId, RequestId,
     TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    BatchUpdateSnapshotItem, Claimed, ClaimedItem, CommandPosition, EngineError, EngineResult,
+    BatchUpdateSnapshotItem, ClaimedItem, CommandPosition, EngineError, EngineResult,
     IdempotencyDecision, ItemView, LeaseView, LiveItemView, MutationDriverSnapshot, PendingPage,
     PushFingerprint, QueueKey, QueueMetrics,
 };
 use fireweed_relational::{
-    ClaimOutboxRow, ClassSClaimResult, OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA,
-    async_projection as sql, delete_claim_outbox, entity_from_json, fields_from_json,
-    metadata_from_json, nanos_ts, parse_priority, select_claim_outbox, ts_nanos,
+    OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA, async_projection as sql, entity_from_json,
+    fields_from_json, metadata_from_json, nanos_ts, parse_priority, ts_nanos,
 };
 use tokio::sync::{Mutex, Semaphore};
 use turso::{Builder, Connection, Database, Value, transaction::TransactionBehavior};
@@ -596,7 +594,7 @@ impl TursoRelational {
         let database = builder.build().await?;
         let mut writer = database.connect()?;
         configure_connection(&writer, &config).await?;
-        migrate_connection(&mut writer).await?;
+        create_schema(&mut writer).await?;
         verify_connection_settings(&writer, &config).await?;
         verify_schema(&writer).await?;
         let reader = database.connect()?;
@@ -1133,70 +1131,6 @@ impl TursoRelational {
         .await
     }
 
-    /// Startup-only detection of receipts written by the old admitted-item hash path.
-    pub async fn has_legacy_push_fingerprints(&self, shard: &QueueKey) -> EngineResult<bool> {
-        let rows = self
-            .query(
-                "SELECT 1 FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
-             AND operation='push' AND length(request_fingerprint)=32 LIMIT 1",
-                vec![
-                    shard.tenant_id.as_str().to_string().into(),
-                    shard.queue_id.as_str().to_string().into(),
-                ],
-            )
-            .await
-            .map_err(|error| EngineError::Storage(error.to_string()))?;
-        Ok(!rows.is_empty())
-    }
-
-    /// Repair only the receipt for this exact logged request incarnation. A reused
-    /// request ID must never be overwritten by an older envelope during replay.
-    pub async fn repair_legacy_push_fingerprints(
-        &self,
-        entries: &[(CommandPosition, fireweed_engine::CommandEnvelope)],
-    ) -> EngineResult<u64> {
-        let mut statements = Vec::new();
-        for (position, envelope) in entries {
-            if !matches!(&envelope.command, fireweed_engine::QueueCommand::Push(_)) {
-                continue;
-            }
-            let (
-                Some(request_id),
-                Some(fingerprint),
-                Some(fireweed_engine::RequestOutcome::Push { .. }),
-            ) = (
-                &envelope.request_id,
-                envelope.request_fingerprint,
-                &envelope.request_outcome,
-            )
-            else {
-                continue;
-            };
-            let positions =
-                serde_json::to_string(&vec![(position.backend_epoch, position.sequence)])
-                    .map_err(|error| EngineError::Storage(error.to_string()))?;
-            statements.push(RelationalStatement::new(
-                "UPDATE fireweed_request_idempotency SET request_fingerprint=?1 \
-                 WHERE tenant_id=?2 AND queue_id=?3 AND operation='push' AND request_id=?4 \
-                 AND command_positions=?5 AND length(request_fingerprint)=32",
-                vec![
-                    fingerprint.to_be_bytes().to_vec().into(),
-                    position.queue.tenant_id.as_str().to_string().into(),
-                    position.queue.queue_id.as_str().to_string().into(),
-                    request_id.as_str().to_string().into(),
-                    positions.into(),
-                ],
-            ));
-        }
-        if statements.is_empty() {
-            return Ok(0);
-        }
-        self.execute_immediate(&statements)
-            .await
-            .map(|counts| counts.into_iter().sum())
-            .map_err(|error| EngineError::Storage(error.to_string()))
-    }
-
     pub async fn push_idempotency_committed(
         &self,
         shard: &QueueKey,
@@ -1388,10 +1322,10 @@ impl TursoRelational {
         Ok(connection)
     }
 
-    /// Reapply idempotent migrations and verify the resulting schema.
-    pub async fn migrate(&self) -> Result<SchemaReport> {
+    /// Re-run the idempotent schema statements and verify the resulting schema.
+    pub async fn ensure_schema(&self) -> Result<SchemaReport> {
         let mut connection = self.writer.lock().await;
-        migrate_connection(&mut connection).await?;
+        create_schema(&mut connection).await?;
         verify_schema(&connection).await
     }
 
@@ -1581,42 +1515,6 @@ impl TursoRelational {
         Ok(cohorts)
     }
 
-    /// Delete one recovered Claim outbox row after the envelope is on the log.
-    /// New serving writes no outbox rows; this remains for the migration window.
-    pub async fn delete_claim_outbox_row(
-        &self,
-        tenant_id: &str,
-        queue_id: &str,
-        outbox_id: &str,
-    ) -> EngineResult<()> {
-        let mut writer = self.writer.lock().await;
-        let tx = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|e| EngineError::Storage(e.to_string()))?;
-        let result = delete_claim_outbox(&TursoRel(&tx), tenant_id, queue_id, outbox_id);
-        match result {
-            Ok(()) => tx
-                .commit()
-                .await
-                .map_err(|e| EngineError::Storage(e.to_string())),
-            Err(error) => {
-                let _ = tx.rollback().await;
-                Err(error)
-            }
-        }
-    }
-
-    /// Load durable pre-upgrade Claim envelopes still waiting to publish.
-    pub async fn pending_claim_outbox(
-        &self,
-        tenant_id: &str,
-        queue_id: &str,
-    ) -> EngineResult<Vec<ClaimOutboxRow>> {
-        let writer = self.writer.lock().await;
-        select_claim_outbox(&TursoRel(&writer), tenant_id, queue_id)
-    }
-
     pub async fn remembered_claim_targets(
         &self,
         shard: &QueueKey,
@@ -1696,92 +1594,23 @@ mod class_s_tests {
         format!(
             "INSERT INTO fireweed_items(\
              tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority_sort,\
-             eligible_since,payload,fields,metadata,retry_count,item_version,\
+             eligible_since,fields,metadata,retry_count,item_version,\
              last_command_sequence,created_at,updated_at,fenced,superseded,max_attempts,created_seq) \
-             VALUES('t','q','{item_id}','key-{item_id}','Pending',X'00',1,X'CAFE','{{}}','{{}}',0,1,1,1,1,0,0,3,{created_seq})"
+             VALUES('t','q','{item_id}','key-{item_id}','Pending',X'00',1,'{{}}','{{}}',0,1,1,1,1,0,0,3,{created_seq})"
         )
     }
 
-    /// Exercise the retained relational helper without the retired serving packer.
-    async fn relational_class_s_claim(
-        store: &TursoRelational,
-        now_nanos: i64,
-        limit: i64,
-        lease_token: &LeaseToken,
-        lease_expires_at: i64,
-        outbox_id: &str,
-    ) -> fireweed_relational::ClassSClaimResult {
-        use fireweed_relational::{ClassSClaimRequest, class_s_claim};
-
-        let mut writer = store.writer.lock().await;
-        let tx = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .expect("begin");
-        let hop = tx.clone();
-        let token = lease_token.clone();
-        let outbox = outbox_id.to_string();
-        let result = crate::tx::run_reltx_blocking(move || {
-            class_s_claim(
-                &TursoRel(&hop),
-                &ClassSClaimRequest {
-                    tenant_id: "t",
-                    queue_id: "q",
-                    now_nanos,
-                    limit,
-                    lease_token: &token,
-                    lease_expires_at,
-                    outbox_id: &outbox,
-                    request_id: None,
-                    request_fingerprint: None,
-                    worker_id: Some("w"),
-                    claim_unit: "item",
-                    cohort_id: None,
-                },
+    #[tokio::test]
+    async fn claim_preserves_fields_metadata_and_entity() {
+        let store = TursoRelational::in_memory().await.expect("open");
+        store
+            .execute(
+                "INSERT INTO queues(tenant,queue,definition,paused,pause_drain_intake) \
+                 VALUES('t','q','{}',0,0)",
+                vec![],
             )
-        })
-        .await;
-        match result {
-            Ok(value) => {
-                tx.commit().await.expect("commit");
-                value
-            }
-            Err(error) => {
-                let _ = tx.rollback().await;
-                panic!("class_s_claim helper: {error}");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn class_s_sequential_claims_are_disjoint() {
-        let store = TursoRelational::in_memory().await.expect("open");
-        let ids: Vec<String> = (1..=5)
-            .map(|seq| ItemId::mint(1, 0, seq as u32).to_string())
-            .collect();
-        for (seq, item_id) in ids.iter().enumerate() {
-            store
-                .execute(insert_pending(item_id, (seq as i64) + 1), vec![])
-                .await
-                .expect("insert");
-        }
-        let token_a = LeaseToken::new("token-a").expect("token");
-        let token_b = LeaseToken::new("token-b").expect("token");
-        let first = relational_class_s_claim(&store, 10, 2, &token_a, 1_000, "out-1").await;
-        let second = relational_class_s_claim(&store, 10, 2, &token_b, 1_000, "out-2").await;
-        let first_ids: Vec<_> = first.items.iter().map(|i| i.item_id.as_str()).collect();
-        let second_ids: Vec<_> = second.items.iter().map(|i| i.item_id.as_str()).collect();
-        assert_eq!(first_ids, [ids[0].as_str(), ids[1].as_str()]);
-        assert_eq!(second_ids, [ids[2].as_str(), ids[3].as_str()]);
-        assert!(first_ids.iter().all(|id| !second_ids.contains(id)));
-        let claimed = claimed_from_class_s(&token_a, first).expect("map");
-        assert_eq!(claimed.items.len(), 2);
-        assert_eq!(claimed.items[0].payload.as_deref(), Some(&[0xCA, 0xFE][..]));
-    }
-
-    #[tokio::test]
-    async fn class_s_claim_preserves_fields_metadata_and_entity() {
-        let store = TursoRelational::in_memory().await.expect("open");
+            .await
+            .expect("queue");
         let stored_id = ItemId::mint(1, 0, 1);
         let compact_id = ItemId::mint(1, 0, 2);
         let index_fields = BTreeMap::from([
@@ -1797,9 +1626,9 @@ mod class_s_tests {
                 .expect("nonempty index fields");
         let insert = "INSERT INTO fireweed_items(\
              tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-             not_before,eligible_since,group_key,payload,fields,metadata,entity_document,index_fields,\
+             not_before,eligible_since,group_key,fields,metadata,entity_document,index_fields,\
              retry_count,item_version,last_command_sequence,created_at,updated_at,fenced,superseded,\
-             max_attempts,created_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+             max_attempts,created_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
         for (id, entity, native_indexes, created_seq) in [
             (
                 stored_id,
@@ -1830,7 +1659,6 @@ mod class_s_tests {
                         Value::Integer(7),
                         Value::Integer(1),
                         Value::Text("group-a".to_string()),
-                        Value::Blob(vec![0xCA, 0xFE]),
                         Value::Text(r#"{"blob":[1,2,3]}"#.to_string()),
                         Value::Text(r#"{"attempt":7,"source":"class-s"}"#.to_string()),
                         entity,
@@ -1848,6 +1676,14 @@ mod class_s_tests {
                 )
                 .await
                 .expect("insert complete serving row");
+            store
+                .execute(
+                    "INSERT INTO fireweed_item_payloads(tenant_id,queue_id,item_id,payload) \
+                     VALUES('t','q',?1,X'CAFE')",
+                    vec![Value::Text(id.to_string())],
+                )
+                .await
+                .expect("insert payload");
         }
         // Gate-state rows contain only currently blocked keys. This membership therefore describes
         // a satisfied gate and must be echoed even though the optimized SELECT omits its anti-join.
@@ -1861,12 +1697,22 @@ mod class_s_tests {
             .expect("insert satisfied gate membership");
 
         let token = LeaseToken::new("token-fidelity").expect("token");
-        let relational =
-            relational_class_s_claim(&store, 10, 2, &token, 1_000, "out-fidelity").await;
-        let claimed = claimed_from_class_s(&token, relational).expect("render public claim");
-        assert_eq!(claimed.items.len(), 2);
+        let shard = QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap());
+        let now = UtcTimestamp::new(10, 0).unwrap();
+        let expires = UtcTimestamp::new(100, 0).unwrap();
+        let mut reader = store.reader.lock().await;
+        let assigned = TursoRelational::item_claim_microbatch_on_connection(
+            &mut reader,
+            &shard,
+            &[(now, 2, token.clone(), expires)],
+            &[],
+        )
+        .await
+        .expect("claim");
+        let claimed_items = &assigned[0].1;
+        assert_eq!(claimed_items.len(), 2);
 
-        let stored = &claimed.items[0];
+        let stored = &claimed_items[0];
         assert_eq!(stored.item_id, stored_id);
         assert_eq!(stored.payload.as_deref(), Some(&[0xCA, 0xFE][..]));
         assert_eq!(
@@ -1895,7 +1741,7 @@ mod class_s_tests {
         assert_eq!(stored.attempt_count, 3);
         assert_eq!(stored.max_attempts, 9);
 
-        let compact = &claimed.items[1];
+        let compact = &claimed_items[1];
         assert_eq!(compact.item_id, compact_id);
         assert_eq!(
             compact.entity,
@@ -3211,17 +3057,6 @@ mod committed_pool_tests {
     }
 }
 
-pub fn claimed_from_class_s(
-    lease_token: &LeaseToken,
-    result: ClassSClaimResult,
-) -> EngineResult<Claimed> {
-    Ok(Claimed {
-        items: render_class_s_claimed_items(lease_token, result.items)?,
-        cohort_lease_token: None,
-        cohort_id: None,
-    })
-}
-
 /// Render complete public Claim items from relational Class-S rows in one reusable bulk helper.
 /// Native index fields stay inside the relational carrier and are used only to echo a compacted
 /// entity document when the durable row omitted the equivalent JSON.
@@ -3477,68 +3312,8 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
     Ok(())
 }
 
-async fn migrate_connection(connection: &mut Connection) -> Result<()> {
+async fn create_schema(connection: &mut Connection) -> Result<()> {
     connection.execute_batch(RELATIONAL_SCHEMA).await?;
-    crate::metrics::migrate(connection).await?;
-    // New stores cluster index membership by item, making replacement/purge
-    // bounded by the addressed IDs. Existing stores retain their primary-key
-    // order and get a compatible covering index instead of a table rebuild.
-    let mut columns = connection
-        .query("PRAGMA table_info(fireweed_item_index)", ())
-        .await?;
-    let mut legacy_order = false;
-    while let Some(row) = columns.next().await? {
-        if row.get::<String>(1)? == "item_id" {
-            legacy_order = row.get::<i64>(5)? == 4;
-        }
-    }
-    drop(columns);
-    if legacy_order {
-        connection
-            .execute(
-                "CREATE INDEX IF NOT EXISTS fireweed_item_index_item_idx \
-            ON fireweed_item_index(tenant_id,queue_id,item_id,index_name)",
-                (),
-            )
-            .await?;
-    }
-    if let Err(error) = connection
-        .execute(
-            "ALTER TABLE queues ADD COLUMN pause_drain_intake INTEGER NOT NULL DEFAULT 0",
-            (),
-        )
-        .await
-        && !error
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("duplicate column")
-    {
-        return Err(error.into());
-    }
-    if let Err(error) = connection
-        .execute(
-            "ALTER TABLE fireweed_group_summary ADD COLUMN rep_created_seq INTEGER",
-            (),
-        )
-        .await
-        && !error
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("duplicate column")
-    {
-        return Err(error.into());
-    }
-    connection
-        .execute(
-            "UPDATE fireweed_group_summary SET rep_created_seq=(\
-               SELECT created_seq FROM fireweed_items i \
-               WHERE i.tenant_id=fireweed_group_summary.tenant_id \
-                 AND i.queue_id=fireweed_group_summary.queue_id \
-                 AND i.item_id=fireweed_group_summary.rep_item_id) \
-             WHERE rep_created_seq IS NULL AND rep_item_id IS NOT NULL",
-            (),
-        )
-        .await?;
     Ok(())
 }
 
@@ -4107,20 +3882,10 @@ mod item_index_lookup_tests {
     }
 
     #[tokio::test]
-    async fn item_index_cleanup_seeks_addressed_ids_on_new_and_legacy_stores() {
-        for legacy in [false, true] {
+    async fn item_index_cleanup_seeks_addressed_ids() {
+        {
             let root = tempfile::tempdir().unwrap();
             let path = root.path().join("projection.db");
-            if legacy {
-                let database = Builder::new_local(path.to_str().unwrap())
-                    .build()
-                    .await
-                    .unwrap();
-                let connection = database.connect().unwrap();
-                connection.execute("CREATE TABLE fireweed_item_index(tenant_id TEXT NOT NULL,queue_id TEXT NOT NULL,\
-                    index_name TEXT NOT NULL,index_key BLOB NOT NULL,item_id TEXT NOT NULL,\
-                    PRIMARY KEY(tenant_id,queue_id,index_name,item_id))", ()).await.unwrap();
-            }
             let store = TursoRelational::open(TursoConfig::local(&path))
                 .await
                 .unwrap();
@@ -4151,7 +3916,7 @@ mod item_index_lookup_tests {
             }
             assert!(
                 details.iter().any(|detail| detail.contains("item_id=?")),
-                "legacy={legacy}: {details:?}"
+                "{details:?}"
             );
             assert!(
                 !details

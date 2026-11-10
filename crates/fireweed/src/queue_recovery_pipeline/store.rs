@@ -16,6 +16,11 @@ struct StoreInner {
     limits: QueueLimits,
     clock: Arc<dyn Clock>,
     diagnostics: Arc<RecoveryCounters>,
+    /// Held for the whole of a shutdown. A second concurrent shutdown holds a
+    /// pipeline clone while it drains, so without this gate the first caller
+    /// could take the pipeline, find it not yet the last owner, and return
+    /// before the other caller's drop released the final resources.
+    shutdown_gate: tokio::sync::Mutex<()>,
 }
 #[derive(Clone)]
 pub struct NativeQueueStore {
@@ -63,6 +68,7 @@ impl NativeQueueStore {
                 limits,
                 clock,
                 diagnostics,
+                shutdown_gate: tokio::sync::Mutex::new(()),
             }),
         })
     }
@@ -202,6 +208,7 @@ impl QueueStore for NativeQueueStore {
     }
     fn shutdown(&self) -> QueueFuture<'_, ()> {
         Box::pin(async move {
+            let _one_shutdown_at_a_time = self.inner.shutdown_gate.lock().await;
             self.inner.runtime.close_and_drain().await?;
             let queues = self
                 .inner
@@ -255,13 +262,33 @@ impl NativeQueueStore {
 mod tests {
     use super::*;
     use fireweed_objectlog::queue_native_log::QueueNativeLogOptions;
+    /// Bounds every wait so a lost wakeup fails the test instead of consuming
+    /// the CI job.
+    async fn within<T>(what: &str, wait: impl Future<Output = T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(60), wait)
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+    }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn abandoned_dispatch_and_cancelled_shutdown_retain_final_ownership() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("fireweed-port-drain-{nonce}"));
+        abandoned_dispatch_and_cancelled_shutdown().await;
+    }
+    /// Two shutdowns race while the first pipeline owner is mid-drop; neither
+    /// may return before that drop completes. The race window is a few
+    /// instructions wide, so repeat the scenario.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_shutdowns_wait_for_final_drop_repeatedly() {
+        for _ in 0..100 {
+            abandoned_dispatch_and_cancelled_shutdown().await;
+        }
+    }
+    async fn abandoned_dispatch_and_cancelled_shutdown() {
+        static SCENARIO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nonce = SCENARIO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "fireweed-port-drain-{}-{nonce}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         let log = Arc::new(
             QueueNativeLog::local(
@@ -302,12 +329,14 @@ mod tests {
             Err(QueueError::Invalid(_))
         ));
         let drop_entered = Arc::new(tokio::sync::Notify::new());
-        let drop_release = Arc::new(std::sync::Barrier::new(2));
+        // A channel, not a barrier: if an assertion fails before the send, the
+        // sender drops and releases the blocked hook, so the runtime can shut
+        // down and the test reports the failure instead of hanging.
+        let (drop_release, hook_release) = std::sync::mpsc::channel::<()>();
         let ready = drop_entered.clone();
-        let release = drop_release.clone();
         *pipeline.before_drop.lock().unwrap() = Some(Box::new(move || {
             ready.notify_one();
-            release.wait();
+            let _ = hook_release.recv();
         }));
         let store = NativeQueueStore::new(
             pipeline,
@@ -332,7 +361,7 @@ mod tests {
                 })
                 .await
         });
-        entered.notified().await;
+        within("dispatch entry", entered.notified()).await;
         task.abort();
         let _ = task.await;
         assert_eq!(store.inner.runtime.usage().unwrap(), (1, 18));
@@ -355,12 +384,12 @@ mod tests {
         let drain_a = tokio::spawn(async move { a.shutdown().await });
         let drain_b = tokio::spawn(async move { b.shutdown().await });
         release.notify_one();
-        drop_entered.notified().await;
+        within("final drop entry", drop_entered.notified()).await;
         assert!(!drain_a.is_finished());
         assert!(!drain_b.is_finished());
-        drop_release.wait();
-        drain_a.await.unwrap().unwrap();
-        drain_b.await.unwrap().unwrap();
+        drop_release.send(()).unwrap();
+        within("first shutdown", drain_a).await.unwrap().unwrap();
+        within("second shutdown", drain_b).await.unwrap().unwrap();
         assert_eq!(store.inner.runtime.usage().unwrap(), (0, 0));
         assert!(store.inner.pipeline.lock().unwrap().is_none());
         store.shutdown().await.unwrap();

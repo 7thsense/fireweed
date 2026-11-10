@@ -737,15 +737,7 @@ async fn turso_grouped_schedule_fast_path_preserves_summary_order_and_recovery()
         );
     }
 
-    // Recovery overlap remains a no-op after reopening an older summary row whose new sequence
-    // column needs backfilling.
-    store
-        .execute(
-            "UPDATE fireweed_group_summary SET rep_created_seq=NULL WHERE group_key=?1",
-            vec![group.as_str().to_string().into()],
-        )
-        .await
-        .unwrap();
+    // Recovery overlap remains a no-op after reopening the projection.
     drop(store);
     let reopened = TursoRelational::open(TursoConfig::local(&path))
         .await

@@ -4947,8 +4947,9 @@ impl ProjectionData {
             {
                 continue;
             }
-            // Compact admissions retain canonical typed values. Old snapshots may
-            // still need their original entity echo; only that fallback allocates.
+            // Compact admissions retain canonical typed values. A row missing a
+            // requested field is read from its entity echo, as range_scan does; only
+            // that path allocates.
             let values = if fields
                 .iter()
                 .all(|(name, _)| rec.index_fields.contains_key(*name))

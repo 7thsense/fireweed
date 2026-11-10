@@ -227,7 +227,7 @@ writes on the live path.
 
 - **Backward Compatibility**: none. Pre-release; data from earlier builds is
   refused. Replay of current UpdateFields / Claim / Finalize histories is valid.
-- **Data Migration**: none. Legacy claim outbox stays recovery-only.
+- **Data Migration**: none.
 - **Feature Toggle**: none. Derived object-log × Turso is the live path.
 - **Rollback**: revert the compose driver to the previous generation; do not
   reintroduce SQL-first serving.
