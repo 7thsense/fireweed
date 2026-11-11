@@ -153,7 +153,7 @@
       "kind": "test"
     },
     {
-      "debt_id": "ddc4fc92b7d0d9e1eb54",
+      "debt_id": "56b3c3ee9982100dc3bd",
       "path": "crates/fireweed-postgres/src/queue_store/administration.rs",
       "test": "queue_store::administration::tests::native_selector_sql_disambiguates_forced_probe_collisions",
       "package": "fireweed-postgres",
