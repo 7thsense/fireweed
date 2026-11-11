@@ -2,7 +2,7 @@ name: ci
 
 # Documentation-only changes do not start the Rust jobs. The ignore list holds only paths
 # that no job here reads by name. docs/helix (formal checks, topology gate),
-# docs/site, docs/operator and docs/deployment (microsite sources), docs/releases
+# docs/site and docs/operator (microsite sources), docs/releases
 # (release-identity checks), README.md and CONTRIBUTING.md (cargo host-safeguard
 # check, crate readme) still trigger CI. The public-identity scan in the
 # functional job walks every tracked file, so residue in an ignored path is
@@ -40,8 +40,7 @@ concurrency:
 jobs:
   functional:
     runs-on: ubuntu-latest
-    # Run 38679816353 reached the 10-minute cap while facade tests were
-    # still completing successfully. Bound the full serial release gate.
+    # Bound the full serial release gate.
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
@@ -56,7 +55,6 @@ jobs:
           python3 -m unittest discover -s scripts/formal -p 'test_*.py'
           python3 scripts/formal/check.py --output target/formal-analysis.json
           python3 scripts/formal/check_source_group.py --output target/api007-formal/source-group.json
-          python3 scripts/formal/generate_replay.py --output target/replay-corpus.json
 
       - name: Retain bounded formal evidence
         if: always()
@@ -86,12 +84,6 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
-      # This standalone fixture has its own lockfile. Prime its complete
-      # dependency closure before the release verifier's offline checks.
-      - name: Fetch locked public boundary fixture dependencies
-        timeout-minutes: 5
-        run: cargo +1.99.0 fetch --locked --manifest-path scripts/ci/fixtures/public-crate-boundary/Cargo.toml
-
       - name: Enforce queue module boundaries and negative controls
         run: python3 scripts/ci/check_queue_boundaries.py --controls
 
@@ -102,24 +94,6 @@ jobs:
       - name: Install pinned RustFS for S3 product tests
         timeout-minutes: 3
         run: echo "FIREWEED_RUSTFS_BIN=$(bash scripts/ci/s3-qualification-endpoint.sh install)" >> "$GITHUB_ENV"
-
-      - name: Legacy model-to-S3/Turso regression replay
-        run: |
-          python3 scripts/formal/with_rustfs.py \
-            --binary "$FIREWEED_RUSTFS_BIN" --replay-profile schedule-smoke --workers 8 \
-            --output target/model-replay.json
-
-      - name: Retain generated replay evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: model-replay
-          path: |
-            target/replay-corpus.json
-            target/model-replay*.json
-            target/model-replay.log
-            target/model-replay-progress.jsonl
-          if-no-files-found: error
 
       - name: Public release validation gate
         run: |

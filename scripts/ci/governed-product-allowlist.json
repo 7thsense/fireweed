@@ -5,13 +5,12 @@
       "category": "functional",
       "command": [
         "python3",
-        "scripts/ci/functional_matrix_route_sources.py",
-        "--check",
-        "--self-test"
+        "scripts/ci/check_queue_boundaries.py",
+        "--controls"
       ],
-      "id": "functional-route-sources-check",
-      "notes": "Manifest registry cardinality and exact-leaf self-test",
-      "source": "P10r"
+      "id": "queue-boundaries",
+      "notes": "Queue module boundary check and negative controls",
+      "source": "API-007"
     },
     {
       "category": "functional",
@@ -23,43 +22,15 @@
         "test",
         "-p",
         "fireweed",
-        "--features",
-        "memory,objectlog,postgres,turso",
-        "--test",
-        "functional_matrix_route_sources",
-        "--",
-        "--nocapture"
+        "--all-features",
+        "--lib"
       ],
-      "id": "functional-matrix-dry-run-leaves",
-      "notes": "Exact dry-run leaves: 12 strict + 6 async + 6 invalid + AC-TXN + guards",
-      "source": "P10r"
-    },
-    {
-      "category": "reduced-count",
-      "command": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed",
-        "--features",
-        "memory,objectlog,postgres,turso",
-        "--test",
-        "storage_matrix_t0_t2",
-        "storage_matrix_t0_t2_all_twelve_cells",
-        "--",
-        "--exact",
-        "--nocapture"
-      ],
-      "id": "functional-matrix-t0-t2-live-reduced-count",
-      "notes": "Live 12-cell T0\u2013T2 reduced-count functional matrix; require ran=20 skipped=0 with PG+S3 fixtures (fail-closed)",
+      "id": "queue-lib-s3-turso",
+      "notes": "queue_recovery_pipeline and queue::s3_turso tests; live S3 cases use FIREWEED_RUSTFS_BIN",
       "requires_fixtures": [
-        "FIREWEED_PG_TEST_URL",
-        "FIREWEED_S3_TEST_ENDPOINT"
+        "FIREWEED_RUSTFS_BIN"
       ],
-      "source": "P10"
+      "source": "API-007"
     },
     {
       "category": "functional",
@@ -71,153 +42,41 @@
         "test",
         "-p",
         "fireweed",
-        "--features",
-        "memory,objectlog,postgres,turso",
-        "--test",
-        "storage_matrix_t0_t2",
-        "storage_matrix_registers_exactly_20_distinct_cells",
-        "--",
-        "--exact",
-        "--nocapture"
-      ],
-      "id": "functional-matrix-registers-12-cells",
-      "notes": "Offline registration: exactly 20 distinct cell IDs",
-      "source": "P10r"
-    },
-    {
-      "category": "functional",
-      "command": [
-        "bash",
-        "scripts/ci/storage-matrix-gate.sh"
-      ],
-      "id": "storage-matrix-gate",
-      "notes": "Route-source check, dry-run leaves, exact server list, helm T4 fixtures",
-      "source": "P10r+P12"
-    },
-    {
-      "category": "T4",
-      "command": [
-        "bash",
-        "scripts/ci/helm-gate.sh"
-      ],
-      "id": "t4-helm-gate",
-      "notes": "12-cell Helm lint/render/kubeconform + Turso default",
-      "source": "P12"
-    },
-    {
-      "category": "external-kafka",
-      "command": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres,external-kafka",
-        "--test",
-        "external_kafka_fixture",
-        "--",
-        "--nocapture"
-      ],
-      "id": "p8k-external-kafka-fixture-preflight",
-      "notes": "Digest-pinned broker start, rskafka sentinel produce/fetch, teardown",
-      "requires_fixtures": [
-        "docker",
-        "REDPANDA_IMAGE"
-      ],
-      "source": "P8k"
-    },
-    {
-      "category": "external-kafka",
-      "command": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres,external-kafka",
-        "--lib",
-        "--",
-        "change_record_sink::tests::change_record_sink_external_kafka_mode_uses_rskafka",
-        "--exact",
-        "--nocapture"
-      ],
-      "id": "external-kafka-feature-on:external_kafka:feature_on:change_record_sink_mode",
-      "notes": "Feature-on external-kafka: rskafka producer path cannot alias feature-off",
-      "source": "P10r"
-    },
-    {
-      "category": "external-kafka",
-      "command": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres,external-kafka",
-        "--test",
-        "p8cs_s3_delivery_cursor",
-        "--",
-        "p8cs_external_kafka_feature_off_rejects_s3_class_a",
-        "--exact",
-        "--nocapture"
-      ],
-      "id": "external-kafka-feature-on:external_kafka:feature_on:p8cs_s3_boundary",
-      "notes": "Paired S3 feature tuple; name retains historical feature-off assertion ID",
-      "source": "P10r"
-    },
-    {
-      "category": "external-kafka",
-      "command": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
-        "--features",
-        "postgres",
-        "--lib",
-        "--",
-        "change_record_sink::tests::change_record_sink_external_kafka_mode_uses_rskafka",
-        "--exact",
-        "--nocapture"
-      ],
-      "id": "external-kafka-feature-off:external_kafka:feature_off:change_record_sink_mode",
-      "notes": "Default-off external-kafka: mode classification and feature-off negatives",
-      "source": "P10r"
-    },
-    {
-      "category": "external-kafka",
-      "command": [
-        "rustup",
-        "run",
-        "1.99.0",
-        "cargo",
-        "test",
-        "-p",
-        "fireweed-server",
         "--features",
         "postgres",
         "--test",
-        "p8c_residual_delivery_cursor",
-        "--",
-        "p8c_residual_external_kafka_feature_off_rejects_class_a_and_class_b",
-        "--exact",
-        "--nocapture"
+        "simple_queue_postgres"
       ],
-      "id": "external-kafka-feature-off:external_kafka:feature_off:p8c_class_boundary",
-      "notes": "Feature-off durability boundary for residual delivery cursor",
-      "source": "P10r"
+      "id": "queue-postgres-simple",
+      "notes": "Queue::postgres over the PostgreSQL control and store",
+      "requires_fixtures": [
+        "FIREWEED_PG_TEST_URL"
+      ],
+      "source": "API-007"
+    },
+    {
+      "category": "functional",
+      "command": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "-p",
+        "fireweed-postgres",
+        "--test",
+        "queue_contract",
+        "--test",
+        "queue_process_loss",
+        "--test",
+        "queue_server_crash"
+      ],
+      "id": "queue-postgres-store",
+      "notes": "PostgreSQL QueueStore contract, process-loss and server-crash targets",
+      "requires_fixtures": [
+        "FIREWEED_PG_TEST_URL"
+      ],
+      "source": "API-007"
     },
     {
       "category": "policy",
@@ -240,14 +99,12 @@
   ],
   "lane": "governed-product",
   "notes": [
-    "P13 populates commands from functional-matrix-route-sources.json, T4 helm-gate, reduced-count live T0\u2013T2 matrix, and P8k/feature-on ExternalKafka bindings.",
+    "P13 populates commands from the Queue test targets and the queue boundary check.",
     "No authoritative performance, fireweed-bench, or scripts/perf entries.",
     "Regenerate with: python3 scripts/ci/generate-governed-product-allowlist.py --write"
   ],
   "plan_key": "P13",
   "product_release_readiness_claimed": false,
-  "route_sources_authority_manifest_sha256": "1325d2c5ee65cf15d92423e34935e8f5f175880cb66609c4851bccd2ef35584a",
-  "route_sources_sha256_field": "authority_manifest_sha256",
   "schema_version": 1,
   "workflow": ".github/workflows/governed-product.yml"
 }

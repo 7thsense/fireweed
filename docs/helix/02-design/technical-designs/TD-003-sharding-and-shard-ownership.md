@@ -284,7 +284,7 @@ requirement.
 
 This design is written in terms of an abstract "owner worker." Per ADR-007 there
 are **two** driving adapters that realize an owner-runtime over the *same* engine
-coordination: the RESP server (`fireweed-resp`) and the **in-process Rust library**
+coordination: the RESP server (the retired RESP crate) and the **in-process Rust library**
 (`fireweed`, `Fireweed`). ADR-009 makes both first-class owners — **neither is exempt
 from resolve + fence**, and coordination is enforced in the engine *below the
 ports*, not in either adapter. The rules below constrain the library realization

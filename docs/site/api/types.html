@@ -27,7 +27,6 @@
         <a href="../get-started.html">Get started</a>
         <a href="../examples/index.html">Examples</a>
         <a href="index.html" aria-current="page">API</a>
-        <a href="../deploy/index.html">Deploy</a>
         <a href="../support.html">Support</a>
         </nav>
       </header>
@@ -36,31 +35,27 @@
         <div class="page-intro">
           <h2>Type catalog</h2>
           <p>
-            Embedders should import types from the <code>fireweed</code> crate root.
-            The export closure is fixed by API-005 so downstream crates (e.g. Snorri)
+            Embedders import types from <code>fireweed::queue</code>, so downstream crates
             compile against <code>fireweed</code> alone.
           </p>
         </div>
         <div class="table-wrap"><table class="data">
           <thead><tr><th>Area</th><th>Types (representative)</th></tr></thead>
           <tbody>
-            <tr><td>Handle</td><td><code>Fireweed</code>, <code>ProjectionControl</code>, capability/result types</td></tr>
-            <tr><td>Identity</td><td><code>TenantId</code>, <code>QueueId</code>, <code>QueueKey</code>, <code>ItemId</code>, <code>WorkerId</code>, <code>OwnerId</code>, <code>ClientItemKey</code>, <code>RequestId</code></td></tr>
-            <tr><td>Definition</td><td><code>QueueDefinition</code>, <code>PriorityModel</code>, <code>OrderingMode</code>, <code>RetryPolicy</code>, <code>EligibilityPolicy</code></td></tr>
-            <tr><td>Write</td><td><code>NewItem</code>, <code>PriorityValue</code>, <code>ScheduleUpdate</code></td></tr>
-            <tr><td>Claim</td><td><code>ClaimedItem</code>, <code>ClaimAt</code>, <code>MultiQueueClaimTarget</code>, <code>ClaimRef</code></td></tr>
-            <tr><td>Commit</td><td><code>CommitRequest</code>, <code>CommitCapabilities</code>, side-record types</td></tr>
-            <tr><td>Query</td><td><code>ItemView</code>, <code>QueueMetrics</code>, index query types, hot-projection flags</td></tr>
-            <tr><td>Construction</td><td><code>ObjectLogRuntimeConfig</code>, <code>PostgresRuntimeConfig</code>, <code>ConfigSecret</code>, <code>SystemClock</code>, <code>Clock</code></td></tr>
-            <tr><td>Helpers</td><td><code>QueueTemplate</code>, <code>ActiveScopeDiscovery</code>, <code>OldestFirstScopePrefix</code></td></tr>
-            <tr><td>Errors</td><td><code>EngineError</code>, <code>EngineResult</code>, structured error variants</td></tr>
+            <tr><td>Handle</td><td><code>Queue</code>, <code>QueueFuture</code>, <code>QueueError</code>, <code>QueueResult</code></td></tr>
+            <tr><td>Construction</td><td><code>S3TursoOptions</code>, <code>S3LogOptions</code>, <code>TursoCacheOptions</code>, <code>PostgresControlPlaneOptions</code>, <code>PostgresOptions</code>, <code>QueueLimits</code>, <code>QueueRuntimeOptions</code>, <code>ConfigSecret</code>, <code>SystemClock</code>, <code>Clock</code>, <code>OwnerId</code></td></tr>
+            <tr><td>Schema</td><td><code>QueueAddress</code>, <code>QueueSchema</code>, <code>CollectionDefinition</code>, <code>QueueRetention</code>, <code>FieldType</code>, <code>FieldValue</code></td></tr>
+            <tr><td>Work</td><td><code>NewWork</code>, <code>WorkRecord</code>, <code>ClaimedWork</code>, <code>LeaseCredential</code>, <code>Lifecycle</code></td></tr>
+            <tr><td>Requests</td><td><code>ProvisionRequest</code>, <code>InsertRequest</code>, <code>ClaimRequest</code>, <code>CommitBatch</code>, <code>PreviewRequest</code>, <code>StatsRequest</code>, <code>StateReadRequest</code>, <code>QueryRequest</code>, <code>ReceiptReadRequest</code></td></tr>
+            <tr><td>Commit</td><td><code>CommitGroup</code>, <code>ClaimedUpdate</code>, <code>Disposition</code>, <code>StateUpdate</code>, <code>CommitReceipt</code>, <code>GroupOutcome</code>, <code>Rejection</code></td></tr>
+            <tr><td>Selection</td><td><code>Filter</code>, <code>Predicate</code>, <code>ClaimOrder</code></td></tr>
           </tbody>
         </table></div>
         <div class="prose">
           <p>
             For field layouts and trait bounds, run
             <code>cargo doc -p fireweed --no-deps --open</code>.
-            Full export list: API-005 export closure section.
+            Full contract: API-007.
           </p>
         </div>
 
@@ -68,7 +63,7 @@
       <footer class="site-footer">
         <p>
           Fireweed Queue v0.30.0 · source release ·
-          crates.io and GHCR deferred ·
+          crates.io deferred ·
           issues welcome · code contributions not accepted ·
           MIT OR Apache-2.0.
         </p>

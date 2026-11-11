@@ -8,7 +8,6 @@ Published layout (https://<org>.github.io/<repo>/):
     .nojekyll
     site/               # from docs/site
     helix/              # from docs/helix
-    deployment/         # from docs/deployment
     operator/           # from docs/operator
     SECURITY.md …       # repo-root policy files
 
@@ -63,8 +62,6 @@ def map_to_staged(target: Path, out: Path) -> Path | None:
         return out.joinpath("site", *parts[2:])
     if parts[:2] == ("docs", "helix"):
         return out.joinpath("helix", *parts[2:])
-    if parts[:2] == ("docs", "deployment"):
-        return out.joinpath("deployment", *parts[2:])
     if parts[:2] == ("docs", "operator"):
         return out.joinpath("operator", *parts[2:])
     if len(parts) == 1 and parts[0] in ROOT_POLICY_FILES:
@@ -142,7 +139,6 @@ def stage(out: Path) -> None:
 
     copy_tree(ROOT / "docs" / "site", out / "site")
     copy_tree(ROOT / "docs" / "helix", out / "helix")
-    copy_tree(ROOT / "docs" / "deployment", out / "deployment")
     copy_tree(ROOT / "docs" / "operator", out / "operator")
 
     for name in ROOT_POLICY_FILES:

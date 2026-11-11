@@ -55,7 +55,7 @@ Honest dependency state (as of the 2026-07-06 decision): fireweed had **no** Kaf
 `heimq-wire` left the workspace when the `fireweed-kafka` producer adapter was deleted (ADR-005,
 superseded by ADR-007); no workspace `Cargo.toml` referenced heimq or fjord at decision time. The
 provider chosen here was a new dependency, not an existing anchor. (It has since landed:
-`crates/fireweed-server/Cargo.toml` pins `fjord-broker` plus `heimq`/`heimq-broker`/`heimq-protocol`
+the retired server crate pins `fjord-broker` plus `heimq`/`heimq-broker`/`heimq-protocol`
 by git tag.)
 
 ## Decision
@@ -68,11 +68,11 @@ deployment is required for another system to consume the change log.
 
 ### Provider + shape
 
-- **Provider**: fjord, embedded as a component of `fireweed-server` behind an explicit seam.
+- **Provider**: fjord, embedded as a component of the retired server crate behind an explicit seam.
 - **In-process produce (no loopback socket, no librdkafka).** fireweed produces change records to the
   embedded fjord broker by appending directly, in-process, to the broker's Rust log
   (`heimq_broker::storage::LogBackend::append`). One `EmbeddedFjordSurface` is constructed in
-  `fireweed_server::start()`; its shared `Arc<dyn LogBackend>` is handed BOTH to the `FjordChangeRecordSink`
+  the retired server crate::start()`; its shared `Arc<dyn LogBackend>` is handed BOTH to the `FjordChangeRecordSink`
   (the write path) AND to the embedded `HeimqServer` (the external-consumer surface), so in-process
   appends are immediately visible to broker fetches. Change records are encoded as Kafka v2 record
   batches with the pure-Rust `heimq-protocol` codec — heimq's vendored fork of `kafka-protocol` 0.15.1
@@ -210,16 +210,16 @@ deployment mode via a producer sink at the same seam (the embedded fjord idles).
 
 ### fireweed-as-broker, hand-rolled
 
-Rejected: `fireweed-server` would have to implement Kafka metadata/fetch/consumer-group/offset
+Rejected: the retired server crate would have to implement Kafka metadata/fetch/consumer-group/offset
 machinery itself, importing a second durability model into the service binary. Embedding fjord
 provides that machinery behind a boundary instead.
 
 ## Consequences
 
-- fjord becomes an embedded dependency of `fireweed-server` — git-pinned like `axon-esf` (ADR-011's
+- fjord becomes an embedded dependency of the retired server crate — git-pinned like `axon-esf` (ADR-011's
   no-path-deps rule applies; no path dependencies into sibling repos). Since 2026-07, fjord is the
   **public** repository `github.com/7thsense/fjord` (moved from the private `telepathdata/fjord`),
-  pinned by release tag in `crates/fireweed-server/Cargo.toml` (`fjord-broker`, tag `v0.1.3` at the time
+  pinned by release tag in the retired server crate (`fjord-broker`, tag `v0.1.3` at the time
   of writing), so building fireweed — including CI — requires no private-repo git credentials.
 - The Kafka-binding implementation bead is re-scoped to: embed fjord behind the delivery seam, feed
   it from the emission task, enforce the boundary invariants, pin the record contract above, and

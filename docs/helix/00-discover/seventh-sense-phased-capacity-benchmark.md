@@ -214,7 +214,7 @@ Sense actions take to ingest, enrich, schedule, and deliver?**
 
 | Artifact | Overlap | Gap this spec fills |
 |---|---|---|
-| `examples/python-resp` P01–P05 | 1M insert, update half, claim/ack chunks | No profile amend, no scheduler vs delivery, RESP cannot `release`/`BatchUpdate` under lease |
+| the retired Python RESP examples P01–P05 | 1M insert, update half, claim/ack chunks | No profile amend, no scheduler vs delivery, RESP cannot `release`/`BatchUpdate` under lease |
 | `SS01` / `SS02` | Three queues, smoke correctness | N=5k default; not a capacity envelope |
 | TP-005 `million-cycle-v1` | 1M insert + 500k update + read | No claim, no finalize, batch 1,000 |
 | `sqlite_multi_worker_tps_probe` | Durable sqlite×memory | Wrong shape; keep as sealer ratchet only |

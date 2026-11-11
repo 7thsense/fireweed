@@ -47,15 +47,11 @@ target package names are intentionally identical.
 | fireweed-relational | fireweed-relational | repository-only | - | - | no public feature contract | Driver-neutral relational implementation shared by internal adapters. |
 | fireweed-memory | fireweed-memory | repository-only | - | - | always built for the default facade; development-only durability | Reference adapter used by the facade, tests, and local evaluation. |
 | fireweed-objectlog | fireweed-objectlog | repository-only | - | - | facade feature objectlog | Internal adapter for supported object-log profiles. |
-| fireweed-postgres | fireweed-postgres | repository-only | - | - | facade feature postgres; server tls opt-in | Optional PostgreSQL log/projection adapter. |
-| fireweed-resp | fireweed-resp | repository-only | - | - | no independent features; shipped through the service | Supported protocol adapter, not a standalone Cargo API. |
-| fireweed-server | fireweed-server | repository-only | - | - | default env-config, postgres, turso-projection; tls and external-kafka opt-in | Composition package for the shipped service binary and container. |
+| fireweed-postgres | fireweed-postgres | repository-only | - | - | facade feature postgres | Optional PostgreSQL log/projection adapter. |
 | fireweed-turso | fireweed-turso | repository-only | - | - | local enabled by facade default turso feature | Default native projection, supported through the facade. |
 | fireweed-conformance | fireweed-conformance | private | - | - | test-only | Maintainer backend contract suite. |
 | fireweed-release | fireweed-release | private | - | - | release tooling only | Maintainer verification-ledger and evidence tools. |
-| fireweed-loadgen | fireweed-loadgen | private | - | - | evidence workload only | In-cluster release-evidence generator, not an operator command. |
 | fireweed-sim-support | fireweed-sim-support | private | - | - | test-only | Deterministic simulation support with no product API. |
-| fireweed-workload | fireweed-workload | private | - | - | public API workflow qualification | Original-row campaign, primitive and log-recovery workload runner. |
 <!-- workspace-package-inventory:end -->
 <!-- markdownlint-enable MD013 -->
 
@@ -98,17 +94,11 @@ aliases, compatibility binaries, and dual-published artifacts.
 <!-- markdownlint-disable MD013 -->
 | Artifact | Target coordinate | Built from | Publication and feature policy |
 | --- | --- | --- | --- |
-| Service container | `ghcr.io/<owner>/fireweed-service:0.20.0` and `:sha-<commit>` | `fireweed-service` plus the private ledger verifier | GHCR, Linux amd64; default service features, with a separately identified `tls` build when released. |
-| Binary archive | `fireweed-0.20.0-x86_64-linux.tar.gz` | `fireweed-service`, `fireweed-verify-ledger` | GitHub Release; Linux amd64 is the preview target. |
-| Helm chart | `fireweed-queue-0.20.0.tgz` | `charts/fireweed-queue` target path | GitHub Release; chart and application versions are overridden to `0.20.0` at packaging. |
 | Checksums | `SHA256SUMS` | Every downloadable release asset | GitHub Release; generated again after the final artifact is added. |
-| Image evidence | `fireweed-service-image.txt` | Immutable GHCR digest and both tags | GitHub Release; must identify the exact source commit. |
-| Chart evidence | `fireweed-helm-chart.txt` | Packaged chart name, version, and digest | GitHub Release; must identify `v0.20.0`. |
 | Source archive | GitHub-generated `v0.20.0` source archives | Tagged repository tree | GitHub Release; immutable audit identifiers may remain only where rewriting would falsify history. |
 <!-- markdownlint-enable MD013 -->
 
-`Dockerfile`, `Dockerfile.prebuilt`, `Dockerfile.e2`, `docker-compose.yml`, the
-load generator, benchmark binaries, compatibility probe, and remaining
+Benchmark binaries, the compatibility probe, and the
 `fireweed-release` verifier binaries are build or evidence inputs. They are not
 separate public artifacts unless a later topology decision promotes them.
 

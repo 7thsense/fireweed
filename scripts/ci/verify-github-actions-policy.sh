@@ -10,21 +10,18 @@
 #     install the checksum-pinned RustFS binary through the S3 qualification script.
 #   - Focused turso.yml (P13t): only its fixed PostgreSQL/S3 correctness fixtures.
 #   - nightly.yml: manual extended lib tests; no services/perf.
-#   - release.yml: owned by P17r — no services/kind; Docker publication exception
-#     only (docker/build-push-action + GHCR login).
-#   - governed-product.yml: broader service-backed matrix/kind/S3 qualification
-#     and P8k kafka-compatible broker service *slots*. The focused Turso lane has
-#     only the correctness-fixture exception above. Exact broker digests/commands are
-#     P13-populated in governed-product-services.json / allowlist (not workflow YAML).
+#   - release.yml: owned by P17r — no services/kind/docker.
+#   - governed-product.yml: broader service-backed matrix/S3 qualification. The focused
+#     Turso lane has only the correctness-fixture exception above. Exact commands are
+#     P13-populated in the allowlist (not workflow YAML).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 workflow_root="${repo_root}/.github/workflows"
 allowlist_path="${repo_root}/scripts/ci/governed-product-allowlist.json"
-services_path="${repo_root}/scripts/ci/governed-product-services.json"
 governed_workflow="${workflow_root}/governed-product.yml"
 
-forbidden_perf='scripts/perf/|fireweed-bench|cargo[[:space:]]+bench|performance_[A-Za-z0-9_]*|queue_density|fireweed-matrix|fireweed-loadgen'
+forbidden_perf='scripts/perf/|fireweed-bench|cargo[[:space:]]+bench|performance_[A-Za-z0-9_]*|queue_density|fireweed-matrix'
 if rg -n -i --glob '*.yml' --glob '*.yaml' "${forbidden_perf}" "${workflow_root}"; then
     echo "GitHub Actions must not execute performance tooling or benchmark suites" >&2
     exit 1
@@ -70,9 +67,7 @@ fi
 grep -Fq 'pull_request:' "${turso}"
 grep -Fq 'paths:' "${turso}"
 grep -Fq '1.99.0' "${turso}"
-grep -Fq 'turso_projection_is_the_public_env_default' "${turso}"
-grep -Fq 'objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_log' "${turso}"
-grep -Fq 'storage_matrix_t0_t2_all_twelve_cells' "${turso}"
+grep -Fq 'simple_queue_postgres' "${turso}"
 # Zero-argument policy-verifier invocation (exact regression for P13t).
 grep -Fq 'bash scripts/ci/verify-github-actions-policy.sh' "${turso}"
 # Only the exact PostgreSQL service and owned, CAS-preflighted S3 fixture are
@@ -111,10 +106,6 @@ if [[ ! -f "${allowlist_path}" ]]; then
     echo "missing governed allowlist: scripts/ci/governed-product-allowlist.json" >&2
     exit 1
 fi
-if [[ ! -f "${services_path}" ]]; then
-    echo "missing governed services authorization: scripts/ci/governed-product-services.json" >&2
-    exit 1
-fi
 
 grep -Fq 'bash scripts/ci/verify-github-actions-policy.sh' "${governed_workflow}"
 grep -Fq 'governed-product' "${governed_workflow}"
@@ -126,23 +117,21 @@ fi
 # Authoritative performance remains forbidden even on the governed lane.
 # Match executable forms only (comments may document the ban).
 if rg -n -i \
-    '(^|[[:space:]])(bash[[:space:]]+)?scripts/perf/|cargo[[:space:]]+bench|fireweed-bench|fireweed-loadgen' \
+    '(^|[[:space:]])(bash[[:space:]]+)?scripts/perf/|cargo[[:space:]]+bench|fireweed-bench' \
     "${governed_workflow}"; then
     echo "governed-product.yml must not run authoritative performance" >&2
     exit 1
 fi
 
-python3 - "${allowlist_path}" "${services_path}" "${governed_workflow}" <<'PY'
+python3 - "${allowlist_path}" "${governed_workflow}" <<'PY'
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
 
-allowlist_path, services_path, workflow_path = map(Path, sys.argv[1:])
+allowlist_path, workflow_path = map(Path, sys.argv[1:])
 repo_root = workflow_path.resolve().parents[2]
 allowlist = json.loads(allowlist_path.read_text())
-services = json.loads(services_path.read_text())
 workflow = workflow_path.read_text()
 
 assert allowlist["schema_version"] == 1, "allowlist schema_version"
@@ -153,7 +142,7 @@ assert allowlist["product_release_readiness_claimed"] is False, (
 )
 assert allowlist["command_population_owner"] == "P13"
 assert isinstance(allowlist["commands"], list), "commands must be a list"
-assert len(allowlist["commands"]) >= 8, "P13 must populate the governed command set"
+assert len(allowlist["commands"]) >= 5, "P13 must populate the governed command set"
 assert "P13" in allowlist["disclaimer"] or "P13b" in allowlist["disclaimer"]
 
 forbidden = allowlist.get("forbidden_in_lane") or [
@@ -179,43 +168,12 @@ for entry in allowlist["commands"]:
         assert token not in joined, f"{entry['id']} hits forbidden_in_lane {token!r}"
     categories.add(entry.get("category") or "")
 
-for required_cat in ("functional", "T4", "reduced-count", "external-kafka", "policy"):
+for required_cat in ("functional", "policy"):
     assert required_cat in categories, f"allowlist missing category {required_cat}"
 
-assert services["schema_version"] == 1, "services schema_version"
-assert services["workflow"] == ".github/workflows/governed-product.yml"
-kafka = services["services"]["kafka_compatible_broker"]
-assert kafka["authorized"] is True
-assert kafka["digest_population_owner"] == "P13"
-assert kafka["command_population_owner"] == "P13"
-assert kafka["requirements"]["image_must_be_digest_pinned"] is True
-assert kafka["requirements"]["tag_only_image_forbidden"] is True
-assert "sha256" in kafka["requirements"]["immutable_digest_form"]
-digest = kafka["image_digest"]
-assert isinstance(digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", digest), (
-    "P13 must populate kafka image_digest as sha256:<64-hex>"
-)
-command = kafka["command"]
-assert isinstance(command, list) and command and command[0] == "redpanda", (
-    "P13 must populate kafka command as redpanda start argv list"
-)
-assert kafka["image_repository"] == "redpandadata/redpanda"
-pinned = kafka.get("image_pinned") or f"{kafka['image_repository']}@{digest}"
-assert pinned == f"redpandadata/redpanda@{digest}"
-
-# Workflow references authorization docs; pin lives in services JSON only (not YAML image:).
-assert "governed-product-services.json" in workflow or "kafka_compatible_broker" in workflow
-assert "kafka_compatible_broker" in workflow
 assert "governed-product-allowlist.json" in workflow
-if re.search(r"image:\s*redpandadata/redpanda@", workflow):
-    raise SystemExit(
-        "governed-product.yml must not embed kafka image pin in workflow YAML; "
-        "pin lives in governed-product-services.json"
-    )
-if re.search(r"image:\s*redpandadata/redpanda:", workflow):
-    raise SystemExit("tag-only redpanda image is forbidden; digest pin required")
 
-# On-disk allowlist/services must match the P13 generator (manifest-derived).
+# On-disk allowlist must match the P13 generator (manifest-derived).
 gen = repo_root / "scripts/ci/generate-governed-product-allowlist.py"
 assert gen.is_file(), "missing generate-governed-product-allowlist.py"
 check = subprocess.run(
@@ -227,17 +185,17 @@ check = subprocess.run(
 )
 if check.returncode != 0:
     sys.stderr.write(check.stdout + check.stderr)
-    raise SystemExit("governed allowlist/services drift from P13 generator")
+    raise SystemExit("governed allowlist drift from P13 generator")
 
 print(
     "GitHub Actions policy valid: governed-product allowlist populated "
-    f"({len(allowlist['commands'])} commands); kafka digest pinned; "
+    f"({len(allowlist['commands'])} commands); "
     "product_release_readiness_claimed=false"
 )
 PY
 
 # Other hosted lanes must not declare services; Turso was checked narrowly above.
-# release.yml (P17r) retains only the Docker publication exception — no services.
+# release.yml (P17r) is a source-release lane — no services.
 while IFS= read -r -d '' wf; do
     base="$(basename "${wf}")"
     case "${base}" in
@@ -256,7 +214,10 @@ if [[ -f "${release_wf}" ]]; then
     grep -Fq 'path: fireweed-evidence' "${release_wf}"
     grep -Fq 'path: fireweed-source' "${release_wf}"
     grep -Fq 'resolve-release-identity.sh' "${release_wf}"
-    grep -Fq 'docker/build-push-action' "${release_wf}"
+    if rg -n 'docker/|ghcr\.io' "${release_wf}"; then
+        echo "release.yml must not publish container images" >&2
+        exit 1
+    fi
     if rg -n 'services:' "${release_wf}"; then
         echo "release.yml must not declare services after P17r" >&2
         exit 1
@@ -265,7 +226,7 @@ if [[ -f "${release_wf}" ]]; then
         echo "release.yml must not pin kind after P17r" >&2
         exit 1
     fi
-    echo "GitHub Actions policy valid: release.yml dual-checkout tag lane (Docker exception only)"
+    echo "GitHub Actions policy valid: release.yml dual-checkout tag lane (source release only)"
 fi
 
 echo "GitHub Actions policy valid: repository-side governed lane + external-proof prerequisites"

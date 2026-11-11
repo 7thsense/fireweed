@@ -25,8 +25,8 @@
 //! ## Blocking caveat (same as the monolith)
 //!
 //! Every method makes a **blocking** postgres network call. The sync `postgres` client drives its own
-//! internal tokio runtime per call, so the composition MUST be driven off the reactor (the `fireweed-server`
-//! blocking wrapper delegates every port call to `spawn_blocking`). The composition's own port methods are
+//! internal tokio runtime per call, so the composition MUST be driven off the reactor (callers
+//! must delegate every port call to `spawn_blocking`). The composition's own port methods are
 //! sync-but-`ready`, so this LogStore's calls run on whatever thread drives the composition — in production,
 //! a Tokio blocking-pool thread, never a reactor worker.
 

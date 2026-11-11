@@ -17,10 +17,6 @@ from stock_turso_policy import StockTursoError, read_and_validate as validate_st
 from queue_pg_evidence import verify_report as verify_queue_report
 from queue_pg_workflow import validate as validate_queue_workflow, self_test as queue_workflow_self_test
 
-from fireweed_test_placement import PlacementError
-from fireweed_test_placement import self_test as fireweed_placement_self_test
-from fireweed_test_placement import validate as validate_fireweed_test_placement
-
 
 ROOT = Path(__file__).resolve().parents[2]
 INVENTORY = ROOT / "scripts/ci/storage-remediation-inventory.json"
@@ -126,10 +122,8 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool,
         "workspaces",
         "harness_routes",
         "rustdoc_routes",
-        "fireweed_test_placement",
         "debt_registries",
         "external_dependency_observations",
-        "release_repeat_quarantine",
         "discovery_negatives",
     }
     require(set(document) == required, "inventory schema drift")
@@ -152,7 +146,6 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool,
         all(row["routing"] == "independent" for row in document["workspaces"][1:]),
         "independent workspace classification",
     )
-    validate_fireweed_test_placement(document["fireweed_test_placement"])
     for workspace in document["workspaces"]:
         require(
             workspace["listing_status"] in {"listed", "compile_failure_debt"},
@@ -177,14 +170,6 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool,
         require(
             document["external_dependency_observations"] == refreshed["external_dependency_observations"],
             "external dependency observations changed; regenerate remediation inventory",
-        )
-        require(
-            document["release_repeat_quarantine"] == refreshed["release_repeat_quarantine"],
-            "release-repeat quarantine changed; regenerate remediation inventory",
-        )
-        require(
-            document["fireweed_test_placement"] == refreshed["fireweed_test_placement"],
-            "Fireweed test placement changed; regenerate remediation inventory with --with-cargo",
         )
 
     route_ids = [route["id"] for route in document["harness_routes"]]
@@ -216,8 +201,6 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool,
     debt_ids: set[str] = set()
     registries = document["debt_registries"]
     required_registries = {
-        "source_registration",
-        "test_boundary_debt",
         "cargo_machete_exceptions",
         "ignored_tests",
         "harness_skips",
@@ -227,24 +210,14 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool,
         "no_ops",
         "source_guards",
         "workflow_inline",
-        "release_repeat_contract",
         "rustdoc_unlisted_or_compile_only",
         "workspace_listing_failures",
         "public_release_gate_failures",
     }
     require(set(registries) == required_registries, "debt registry set drift")
     machete_exceptions = registries["cargo_machete_exceptions"]
-    # P12a bound Turso as a real server feature dependency (`dep:fireweed-turso`); the
-    # cargo-machete ignore exception is retired. Empty is the only legal end state.
-    # While any residual ignore remains, it must still be the single P12a-owned Turso row.
-    if machete_exceptions:
-        require(
-            len(machete_exceptions) == 1
-            and machete_exceptions[0]["path"] == "crates/fireweed-server/Cargo.toml"
-            and machete_exceptions[0]["identity"] == "fireweed-turso"
-            and machete_exceptions[0]["dependency_chain"] == ["P12a", "P2f"],
-            "cargo-machete exceptions must be empty or the single P12a-bound Turso dependency",
-        )
+    # The cargo-machete ignore exception is retired. Empty is the only legal end state.
+    require(not machete_exceptions, "cargo-machete exceptions must be empty")
     eligible_queue_ids = {row['id'] for row in registries['ignored_tests']
         if row['status'] == 'debt' and row['category'] == 'ignored_test'
         and row['path'].startswith(('crates/fireweed-postgres/', 'crates/fireweed/'))}
@@ -290,45 +263,8 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool,
             str(row.get("detail", "")).startswith("policy_positive:"),
             f"workflow_inline row lacks executed policy_positive detail: {row['id']}",
         )
-    quarantine = document["release_repeat_quarantine"]
-    legacy_rows = quarantine["legacy_rows"]
-    if legacy_rows:
-        # Pre-P2r quarantine: nine false-green fixtures and eleven contract debts.
-        require(len(legacy_rows) == 9, "legacy repeat row count drift")
-        require(
-            all(
-                row["kind"] == "legacy_false_green" and row["executable"] is False
-                for row in legacy_rows
-            ),
-            "legacy repeat rows must be non-executable debt fixtures",
-        )
-        require(len(quarantine["required_contract_debts"]) == 11, "contract debt count drift")
-        require(
-            quarantine["current_verifier_semantics"] == "missing_only_required_minus_names",
-            "verifier characterization",
-        )
-    else:
-        # Post-P2r: real generated product_workflow + operator_validation bindings.
-        require(
-            quarantine["current_verifier_semantics"]
-            == "exact_set_product_workflow_namespace",
-            "post-P2r verifier characterization",
-        )
-        require(
-            not quarantine["required_contract_debts"],
-            "post-P2r residual release_repeat_contract debt",
-        )
-        generated = quarantine.get("generated_product_workflow_names") or []
-        require(len(generated) == 10, "post-P2r product workflow name count")
-        require(
-            quarantine.get("generated_operator_job") == "operator_validation_tests",
-            "post-P2r operator job missing",
-        )
-    require(quarantine["required_jobs_executed_or_counted"] is False, "false execution claim")
-
     if policy == "closure":
         require(debt_count == 0, f"closure blocked by {debt_count} assigned debt rows")
-        require(not quarantine["legacy_rows"], "closure blocked by legacy false-green rows")
     return debt_count
 
 
@@ -371,7 +307,6 @@ def validate_shape() -> None:
 def self_test(document: dict[str, object]) -> None:
     validate_shape()
     queue_workflow_self_test(CI.read_text())
-    fireweed_placement_self_test(document["fireweed_test_placement"])
     cargo = CARGO_MANIFEST.read_text()
     validate_cargo_scope(cargo)
     for label, text in (
@@ -570,7 +505,7 @@ def main() -> int:
         count = len(document["external_dependency_observations"]["findings"])
         print(f"external dependency observations: {count}; not qualified by product closure")
         return 0
-    except (ValueError, PolicyError, StockTursoError, PlacementError, json.JSONDecodeError, KeyError, TypeError, OSError, tomllib.TOMLDecodeError) as error:
+    except (ValueError, PolicyError, StockTursoError, json.JSONDecodeError, KeyError, TypeError, OSError, tomllib.TOMLDecodeError) as error:
         print(f"storage remediation policy failed: {error}", file=sys.stderr)
         return 1
 

@@ -26,7 +26,7 @@ retained for historical context only; its decision is no longer in effect. See
 applies to the **queue data plane** (Kafka committed-offset semantics do not compose with mutable
 priority and progress bounds). It does not cover the **change log**: TD-008 requires a Kafka-protocol
 consumer interface for the append-only, per-queue-ordered change-record stream, provided by fjord
-embedded in fireweed-server (ADR-014, decided 2026-07-06). That surface has none of the data-plane
+embedded in the retired server crate (ADR-014, decided 2026-07-06). That surface has none of the data-plane
 conflicts this ADR rejected.
 
 _(Historical — as originally accepted 2026-06-16:)_ Accepted

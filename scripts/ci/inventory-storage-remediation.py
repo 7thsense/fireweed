@@ -11,8 +11,6 @@ import sys
 import tempfile
 import tomllib
 
-from fireweed_test_placement import generate as generate_fireweed_test_placement
-
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / "scripts/ci/storage-remediation-inventory.json"
@@ -26,7 +24,6 @@ EXCLUDED_DIGEST_PATHS = {
     "scripts/ci/storage-remediation-inventory.json",
 }
 META_POLICY_SOURCES = {
-    "scripts/ci/fireweed_test_placement.py",
     "scripts/ci/inventory-storage-remediation.py",
     "scripts/ci/storage-remediation-policy.py",
 }
@@ -114,20 +111,6 @@ def separate_external_dependencies(debt: dict[str, list[dict[str, object]]]) -> 
         "findings": findings,
     }
 
-
-PRODUCT_WORKFLOW_REQUIREMENTS = [
-    "product_validation_tests",
-    "product_workflow_scheduled_action_delivery_e2e",
-    "product_workflow_marketo_group_batching_e2e",
-    "product_workflow_callback_cohort_e2e",
-    "product_workflow_jobs_connectors_recurring_e2e",
-    "product_workflow_worker_crash_recovery_e2e",
-    "product_workflow_noisy_neighbor_scale_e2e",
-    "product_workflow_generic_priority_bounded_relaxed_e2e",
-    "product_workflow_downstream_pacing_non_goal_e2e",
-    "product_workflow_operator_repair_redrive_e2e",
-    "operator_validation_tests",
-]
 
 # P10w: closed allowlist of executed policy-positive workflow-inline patterns.
 # Each residual scanner hit must match one of these (identity substring + optional
@@ -272,8 +255,6 @@ def owner_for(path: str, *, performance: bool = False, e3: bool = False) -> tupl
         return "P15" if performance else "P10pb", ["P15" if performance else "P10pb", "P2f"]
     if path.startswith("crates/fireweed-postgres/"):
         return "P10pp", ["P10pp", "P2f"]
-    if path.startswith("crates/fireweed-server/"):
-        return "P10ps", ["P10ps", "P2f"]
     if path.startswith("crates/fireweed-conformance/"):
         return "P10pc", ["P10pc", "P2f"]
     if path.startswith("crates/fireweed/"):
@@ -568,65 +549,9 @@ def cargo_routes(
     return routes, doc_routes, None
 
 
-def fireweed_placement_debt(
-    placement: dict[str, object],
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    registration_rows = []
-    boundary_rows = []
-    bindings_by_source: dict[str, list[dict[str, object]]] = {}
-    for binding in placement["assertion_bindings"]:
-        bindings_by_source.setdefault(str(binding["source"]), []).append(binding)
-    for source in placement["sources"]:
-        path = str(source["source"])
-        if source["placement_count"] != 1 or not source["exists"]:
-            row = debt_row(
-                "source_registration",
-                path,
-                1,
-                path.removeprefix("crates/fireweed/"),
-                detail="test source must exist and have exactly one Cargo [[test]] or internal #[path] placement",
-            )
-            row["owner"] = "P2a"
-            row["dependency_chain"] = ["P2a", "P2r", "P2f"]
-            registration_rows.append(row)
-            continue
-        if source["placement"] != "internal":
-            continue
-        logical_source = str(source["logical_source"])
-        owners = sorted(
-            {
-                owner
-                for binding in bindings_by_source.get(logical_source, [])
-                if binding["boundary_kind"] != "public_external"
-                for owner in binding["boundary_owners"]
-            }
-        )
-        row = debt_row(
-            "test_boundary_debt",
-            path,
-            1,
-            logical_source,
-            detail=(
-                "temporary crate-internal white-box placement; final public re-expression owners="
-                + ",".join(owners)
-            ),
-        )
-        row["owner"] = "/".join(owners)
-        row["dependency_chain"] = ["P2a", *owners, "P2r", "P2f"]
-        row["boundary_owners"] = owners
-        row["private_refs"] = source["private_refs"]
-        boundary_rows.append(row)
-    return registration_rows, boundary_rows
-
-
 def cargo_machete_exception_debt(paths: list[str]) -> list[dict[str, object]]:
     rows = []
-    explicit_owners = {
-        ("crates/fireweed-server/Cargo.toml", "fireweed-turso"): (
-            "P12a",
-            ["P12a", "P2f"],
-        ),
-    }
+    explicit_owners: dict[tuple[str, str], tuple[str, list[str]]] = {}
     for path in paths:
         if not path.endswith("Cargo.toml"):
             continue
@@ -662,12 +587,9 @@ def cargo_machete_exception_debt(paths: list[str]) -> list[dict[str, object]]:
 
 
 def scan_source_debt(
-    paths: list[str], placement: dict[str, object]
+    paths: list[str],
 ) -> dict[str, list[dict[str, object]]]:
-    registration_debt, boundary_debt = fireweed_placement_debt(placement)
     debt: dict[str, list[dict[str, object]]] = {
-        "source_registration": registration_debt,
-        "test_boundary_debt": boundary_debt,
         "cargo_machete_exceptions": cargo_machete_exception_debt(paths),
         "ignored_tests": [],
         "harness_skips": [],
@@ -677,7 +599,6 @@ def scan_source_debt(
         "no_ops": [],
         "source_guards": [],
         "workflow_inline": [],
-        "release_repeat_contract": [],
         "rustdoc_unlisted_or_compile_only": [],
         "workspace_listing_failures": [],
         "public_release_gate_failures": [],
@@ -889,7 +810,6 @@ def reclassify_residual_debt(debt: dict[str, list[dict[str, object]]]) -> None:
                     "crates/fireweed-bench/",
                     "crates/fireweed-release/",
                     "crates/fireweed-conformance/",
-                    "crates/fireweed-server/tests/performance_",
                     "docs/perf/",
                     "docs/evidence/",
                     "docs/releases/",
@@ -938,13 +858,6 @@ def reclassify_residual_debt(debt: dict[str, list[dict[str, object]]]) -> None:
                 ):
                     row["status"] = "discovery_negative"
                     row["detail"] = (detail + "; prose_or_counter_false_positive").strip("; ")
-            # White-box suite under crates/fireweed/tests/whitebox is the intentional
-            # crate-private placement until public re-expression; not residual product debt.
-            if category == "test_boundary_debt" and path.startswith(
-                "crates/fireweed/tests/whitebox/"
-            ):
-                row["status"] = "discovery_negative"
-                row["detail"] = (detail + "; intentional_whitebox_suite").strip("; ")
             # rustdoc ignore/no_run fences + exact-route execution failures: routes are listed;
             # observed_ran=0 until rustdoc --exact producers run in P2f. Treat fence markers and
             # listed-route execution failures as discovery_negative so inventory debt tracks product
@@ -1053,93 +966,9 @@ def copy_row(row: dict[str, object], category: str) -> dict[str, object]:
     return copied
 
 
-def add_release_repeat_debt(debt: dict[str, list[dict[str, object]]]) -> dict[str, object]:
-    suite_path = ROOT / "scripts/ci/release-repeat-suites.toml"
-    data = tomllib.loads(suite_path.read_text())
-    suites = data.get("suites", [])
-    legacy_rows = []
-    generated_product: list[str] = []
-    generated_operator = None
-    for index, suite in enumerate(suites):
-        name = suite.get("name", "")
-        command = suite.get("command", [])
-        kind = suite.get("kind")
-        executable = suite.get("executable")
-        namespace = suite.get("namespace")
-        row = {
-            "name": name,
-            "command": command,
-            "kind": kind,
-            "executable": executable,
-            "namespace": namespace,
-        }
-        # Pre-P2r debt fixtures only.
-        if kind == "legacy_false_green" or (
-            isinstance(command, list) and any("always-pass.sh" in str(part) for part in command)
-        ):
-            legacy_rows.append(row)
-            debt["no_ops"].append(
-                debt_row(
-                    "legacy_false_green",
-                    "scripts/ci/release-repeat-suites.toml",
-                    index + 1,
-                    name,
-                    detail="hand-maintained row points at a success-only fixture and is non-executable debt",
-                )
-            )
-            continue
-        if namespace == "product_workflow" or (
-            namespace is None and name in PRODUCT_WORKFLOW_REQUIREMENTS[:10]
-        ):
-            generated_product.append(name)
-        if name == "operator_validation_tests":
-            generated_operator = name
-    # Contract debt only for required names still lacking a real generated binding.
-    generated_set = set(generated_product)
-    if generated_operator:
-        generated_set.add(generated_operator)
-    remaining = [name for name in PRODUCT_WORKFLOW_REQUIREMENTS if name not in generated_set]
-    for name in remaining:
-        debt["release_repeat_contract"].append(
-            debt_row(
-                "release_repeat_contract",
-                "scripts/ci/release-repeat-suites.toml",
-                1,
-                name,
-                detail="P2r must generate one real campaign-aware binding",
-            )
-        )
-    caller_matches = []
-    for path in tracked_files():
-        if Path(path).suffix not in SOURCE_SUFFIXES:
-            continue
-        text = (ROOT / path).read_text(errors="replace")
-        for index, line in enumerate(text.splitlines(), start=1):
-            if "release-repeat-suites.toml" in line or "verify-product-workflow-names.sh" in line:
-                caller_matches.append({"path": path, "line": index, "text": line.strip()})
-    if legacy_rows:
-        verifier = "missing_only_required_minus_names"
-    else:
-        verifier = "exact_set_product_workflow_namespace"
-    return {
-        "legacy_rows": legacy_rows,
-        "required_contract_debts": remaining,
-        "generated_product_workflow_names": sorted(generated_product),
-        "generated_operator_job": generated_operator,
-        "current_verifier_semantics": verifier,
-        "required_jobs_executed_or_counted": False,
-        "callers": caller_matches,
-    }
-
-
 def inventory(with_cargo: bool) -> dict[str, object]:
     paths = source_files()
     prior = json.loads(OUTPUT.read_text()) if OUTPUT.is_file() else {}
-    fireweed_test_placement = generate_fireweed_test_placement(
-        ROOT,
-        with_cargo=with_cargo,
-        prior=prior.get("fireweed_test_placement"),
-    )
     harness_routes: list[dict[str, object]] = []
     rustdoc_routes: list[dict[str, object]] = []
     workspace_rows = []
@@ -1165,7 +994,7 @@ def inventory(with_cargo: bool) -> dict[str, object]:
                 workspace_row["listing_status"] = "compile_failure_debt"
                 workspace_row["listing_error_sha256"] = failure["stderr_sha256"]
                 workspace_failures.append(failure)
-    debt = scan_source_debt(paths, fireweed_test_placement)
+    debt = scan_source_debt(paths)
     if with_cargo:
         debt["public_release_gate_failures"] = public_release_gate_failures()
         reclassify_public_release_lineage(debt["public_release_gate_failures"])
@@ -1193,7 +1022,6 @@ def inventory(with_cargo: bool) -> dict[str, object]:
                 detail="; ".join(str(item) for item in failure["diagnostics"]),
             )
         )
-    repeat_contract = add_release_repeat_debt(debt)
     if not with_cargo and OUTPUT.is_file():
         harness_routes = prior.get("harness_routes", [])
         rustdoc_routes = prior.get("rustdoc_routes", [])
@@ -1230,10 +1058,8 @@ def inventory(with_cargo: bool) -> dict[str, object]:
         "workspaces": workspace_rows,
         "harness_routes": sorted(harness_routes, key=lambda row: row["id"]),
         "rustdoc_routes": sorted(rustdoc_routes, key=lambda row: row["id"]),
-        "fireweed_test_placement": fireweed_test_placement,
         "debt_registries": debt,
         "external_dependency_observations": external_dependencies,
-        "release_repeat_quarantine": repeat_contract,
         "discovery_negatives": [
             "Iterator::skip and iterator .skip(...) calls",
             "fault-injection skip operations",

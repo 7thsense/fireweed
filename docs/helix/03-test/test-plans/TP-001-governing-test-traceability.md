@@ -92,9 +92,9 @@ queue's persisted progress contract.
 | Core unit | `crates/fireweed-core/src/**`, `crates/fireweed-engine/**` | Pure validation, priority encoding, lifecycle, retry, idempotency, version rules, and the engine's decision helpers + dependency-direction guard. |
 | Backend conformance | `crates/fireweed-conformance/**` (run by each adapter's `tests/`) | The shared no-stub port-conformance suite executes against the public cell `s3--turso` (ADR-024). It includes transaction-contract scenarios (object-log durability, rejection-no-effect, unknown-outcome replay, empty claim as a poll), reopen from the object log, lease, claim, finalize, renew/reassign, purge, and projection-read scenarios. Required routes fail rather than silently skip when a fixture or feature is absent. |
 | Postgres integration | `crates/fireweed-postgres/tests/**` | The durable-log postgres adapter (TD-004 template) against a real DB, env-gated on `FIREWEED_PG_TEST_URL`: the full conformance suite + a reconnect/durability replay test. |
-| Wire (RESP) integration | `crates/fireweed-resp/tests/**` | End-to-end over real TCP with an off-the-shelf `redis` client: XADD/XREADGROUP/XACK/XPENDING/XCLAIM/XAUTOCLAIM/XLEN/XDEL/XINFO, error tokens, and Invariant-1/2 reconcile (ADR-007 RESP face). |
+| Wire (RESP) integration | the retired RESP crate | End-to-end over real TCP with an off-the-shelf `redis` client: XADD/XREADGROUP/XACK/XPENDING/XCLAIM/XAUTOCLAIM/XLEN/XDEL/XINFO, error tokens, and Invariant-1/2 reconcile (ADR-007 RESP face). |
 | Library (facade) integration | `crates/fireweed/tests/**` | The ergonomic Rust library face: every verb (push/claim/ack/nack/fail/renew/reassign/rearm/purge/peek/claimed/metrics) over real backends. |
-| Composition root | `crates/fireweed-server/tests/**` | The wired server: backend selection, background reclaim driver, graceful drain, and end-to-end drivability by a stock client. |
+| Composition root | the retired server crate | The wired server: backend selection, background reclaim driver, graceful drain, and end-to-end drivability by a stock client. |
 | Security | engine + wire + backend integration tests | Denied paths, tenant isolation, lease-token handling, and payload/log safety. |
 
 ## Requirement Coverage Matrix

@@ -5,7 +5,7 @@ ddx:
     - api-native-client-interface
     - api-hot-projection-query-surface
     - adr-concrete-fireweed-facade-and-optional-controls
-  status: accepted
+  status: retired
 ---
 
 # API-005: Fireweed Rust facade
@@ -15,7 +15,7 @@ ddx:
 
 **Type**: Rust binding contract
 **Version**: v0.24
-**Status**: accepted
+**Status**: Retired. The facade this contract described was removed before v0.32.0; `fireweed::queue::Queue` ([API-007](API-007-queue-claim-commit-contract.md)) is the only public API. The text below is retained as history.
 **Related**: API-001, API-004, ADR-009, ADR-012, ADR-015, ADR-017, ADR-022,
 ADR-023, TP-004, orthogonal-storage-matrix-brief
 

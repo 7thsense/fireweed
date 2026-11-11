@@ -253,7 +253,7 @@ def tracked_files():
 
 
 def is_probably_text(path: Path) -> bool:
-    if path.name in {"Dockerfile", "Dockerfile.e2", "Dockerfile.prebuilt", "Cargo.lock", ".gitignore"}:
+    if path.name in {"Cargo.lock", ".gitignore"}:
         return True
     return path.suffix in text_suffixes
 

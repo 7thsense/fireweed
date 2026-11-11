@@ -410,8 +410,8 @@ Product-shaped black-box profile for **jobs / actions / scheduled_actions** over
 the RESP worker surface only:
 
 - Profile: `docs/perf/workload-seventh-sense-actions-scheduler.md`
-- Harness: `examples/python-resp` suite `ss` (`SS_N=5000` smoke;
-  `./examples/python-resp/scripts/start_ss_service.sh`)
+- Harness: the retired Python RESP examples suite `ss` (`SS_N=5000` smoke;
+  `./the retired Python RESP examples)
 - Hard bars: insert / mutate / point-query / drain exactness on three bootstrap
   queues (`ss:jobs`, `ss:actions`, `ss:scheduled`)
 - Latency: p50/p95/p99 are reported as smoke capacity/regression observations;
