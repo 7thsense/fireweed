@@ -107,8 +107,9 @@ jobs:
         run: cargo +1.99.0 clippy -p fireweed-turso --all-targets --features local -- -D warnings
 
       - name: fireweed-turso tests (local)
-        # Preserve the first panic if a later test aborts the process.
-        run: cargo +1.99.0 test -p fireweed-turso --features local -- --nocapture
+        # Preserve the first panic if a later test aborts the process. The
+        # ::large:: tier runs nightly (scripts/ci/large-tier-gate.sh).
+        run: cargo +1.99.0 test -p fireweed-turso --features local -- --skip ::large:: --nocapture
 
       # The Queue tests require PostgreSQL and native conditional-create S3.
       # Keep fixture credentials outside the checkout and mask before GITHUB_ENV.
@@ -134,7 +135,7 @@ jobs:
 
       # `Queue::s3_turso` and `Queue::postgres` against the fixtures above.
       - name: Queue S3/Turso pipeline and recovery tests
-        run: cargo +1.99.0 test -p fireweed --all-features --lib
+        run: cargo +1.99.0 test -p fireweed --all-features --lib -- --skip ::large::
 
       - name: Queue PostgreSQL tests
         run: cargo +1.99.0 test -p fireweed --all-features --test simple_queue_postgres
