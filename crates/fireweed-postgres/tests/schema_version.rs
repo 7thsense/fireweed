@@ -240,7 +240,7 @@ impl Drop for Target {
 
 /// The version a component's current DDL is stamped with.
 fn required(component: &str) -> i64 {
-    if component == "queue_store" { 2 } else { 1 }
+    if component == "queue_store" { 3 } else { 1 }
 }
 fn assert_refusal(message: &str, case: &Case, found: &str, target: &Target) {
     assert!(message.contains(case.component), "{message}");

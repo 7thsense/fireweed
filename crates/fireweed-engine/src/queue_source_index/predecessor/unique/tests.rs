@@ -846,6 +846,23 @@ fn record_inventory(
                 Vec::new(),
             );
         }
+        for field in f.schema.state[collection]
+            .fields
+            .keys()
+            .filter(|field| !record.fields.contains_key(*field))
+        {
+            inventory.insert(
+                QueueSourceKey::ScalarPosting {
+                    collection: Some(collection),
+                    field,
+                    sort: &crate::queue_source_index::QUEUE_SOURCE_ABSENT_SORT,
+                    key,
+                }
+                .encode()
+                .unwrap(),
+                Vec::new(),
+            );
+        }
         for (index, columns) in &f.schema.state[collection].indexes {
             let values: Vec<_> = columns
                 .iter()

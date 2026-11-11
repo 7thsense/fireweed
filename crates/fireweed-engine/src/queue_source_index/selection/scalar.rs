@@ -4,7 +4,7 @@ use crate::{
     queue_admission::{OwnedQueueBufferCharge, QueueReservation},
     queue_index::{borrowed_value, ordered_key_ref, ordered_key_ref_len},
     queue_schema_codec::{AdmittedQueueDefinition, DefinitionPin},
-    queue_source_index::{QueueSourcePostingFamily, prefix_successor},
+    queue_source_index::{QUEUE_SOURCE_ABSENT_SORT, QueueSourcePostingFamily, prefix_successor},
 };
 use fireweed_core::queue_contract::{
     Bound, FieldType, FieldValue, Predicate, QueueError, QueueResult, encoded_len,
@@ -96,6 +96,9 @@ pub fn plan_source_scalar_ranges<'a>(
             .ok_or_else(|| unknown("collection differs"))?,
     };
     declaration.validate_predicate(field, predicate)?;
+    if matches!(predicate, Predicate::Present) {
+        return plan_source_presence_ranges(definition, collection, field, job);
+    }
     let family = QueueSourcePostingFamily::Scalar { collection, field };
     let count = match predicate {
         Predicate::In(values) => values.len(),
@@ -107,6 +110,20 @@ pub fn plan_source_scalar_ranges<'a>(
     let charge = job.owned_buffer(capacity)?;
     let mut ranges = Vec::with_capacity(count);
     match predicate {
+        // Present returned above with its own complete per-type manifest.
+        Predicate::Present => {}
+        Predicate::Absent => {
+            // Validation guarantees a declared field; the sentinel posting
+            // shares the declared type's scalar decode.
+            let kind = *declaration
+                .fields
+                .get(field)
+                .ok_or_else(|| unknown("absence field is undeclared"))?;
+            let lower = family.value_prefix(&QUEUE_SOURCE_ABSENT_SORT)?;
+            let mut upper = lower.clone();
+            successor(&mut upper)?;
+            ranges.push(QueueSourceScalarRange { lower, upper, kind });
+        }
         Predicate::Equal(value) => ranges.push(equal(family, value)?),
         Predicate::In(values) => {
             for value in values {

@@ -59,6 +59,66 @@ fn contains(plan: &QueueSourceScalarRanges<'_>, raw: &[u8]) -> bool {
         .any(|range| range.lower() <= raw && raw < range.upper())
 }
 #[test]
+fn presence_and_absence_ranges_split_values_from_the_sentinel_posting() {
+    let (_root, job, definition) = fixture(8 << 20);
+    let raw = |collection, field, sort: &[u8], key| {
+        QueueSourceKey::ScalarPosting {
+            collection,
+            field,
+            sort,
+            key,
+        }
+        .encode()
+        .unwrap()
+    };
+    for collection in [None, Some("state\0é")] {
+        // Declared integer field: present covers its type only.
+        let present =
+            plan_source_scalar_ranges(&definition, collection, "n", &Predicate::Present, &job)
+                .unwrap();
+        let absent =
+            plan_source_scalar_ranges(&definition, collection, "n", &Predicate::Absent, &job)
+                .unwrap();
+        assert!(absent.belongs_to(&job));
+        for key in ["k", "k\0", "é🦊"] {
+            let sentinel = raw(collection, "n", &QUEUE_SOURCE_ABSENT_SORT, key);
+            assert!(contains(&absent, &sentinel));
+            assert!(!contains(&present, &sentinel));
+            for value in values() {
+                let sort = crate::queue_index::ordered_key(&[Some(&value)]).unwrap();
+                let posting = raw(collection, "n", &sort, key);
+                assert!(!contains(&absent, &posting));
+                assert_eq!(
+                    contains(&present, &posting),
+                    value.field_type() == FieldType::Integer
+                );
+            }
+        }
+        for range in absent.ranges() {
+            assert_eq!(range.field_type(), FieldType::Integer);
+        }
+        // Another field, another namespace: the sentinel never leaks across names.
+        let other = raw(collection, "nx", &QUEUE_SOURCE_ABSENT_SORT, "k");
+        assert!(!contains(&absent, &other));
+        // Prefix-admitted fields admit presence over every type, never absence.
+        let present =
+            plan_source_scalar_ranges(&definition, collection, "bag/v", &Predicate::Present, &job)
+                .unwrap();
+        for value in values() {
+            let sort = crate::queue_index::ordered_key(&[Some(&value)]).unwrap();
+            assert!(contains(&present, &raw(collection, "bag/v", &sort, "k")));
+        }
+        assert!(!contains(
+            &present,
+            &raw(collection, "bag/v", &QUEUE_SOURCE_ABSENT_SORT, "k")
+        ));
+        assert!(matches!(
+            plan_source_scalar_ranges(&definition, collection, "bag/v", &Predicate::Absent, &job),
+            Err(QueueError::Invalid(_))
+        ));
+    }
+}
+#[test]
 fn compiled_scalar_ranges_match_common_predicates_for_all_types_ties_and_open_bounds() {
     let (root, job, definition) = fixture(8 << 20);
     let baseline = root.usage().unwrap();

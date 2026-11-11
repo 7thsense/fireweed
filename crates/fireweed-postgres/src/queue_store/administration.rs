@@ -51,18 +51,23 @@ fn selector_sql(
     let active = "(r.lifecycle=1 AND COALESCE(r.lease_until>$3::bigint,FALSE))";
     fireweed_engine::queue_sql::administrative_selector_sql(selector, |node| {
         Ok(match node {
-            SelectorNode::Field { name, predicate } => {
+            SelectorNode::Field { name, predicate } if node.presence().is_none() => {
                 let (table, identity) = field_identity_sql(name, definition, pool)?;
                 let predicate = field_predicate_sql(predicate, pool)?;
                 format!(
                     "EXISTS(SELECT 1 FROM {table} f WHERE f.record_id=r.id AND f.queue_id=r.queue_id AND f.collection=r.collection AND {identity}{predicate})"
                 )
             }
-            SelectorNode::Present { name, present } => {
+            // `Present` nodes and `Field` nodes carrying Present/Absent share this
+            // one implementation.
+            SelectorNode::Field { .. } | SelectorNode::Present { .. } => {
+                let (name, present) = node
+                    .presence()
+                    .ok_or_else(|| storage("presence node differs from its selector"))?;
                 let (table, identity) = field_identity_sql(name, definition, pool)?;
                 format!(
                     "{}EXISTS(SELECT 1 FROM {table} f WHERE f.record_id=r.id AND f.queue_id=r.queue_id AND f.collection=r.collection AND {identity})",
-                    if *present { "" } else { "NOT " }
+                    if present { "" } else { "NOT " }
                 )
             }
             SelectorNode::Keys(keys) => {

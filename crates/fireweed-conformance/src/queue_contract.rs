@@ -1041,6 +1041,26 @@ pub async fn predicate_and_order_oracles(store: &dyn QueueStore, queue: QueueAdd
                 });
             }
         }
+        // Every domain's values are ascending, so the closed range over its
+        // ends is the union of all typed ranges and must equal presence.
+        let union = Predicate::Range {
+            lower: Some(Bound::Included(values[0].clone())),
+            upper: Some(Bound::Included(values.last().unwrap().clone())),
+        };
+        let keys_matching = |predicate: &Predicate| -> Vec<String> {
+            items
+                .iter()
+                .filter(|w| predicate.matches(w.fields.get(field)))
+                .map(|w| w.key.clone())
+                .collect()
+        };
+        assert_eq!(keys_matching(&Predicate::Present), keys_matching(&union));
+        assert_eq!(
+            keys_matching(&Predicate::Absent),
+            vec![format!("{field}-missing")]
+        );
+        predicates.push(Predicate::Present);
+        predicates.push(Predicate::Absent);
         for (n, predicate) in predicates.into_iter().enumerate() {
             let mut selected = filter(field);
             selected.fields.insert(field.into(), predicate.clone());
@@ -1201,6 +1221,621 @@ pub async fn predicate_and_order_oracles(store: &dyn QueueStore, queue: QueueAdd
         keys,
         vec!["state-4", "state-3", "state-2", "state-1", "state-0"]
     );
+}
+/// Presence and absence of declared fields across query, claim and stats, kept
+/// in step with a model through patches, replacements, deletion and reinsertion.
+pub async fn presence_and_absence_predicates(store: &dyn QueueStore, queue: QueueAddress) {
+    let mut definition = schema();
+    for (name, ty) in [
+        ("note", FieldType::Text),
+        ("flag", FieldType::Boolean),
+        ("count", FieldType::Integer),
+        ("blob", FieldType::Bytes),
+    ] {
+        definition.work.fields.insert(name.into(), ty);
+    }
+    definition
+        .state
+        .get_mut("instances")
+        .unwrap()
+        .fields
+        .insert("tag".into(), FieldType::Text);
+    store
+        .provision(ProvisionRequest {
+            queue: queue.clone(),
+            schema: definition,
+        })
+        .await
+        .unwrap();
+    let work = |key: &str,
+                priority: i64,
+                available_at: i64,
+                score: i64,
+                extra: Vec<(&str, FieldValue)>| {
+        let mut w = item(key, "presence", priority, score);
+        w.available_at = available_at;
+        w.fields
+            .extend(extra.into_iter().map(|(name, v)| (name.to_string(), v)));
+        w
+    };
+    let seed = vec![
+        // Zero-like values are present.
+        work(
+            "a",
+            3,
+            0,
+            1,
+            vec![
+                ("note", FieldValue::Text(String::new())),
+                ("flag", FieldValue::Boolean(false)),
+                ("count", FieldValue::Integer(0)),
+                ("blob", FieldValue::Bytes(vec![])),
+            ],
+        ),
+        work("b", 1, 20, 2, vec![]),
+        work(
+            "c",
+            2,
+            10,
+            3,
+            vec![
+                ("note", FieldValue::Text("x".into())),
+                ("flag", FieldValue::Boolean(true)),
+            ],
+        ),
+        work(
+            "d",
+            1,
+            5,
+            4,
+            vec![
+                ("note", FieldValue::Text("y".into())),
+                ("count", FieldValue::Integer(5)),
+            ],
+        ),
+        work("e", 5, 1, 5, vec![]),
+    ];
+    let mut ctx = PresenceContext {
+        store,
+        queue: queue.clone(),
+        model: seed.iter().map(|w| (w.key.clone(), w.clone())).collect(),
+        serial: 0,
+    };
+    store
+        .insert(InsertRequest {
+            queue: queue.clone(),
+            request_id: "presence-seed".into(),
+            mode: InsertMode::InsertOnly,
+            items: seed,
+            issued_at: 0,
+        })
+        .await
+        .unwrap();
+    let only = |entries: Vec<(&str, Predicate)>| -> BTreeMap<String, Predicate> {
+        entries
+            .into_iter()
+            .map(|(name, predicate)| (name.to_string(), predicate))
+            .collect()
+    };
+    let one_field_sets = || {
+        let mut sets = vec![];
+        for name in ["note", "flag", "count", "blob"] {
+            sets.push(only(vec![(name, Predicate::Present)]));
+            sets.push(only(vec![(name, Predicate::Absent)]));
+        }
+        sets
+    };
+    let conjunctions = || {
+        vec![
+            only(vec![
+                ("note", Predicate::Present),
+                ("count", Predicate::Absent),
+            ]),
+            only(vec![
+                ("note", Predicate::Absent),
+                ("flag", Predicate::Present),
+            ]),
+            only(vec![
+                ("flag", Predicate::Absent),
+                (
+                    "score",
+                    Predicate::Range {
+                        lower: Some(Bound::Included(FieldValue::Integer(2))),
+                        upper: None,
+                    },
+                ),
+            ]),
+            only(vec![
+                ("note", Predicate::Present),
+                ("flag", Predicate::Equal(FieldValue::Boolean(true))),
+            ]),
+            only(vec![
+                ("count", Predicate::Present),
+                (
+                    "score",
+                    Predicate::In(vec![FieldValue::Integer(1), FieldValue::Integer(4)]),
+                ),
+            ]),
+            only(vec![
+                ("note", Predicate::Absent),
+                ("count", Predicate::Absent),
+                ("flag", Predicate::Absent),
+                ("blob", Predicate::Absent),
+            ]),
+        ]
+    };
+    let all_sets = || {
+        let mut sets = one_field_sets();
+        sets.extend(conjunctions());
+        sets
+    };
+    let ordered_sets = || {
+        vec![
+            only(vec![("count", Predicate::Absent)]),
+            only(vec![("note", Predicate::Present)]),
+            only(vec![("note", Predicate::Absent)]),
+        ]
+    };
+    let orders = [
+        ClaimOrder::PriorityAscending,
+        ClaimOrder::PriorityDescending,
+        ClaimOrder::ScheduledAscending,
+    ];
+    // Stage 0: never set, plus the zero-like present values.
+    assert_eq!(
+        ctx.expected(&only(vec![("count", Predicate::Absent)])),
+        vec!["b", "c", "e"]
+    );
+    assert_eq!(
+        ctx.expected(&only(vec![("note", Predicate::Present)])),
+        vec!["a", "c", "d"]
+    );
+    for set in all_sets() {
+        ctx.check_reads(&set).await;
+    }
+    for set in ordered_sets() {
+        for order in orders {
+            ctx.check_claim_order(&set, order).await;
+        }
+    }
+    ctx.check_stats_shapes().await;
+    // Stage 1: set a missing field, remove a present one, by patch.
+    let mut patch = group("presence-patch");
+    for (key, field, value) in [
+        ("b", "note", Some(FieldValue::Text("later".into()))),
+        ("a", "note", None),
+        ("d", "count", None),
+        ("c", "count", Some(FieldValue::Integer(9))),
+    ] {
+        patch.work_updates.push(UnclaimedUpdate {
+            key: key.into(),
+            expect: StateExpect::Version(ctx.version(key).await),
+            change: UnclaimedChange::Patch(WorkPatch {
+                fields: BTreeMap::from([(field.to_string(), value.clone())]),
+                ..WorkPatch::default()
+            }),
+        });
+        let w = ctx.model.get_mut(key).unwrap();
+        match value {
+            Some(value) => w.fields.insert(field.into(), value),
+            None => w.fields.remove(field),
+        };
+    }
+    ctx.commit(patch).await;
+    for set in all_sets() {
+        ctx.check_reads(&set).await;
+    }
+    ctx.check_claim_order(
+        &only(vec![("count", Predicate::Absent)]),
+        ClaimOrder::PriorityDescending,
+    )
+    .await;
+    ctx.check_stats_shapes().await;
+    // Stage 2: replacement by upsert drops and adds fields.
+    let replaced = vec![
+        work("c", 2, 10, 3, vec![("blob", FieldValue::Bytes(vec![1]))]),
+        work(
+            "e",
+            5,
+            1,
+            5,
+            vec![
+                ("note", FieldValue::Text("e".into())),
+                ("flag", FieldValue::Boolean(false)),
+                ("count", FieldValue::Integer(1)),
+                ("blob", FieldValue::Bytes(vec![])),
+            ],
+        ),
+        work("f", 4, 2, 6, vec![]),
+    ];
+    store
+        .insert(InsertRequest {
+            queue: queue.clone(),
+            request_id: "presence-upsert".into(),
+            mode: InsertMode::Upsert,
+            items: replaced.clone(),
+            issued_at: 0,
+        })
+        .await
+        .unwrap();
+    for w in replaced {
+        ctx.model.insert(w.key.clone(), w);
+    }
+    for set in all_sets() {
+        ctx.check_reads(&set).await;
+    }
+    ctx.check_stats_shapes().await;
+    // Stage 3: replacement by a version-fenced commit.
+    let replacement = work("a", 3, 0, 1, vec![("count", FieldValue::Integer(3))]);
+    let mut replace = group("presence-replace");
+    replace.work_updates.push(UnclaimedUpdate {
+        key: "a".into(),
+        expect: StateExpect::Version(ctx.version("a").await),
+        change: UnclaimedChange::Replace(replacement.clone()),
+    });
+    ctx.commit(replace).await;
+    ctx.model.insert("a".into(), replacement);
+    for set in all_sets() {
+        ctx.check_reads(&set).await;
+    }
+    ctx.check_claim_order(
+        &only(vec![("note", Predicate::Absent)]),
+        ClaimOrder::ScheduledAscending,
+    )
+    .await;
+    // Stage 4: delete, then reinsert the same key with different fields.
+    let mut selection = claim(&queue, "presence-delete-claim", "presence");
+    selection.filter.keys = Some(BTreeSet::from(["d".into()]));
+    selection.eligible_at = 100;
+    let claimed = store.claim(selection).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    let mut delete = group("presence-delete");
+    delete.claimed_updates = claimed
+        .iter()
+        .map(|w| {
+            let mut u = update(w);
+            u.disposition = Disposition::Delete;
+            u
+        })
+        .collect();
+    ctx.commit(delete).await;
+    ctx.model.remove("d");
+    for set in all_sets() {
+        ctx.check_reads(&set).await;
+    }
+    let reinserted = work("d", 1, 5, 4, vec![("count", FieldValue::Integer(1))]);
+    store
+        .insert(InsertRequest {
+            queue: queue.clone(),
+            request_id: "presence-reinsert".into(),
+            mode: InsertMode::InsertOnly,
+            items: vec![reinserted.clone()],
+            issued_at: 0,
+        })
+        .await
+        .unwrap();
+    ctx.model.insert("d".into(), reinserted);
+    for set in all_sets() {
+        ctx.check_reads(&set).await;
+    }
+    ctx.check_stats_shapes().await;
+    ctx.check_state_collection().await;
+}
+struct PresenceContext<'a> {
+    store: &'a dyn QueueStore,
+    queue: QueueAddress,
+    model: BTreeMap<String, NewWork>,
+    serial: u32,
+}
+impl PresenceContext<'_> {
+    fn id(&mut self, what: &str) -> String {
+        self.serial += 1;
+        format!("presence-{what}-{}", self.serial)
+    }
+    fn selected(&self, fields: &BTreeMap<String, Predicate>) -> Filter {
+        let mut selected = filter("presence");
+        selected.fields.extend(fields.clone());
+        selected
+    }
+    /// Keys in ascending order, decided by the shared in-memory predicate oracle.
+    fn expected(&self, fields: &BTreeMap<String, Predicate>) -> Vec<String> {
+        self.model
+            .values()
+            .filter(|w| {
+                fields
+                    .iter()
+                    .all(|(name, predicate)| predicate.matches(w.fields.get(name)))
+            })
+            .map(|w| w.key.clone())
+            .collect()
+    }
+    async fn version(&self, key: &str) -> u64 {
+        let page = self
+            .store
+            .query(QueryRequest {
+                queue: self.queue.clone(),
+                source: RecordSource::Work,
+                index: "$key".into(),
+                filter: Filter {
+                    keys: Some(BTreeSet::from([key.to_string()])),
+                    ..Filter::default()
+                },
+                descending: false,
+                cursor: None,
+                max_records: 1,
+                max_bytes: 1 << 20,
+            })
+            .await
+            .unwrap();
+        match page.records.into_iter().next() {
+            Some(QueryRecord::Work(w)) => w.version,
+            other => panic!("expected {key}: {other:?}"),
+        }
+    }
+    async fn commit(&self, group: CommitGroup) {
+        committed(
+            &self
+                .store
+                .commit(CommitBatch {
+                    queue: self.queue.clone(),
+                    groups: vec![group],
+                })
+                .await
+                .unwrap()[0],
+        );
+    }
+    /// Paged queries in both directions (one record per page) and stats totals.
+    async fn check_reads(&mut self, fields: &BTreeMap<String, Predicate>) {
+        let expected = self.expected(fields);
+        let selected = self.selected(fields);
+        for descending in [false, true] {
+            let keys = query_keys(
+                self.store,
+                QueryRequest {
+                    queue: self.queue.clone(),
+                    source: RecordSource::Work,
+                    index: "$key".into(),
+                    filter: selected.clone(),
+                    descending,
+                    cursor: None,
+                    max_records: 1,
+                    max_bytes: 1 << 20,
+                },
+            )
+            .await;
+            let mut want = expected.clone();
+            if descending {
+                want.reverse();
+            }
+            assert_eq!(keys, want, "query {fields:?} descending {descending}");
+        }
+        let stats = self
+            .store
+            .stats(StatsRequest {
+                buckets: None,
+                queue: self.queue.clone(),
+                filter: selected,
+                group_by: vec![],
+                eligible_at: 0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            stats.totals.pending,
+            expected.len() as u64,
+            "stats {fields:?}"
+        );
+    }
+    async fn check_claim_order(&mut self, fields: &BTreeMap<String, Predicate>, order: ClaimOrder) {
+        let mut want: Vec<&NewWork> = self
+            .model
+            .values()
+            .filter(|w| {
+                fields
+                    .iter()
+                    .all(|(name, predicate)| predicate.matches(w.fields.get(name)))
+            })
+            .collect();
+        want.sort_by(|a, b| match order {
+            ClaimOrder::PriorityAscending => a.priority.cmp(&b.priority),
+            ClaimOrder::PriorityDescending => b.priority.cmp(&a.priority),
+            ClaimOrder::ScheduledAscending => a
+                .available_at
+                .cmp(&b.available_at)
+                .then(a.priority.cmp(&b.priority)),
+        });
+        let want: Vec<String> = want.into_iter().map(|w| w.key.clone()).collect();
+        let id = self.id("claim");
+        let mut request = claim(&self.queue, &id, "presence");
+        request.filter = self.selected(fields);
+        request.order = order;
+        request.eligible_at = 100;
+        let leased = self.store.claim(request).await.unwrap();
+        assert_eq!(
+            leased
+                .iter()
+                .map(|w| w.record.work.key.clone())
+                .collect::<Vec<_>>(),
+            want,
+            "claim {fields:?} {order:?}"
+        );
+        if leased.is_empty() {
+            return;
+        }
+        let mut release = group(&self.id("release"));
+        release.claimed_updates = leased
+            .iter()
+            .map(|w| {
+                let mut u = update(w);
+                u.disposition = Disposition::Release;
+                u
+            })
+            .collect();
+        self.commit(release).await;
+    }
+    /// Grouping and numeric buckets agree with absence: the missing bucket and
+    /// the null group count exactly the records the absence predicate selects.
+    async fn check_stats_shapes(&self) {
+        let missing = BTreeMap::from([("count".to_string(), Predicate::Absent)]);
+        let present = BTreeMap::from([("count".to_string(), Predicate::Present)]);
+        let absent_count = self.expected(&missing).len() as u64;
+        let present_count = self.expected(&present).len() as u64;
+        let dimension = NumericBucketDimension {
+            field: "count".into(),
+            buckets: vec![
+                NumericBucket {
+                    label: "low".into(),
+                    lower_inclusive: FieldValue::Integer(i64::MIN),
+                    upper_exclusive: FieldValue::Integer(5),
+                },
+                NumericBucket {
+                    label: "high".into(),
+                    lower_inclusive: FieldValue::Integer(5),
+                    upper_exclusive: FieldValue::Integer(i64::MAX),
+                },
+            ],
+            missing_label: "none".into(),
+        };
+        let request =
+            |fields: Option<&BTreeMap<String, Predicate>>, group_by: Vec<String>| StatsRequest {
+                buckets: Some(dimension.clone()),
+                queue: self.queue.clone(),
+                filter: fields.map_or_else(|| filter("presence"), |f| self.selected(f)),
+                group_by,
+                eligible_at: 0,
+            };
+        let everything = self.store.stats(request(None, vec![])).await.unwrap();
+        assert_eq!(everything.buckets.last().unwrap().label, "none");
+        assert_eq!(
+            everything.buckets.last().unwrap().counts.pending,
+            absent_count
+        );
+        assert_eq!(
+            everything.buckets[..2]
+                .iter()
+                .map(|b| b.counts.pending)
+                .sum::<u64>(),
+            present_count
+        );
+        let absent = self
+            .store
+            .stats(request(Some(&missing), vec!["count".into()]))
+            .await
+            .unwrap();
+        assert_eq!(absent.totals.pending, absent_count);
+        assert_eq!(absent.buckets.last().unwrap().counts.pending, absent_count);
+        assert!(absent.buckets[..2].iter().all(|b| b.counts.pending == 0));
+        if absent_count > 0 {
+            assert_eq!(absent.groups.len(), 1);
+            assert_eq!(absent.groups[0].values, vec![None]);
+            assert_eq!(absent.groups[0].counts.pending, absent_count);
+        } else {
+            assert!(absent.groups.is_empty());
+        }
+        let present = self
+            .store
+            .stats(request(Some(&present), vec!["count".into()]))
+            .await
+            .unwrap();
+        assert_eq!(present.totals.pending, present_count);
+        assert_eq!(present.buckets.last().unwrap().counts.pending, 0);
+        assert!(present.groups.iter().all(|g| g.values[0].is_some()));
+    }
+    async fn check_state_collection(&mut self) {
+        let mut seed = group(&self.id("state-seed"));
+        for (n, (run, tag)) in [
+            ("r2", Some("t")),
+            ("r1", None),
+            ("r0", None),
+            ("r3", Some("u")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut fields = BTreeMap::from([("run".to_string(), FieldValue::Text(run.into()))]);
+            if let Some(tag) = tag {
+                fields.insert("tag".into(), FieldValue::Text(tag.into()));
+            }
+            seed.state_updates.push(StateUpdate {
+                collection: "instances".into(),
+                key: format!("s{n}"),
+                expect: StateExpect::Absent,
+                change: StateChange::Put {
+                    fields,
+                    value: vec![n as u8].into(),
+                },
+            });
+        }
+        self.commit(seed).await;
+        let address = self.queue.clone();
+        let query = |predicate| QueryRequest {
+            queue: address.clone(),
+            source: RecordSource::State("instances".into()),
+            index: "by_run".into(),
+            filter: Filter {
+                fields: BTreeMap::from([("tag".to_string(), predicate)]),
+                ..Filter::default()
+            },
+            descending: false,
+            cursor: None,
+            max_records: 1,
+            max_bytes: 1 << 20,
+        };
+        assert_eq!(
+            query_keys(self.store, query(Predicate::Absent)).await,
+            vec!["s2", "s1"]
+        );
+        assert_eq!(
+            query_keys(self.store, query(Predicate::Present)).await,
+            vec!["s0", "s3"]
+        );
+        // Drop one tag and add another by replacing the whole state row.
+        let page = self
+            .store
+            .query(QueryRequest {
+                filter: Filter {
+                    keys: Some(BTreeSet::from(["s0".into(), "s1".into()])),
+                    ..Filter::default()
+                },
+                max_records: 10,
+                ..query(Predicate::Present)
+            })
+            .await
+            .unwrap();
+        let versions: BTreeMap<String, u64> = page
+            .records
+            .into_iter()
+            .map(|record| match record {
+                QueryRecord::State(s) => (s.key, s.version),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let mut replace = group(&self.id("state-replace"));
+        for (key, run, tag) in [("s0", "r2", None), ("s1", "r1", Some("v"))] {
+            let mut fields = BTreeMap::from([("run".to_string(), FieldValue::Text(run.into()))]);
+            if let Some(tag) = tag {
+                fields.insert("tag".into(), FieldValue::Text(tag.into()));
+            }
+            replace.state_updates.push(StateUpdate {
+                collection: "instances".into(),
+                key: key.into(),
+                expect: StateExpect::Version(versions[key]),
+                change: StateChange::Put {
+                    fields,
+                    value: vec![9].into(),
+                },
+            });
+        }
+        self.commit(replace).await;
+        assert_eq!(
+            query_keys(self.store, query(Predicate::Absent)).await,
+            vec!["s2", "s0"]
+        );
+        assert_eq!(
+            query_keys(self.store, query(Predicate::Present)).await,
+            vec!["s1", "s3"]
+        );
+    }
 }
 async fn query_keys(store: &dyn QueueStore, mut request: QueryRequest) -> Vec<String> {
     let mut keys = vec![];
@@ -1894,6 +2529,28 @@ pub async fn indexed_additional_attributes(store: &dyn QueueStore, queue: QueueA
         max_records: 10,
         max_bytes: 1 << 20,
     };
+    // JSON null is a present value, so presence sees it; absence is a declared
+    // field concept and an admitted-by-prefix name cannot be tested for it.
+    for (name, expected) in [
+        (literal.clone(), vec!["a", "b"]),
+        ("/payload/mixed".to_string(), vec!["a", "b", "c"]),
+        (long.clone(), vec!["a"]),
+        ("/gates/rule/~1".to_string(), vec!["a"]),
+        ("/payload/never-written".to_string(), vec![]),
+    ] {
+        assert_eq!(
+            query_keys(store, select(name.clone(), Predicate::Present)).await,
+            expected,
+            "present {name}"
+        );
+        assert!(
+            matches!(
+                store.query(select(name.clone(), Predicate::Absent)).await,
+                Err(QueueError::Invalid(_))
+            ),
+            "absent {name}"
+        );
+    }
     assert_eq!(
         query_keys(
             store,

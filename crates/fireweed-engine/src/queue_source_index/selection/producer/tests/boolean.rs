@@ -47,6 +47,16 @@ fn eq(field: &str, n: i64) -> WorkSelector {
         predicate: Predicate::Equal(FieldValue::Integer(n)),
     })
 }
+fn field_presence(field: &str, value: bool) -> WorkSelector {
+    WorkSelector::leaf(SelectorNode::Field {
+        name: field.into(),
+        predicate: if value {
+            Predicate::Present
+        } else {
+            Predicate::Absent
+        },
+    })
+}
 fn present(field: &str, value: bool) -> WorkSelector {
     WorkSelector::leaf(SelectorNode::Present {
         name: field.into(),
@@ -85,6 +95,17 @@ fn actual_boolean_programs_distinguish_missing_nonmatching_and_syntactic_empty()
             ),
             (WorkSelector::negate(eq("meta/any", 1)), vec!["b", "c", "d"]),
             (present("meta/any", false), vec!["b"]),
+            (field_presence("n", false), vec!["b"]),
+            (field_presence("n", true), vec!["a", "c", "d"]),
+            (WorkSelector::negate(field_presence("n", true)), vec!["b"]),
+            (field_presence("meta/any", true), vec!["a", "c", "d"]),
+            (
+                WorkSelector::all(vec![
+                    field_presence("n", true),
+                    WorkSelector::negate(eq("n", 1)),
+                ]),
+                vec!["c"],
+            ),
         ] {
             let mut f =
                 fixture_contents(Signals::default(), false, FieldType::Integer, false, true);
@@ -116,7 +137,7 @@ fn boolean_operands_are_bound_to_actual_occurrences_and_all_manifests_are_retain
         let intent = intent(vec![
             WorkSelector::all(vec![
                 eq("n", 1),
-                WorkSelector::any(vec![eq("n", 1), present("n", true)]),
+                WorkSelector::any(vec![eq("n", 1), field_presence("n", true)]),
             ]),
             eq("n", 2),
         ]);

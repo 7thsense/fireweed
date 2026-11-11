@@ -45,6 +45,26 @@ pub enum SelectorNode {
     AvailableAt { comparison: Comparison, value: i64 },
     LeaseActive(bool),
 }
+impl SelectorNode {
+    /// Field presence probe: `Present { name, present }` and the equivalent
+    /// `Field` nodes with `Predicate::Present` / `Predicate::Absent`. Backends
+    /// route all of them through one presence implementation.
+    #[doc(hidden)]
+    pub fn presence(&self) -> Option<(&str, bool)> {
+        match self {
+            Self::Present { name, present } => Some((name, *present)),
+            Self::Field {
+                name,
+                predicate: Predicate::Present,
+            } => Some((name, true)),
+            Self::Field {
+                name,
+                predicate: Predicate::Absent,
+            } => Some((name, false)),
+            _ => None,
+        }
+    }
+}
 impl WorkSelector {
     pub fn leaf(node: SelectorNode) -> Self {
         Self { nodes: vec![node] }
@@ -192,11 +212,12 @@ impl WorkSelector {
     /// broadly and filter on the client. Malformed programs fail closed.
     pub fn matches(&self, record: &WorkRecord, evaluated_at: i64) -> bool {
         self.evaluate(|node| match node {
-            SelectorNode::Field { name, predicate } => {
+            SelectorNode::Field { name, predicate } if node.presence().is_none() => {
                 predicate.matches(record.work.fields.get(name))
             }
-            SelectorNode::Present { name, present } => {
-                record.work.fields.contains_key(name) == *present
+            SelectorNode::Field { .. } | SelectorNode::Present { .. } => {
+                let (name, present) = node.presence().expect("presence node");
+                record.work.fields.contains_key(name) == present
             }
             SelectorNode::Keys(keys) => keys.contains(&record.work.key),
             SelectorNode::StoredLifecycleIn(states) => states.contains(&record.lifecycle),

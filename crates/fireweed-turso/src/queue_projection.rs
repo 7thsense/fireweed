@@ -114,6 +114,8 @@ CREATE TABLE IF NOT EXISTS q7_bodies(record_id INTEGER PRIMARY KEY,value BLOB NO
 CREATE TABLE IF NOT EXISTS q7_fields(record_id INTEGER NOT NULL,queue_id INTEGER NOT NULL,collection INTEGER NOT NULL,field INTEGER NOT NULL,prefix BLOB NOT NULL,hash BLOB NOT NULL,full_key BLOB NOT NULL,value BLOB NOT NULL,PRIMARY KEY(record_id,field));
 CREATE INDEX IF NOT EXISTS q7_field_equal ON q7_fields(queue_id,collection,field,hash,record_id);
 CREATE INDEX IF NOT EXISTS q7_field_range ON q7_fields(queue_id,collection,field,prefix,record_id);
+CREATE TABLE IF NOT EXISTS q7_field_absent(record_id INTEGER NOT NULL,queue_id INTEGER NOT NULL,collection INTEGER NOT NULL,field INTEGER NOT NULL,PRIMARY KEY(record_id,field));
+CREATE INDEX IF NOT EXISTS q7_field_absent_probe ON q7_field_absent(queue_id,collection,field,record_id);
 CREATE TABLE IF NOT EXISTS q7_additional(id INTEGER PRIMARY KEY,record_id INTEGER NOT NULL,queue_id INTEGER NOT NULL,collection INTEGER NOT NULL,name_hash BLOB NOT NULL,name BLOB NOT NULL,prefix BLOB NOT NULL,hash BLOB NOT NULL,full_key BLOB NOT NULL,value BLOB NOT NULL);
 CREATE INDEX IF NOT EXISTS q7_additional_name ON q7_additional(record_id,name_hash);
 CREATE INDEX IF NOT EXISTS q7_additional_equal ON q7_additional(queue_id,collection,name_hash,hash,record_id);
@@ -1000,6 +1002,28 @@ async fn delete_field(
     }
     Ok(())
 }
+/// One row per declared field the record lacks, so absence probes are
+/// index-backed. Every path that changes a record's field set keeps these in
+/// step with the field rows.
+async fn write_absence(
+    connection: &Connection,
+    location: PhysicalRecord,
+    field: i32,
+) -> QueueResult<()> {
+    connection
+        .execute(
+            "INSERT INTO q7_field_absent(record_id,queue_id,collection,field) VALUES(?1,?2,?3,?4)",
+            vec![
+                Value::Integer(location.id),
+                Value::Integer(location.queue_id),
+                Value::Integer(i64::from(location.collection)),
+                Value::Integer(i64::from(field)),
+            ],
+        )
+        .await
+        .map_err(unknown)?;
+    Ok(())
+}
 async fn persist_fields(
     connection: &Connection,
     location: PhysicalRecord,
@@ -1029,6 +1053,23 @@ async fn persist_fields(
                 )
                 .await
                 .map_err(unknown)?;
+            connection
+                .execute(
+                    "DELETE FROM q7_field_absent WHERE record_id=?1",
+                    vec![Value::Integer(record_id)],
+                )
+                .await
+                .map_err(unknown)?;
+            for (number, name) in definition.fields.keys().enumerate() {
+                if !fields.contains_key(name) {
+                    write_absence(
+                        connection,
+                        location,
+                        i32::try_from(number).map_err(|_| QueueError::TooLarge)?,
+                    )
+                    .await?;
+                }
+            }
             for (name, value) in fields {
                 write_field(
                     connection,
@@ -1048,6 +1089,19 @@ async fn persist_fields(
         ResolvedFields::Edit(fields) => {
             for (name, value) in fields {
                 delete_field(connection, record_id, definition, name).await?;
+                let number = field_number(definition, name)?;
+                if number >= 0 {
+                    connection
+                        .execute(
+                            "DELETE FROM q7_field_absent WHERE record_id=?1 AND field=?2",
+                            vec![Value::Integer(record_id), Value::Integer(i64::from(number))],
+                        )
+                        .await
+                        .map_err(unknown)?;
+                    if value.is_none() {
+                        write_absence(connection, location, number).await?;
+                    }
+                }
                 if let Some(value) = value {
                     write_field(
                         connection,
@@ -1225,6 +1279,7 @@ async fn apply_command(
         EffectRef::Delete { deleted_at } => {
             for sql in [
                 "DELETE FROM q7_fields WHERE record_id=?1",
+                "DELETE FROM q7_field_absent WHERE record_id=?1",
                 "DELETE FROM q7_additional WHERE record_id=?1",
                 "DELETE FROM q7_indexes WHERE record_id=?1",
                 "DELETE FROM q7_bodies WHERE record_id=?1",
@@ -3741,6 +3796,173 @@ mod tests {
         drop(definition);
         drop(job);
         assert_eq!(admission.usage().unwrap(), (0, 0));
+        workers.close_and_drain().await.unwrap();
+    }
+    #[tokio::test]
+    async fn absence_rows_follow_every_field_change_and_back_the_absence_probe() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("absence-selection.db");
+        let admission = QueueAdmission::new(1, 64 << 20).unwrap();
+        let job = Arc::new(admission.reserve(0).unwrap());
+        let workers = ScratchWorkers::new(1, 1).unwrap();
+        let (projection, definition) = bootstrap(&path, &job, &workers).await;
+        let mut snapshot = seed(&projection, &definition, &job, &workers, true).await;
+        let base = ClaimRequest {
+            queue: address(),
+            request_id: "absence".into(),
+            filter: Filter::default(),
+            order: ClaimOrder::PriorityAscending,
+            eligible_at: 0,
+            lease_nanos: 1_000_000,
+            max_records: 2,
+            max_bytes: 4096,
+            fields: Some(Default::default()),
+            include_body: false,
+            issued_at: 0,
+        };
+        let select = |predicate: Predicate, field: &str| {
+            let mut request = base.clone();
+            request.filter.fields.insert(field.into(), predicate);
+            request
+        };
+        let rows_for = |key: &'static str| {
+            let projection = Arc::clone(&projection);
+            async move {
+                integer(
+                    &inspect(
+                        &projection,
+                        "SELECT COUNT(*) FROM q7_field_absent a JOIN q7_records r ON r.id=a.record_id WHERE r.key=?1",
+                        vec![blob(key.as_bytes())],
+                        1,
+                    )
+                    .await[0],
+                )
+                .unwrap()
+            }
+        };
+        // Only `b` lacks the declared `opaque` field, and no row is written for
+        // present fields or for additional names.
+        assert_eq!((rows_for("a").await, rows_for("b").await), (0, 1));
+        for (predicate, field, expected, offset) in [
+            (Predicate::Absent, "opaque", vec!["b"], 2),
+            (Predicate::Present, "opaque", vec!["a"], 2),
+            (Predicate::Present, "u", vec!["a", "b"], 2),
+            (Predicate::Absent, "u", vec![], 2),
+            (Predicate::Present, "meta/rank", vec![], 2),
+        ] {
+            let selected = select_fixture(
+                &projection,
+                &definition,
+                select(predicate.clone(), field),
+                11,
+                offset,
+                &job,
+                &workers,
+            )
+            .await
+            .unwrap();
+            assert_eq!(selected.keys(), &expected, "{predicate:?} {field}");
+        }
+        let mut remove = group("absence-remove");
+        remove.work_updates.push(patch("a", 1, None, Some(None)));
+        apply_group_record(
+            &projection,
+            &definition,
+            &mut snapshot,
+            &remove,
+            2,
+            &job,
+            &workers,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows_for("a").await, 1);
+        for (predicate, expected) in [
+            (Predicate::Absent, vec!["a"]),
+            (Predicate::Present, vec!["b"]),
+        ] {
+            let selected = select_fixture(
+                &projection,
+                &definition,
+                select(predicate.clone(), "u"),
+                11,
+                3,
+                &job,
+                &workers,
+            )
+            .await
+            .unwrap();
+            assert_eq!(selected.keys(), &expected, "{predicate:?}");
+        }
+        let mut set = group("absence-set");
+        set.work_updates.push(patch("a", 2, None, Some(Some(5))));
+        apply_group_record(
+            &projection,
+            &definition,
+            &mut snapshot,
+            &set,
+            3,
+            &job,
+            &workers,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows_for("a").await, 0);
+        assert!(
+            select_fixture(
+                &projection,
+                &definition,
+                select(Predicate::Absent, "u"),
+                11,
+                4,
+                &job,
+                &workers
+            )
+            .await
+            .unwrap()
+            .keys()
+            .is_empty()
+        );
+        // The probe is a search of the absence index, never a scan of records.
+        let request = select(Predicate::Absent, "opaque");
+        let explain_projection = Arc::clone(&projection);
+        let details = tokio::task::spawn_blocking(move || {
+            crate::tx::block_on_owned_apply(async {
+                let writer = explain_projection.writer.lock().await;
+                let connection = writer.as_ref().unwrap();
+                let queue_id = integer(
+                    &one(connection, "SELECT id FROM q7_queues", vec![], 1)
+                        .await
+                        .unwrap()
+                        .unwrap()[0],
+                )
+                .unwrap();
+                let (sql, pool) =
+                    selection::candidate_sql(&request, &schema(), queue_id, 11).unwrap();
+                let mut rows = connection
+                    .query(&format!("EXPLAIN QUERY PLAN {sql}"), pool)
+                    .await
+                    .unwrap();
+                let mut details = Vec::new();
+                while let Some(row) = rows.next().await.unwrap() {
+                    match row.get_value(3).unwrap() {
+                        Value::Text(text) => details.push(text),
+                        _ => panic!("non-text query plan"),
+                    }
+                }
+                details
+            })
+        })
+        .await
+        .unwrap();
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("SEARCH a")
+                    && detail.contains("q7_field_absent_probe")),
+            "{details:?}"
+        );
+        drop(projection);
         workers.close_and_drain().await.unwrap();
     }
     #[tokio::test]
