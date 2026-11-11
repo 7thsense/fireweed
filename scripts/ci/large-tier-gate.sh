@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Large-scale test tier: the Rust lib tests under a `large` submodule and the
+# Large-scale test tier: the fireweed and fireweed-turso lib tests under a `large` submodule and the
 # Python formal tests in scripts/formal/large_test_*.py. Selection is by path
 # only, so every test stays listed and runnable. The fast tier
 # (fast-functional-gate.sh and the formal unit step) skips these tests.
@@ -31,6 +31,21 @@ if [[ "${rust_ran}" -eq 0 ]]; then
     exit 1
 fi
 echo "large tier Rust tests passed: ${rust_ran}"
+
+echo "--- large tier: fireweed-turso lib tests under ::large:: (local feature, no services) ---"
+cargo "+${toolchain}" test --locked -p fireweed-turso --features local --lib ::large:: 2>&1 | tee "${log_dir}/rust-turso.log"
+turso_ran="$(python3 - "${log_dir}/rust-turso.log" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+rows = re.findall(r"^test result: ok\. (\d+) passed; 0 failed; 0 ignored", text, re.MULTILINE)
+print(sum(int(n) for n in rows))
+PY
+)"
+if [[ "${turso_ran}" -eq 0 ]]; then
+    echo "large tier ran 0 fireweed-turso tests; the ::large:: selection is empty" >&2
+    exit 1
+fi
+echo "large tier fireweed-turso tests passed: ${turso_ran}"
 
 echo "--- large tier: scripts/formal large_test_*.py ---"
 python3 -m unittest discover -s scripts/formal -p 'large_test_*.py' -v 2>&1 | tee "${log_dir}/python.log"
