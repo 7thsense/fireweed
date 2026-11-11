@@ -41,6 +41,7 @@ async fn concrete_queue_runs_identical_contract_and_reopens_exact_receipt() {
     suite::expiry_and_administration(&queue, &clock, address("expiry")).await;
     suite::ordered_long_values_and_cursor_scope(&queue, address("long")).await;
     suite::predicate_and_order_oracles(&queue, address("predicates")).await;
+    suite::presence_and_absence_predicates(&queue, address("presence")).await;
     suite::ordered_groups_sparse_stats_and_replay_precedence(&queue, &clock, address("groups"))
         .await;
     suite::ordered_insert_uniqueness(&queue, address("insert-uniqueness")).await;

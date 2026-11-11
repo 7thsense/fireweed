@@ -122,6 +122,10 @@ fn scalar_field(
             )
         }
         Predicate::In(_) => return Err(unknown("membership scalar was not expanded")),
+        // Presence probes are normalised to the Present node before any leaf.
+        Predicate::Present | Predicate::Absent => {
+            return Err(unknown("presence predicate reached a scalar probe"));
+        }
     };
     Ok(format!(
         "SELECT r.id,length(r.key),r.version FROM {table} f INDEXED BY {index} JOIN q7_records r ON r.id=f.record_id WHERE f.queue_id={queue} AND f.collection=0 AND {identity} AND {predicate} AND r.queue_id={queue} AND r.collection=0 AND r.active=1"
@@ -144,7 +148,7 @@ fn leaf(
     let mut pool = BytePool::default();
     let active = format!("(r.lifecycle=1 AND COALESCE(r.lease_until>{evaluated},0))");
     let sql = match node {
-        SelectorNode::Field { name, predicate } => match scalar {
+        SelectorNode::Field { name, predicate } if node.presence().is_none() => match scalar {
             Some(value) => scalar_field(
                 queue,
                 name,
@@ -154,13 +158,18 @@ fn leaf(
             )?,
             None => scalar_field(queue, name, predicate, definition, &mut pool)?,
         },
-        SelectorNode::Present { name, present } => {
+        // `Present` nodes and `Field` nodes carrying Present/Absent share this
+        // one implementation.
+        SelectorNode::Field { .. } | SelectorNode::Present { .. } => {
+            let (name, present) = node
+                .presence()
+                .ok_or_else(|| unknown("presence node differs from its selector"))?;
             let (table, identity) = field_identity(name, definition, &mut pool)?;
             base(
                 queue,
                 &format!(
                     "{}EXISTS(SELECT 1 FROM {table} f WHERE f.record_id=r.id AND f.queue_id=r.queue_id AND f.collection=0 AND {identity})",
-                    if *present { "" } else { "NOT " }
+                    if present { "" } else { "NOT " }
                 ),
                 false,
             )

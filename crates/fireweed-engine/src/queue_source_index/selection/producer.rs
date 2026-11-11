@@ -99,7 +99,11 @@ impl<'a> QueueSourceSelectionRequest<'a> {
                     // scanner applies them only after the first clause owns a key.
                     for clause in clauses {
                         for node in &clause.selector.nodes {
-                            if let SelectorNode::Field { name, predicate } = node {
+                            // Presence probes are presence leaves, not scalar
+                            // occurrences.
+                            if node.presence().is_none()
+                                && let SelectorNode::Field { name, predicate } = node
+                            {
                                 visit(Declaration {
                                     collection: None,
                                     field: name,

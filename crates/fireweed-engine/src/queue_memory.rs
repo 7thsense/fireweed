@@ -173,7 +173,9 @@ pub fn identity_expansion(
         .checked_add(collection.map_or(0, |name| name.len() as u64))
         .and_then(|n| n.checked_add(512))
         .ok_or(QueueError::TooLarge)?;
-    per.checked_mul(def.indexes.len() as u64 + 1)
+    // One posting per index, the record itself, and one absence sentinel per
+    // declared field the record may lack.
+    per.checked_mul(def.indexes.len() as u64 + def.fields.len() as u64 + 1)
         .ok_or(QueueError::TooLarge)
 }
 
@@ -963,6 +965,7 @@ pub fn filter_headers(filter: &Filter) -> QueueResult<u64> {
     for predicate in filter.fields.values() {
         let values = match predicate {
             Predicate::Equal(_) => 1,
+            Predicate::Present | Predicate::Absent => 0,
             Predicate::In(values) => values.len(),
             Predicate::Range { lower, upper } => {
                 usize::from(lower.is_some()) + usize::from(upper.is_some())

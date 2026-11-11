@@ -16,8 +16,10 @@ impl<'a> QueueSourceSelectionRequest<'a> {
             .get(clause)
             .and_then(|clause| clause.selector.nodes.get(node))
         {
-            Some(SelectorNode::Present { name, present }) => Ok((name, *present)),
-            _ => Err(unknown("presence occurrence differs from actual request")),
+            Some(node) => node
+                .presence()
+                .ok_or_else(|| unknown("presence occurrence differs from actual request")),
+            None => Err(unknown("presence occurrence differs from actual request")),
         }
     }
 }

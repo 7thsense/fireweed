@@ -69,6 +69,10 @@ CREATE TABLE IF NOT EXISTS fireweed_api007.fields (
  PRIMARY KEY(record_id,field));
 CREATE INDEX IF NOT EXISTS field_equal_probe ON fireweed_api007.fields(queue_id,collection,field,hash,record_id);
 CREATE INDEX IF NOT EXISTS field_range_probe ON fireweed_api007.fields(queue_id,collection,field,prefix,record_id);
+CREATE TABLE IF NOT EXISTS fireweed_api007.field_absent (
+ record_id BIGINT NOT NULL REFERENCES fireweed_api007.records(id), queue_id BIGINT NOT NULL, collection INT NOT NULL,
+ field INT NOT NULL, PRIMARY KEY(record_id,field));
+CREATE INDEX IF NOT EXISTS field_absent_probe ON fireweed_api007.field_absent(queue_id,collection,field,record_id);
 CREATE TABLE IF NOT EXISTS fireweed_api007.additional_fields (
  id BIGSERIAL PRIMARY KEY, record_id BIGINT NOT NULL REFERENCES fireweed_api007.records(id),
  queue_id BIGINT NOT NULL, collection INT NOT NULL, name_hash BYTEA NOT NULL, name BYTEA NOT NULL,
@@ -413,7 +417,7 @@ impl PostgresQueueStore {
                     }
                     removed += u64::try_from(ids.len()).map_err(storage)?;
                     if !ids.is_empty() {
-                        for table in ["bodies", "fields", "additional_fields", "indexes"] {
+                        for table in ["bodies", "fields", "field_absent", "additional_fields", "indexes"] {
                             tx.execute(
                                 &format!("DELETE FROM fireweed_api007.{table} WHERE record_id=ANY($1)"),
                                 &[&ids],
@@ -1500,6 +1504,12 @@ async fn persist_delta(
         .await
         .map_err(storage)?;
         tx.execute(
+            "DELETE FROM fireweed_api007.field_absent WHERE record_id=ANY($1)",
+            &[&changed],
+        )
+        .await
+        .map_err(storage)?;
+        tx.execute(
             "DELETE FROM fireweed_api007.indexes WHERE record_id=ANY($1)",
             &[&changed],
         )
@@ -1539,6 +1549,9 @@ async fn persist_delta(
         }
         if !edited_records.is_empty() {
             tx.execute("DELETE FROM fireweed_api007.fields f USING UNNEST($1::bigint[],$2::int[]) AS x(id,no) WHERE f.record_id=x.id AND f.field=x.no", &[&edited_records,&edited_numbers]).await.map_err(storage)?;
+            // Only the edited declared names change absence; other absence rows
+            // of the record keep their physical rows.
+            tx.execute("DELETE FROM fireweed_api007.field_absent f USING UNNEST($1::bigint[],$2::int[]) AS x(id,no) WHERE f.record_id=x.id AND f.field=x.no", &[&edited_records,&edited_numbers]).await.map_err(storage)?;
         }
         if !edited_extra_records.is_empty() {
             tx.execute("DELETE FROM fireweed_api007.additional_fields f USING UNNEST($1::bigint[],$2::bytea[],$3::bytea[]) AS x(id,hash,name) WHERE f.record_id=x.id AND f.name_hash=x.hash AND f.name=x.name", &[&edited_extra_records,&edited_name_hashes,&edited_names]).await.map_err(storage)?;
@@ -1561,6 +1574,9 @@ async fn persist_delta(
         let mut value_hashes = vec![];
         let mut full = vec![];
         let mut values = vec![];
+        let mut absent_records = vec![];
+        let mut absent_cols = vec![];
+        let mut absent_numbers = vec![];
         let mut ix_records = vec![];
         let mut ix_cols = vec![];
         let mut ix_numbers = vec![];
@@ -1573,6 +1589,24 @@ async fn persist_delta(
                 continue;
             }
             let def = definition(&queue.schema, *col)?;
+            if let Some(edits) = exact_edits.get(id) {
+                for (name, value) in edits.iter() {
+                    let no = field_no(def, name)?;
+                    if no >= 0 && value.is_none() {
+                        absent_records.push(*id);
+                        absent_cols.push(*col);
+                        absent_numbers.push(no);
+                    }
+                }
+            } else {
+                for (no, name) in def.fields.keys().enumerate() {
+                    if !fields.contains_key(name) {
+                        absent_records.push(*id);
+                        absent_cols.push(*col);
+                        absent_numbers.push(i32::try_from(no).map_err(|_| QueueError::TooLarge)?);
+                    }
+                }
+            }
             for (name, value) in fields {
                 let sort = ordered_key(&[Some(value)])?;
                 let no = field_no(def, name)?;
@@ -1633,6 +1667,10 @@ async fn persist_delta(
         if !record_ids.is_empty() {
             tx.execute("INSERT INTO fireweed_api007.fields(record_id,queue_id,collection,field,prefix,hash,full_key,value) SELECT rid,$1,col,no,prefix,hash,full_key,value FROM UNNEST($2::bigint[],$3::int[],$4::int[],$5::bytea[],$6::bytea[],$7::bytea[],$8::bytea[]) AS x(rid,col,no,prefix,hash,full_key,value)",
             &[&queue.id,&record_ids,&col_ids,&numbers,&prefixes,&value_hashes,&full,&values]).await.map_err(storage)?;
+        }
+        if !absent_records.is_empty() {
+            tx.execute("INSERT INTO fireweed_api007.field_absent(record_id,queue_id,collection,field) SELECT rid,$1,col,no FROM UNNEST($2::bigint[],$3::int[],$4::int[]) AS x(rid,col,no)",
+            &[&queue.id,&absent_records,&absent_cols,&absent_numbers]).await.map_err(storage)?;
         }
         if !extra_records.is_empty() {
             tx.execute("INSERT INTO fireweed_api007.additional_fields(record_id,queue_id,collection,name_hash,name,prefix,hash,full_key,value) SELECT rid,$1,col,name_hash,name,prefix,hash,full_key,value FROM UNNEST($2::bigint[],$3::int[],$4::bytea[],$5::bytea[],$6::bytea[],$7::bytea[],$8::bytea[],$9::bytea[]) AS x(rid,col,name_hash,name,prefix,hash,full_key,value)",&[&queue.id,&extra_records,&extra_cols,&extra_name_hashes,&extra_names,&extra_prefixes,&extra_hashes,&extra_full,&extra_values]).await.map_err(storage)?;
@@ -1777,12 +1815,43 @@ fn field_identity_sql(
     };
     Ok(result)
 }
+/// A declared field's absence row for the record aliased `record`; additional
+/// names have no absence rows and are rejected by predicate validation first.
+fn absence_sql(
+    field: &str,
+    def: &CollectionDefinition,
+    params: &mut impl FieldSqlParameters,
+    record: &str,
+) -> QueueResult<String> {
+    let no = field_no(def, field)?;
+    if no < 0 {
+        return Err(QueueError::Invalid(
+            "absence requires a declared field".into(),
+        ));
+    }
+    let no = params.integer(no);
+    Ok(format!(
+        "EXISTS(SELECT 1 FROM fireweed_api007.field_absent a WHERE a.record_id={record}.id AND a.queue_id={record}.queue_id AND a.collection={record}.collection AND a.field={no})"
+    ))
+}
 fn field_predicate_sql(
     predicate: &Predicate,
     params: &mut impl FieldSqlParameters,
 ) -> QueueResult<String> {
     let mut sql = String::new();
     match predicate {
+        Predicate::Present => {
+            // Every present value's ordered key starts [1, 1], so this range
+            // covers the field's whole value space on either table.
+            let fp = params.bytes(vec![1, 1]);
+            let cp = params.bytes(vec![1, 2]);
+            sql.push_str(&format!(" AND f.prefix>={fp} AND f.prefix<{cp}"));
+        }
+        Predicate::Absent => {
+            return Err(QueueError::Invalid(
+                "absence is probed through the absence table".into(),
+            ));
+        }
         Predicate::Equal(value) => {
             let bytes = ordered_key(&[Some(value)])?;
             let hp = params.bytes(probe_hash(&bytes));
@@ -1852,6 +1921,10 @@ fn filter_sql(
         sql.push_str(&format!(" AND r.key_hash=ANY({hp}) AND r.key=ANY({kp})"));
     }
     for (field, predicate) in &filter.fields {
+        if matches!(predicate, Predicate::Absent) {
+            sql.push_str(&format!(" AND {}", absence_sql(field, def, params, "r")?));
+            continue;
+        }
         let (table, identity) = field_identity_sql(field, def, params)?;
         sql.push_str(&format!(" AND EXISTS(SELECT 1 FROM {table} f WHERE f.record_id=r.id AND f.queue_id=r.queue_id AND f.collection=r.collection AND {identity}"));
         sql.push_str(&field_predicate_sql(predicate, params)?);
@@ -3905,6 +3978,11 @@ mod tests {
         let writer_before = writer.snapshot.clone();
         let unchanged = tx.query("SELECT record_id,field,ctid::text FROM fireweed_api007.fields WHERE record_id=ANY($1) ORDER BY record_id,field", &[&vec![work_id, writer.ids[&RecordIdentity { collection: None, key: "b".into() }]]]).await.unwrap().into_iter().map(|r| (r.get::<_,i64>(0), r.get::<_,i32>(1), r.get::<_,String>(2))).collect::<Vec<_>>();
         let unchanged_indexes = tx.query("SELECT record_id,index_no,ctid::text FROM fireweed_api007.indexes WHERE queue_id=$1 AND collection=0 ORDER BY record_id,index_no", &[&row.id]).await.unwrap().into_iter().map(|r| (r.get::<_,i64>(0), r.get::<_,i32>(1), r.get::<_,String>(2))).collect::<Vec<_>>();
+        let unchanged_absent = tx.query("SELECT record_id,field,ctid::text FROM fireweed_api007.field_absent WHERE queue_id=$1 AND collection=0 ORDER BY record_id,field", &[&row.id]).await.unwrap().into_iter().map(|r| (r.get::<_,i64>(0), r.get::<_,i32>(1), r.get::<_,String>(2))).collect::<Vec<_>>();
+        assert!(
+            !unchanged_absent.is_empty(),
+            "the fixture must own absence rows"
+        );
         let unchanged_extras = tx.query("SELECT id,record_id,name,ctid::text FROM fireweed_api007.additional_fields WHERE queue_id=$1 ORDER BY id", &[&row.id]).await.unwrap().into_iter().map(|r| (r.get::<_,i64>(0), r.get::<_,i64>(1), r.get::<_,Vec<u8>>(2), r.get::<_,String>(3))).collect::<Vec<_>>();
         let unchanged_bodies = tx
             .query(
@@ -3970,6 +4048,9 @@ mod tests {
         for (id, index, ctid) in &unchanged_indexes {
             assert_eq!(&tx.query_one("SELECT ctid::text FROM fireweed_api007.indexes WHERE record_id=$1 AND index_no=$2", &[id,index]).await.unwrap().get::<_,String>(0), ctid);
         }
+        for (id, field, ctid) in &unchanged_absent {
+            assert_eq!(&tx.query_one("SELECT ctid::text FROM fireweed_api007.field_absent WHERE record_id=$1 AND field=$2", &[id,field]).await.unwrap().get::<_,String>(0), ctid);
+        }
         drop(noop_output);
         load_unique_probes(&tx, &writer_row, &mut writer, &writer_group, 0, &writer_job)
             .await
@@ -3997,6 +4078,13 @@ mod tests {
                 .get::<_, String>(0),
                 ctid
             );
+        }
+        // Absence rows of names the edit did not touch keep their physical rows.
+        for (id, field, ctid) in unchanged_absent {
+            if (id == work_id && field == 0) || (id == b_id && field == 1) {
+                continue;
+            }
+            assert_eq!(tx.query_one("SELECT ctid::text FROM fireweed_api007.field_absent WHERE record_id=$1 AND field=$2", &[&id,&field]).await.unwrap().get::<_,String>(0), ctid);
         }
         for (id, index, ctid) in unchanged_indexes {
             if (id == work_id && index == 0) || (id == b_id && index == 1) {
@@ -4759,6 +4847,11 @@ mod tests {
         fireweed_conformance::queue_contract::predicate_and_order_oracles(
             &store,
             q("left", "predicates"),
+        )
+        .await;
+        fireweed_conformance::queue_contract::presence_and_absence_predicates(
+            &store,
+            q("left", "presence"),
         )
         .await;
         fireweed_conformance::queue_contract::ordered_long_values_and_cursor_scope(

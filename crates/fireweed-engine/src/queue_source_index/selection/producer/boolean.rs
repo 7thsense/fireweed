@@ -17,7 +17,7 @@ impl<'a> QueueSourceSelectionRequest<'a> {
         let offset = clauses[..clause]
             .iter()
             .flat_map(|clause| &clause.selector.nodes)
-            .filter(|node| matches!(node, SelectorNode::Field { .. }))
+            .filter(|node| matches!(node, SelectorNode::Field { .. }) && node.presence().is_none())
             .count();
         Ok((selector, offset))
     }
@@ -25,6 +25,10 @@ impl<'a> QueueSourceSelectionRequest<'a> {
 fn requirements(program: &WorkSelector) -> QueueResult<(bool, bool)> {
     let (mut universe, mut empty) = (false, false);
     for node in &program.nodes {
+        if let Some((_, present)) = node.presence() {
+            universe |= !present;
+            continue;
+        }
         match node {
             SelectorNode::Field { .. }
             | SelectorNode::Keys(_)
@@ -126,6 +130,29 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
         let mut occurrence = offset;
         for (node_index, node) in program.nodes.iter().enumerate() {
             let value = match node {
+                SelectorNode::Present { .. } | SelectorNode::Field { .. }
+                    if node.presence().is_some() =>
+                {
+                    let present = node.presence().is_some_and(|(_, present)| present);
+                    let (producer, leaf) = self.presence(clause, node_index).await?;
+                    self = producer;
+                    let index = proof.presence.len();
+                    proof.presence.push(leaf);
+                    let operand = CandidateOperand::Presence(index);
+                    if present {
+                        operand
+                    } else {
+                        let universe = proof
+                            .universe
+                            .as_ref()
+                            .ok_or_else(|| unknown("Missing requires the complete universe"))?;
+                        CandidateOperand::Owned(
+                            self.scratch
+                                .difference(&universe.set, resolved(&operand, &proof)?)
+                                .await?,
+                        )
+                    }
+                }
                 SelectorNode::Field { .. } => {
                     let (producer, leaf) = self.scalar(occurrence).await?;
                     self = producer;
@@ -140,26 +167,6 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
                     let index = proof.keys.len();
                     proof.keys.push(leaf);
                     CandidateOperand::Keys(index)
-                }
-                SelectorNode::Present { present, .. } => {
-                    let (producer, leaf) = self.presence(clause, node_index).await?;
-                    self = producer;
-                    let index = proof.presence.len();
-                    proof.presence.push(leaf);
-                    let operand = CandidateOperand::Presence(index);
-                    if *present {
-                        operand
-                    } else {
-                        let universe = proof
-                            .universe
-                            .as_ref()
-                            .ok_or_else(|| unknown("Missing requires the complete universe"))?;
-                        CandidateOperand::Owned(
-                            self.scratch
-                                .difference(&universe.set, resolved(&operand, &proof)?)
-                                .await?,
-                        )
-                    }
                 }
                 SelectorNode::Not => {
                     let operand = stack
@@ -235,6 +242,19 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
         let (mut values, mut presence, mut keys) = (0, 0, 0);
         for (node, declaration) in program.nodes.iter().enumerate() {
             match declaration {
+                SelectorNode::Present { .. } | SelectorNode::Field { .. }
+                    if declaration.presence().is_some() =>
+                {
+                    self.validate_presence(
+                        proof
+                            .presence
+                            .get(presence)
+                            .ok_or_else(|| unknown("Boolean presence proof missing"))?,
+                        clause,
+                        node,
+                    )?;
+                    presence += 1;
+                }
                 SelectorNode::Field { .. } => {
                     self.validate_scalar(
                         proof
@@ -256,17 +276,6 @@ impl<'a, R: QueueSourceStreamingReader + Send, S: QueueSourceCandidateScratch>
                         node,
                     )?;
                     keys += 1;
-                }
-                SelectorNode::Present { .. } => {
-                    self.validate_presence(
-                        proof
-                            .presence
-                            .get(presence)
-                            .ok_or_else(|| unknown("Boolean presence proof missing"))?,
-                        clause,
-                        node,
-                    )?;
-                    presence += 1;
                 }
                 _ => {}
             }

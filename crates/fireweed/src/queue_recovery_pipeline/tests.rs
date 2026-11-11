@@ -298,6 +298,8 @@ async fn native_port_identical_contract(s3: bool) {
     suite::ordered_long_values_and_cursor_scope(&queue, address("long")).await;
     eprintln!("native contract {s3}: predicate_and_order_oracles");
     suite::predicate_and_order_oracles(&queue, address("predicates")).await;
+    eprintln!("native contract {s3}: presence_and_absence_predicates");
+    suite::presence_and_absence_predicates(&queue, address("presence")).await;
     eprintln!("native contract {s3}: ordered_groups_sparse_stats_and_replay_precedence");
     suite::ordered_groups_sparse_stats_and_replay_precedence(&queue, &clock, address("groups"))
         .await;

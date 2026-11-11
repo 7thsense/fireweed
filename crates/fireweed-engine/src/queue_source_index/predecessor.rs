@@ -315,8 +315,8 @@ pub(super) mod tests {
         queue_publication::{BodyCommandRef, EffectRef, PublicationReceipt, encode_publication},
         queue_schema_codec::encode_definition,
         queue_source_index::{
-            QueueSourceGenesis, QueueSourcePayload, QueueSourcePoint, QueueSourceRecordReader,
-            QueueSourceSpan,
+            QUEUE_SOURCE_ABSENT_SORT, QueueSourceGenesis, QueueSourcePayload, QueueSourcePoint,
+            QueueSourceRecordReader, QueueSourceSpan,
         },
     };
     use fireweed_core::queue_contract::*;
@@ -426,6 +426,23 @@ pub(super) mod tests {
                     Vec::new(),
                 );
             }
+            for name in definition
+                .fields
+                .keys()
+                .filter(|name| !fields.contains_key(*name))
+            {
+                map.insert(
+                    QueueSourceKey::ScalarPosting {
+                        collection: None,
+                        field: name,
+                        sort: &QUEUE_SOURCE_ABSENT_SORT,
+                        key: "work\0α",
+                    }
+                    .encode()
+                    .unwrap(),
+                    Vec::new(),
+                );
+            }
             for (index, columns) in &definition.indexes {
                 let values: Vec<_> = columns.iter().map(|name| fields.get(name)).collect();
                 let sort = crate::queue_index::ordered_key(&values).unwrap();
@@ -514,31 +531,48 @@ pub(super) mod tests {
         transition: &QueueSourceRecordTransition<'_, '_>,
         collection: Option<&str>,
         key: &str,
-        before: &Fields,
-        after: &Fields,
+        definition: &CollectionDefinition,
+        before: Option<&Fields>,
+        after: Option<&Fields>,
         job: &Arc<QueueReservation>,
     ) -> usize {
         fn inventory(
             collection: Option<&str>,
             key: &str,
-            fields: &Fields,
+            definition: &CollectionDefinition,
+            fields: Option<&Fields>,
         ) -> std::collections::BTreeSet<Vec<u8>> {
-            fields
-                .iter()
-                .map(|(field, value)| {
-                    let sort = crate::queue_index::ordered_key(&[Some(value)]).unwrap();
+            let Some(fields) = fields else {
+                return Default::default();
+            };
+            let present = fields.iter().map(|(field, value)| {
+                let sort = crate::queue_index::ordered_key(&[Some(value)]).unwrap();
+                QueueSourceKey::ScalarPosting {
+                    collection,
+                    field,
+                    sort: &sort,
+                    key,
+                }
+                .encode()
+                .unwrap()
+            });
+            let absent = definition
+                .fields
+                .keys()
+                .filter(|name| !fields.contains_key(*name))
+                .map(|field| {
                     QueueSourceKey::ScalarPosting {
                         collection,
                         field,
-                        sort: &sort,
+                        sort: &QUEUE_SOURCE_ABSENT_SORT,
                         key,
                     }
                     .encode()
                     .unwrap()
-                })
-                .collect()
+                });
+            present.chain(absent).collect()
         }
-        let mut actual = inventory(collection, key, before);
+        let mut actual = inventory(collection, key, definition, before);
         let mut calls = 0;
         transition
             .visit_scalar_postings(job, &mut |posting, present| {
@@ -552,7 +586,7 @@ pub(super) mod tests {
                 Ok(())
             })
             .unwrap();
-        assert_eq!(actual, inventory(collection, key, after));
+        assert_eq!(actual, inventory(collection, key, definition, after));
         if calls > 0 {
             let mut stopped = 0;
             let result = transition.visit_scalar_postings(job, &mut |_, _| {
@@ -1099,8 +1133,9 @@ pub(super) mod tests {
                     &transition,
                     None,
                     "work\0α",
-                    &snapshot.work["work\0α"].record.work.fields,
-                    &expected,
+                    &schema.work,
+                    Some(&snapshot.work["work\0α"].record.work.fields),
+                    after.work.get("work\0α").map(|row| &row.record.work.fields),
                     &job,
                 );
                 assert_eq!(admission.usage().unwrap(), posting_baseline);
@@ -2147,8 +2182,9 @@ pub(super) mod tests {
                         &transition,
                         Some("state"),
                         "row",
-                        &snapshot.state[&("state".into(), "row".into())].fields,
-                        &rebuilt,
+                        &schema.state["state"],
+                        Some(&snapshot.state[&("state".into(), "row".into())].fields),
+                        Some(&rebuilt),
                         &job,
                     );
 
@@ -2229,8 +2265,9 @@ pub(super) mod tests {
                     &transition,
                     Some("state"),
                     "row",
-                    &snapshot.state[&("state".into(), "row".into())].fields,
-                    &Fields::new(),
+                    &schema.state["state"],
+                    Some(&snapshot.state[&("state".into(), "row".into())].fields),
+                    None,
                     &job,
                 );
             }

@@ -121,8 +121,14 @@ so stale CAS cannot match a replacement record (ABA). State is never claimable. 
 first-class records with documented schemas, keyed reads, and indexed queries;
 there is no consumer-facing side-record API or backend position.
 
-Hot-path filters provide typed equality, membership, ranges and presence/absence
-on declared or explicitly admitted indexed additional fields, plus key selection.
+Hot-path filters provide typed equality, membership and ranges, plus key selection.
+`Predicate::Present` matches a field that exists in the record, with any value, on a
+declared field or an explicitly admitted indexed additional field. `Predicate::Absent`
+matches a declared field the record lacks and is index-backed (a per-record absence
+entry for each missing declared field); on a field admitted only by an additional-field
+prefix it is `Invalid`. Claim, stats, query and administrative selectors share this
+vocabulary (an administrative `Field` node carrying Present or Absent behaves exactly
+like the `Present { present }` node), and a filter holds one predicate per field.
 Administrative selection also supports All/Any/Not and intrinsic lifecycle,
 attempt, lease-active-at-evaluated_at and due-time predicates. Full namespace/name
 and typed values disambiguate every hash/prefix; no digest-only or schema-ordinal

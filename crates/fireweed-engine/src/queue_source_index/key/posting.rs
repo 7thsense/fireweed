@@ -8,6 +8,11 @@ use super::{
 use crate::queue_source_index::{QueueSourceCut, QueueSourcePoint};
 use fireweed_core::queue_contract::{FieldType, QueueError};
 
+/// Sort bytes of the sentinel scalar posting that marks a declared field the
+/// live record lacks: codec version 1 then the missing marker 0. Present values
+/// always continue with `1`, so the sentinel precedes every present posting.
+pub const QUEUE_SOURCE_ABSENT_SORT: [u8; 2] = [1, 0];
+
 #[derive(Clone, Copy)]
 pub enum QueueSourcePostingFamily<'a> {
     Scalar {
@@ -57,7 +62,11 @@ impl<'a> QueueSourcePostingFamily<'a> {
             return Err(unknown("posting name differs"));
         }
         let (sort, input) = Literal::parse(input)?;
-        super::ordered::validate(sort.bytes(), types, missing)?;
+        if tag == 4 && sort.matches(&QUEUE_SOURCE_ABSENT_SORT) {
+            // Declared-field absence sentinel; no typed payload follows.
+        } else {
+            super::ordered::validate(sort.bytes(), types, missing)?;
+        }
         let key = record_key(input)?;
         Ok(QueueSourceDecodedPosting {
             identity: QueueSourceDecodedIdentity::new(collection, key, point),

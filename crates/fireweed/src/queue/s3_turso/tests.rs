@@ -498,6 +498,7 @@ async fn contract(queue: &Queue, clock: &TestClock, id: u128) -> Prepared {
     suite::expiry_and_administration(queue, clock, a("expiry")).await;
     suite::ordered_long_values_and_cursor_scope(queue, a("long")).await;
     suite::predicate_and_order_oracles(queue, a("predicates")).await;
+    suite::presence_and_absence_predicates(queue, a("presence")).await;
     suite::ordered_groups_sparse_stats_and_replay_precedence(queue, clock, a("groups")).await;
     suite::ordered_insert_uniqueness(queue, a("insert-uniqueness")).await;
     suite::shrinking_upsert_index_amplification(queue, a("shrinking-upsert")).await;
