@@ -19,6 +19,7 @@ on:
       - crates/fireweed-relational/**
       - crates/fireweed-turso/**
       - .github/workflows/turso.yml
+      - scripts/ci/focused-queue-tests.sh
       - scripts/ci/s3-qualification-endpoint.sh
       - scripts/ci/s3-native-cas-preflight.py
       - scripts/ci/turso_workflow_fixtures.py
@@ -38,6 +39,7 @@ on:
       - crates/fireweed-relational/**
       - crates/fireweed-turso/**
       - .github/workflows/turso.yml
+      - scripts/ci/focused-queue-tests.sh
       - scripts/ci/s3-qualification-endpoint.sh
       - scripts/ci/s3-native-cas-preflight.py
       - scripts/ci/turso_workflow_fixtures.py
