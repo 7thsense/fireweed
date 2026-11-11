@@ -7462,36 +7462,6 @@
         "owner": "P10w",
         "path": ".github/workflows/release.yml",
         "status": "discovery_negative"
-      },
-      {
-        "category": "workflow_inline",
-        "dependency_chain": [
-          "P13t",
-          "P10w",
-          "P2f"
-        ],
-        "detail": "residual_workflow_inline; exclusive_owner=P13t; requires exact remediation route (not classifiable as policy_positive); P10w edits no workflow file",
-        "id": "08e9b1f329b251744720",
-        "identity": "run: cargo +1.99.0 test -p fireweed-turso --features local -- --skip ::large:: --nocapture",
-        "line": 112,
-        "owner": "P10w",
-        "path": ".github/workflows/turso.yml",
-        "status": "debt"
-      },
-      {
-        "category": "workflow_inline",
-        "dependency_chain": [
-          "P13t",
-          "P10w",
-          "P2f"
-        ],
-        "detail": "residual_workflow_inline; exclusive_owner=P13t; requires exact remediation route (not classifiable as policy_positive); P10w edits no workflow file",
-        "id": "828525dad099c9771fc2",
-        "identity": "run: cargo +1.99.0 test -p fireweed --all-features --lib -- --skip ::large::",
-        "line": 138,
-        "owner": "P10w",
-        "path": ".github/workflows/turso.yml",
-        "status": "debt"
       }
     ],
     "workspace_listing_failures": []
@@ -76405,7 +76375,7 @@
   ],
   "rustdoc_routes": [],
   "schema_version": 1,
-  "source_inventory_sha256": "ba4c4d41476994a89a7c04bb316b230c60d3f68594e98d7158312f6074cc8f8e",
+  "source_inventory_sha256": "d9e952c2c68196b09379ca41973e5520625f68cd44385a9aebd38f4407285186",
   "workspaces": [
     {
       "listing_error_sha256": "",
