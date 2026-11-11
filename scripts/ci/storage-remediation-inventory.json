@@ -488,9 +488,9 @@
           "P2f"
         ],
         "detail": "intentional_env_or_release_ignore",
-        "id": "bb3b3b4db1b7ff39acd1",
+        "id": "f6b15ad8a48b6f3c82ca",
         "identity": "#[ignore = \"requires FIREWEED_API007_PG_TEST_URL and FIREWEED_S3_TEST_*\"]",
-        "line": 531,
+        "line": 643,
         "owner": "P10pf",
         "path": "crates/fireweed/src/queue/s3_turso/tests.rs",
         "status": "discovery_negative"
@@ -502,9 +502,9 @@
           "P2f"
         ],
         "detail": "intentional_env_or_release_ignore",
-        "id": "cc2bc876c403aef6a7de",
+        "id": "88a31f7d37a725f71513",
         "identity": "#[ignore = \"requires FIREWEED_API007_PG_TEST_URL and FIREWEED_S3_TEST_*\"]",
-        "line": 573,
+        "line": 685,
         "owner": "P10pf",
         "path": "crates/fireweed/src/queue/s3_turso/tests.rs",
         "status": "discovery_negative"
@@ -516,9 +516,9 @@
           "P2f"
         ],
         "detail": "intentional_env_or_release_ignore",
-        "id": "0f06f5ebb5de0f0baf53",
+        "id": "227170772ec1047239bd",
         "identity": "#[ignore = \"requires FIREWEED_API007_PG_TEST_URL and FIREWEED_S3_TEST_*\"]",
-        "line": 620,
+        "line": 732,
         "owner": "P10pf",
         "path": "crates/fireweed/src/queue/s3_turso/tests.rs",
         "status": "discovery_negative"
@@ -72207,6 +72207,43 @@
         "--features",
         "default,objectlog,s3-turso,turso",
         "--lib",
+        "queue::s3_turso::tests::ephemeral_disk_limits_round_trip_and_are_applied",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "objectlog",
+        "s3-turso",
+        "turso"
+      ],
+      "harness_id": "queue::s3_turso::tests::ephemeral_disk_limits_round_trip_and_are_applied",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue::s3_turso::tests::ephemeral_disk_limits_round_trip_and_are_applied",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,objectlog,s3-turso,turso",
+        "--lib",
         "queue::s3_turso::tests::ephemeral_disk_public_constructor_uses_the_temp_directory",
         "--",
         "--exact"
@@ -72257,6 +72294,80 @@
       ],
       "harness_id": "queue::s3_turso::tests::ephemeral_disk_round_trips_and_shutdown_removes_its_directory",
       "id": "Cargo.toml::fireweed::fireweed::test::queue::s3_turso::tests::ephemeral_disk_round_trips_and_shutdown_removes_its_directory",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,objectlog,s3-turso,turso",
+        "--lib",
+        "queue::s3_turso::tests::ephemeral_disk_with_refuses_invalid_input_before_creating_a_directory",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "objectlog",
+        "s3-turso",
+        "turso"
+      ],
+      "harness_id": "queue::s3_turso::tests::ephemeral_disk_with_refuses_invalid_input_before_creating_a_directory",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue::s3_turso::tests::ephemeral_disk_with_refuses_invalid_input_before_creating_a_directory",
+      "listed_kind": "test",
+      "package": "fireweed",
+      "target": "fireweed",
+      "target_kind": [
+        "lib"
+      ],
+      "workspace": "Cargo.toml"
+    },
+    {
+      "exact_invocation": [
+        "rustup",
+        "run",
+        "1.99.0",
+        "cargo",
+        "test",
+        "--manifest-path",
+        "Cargo.toml",
+        "--locked",
+        "-p",
+        "fireweed",
+        "--no-default-features",
+        "--features",
+        "default,objectlog,s3-turso,turso",
+        "--lib",
+        "queue::s3_turso::tests::ephemeral_disk_with_refuses_unsupported_native_options_before_creating_a_directory",
+        "--",
+        "--exact"
+      ],
+      "expected_ran": 1,
+      "features": [
+        "default",
+        "objectlog",
+        "s3-turso",
+        "turso"
+      ],
+      "harness_id": "queue::s3_turso::tests::ephemeral_disk_with_refuses_unsupported_native_options_before_creating_a_directory",
+      "id": "Cargo.toml::fireweed::fireweed::test::queue::s3_turso::tests::ephemeral_disk_with_refuses_unsupported_native_options_before_creating_a_directory",
       "listed_kind": "test",
       "package": "fireweed",
       "target": "fireweed",
@@ -76375,7 +76486,7 @@
   ],
   "rustdoc_routes": [],
   "schema_version": 1,
-  "source_inventory_sha256": "4640b7e672c60fc04ea43face53bb390c501d36cea021bd17f09147d503c06e8",
+  "source_inventory_sha256": "4a3481e0885c07d2c9afc37026378ba63e0dd15bc59e19dcd4a106854d174332",
   "workspaces": [
     {
       "listing_error_sha256": "",

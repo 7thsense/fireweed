@@ -33,6 +33,13 @@ pub type QueueFuture<'a, T> = fireweed_engine::queue_contract::QueueFuture<'a, T
 #[derive(Clone)]
 pub struct Queue {
     store: Arc<dyn QueueStore>,
+    limits: QueueLimits,
+}
+impl Queue {
+    /// The admission limits this handle was constructed with.
+    pub fn limits(&self) -> QueueLimits {
+        self.limits
+    }
 }
 impl fmt::Debug for Queue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -88,16 +95,18 @@ impl Queue {
     /// controls logical eligibility/lease semantics, independently of operation
     /// admission and infrastructure deadlines. Use SystemClock in production.
     pub async fn postgres(options: PostgresOptions, clock: Arc<dyn Clock>) -> QueueResult<Self> {
+        let limits = options.limits;
         let store = fireweed_postgres::PostgresQueueStore::connect_with_runtime(
             &options.url.0.0,
             clock,
-            options.limits,
+            limits,
             options.pool_size,
             options.runtime,
         )
         .await?;
         Ok(Self {
             store: Arc::new(store),
+            limits,
         })
     }
 }

@@ -474,6 +474,7 @@ impl Queue {
                     control: Some(control),
                     directory: None,
                 }),
+                limits,
             }),
             Err(error) => {
                 let _ = control.shutdown().await;
@@ -488,15 +489,35 @@ impl Queue {
     /// survives the last clone's `shutdown` or drop, which remove the directory.
     /// Production uses `s3_turso`.
     pub async fn ephemeral_disk(clock: Arc<dyn Clock>) -> QueueResult<Self> {
-        Self::ephemeral_disk_in(&std::env::temp_dir(), clock).await
+        Self::ephemeral_disk_with(
+            QueueLimits::default(),
+            QueueRuntimeOptions::default(),
+            clock,
+        )
+        .await
     }
 
-    /// `ephemeral_disk` with the parent of its temporary directory chosen.
-    async fn ephemeral_disk_in(parent: &Path, clock: Arc<dyn Clock>) -> QueueResult<Self> {
-        let limits = QueueLimits::default();
-        let (runtime, _, pipeline) = resolve_runtime(&limits, &QueueRuntimeOptions::default())?;
-        let directory = EphemeralDirectory::create(parent)?;
+    /// `ephemeral_disk` with explicit admission limits and runtime options. Both
+    /// are validated as `s3_turso` validates them, before any directory is created.
+    pub async fn ephemeral_disk_with(
+        limits: QueueLimits,
+        runtime: QueueRuntimeOptions,
+        clock: Arc<dyn Clock>,
+    ) -> QueueResult<Self> {
+        Self::ephemeral_disk_in(&std::env::temp_dir(), limits, runtime, clock).await
+    }
+
+    /// `ephemeral_disk_with` with the parent of its temporary directory chosen.
+    async fn ephemeral_disk_in(
+        parent: &Path,
+        limits: QueueLimits,
+        runtime: QueueRuntimeOptions,
+        clock: Arc<dyn Clock>,
+    ) -> QueueResult<Self> {
+        limits.validate()?;
+        let (runtime, _, pipeline) = resolve_runtime(&limits, &runtime)?;
         let native = native_options(&limits, &runtime)?;
+        let directory = EphemeralDirectory::create(parent)?;
         let log = QueueNativeLog::local(
             &directory.path().join("log"),
             "ephemeral".to_owned(),
@@ -533,6 +554,7 @@ impl Queue {
                 control: None,
                 directory: Some(directory),
             }),
+            limits,
         })
     }
 }
