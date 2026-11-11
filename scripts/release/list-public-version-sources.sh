@@ -80,7 +80,7 @@ printf 'scripts/ci/public-release-gates.json: /version=%s; treatment=independent
 printf 'scripts/ci/public-release-gates-ci.json: /version=%s; treatment=independent gate-set identity; owner=P13a; never rewrite to package SemVer V\n' \
     "$gates_ci_version"
 
-mapfile -t release_notes < <(find docs/releases -maxdepth 1 -type f -name 'v*.md' -printf '%f\n' | sort -V)
+mapfile -t release_notes < <(find docs/releases -maxdepth 1 -type f -name 'v*.md' | sed 's|.*/||' | sort -V)
 if [[ "${#release_notes[@]}" -eq 0 ]]; then
     echo "unable to read public version source: docs/releases" >&2
     exit 1

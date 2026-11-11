@@ -24,8 +24,7 @@ promotion metadata into physically separate directories. It never treats ambient
 `GITHUB_SHA` as measured source. S-authored tooling verifies
 `target/tp002-release/attestation.json` (materialized from `E` into a run-owned
 root) against tag `vV` and commit `S`, and all evidence and input digests must
-match before packaging or publication begins. Immutable container tags use
-`sha-${S}`.
+match before packaging or publication begins.
 
 The governed E3 authority is portable across hosts: exact command/recovery
 counts, progress, bounded resources, batching, and same-run comparisons are
@@ -36,7 +35,7 @@ planning, but they do not decide the release verdict. The configured
 under load, not a host-performance bar, and remains release-significant.
 
 Versioned files in this directory describe release candidates and already-cut
-releases. Once a release is cut, its note is immutable. Fireweed v0.31.33
+releases. Once a release is cut, its note is immutable. Fireweed v0.32.0
 is the current source-preview candidate. v0.20.0 is the first renamed public
 preview release; v0.19.6 and earlier retain
 the retired identity as immutable release and audit history under ADR-023. This
@@ -70,21 +69,22 @@ v0.21 source-only boundary; the manifest verifies the declared source package,
 SBOM, checksums, and provenance without publishing them.
 
 The v0.21 public-preview boundary ships an immutable Git tag and
-GitHub-generated source archives. crates.io, GHCR, binary, and Helm publication
-remain deferred. Prepare the exact local verification bundle without publishing:
+GitHub-generated source archives. crates.io publication remains deferred; there
+are no container, binary or Helm artifacts. Prepare the exact local verification
+bundle without publishing:
 
 ```bash
 revision="$(git rev-parse HEAD)"
 dist="$(mktemp -d)/source-preview-dist"
 bash scripts/release/build-source-preview-artifacts.sh \
   --out "$dist" \
-  --version 0.31.33 \
+  --version 0.32.0 \
   --revision "$revision" \
   --expected-source "$revision" --expected-remote origin --expected-ref "$revision" \
   --builder "local:$(id -un)"
 bash scripts/release/verify-source-preview-artifacts.sh \
   --dist "$dist" \
-  --version 0.31.33 \
+  --version 0.32.0 \
   --revision "$revision"
 ```
 
@@ -104,13 +104,11 @@ source from the repository root:
 bash scripts/release/list-public-version-sources.sh
 ```
 
-The command reports the Cargo workspace version, README artifact coordinates,
-Helm chart `version` and `appVersion`, Helm packaging inputs and evidence names,
-and existing files under `docs/releases`. ADR-023 sets `v0.20.0` as the first
-Fireweed-branded release. Cargo and published artifact coordinates are
-release-synchronized to that target. The chart file's development defaults are
-independently versioned, while `package-helm-chart.sh` overrides both chart
-versions with the release version when it builds the published package.
+The command reports the Cargo workspace version, the independent benchmark tool
+and gate-set versions, existing files under `docs/releases` and whether the
+target tag exists. ADR-023 sets `v0.20.0` as the first Fireweed-branded release.
+The Cargo workspace version is release-synchronized to the target; the others are
+independent coordinates.
 
 Historical release-note files remain immutable. Add one new file matching each
 release tag; do not rename earlier notes or artifacts. Any new

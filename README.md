@@ -17,7 +17,7 @@ in the `fireweed` crate is the only public entry point: `Queue::postgres`,
 
 ## Status
 
-Fireweed Queue `v0.31.33` is a source preview. Fireweed names are authoritative
+Fireweed Queue `v0.32.0` is a source preview. Fireweed names are authoritative
 across packages, configuration, and storage identifiers. The
 [namespace policy](docs/helix/02-design/adr/ADR-023-pre-release-fireweed-namespace-cutover.md)
 defines this one-way pre-release cutover.
@@ -83,6 +83,8 @@ projection and no storage matrix.
 - [Embedded lifecycle example](crates/fireweed/examples/queue_lifecycle.rs)
   provisions a queue, inserts work, claims by priority, commits outcomes, and
   schedules retries. The production open is S3 × Turso.
+- [v0.32.0 release notes](docs/releases/v0.32.0.md) make `Queue` the only public
+  API, remove the server, RESP and image packaging, and refuse old persisted data.
 - [v0.31.32 release notes](docs/releases/v0.31.32.md) move axon-esf to
   v0.4.2, fjord to v0.1.5, and base64 to 0.23.
 - [v0.31.31 release notes](docs/releases/v0.31.31.md) record the single
