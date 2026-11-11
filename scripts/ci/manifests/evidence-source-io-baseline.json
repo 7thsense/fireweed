@@ -1219,28 +1219,28 @@
         "evidence"
       ],
       "lines": [
-        1364,
-        1372,
-        1373,
-        1374,
-        1375,
-        1381,
-        1385,
+        1369,
+        1377,
+        1378,
+        1379,
+        1380,
         1386,
-        1387,
+        1390,
         1391,
         1392,
-        1395,
-        1403,
-        1438,
-        1439,
-        1440,
-        1441,
-        1442,
+        1396,
+        1397,
+        1400,
+        1408,
         1443,
         1444,
-        1460,
-        1462
+        1445,
+        1446,
+        1447,
+        1448,
+        1449,
+        1465,
+        1467
       ],
       "path": "crates/fireweed-postgres/src/queue_store/administration.rs",
       "symbol": "drop"
@@ -4530,7 +4530,7 @@
         "reduce_evidence",
         "run"
       ],
-      "line": 1344,
+      "line": 1349,
       "path": "crates/fireweed-postgres/src/queue_store/administration.rs",
       "symbol": "drop"
     },
@@ -6219,7 +6219,7 @@
     "source": "scripts/public-identity-allowlist.json"
   },
   "route_assignments": [],
-  "scan_sha256": "a0e77a517403f4dd95e05e70ccdcbc129e53cc4ebd9ece3a444393805de35ae9",
+  "scan_sha256": "282c2a796f5ae745453916cea543058a0e98fc977311d278683ead8386710679",
   "schema_version": 2,
   "source_surfaces": [
     {
@@ -9704,12 +9704,12 @@
     },
     {
       "evidence_paths": [],
-      "first_match_line": 1381,
+      "first_match_line": 1386,
       "groups": [
         "evidence"
       ],
-      "last_match_line": 1381,
-      "line": 1344,
+      "last_match_line": 1386,
+      "line": 1349,
       "markers": [
         "evidence"
       ],
@@ -19935,7 +19935,7 @@
         "matrix",
         "script"
       ],
-      "last_match_line": 122336,
+      "last_match_line": 122551,
       "line": 1,
       "markers": [
         "e3",
