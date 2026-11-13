@@ -1,0 +1,3 @@
+storage remediation policy: 30 assigned product debt rows (report-only; not closure)
+external dependency observations: 0; not qualified by product closure
+storage remediation policy failed: closure blocked by 30 assigned debt rows

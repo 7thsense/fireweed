@@ -1,0 +1,126 @@
+{
+  "schema": "fireweed.source-preview-validation.v1",
+  "version": "0.32.0",
+  "measured_source": "3eca75ece583c99bdbcf5b5a253939d404700167",
+  "scope": "source-preview correctness; no governed deployment or capacity claim",
+  "public_release_gate": {
+    "manifest": {
+      "path": "scripts/ci/public-release-gates.json",
+      "version": "v0.21-source-preview"
+    },
+    "passed": true,
+    "gates": {
+      "functional-format-identity": 0,
+      "artifact-topology": 0,
+      "dependency-license-policy": 0,
+      "secret-history": 0,
+      "source-package-sbom-provenance": 0,
+      "release-channel": 0,
+      "whitespace": 0
+    },
+    "checkout": "fresh full-history clone of origin at the measured source",
+    "s3_fixture": "operator-provided RustFS 1.0.0 endpoint from scripts/ci/s3-qualification-endpoint.sh provision (CAS preflight and isolation verified), as the hosted extended functional run supplies it. The self-spawned fixture on the measured source fails under a parallel lib run, because the ephemeral port from PR #55 stops retries from reusing the first RustFS on the shared data directory. That regression affects only the test fixture and is fixed after this release.",
+    "evidence": "docs/releases/v0.32.0-validation/public-release-gate.json"
+  },
+  "workspace": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--workspace",
+      "--all-features",
+      "--no-fail-fast"
+    ],
+    "harnesses": 117,
+    "passed": 2157,
+    "failed": 7,
+    "ignored": 36,
+    "observed_failures": [
+      "fireweed-postgres::schema_version (6 tests): TLS handshake error. The shared PostgreSQL fixture had ssl=on with a self-signed certificate, so sslmode=prefer connections attempted TLS. All 7 tests in the file passed unchanged against a plaintext fixture (schema-version-plain-retry).",
+      "fireweed-postgres::claim_pool_scale: wall-clock scale-out bar (pooled >= 1.25x single) on the legacy relational claim path. On this host it fails for v0.31.33 (6d15f403) and v0.32.0 alike (claim-pool-host-comparison), so it is recorded as a host observation, not a release criterion."
+    ],
+    "tls": "postgres_tls_connection_succeeds passed against the TLS-enabled fixture with sslmode=require"
+  },
+  "test_profile": {
+    "opt_level": 1,
+    "debug_assertions": true,
+    "overflow_checks": true,
+    "threads": 1
+  },
+  "formal": {
+    "unit_controls": 201,
+    "api007_models": 13,
+    "api007_negative_controls": 30,
+    "states": 266965,
+    "bounded_abstract_models_only": true
+  },
+  "clippy": "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
+  "storage_remediation": {
+    "remediation_policy": "pass",
+    "assigned_product_debt_rows": 30,
+    "closure_claimed": false
+  },
+  "benchmark_functional": "fireweed-bench builds; it contains only the API-007 reference runner and has no tests after the facade removal",
+  "fixtures": {
+    "postgres": "16.15",
+    "postgres_tls": "16.15 with a self-signed certificate",
+    "rustfs": "1.0.0"
+  },
+  "hosted_checks": [
+    {
+      "workflow": "ci",
+      "run_id": 43476593348,
+      "revision": "3eca75ece583c99bdbcf5b5a253939d404700167",
+      "conclusion": "success",
+      "url": "https://github.com/7thsense/fireweed/actions/runs/43476593348"
+    },
+    {
+      "workflow": "turso projection",
+      "run_id": 43476592850,
+      "revision": "3eca75ece583c99bdbcf5b5a253939d404700167",
+      "conclusion": "success",
+      "url": "https://github.com/7thsense/fireweed/actions/runs/43476592850"
+    },
+    {
+      "workflow": "extended functional checks",
+      "run_id": 43484791546,
+      "revision": "3eca75ece583c99bdbcf5b5a253939d404700167",
+      "conclusion": "success",
+      "url": "https://github.com/7thsense/fireweed/actions/runs/43484791546"
+    }
+  ],
+  "logs": {
+    "workspace": {
+      "path": "docs/releases/v0.32.0-validation/workspace.log",
+      "sha256": "faec07b8b36ad1f1e6f857d004d19b06cfa4039e9829471bfb232afe53d32b35"
+    },
+    "schema-version-plain-retry": {
+      "path": "docs/releases/v0.32.0-validation/schema-version-plain-retry.log",
+      "sha256": "de350ef41258c50076b579f48cb9ba5dcff1dd5cf9defc63458c94a68a1be1a1"
+    },
+    "claim-pool-host-comparison": {
+      "path": "docs/releases/v0.32.0-validation/claim-pool-host-comparison.log",
+      "sha256": "a78e99fe41e4bd2548202cd23bcc4d49424e7d0412b853ea1ea7cd5d8e5814d9"
+    },
+    "clippy": {
+      "path": "docs/releases/v0.32.0-validation/clippy.log",
+      "sha256": "978d67454087868a38b8390700b30c46b1b8677046087cdd5cffcc3b3ed4a983"
+    },
+    "formal": {
+      "path": "docs/releases/v0.32.0-validation/formal.log",
+      "sha256": "556c16261c30566d0bf7ec34a0767d9faf0873d59308213492178fb5eb313a08"
+    },
+    "storage-remediation": {
+      "path": "docs/releases/v0.32.0-validation/storage-remediation.log",
+      "sha256": "7db62f14afab6b2f1c599c70bfbe1b619347a7017131bbcb125d4a0c3e577818"
+    },
+    "identity": {
+      "path": "docs/releases/v0.32.0-validation/identity.log",
+      "sha256": "b5d18ae003c9beab7d5e8b80c22908a34b09934b195aa55c8d7fabe338f94ee9"
+    },
+    "public-release-gate": {
+      "path": "docs/releases/v0.32.0-validation/public-release-gate.log",
+      "sha256": "6d9f6de3f78654d47dea477601e8968f90ae2b3777f05068143e2fc7e46e588b"
+    }
+  }
+}
