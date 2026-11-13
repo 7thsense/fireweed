@@ -1,0 +1,78 @@
+{
+  "manifest": {
+    "path": "scripts/ci/public-release-gates.json",
+    "version": "v0.21-source-preview"
+  },
+  "passed": true,
+  "results": [
+    {
+      "command": [
+        "bash",
+        "scripts/ci/fast-functional-gate.sh"
+      ],
+      "exit_status": 0,
+      "id": "functional-format-identity"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/verify-public-artifact-topology.sh"
+      ],
+      "exit_status": 0,
+      "id": "artifact-topology"
+    },
+    {
+      "command": [
+        "cargo",
+        "deny",
+        "check"
+      ],
+      "exit_status": 0,
+      "id": "dependency-license-policy"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/ci/gitleaks-gate.sh"
+      ],
+      "exit_status": 0,
+      "id": "secret-history"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/release/source-preview-artifacts-test.sh"
+      ],
+      "exit_status": 0,
+      "id": "source-package-sbom-provenance"
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/release/test_release_channel.py"
+      ],
+      "exit_status": 0,
+      "id": "release-channel"
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit_status": 0,
+      "id": "whitespace"
+    }
+  ],
+  "revision": "3eca75ece583c99bdbcf5b5a253939d404700167",
+  "schema": "fireweed.public_release_gate.v1",
+  "tool_versions": {
+    "bash": "GNU bash, version 5.3.20(1)-release (x86_64-pc-linux-gnu)",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cargo-deny": "cargo-deny 0.20.2",
+    "git": "git version 2.56.0",
+    "gitleaks": "8.30.1",
+    "python": "3.14.8 (main, Oct  2 2026, 10:23:31) [GCC 16.2.1 20260810]",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)"
+  }
+}

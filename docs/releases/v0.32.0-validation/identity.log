@@ -1,0 +1,10 @@
+public version sources (ADR-020 target=v0.32.0)
+Cargo.toml: workspace.package.version=0.32.0; treatment=release-synchronized; target=0.32.0
+crates/fireweed-bench/Cargo.toml: package.version=0.3.1; treatment=independent tool coordinate; never synchronize to package SemVer V by pattern
+scripts/ci/public-release-gates.json: /version=v0.21-source-preview; treatment=independent gate-set identity; owner=P13a; never rewrite to package SemVer V
+scripts/ci/public-release-gates-ci.json: /version=v0.21-source-preview-ci; treatment=independent gate-set identity; owner=P13a; never rewrite to package SemVer V
+docs/releases: notes=v0.6.0.md,v0.14.0.md,v0.15.0.md,v0.15.1.md,v0.16.0.md,v0.17.0.md,v0.17.1.md,v0.17.2.md,v0.17.3.md,v0.18.0.md,v0.19.0.md,v0.19.1.md,v0.19.2.md,v0.19.3.md,v0.19.4.md,v0.19.5.md,v0.19.6.md,v0.20.0.md,v0.21.0.md,v0.22.0.md,v0.23.0.md,v0.23.1.md,v0.23.2.md,v0.23.3.md,v0.24.0.md,v0.25.0.md,v0.26.0.md,v0.27.0.md,v0.28.0.md,v0.29.0.md,v0.29.1.md,v0.29.2.md,v0.29.3.md,v0.30.0.md,v0.30.1.md,v0.31.2.md,v0.31.3.md,v0.31.4.md,v0.31.5.md,v0.31.6.md,v0.31.7.md,v0.31.8.md,v0.31.9.md,v0.31.17.md,v0.31.18.md,v0.31.19.md,v0.31.20.md,v0.31.21.md,v0.31.22.md,v0.31.23.md,v0.31.24.md,v0.31.25.md,v0.31.26.md,v0.31.27.md,v0.31.28.md,v0.31.29.md,v0.31.30.md,v0.31.31.md,v0.31.32.md,v0.31.33.md,v0.32.0.md; treatment=historical notes immutable; target_note=v0.32.0.md
+git tag v0.32.0: state=absent; treatment=reserved until product-ready P20pr; storage campaign must not create
+Cargo.lock: all fireweed* package versions == 0.32.0
+pre-S note ok: docs/releases/v0.32.0.md
+verify-release-identity: ok V=0.32.0 tag=v0.32.0 reserved absent; independent coordinates preserved
