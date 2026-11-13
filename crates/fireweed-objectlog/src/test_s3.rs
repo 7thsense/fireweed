@@ -10,13 +10,18 @@
 use crate::S3CreateOnlyPut;
 use fireweed_engine::EngineResult;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// One fixed loopback port, so every test binary on a host shares the RustFS a
+/// previous binary started (it outlives that process). A per-process ephemeral
+/// port would start a second RustFS on the same data directory, which cannot
+/// come up while the first holds it.
+const DEFAULT_PORT: u16 = 19_100;
 const ACCESS_KEY: &str = "fireweed";
 const SECRET_KEY: &str = "fireweed-test-rustfs";
 const BUCKET: &str = "fireweed-test";
@@ -78,7 +83,16 @@ fn init_s3_test_env() -> S3TestEnv {
             // configured bucket and required write semantics.
             env
         }
-        None => spawn_local_rustfs(),
+        None => {
+            let local = format!("http://127.0.0.1:{DEFAULT_PORT}");
+            if endpoint_live(&local) && !is_rustfs(&local) {
+                panic!(
+                    "FIREWEED_S3_TEST_ENDPOINT is unset and port {DEFAULT_PORT} is a foreign listener, \
+                     not the expected RustFS. Refusing a generic S3 dispatch failure."
+                );
+            }
+            spawn_local_rustfs()
+        }
     }
 }
 
@@ -184,11 +198,7 @@ fn endpoint_live(endpoint: &str) -> bool {
 }
 
 fn spawn_local_rustfs() -> S3TestEnv {
-    let port = TcpListener::bind(("127.0.0.1", 0))
-        .expect("reserve an available local RustFS port")
-        .local_addr()
-        .expect("read the reserved local RustFS port")
-        .port();
+    let port = DEFAULT_PORT;
     let endpoint = format!("http://127.0.0.1:{port}");
     let env = S3TestEnv {
         endpoint: endpoint.clone(),
