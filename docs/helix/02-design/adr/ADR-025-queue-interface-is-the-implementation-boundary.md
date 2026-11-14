@@ -27,6 +27,8 @@ ddx:
 
 Revision 2 (2026-11-13) records the owner's answers to seven decisions
 raised in adversarial review, and corrects the defects that review found.
+The 2026-11-14 addendum adds evidence from the Cayce storage spike (the
+second Context table and the open questions). It answers no owner question.
 
 ## Context
 
@@ -80,6 +82,19 @@ The code follows these decisions.
 | RESP is bound to engine ports | `RespBackend` requires `UpsertPort`, `ReclaimDriver`, `ControlPlaneStore`, `HotProjectionQueryPort` and `ProjectionRead` (`crates/fireweed-resp/src/lib.rs`). |
 | Internals leak into the public API | API-005 exposes `DurabilityClass`, `ResponseBarrier::AsyncProjection`, `projection_control`, snapshot and compaction methods, and "empty claim may be apply lag". |
 
+The Cayce project's storage spike (2026-11-14) measured candidate storage
+engines against this interface. Its report is held by the Cayce project and
+is not reproduced in this repository; the figures below are as that project
+reported them.
+
+| Observation | Consequence for the contract |
+|-------------|------------------------------|
+| With one writer per database, one claim waited 2.3 s behind a 500,000-row `UPDATE`. | Every mutating operation needs a declared per-call bound (API-006, Atomic steps and per-call bounds). |
+| No asynchronous shipping design made an acknowledged SQLite write durable in S3 at return; the S3 copy lags by the shipper interval. | `Durable` is defined at the implementation's own commit. Durability against host loss needs synchronous replication. |
+| A Durable Object has no interactive multi-call transactions. | Each core operation must be one atomic step. Multi-step operations stay in optional families. |
+| A single-statement claim (`UPDATE … RETURNING` over a `UNION ALL` candidate set) works on SQLite, tursodb and a Durable Object. | The core claim is expressible as one step on all three. |
+| The object-log implementation reached about 100 recipients/s end to end, against Cayce's target of about 17,000/s. | Wrapping object-log first (migration steps 2 and 3) invests in an implementation that misses the throughput target by two orders of magnitude. |
+
 ## Decision
 
 ### 1. The boundary is the queue operation model
@@ -114,7 +129,7 @@ tests.
 
 | Guarantee | Values | Meaning |
 |-----------|--------|---------|
-| Durability | `Process`, `Durable` | Whether a returned mutation survives a crash and reopen. |
+| Durability | `Process`, `Durable` | Whether a returned mutation survives a process crash and reopen. `Durable` is measured at the implementation's own commit, not at any later copy to object storage. |
 | New-work visibility | `Immediate`, `Bounded { max_ms }` | How soon a returned mutation's new-work effects become claimable and readable. `max_ms` is elapsed wall time, not `Clock` time. |
 | Sharing | `SingleProcess`, `MultiProcess` | Whether several instances may serve the same storage at once. |
 
@@ -330,7 +345,24 @@ crates that exist.
 2. **Snorri profile.** Proposed: `Upsert`, `ItemMutation`,
    `ClaimedWorkCommit`, `IndexQuery`, `ProjectionQuery`; features
    `TypedPayloadSchema`, `SecondaryIndexes`, `DynamicGates`; `Durable`.
-   Snorri's owners should confirm.
+   Snorri's owners should confirm. The profile depends on where Snorri's
+   workflow state lives: in Snorri-owned tables (core, `Upsert`,
+   `DynamicGates`), or in Fireweed items as Snorri TD-011 D1 states (which
+   keeps a commit-group family).
+3. **Claim time.** Whether `claim` and `claim_by_item_ids` take an optional
+   `eligibility_time`, with lease time always from the time authority, to
+   carry Snorri CONTRACT-005's separate execution and lease times.
+4. **Object-log's future.** Whether object-log × Turso stays an
+   implementation, given the spike's throughput figure. If it does not,
+   migration steps 2 and 3 move to the implementation that replaces it.
+5. **Production engine.** Which engine backs the production
+   implementation. The spike's working assumption is SQLite with a
+   separately owned S3 shipper; the owner has not confirmed it.
+6. **Replicated durability.** Whether `Durability` gains a variant for
+   writes made durable against host loss before return.
+7. **Bulk selector operations.** Whether a selector-scoped operation larger
+   than `max_selector_affected` may run as a sequence of bounded steps, each
+   its own linearization point, instead of failing.
 
 ## Risks
 
@@ -341,6 +373,8 @@ crates that exist.
 | The time rule is costly for a lazy implementation (cohort expiry against state at the deadline) | M | M | Sweeping at the due instant satisfies the rule. Laziness is allowed, not required. |
 | The Postgres reference grows behaviour outside the contract | L | M | New behaviour goes into API-001, API-006 or a family contract first. |
 | Migration stalls with two boundaries | M | H | Step 4 removes the old boundary before any new implementation is built. |
+| A single-writer implementation stalls claims behind a large mutation | H | M | Per-call bounds in `ImplementationLimits`, rejected with `BatchTooLarge`. |
+| Callers read `Durable` as "safe in object storage" | M | H | API-006 defines the durability point; each implementation documents its post-commit copy lag. |
 
 ## Validation
 

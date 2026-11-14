@@ -18,6 +18,10 @@ ddx:
 **Status**: draft. Proposed by ADR-025. Not normative until ADR-025 is accepted.
 **Related**: API-001, API-002, API-003, API-004, API-005, ADR-025, TD-006
 
+The 2026-11-14 addendum to revision 2 adds evidence from the Cayce storage
+spike: the durability point, atomic steps and per-call bounds. It does not
+answer the owner questions still open in ADR-025.
+
 ## Purpose
 
 This contract defines the Rust traits every Fireweed implementation
@@ -143,6 +147,32 @@ between call and return, consistent with real-time order.
 Operations on different queues have no ordering relationship, except as
 `MultiQueueClaim` states.
 
+### Atomic steps and per-call bounds
+
+1. Every core operation is one atomic step on storage: one request in, one
+   guarded write (or one read) out. No core operation requires a storage
+   transaction held open across more than one call, or across a round trip
+   to the caller. An implementation on a storage engine without interactive
+   multi-call transactions (for example a Durable Object, or SQLite driven
+   as a single guarded batch) can therefore implement the whole core.
+   Families that need more than one step (`ClaimedWorkCommit`,
+   `MultiQueueClaim`) are optional for this reason.
+2. Every mutating operation has a per-call bound declared in
+   `ImplementationLimits`. A request over the bound fails with
+   `BatchTooLarge` and has no effect; the caller splits it. No core
+   operation mutates an unbounded set of items in one step.
+3. On an implementation with one writer per storage unit, a mutation
+   delays every claim on that unit for as long as its step runs. The
+   bounds exist to cap that delay. In the Cayce storage spike a claim on
+   SQLite waited 2.3 s behind one 500,000-row `UPDATE`.
+4. Selector-scoped family operations (`ItemMutation::mutate_items`,
+   `OperatorRepair::purge` and `archive`) are capped by
+   `max_selector_affected`. API-001 requires `MutateItems` to apply the
+   whole request under one serialization boundary, so the cap is also the
+   largest single step such an operation can take. Whether a larger
+   selector operation may run as a sequence of bounded steps, each its own
+   linearization point, is an open question in ADR-025.
+
 ### New-work visibility
 
 ```rust
@@ -221,10 +251,21 @@ pub enum Sharing { SingleProcess, MultiProcess }
 
 | Value | Rule |
 |-------|------|
-| `Durable` | Every mutation that returned survives the process being killed and the storage being reopened. Replay of its `request_id` after reopen returns the recorded result. |
+| `Durable` | Every mutation that returned survives the process being killed and the storage being reopened. Replay of its `request_id` after reopen returns the recorded result. The durability point is the implementation's own commit to its primary storage (for example an fsynced local SQLite commit, or a Postgres commit under the configured `synchronous_commit`). `Durable` says nothing about the loss of that storage's host or disk. |
 | `Process` | State lives only as long as the instance. |
 | `MultiProcess` | Several instances, in one or many processes, may serve the same storage at once. Together they satisfy this contract as one instance would. |
 | `SingleProcess` | At most one instance serves the storage. Opening a second instance either fails, or supersedes the first: every later operation on the first fails with `InstanceSuperseded` and has no effect. Mutations the first returned before supersession keep their durability. |
+
+An implementation that copies its storage elsewhere after commit (for
+example a shipper that uploads SQLite pages or WAL segments to object
+storage on an interval) declares `Durable` for the local commit and
+documents the copy's lag. It does not claim durability against host loss:
+in the Cayce storage spike no asynchronous shipping design made an
+acknowledged write durable in object storage at return. Durability against
+host loss at return needs synchronous replication before the mutation
+returns. Whether `Durability` gains a variant for that (for example
+`Replicated`) is an open question in ADR-025; adding one is compatible
+because the enum is `#[non_exhaustive]`.
 
 ```rust
 #[non_exhaustive]
@@ -246,6 +287,11 @@ pub enum QueueFeature {
 pub struct ImplementationLimits {
     pub max_push_batch_size: u32,
     pub max_claim_batch_size: u32,
+    /// Entries per call for update, purge, claim_by_item_ids, renew,
+    /// reassign, finalize, upsert and family entry-list operations.
+    pub max_mutation_batch_size: u32,
+    /// Hard cap on items a selector-scoped family operation may affect.
+    pub max_selector_affected: u32,
     pub max_lease_duration_ms: u64,
     pub default_max_gate_keys_per_item: u32,
     pub default_max_gates_per_request: u32,
@@ -692,7 +738,7 @@ by API-001. If API-001 is silent, it is amended first.
 | Implementation | Durability | Visibility | Sharing | Families |
 |----------------|------------|------------|---------|----------|
 | PostgreSQL reference (new crate, from TD-002) | `Durable` | `Immediate` | `MultiProcess` | core first, then all |
-| Object log × Turso (current runtime) | `Durable` | `Bounded` (value set by evidence) | `SingleProcess` | all eight |
+| Object log × Turso (current runtime; future open in ADR-025) | `Durable` | `Bounded` (value set by evidence) | `SingleProcess` | all eight |
 | In-memory (new crate) | `Process` | `Immediate` | `SingleProcess` | core, `Upsert`, `StreamGroup` |
 
 ## Facade binding (summary for API-005)
@@ -768,6 +814,10 @@ and 10 `operator_*` methods in `crates/fireweed/src/operator.rs`.
       own tests, including child-process crash and peer scenarios where
       declared.
 - [ ] Time-driven scenarios pass under `ManualClock` with no tick.
+- [ ] Every mutating operation rejects a request over its declared bound
+      with `BatchTooLarge` and no effect.
+- [ ] Each implementation documents its durability point and any
+      post-commit copy lag.
 - [ ] The differential test passes for every implementation against the
       reference.
 - [ ] The object-log implementation passes the safety-effect scenarios
