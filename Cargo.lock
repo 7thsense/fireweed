@@ -1377,6 +1377,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "fireweed-interface"
+version = "0.31.32"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "fireweed-interface-conformance"
+version = "0.31.32"
+dependencies = [
+ "bytes",
+ "fireweed-interface",
+ "futures",
+ "serde_json",
+]
+
+[[package]]
+name = "fireweed-interface-memory"
+version = "0.31.32"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "fireweed-interface",
+ "fireweed-interface-conformance",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fireweed-loadgen"
 version = "0.31.32"
 dependencies = [

@@ -159,6 +159,7 @@ pub struct QueueDecl {
 
 pub struct QueueSpec {
     pub priority_kind: PriorityKind,        // Timestamp | Int64
+    pub priority_direction: Direction,      // API-001 priority_model.direction
     pub ordering: OrderingMode,             // Strict | BestEffort
     pub max_attempts: u32,
     pub retry_backoff: Backoff,             // Fixed { ms } | Exponential { base_ms, max_ms }
@@ -915,7 +916,10 @@ pub struct RenewRequest {
 }
 pub struct RenewResponse { pub entries: Vec<EntryResult>, pub durability: DurabilityLevel }
 
-pub struct FinalizeRequest { pub header: WriteHeader, pub queue: ObjectName, pub entries: Vec<FinalizeEntry> }
+pub struct FinalizeRequest {
+    pub header: WriteHeader, pub queue: ObjectName, pub entries: Vec<FinalizeEntry>,
+    pub params: BTreeMap<ParamName, Value>,
+}
 pub struct FinalizeResponse { pub entries: Vec<EntryResult>, pub durability: DurabilityLevel }
 
 pub struct FinalizeEntry {
@@ -1714,6 +1718,18 @@ vectors. IDs are stable and cited in failures.
 | PG-1 | Postgres isolation | Under concurrent group commits, `Contention` is returned only after retries, and no partial effect survives. |
 | PG-2 | Postgres time | `as_of` of conflicting requests never decreases in commit order. |
 | PG-3 | Write skew | Two groups that each require the other's key absent and insert their own: at most one commits. |
+
+### Status (revision 5)
+
+`fireweed-interface-conformance` implements the rule-pinning tests as
+executable checks through `DataPlane` only. Expression rules run through
+`Mutate` `Set` (action position) and `Where` dry runs (predicate position),
+so each implementation is tested on its own evaluation. Against
+`fireweed-interface-memory` with small test limits: 65 pass, 0 fail, 24
+skip. The skipped tests need a capability the in-memory implementation does
+not declare (cohorts, event logs, blobs, queue history, `Replicated`), a
+harness control not yet built (fault hooks, child processes, concurrent
+peers, index builds), or the PostgreSQL implementation.
 
 ### Differential test
 

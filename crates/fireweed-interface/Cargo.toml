@@ -1,0 +1,16 @@
+[package]
+name = "fireweed-interface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Fireweed data-plane interface (API-006): types, request model, expression semantics and the DataPlane trait."
+
+# API-006 crate rule 1: no fireweed-* dependency.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = { version = "1", features = ["serde"] }
+sha2 = "0.10"
+base64 = "0.22"
