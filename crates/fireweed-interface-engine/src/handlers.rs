@@ -37,6 +37,17 @@ pub fn begin(space: &mut Space, now: i64) -> i64 {
     t
 }
 
+/// `max_request_bytes` on the serialized request (API-006 §Work limits).
+fn request_bytes_ok<T: serde::Serialize>(r: &T, limits: &ImplementationLimits) -> DpResult<()> {
+    let n = serde_json::to_vec(r)
+        .map(|v| v.len() as u64)
+        .unwrap_or(u64::MAX);
+    if n > limits.max_request_bytes {
+        return Err(DataPlaneError::BatchTooLarge(LimitKind::RequestBytes));
+    }
+    Ok(())
+}
+
 fn replay(space: &Space, rid: &RequestId, fp: &str) -> Option<DpResult<RecordedResponse>> {
     let rec = space.records.get(rid)?;
     if rec.fingerprint != fp {
@@ -129,6 +140,9 @@ pub fn apply_schema(
             Ok((resp, Some(new_space(&r.schema, now))))
         }
         Some(space) => {
+            // Expire what the old policy has already expired, so a raised
+            // retention cannot bring it back.
+            begin(space, now);
             let current = space.schema.version;
             if space.schema == r.schema {
                 let resp = ApplySchemaResponse {
@@ -237,6 +251,7 @@ pub fn enqueue(
     r: &EnqueueRequest,
 ) -> DpResult<EnqueueResponse> {
     check_durability(p, r.header.min_durability)?;
+    request_bytes_ok(r, limits)?;
     let fp = fingerprint(r);
     if let Some(rep) = replay(space, &r.header.request_id, &fp) {
         return Ok(recorded!(rep?, Enqueue));
@@ -279,6 +294,7 @@ pub fn claim(
     r: &ClaimRequest,
 ) -> DpResult<ClaimResponse> {
     check_durability(p, r.header.min_durability)?;
+    request_bytes_ok(r, limits)?;
     let fp = fingerprint(r);
     let q = queue_of(space, &r.queue)?;
     if let Some(rep) = replay(space, &r.header.request_id, &fp) {
@@ -341,10 +357,27 @@ pub fn claim_by_item_ids(
     r: &ClaimByItemIdsRequest,
 ) -> DpResult<ClaimByItemIdsResponse> {
     check_durability(p, r.header.min_durability)?;
+    request_bytes_ok(r, limits)?;
     let fp = fingerprint(r);
-    queue_of(space, &r.queue)?;
+    let q = queue_of(space, &r.queue)?;
     if let Some(rep) = replay(space, &r.header.request_id, &fp) {
-        return Ok(recorded!(rep?, ClaimByItemIds));
+        let c = recorded!(rep?, ClaimByItemIds);
+        let claimed: Vec<&ClaimedItem> = c
+            .results
+            .iter()
+            .filter_map(|(_, x)| x.as_ref().ok())
+            .collect();
+        let active = claimed.iter().any(|ci| {
+            q.items.get(&ci.item_id.0).is_some_and(|it| {
+                it.state == St::Leased
+                    && it.lease.as_ref().map(|l| l.token.as_str())
+                        == ci.lease_token.as_ref().map(|x| x.as_str())
+            })
+        });
+        if !claimed.is_empty() && !active {
+            return Err(DataPlaneError::RequestExpired);
+        }
+        return Ok(c);
     }
     if r.lease_duration_ms == 0 || r.lease_duration_ms > limits.max_lease_duration_ms {
         return Err(DataPlaneError::BatchTooLarge(LimitKind::LeaseDuration));
@@ -413,6 +446,7 @@ pub fn renew(
     r: &RenewRequest,
 ) -> DpResult<RenewResponse> {
     check_durability(p, r.header.min_durability)?;
+    request_bytes_ok(r, limits)?;
     let fp = fingerprint(r);
     queue_of(space, &r.queue)?;
     if let Some(rep) = replay(space, &r.header.request_id, &fp) {
@@ -454,6 +488,7 @@ pub fn finalize(
     r: &FinalizeRequest,
 ) -> DpResult<FinalizeResponse> {
     check_durability(p, r.header.min_durability)?;
+    request_bytes_ok(r, limits)?;
     let fp = fingerprint(r);
     let q = queue_of(space, &r.queue)?;
     if let Some(rep) = replay(space, &r.header.request_id, &fp) {
@@ -489,6 +524,7 @@ pub fn commit(
     r: &CommitRequest,
 ) -> DpResult<CommitResponse> {
     check_durability(p, r.header.min_durability)?;
+    request_bytes_ok(r, limits)?;
     let fp = fingerprint(r);
     // A request id with a record replays before any state-dependent
     // validation (API-006 §Replay).

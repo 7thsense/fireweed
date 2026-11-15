@@ -50,8 +50,8 @@ Revision 6 (2026-11-15) fixes review round five findings (API-006 revision
 6), adds the first PostgreSQL implementation, `fireweed-interface-postgres`,
 and moves the request logic into the shared internal library
 `fireweed-interface-engine`, so the in-memory and PostgreSQL
-implementations run the same code. Both pass the same 83 executable
-rule-pinning tests (23 skipped). It also records the Turso-queue session's
+implementations run the same code. Both pass the same 96 executable
+rule-pinning tests (23 skipped), after fixes for two review passes. It also records the Turso-queue session's
 inputs to open questions 13, 16, 17 and 18, and adds questions 20 to 22.
 
 ## Context

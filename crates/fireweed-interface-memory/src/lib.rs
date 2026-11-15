@@ -81,19 +81,20 @@ impl MemoryDataPlane {
     }
 
     /// Runs a read on a copy with due transitions applied, so reads never
-    /// change stored state.
+    /// change stored state. Request time is fixed under the same lock as the
+    /// snapshot, and recorded, so no later write gets an earlier time.
     fn read_only<T>(
         &self,
         key: &SpaceKey,
         f: impl FnOnce(&Space, i64) -> DpResult<T>,
     ) -> DpResult<T> {
-        let spaces = self.spaces.lock().unwrap_or_else(|p| p.into_inner());
-        let mut space = spaces
-            .get(key)
-            .ok_or(DataPlaneError::SpaceNotFound)?
-            .clone();
+        let mut spaces = self.spaces.lock().unwrap_or_else(|p| p.into_inner());
+        let stored = spaces.get_mut(key).ok_or(DataPlaneError::SpaceNotFound)?;
+        let t = self.clock.now().0.max(stored.last_time);
+        stored.last_time = t;
+        let mut space = stored.clone();
         drop(spaces);
-        let t = handlers::begin(&mut space, self.clock.now().0);
+        handlers::begin(&mut space, t);
         f(&space, t)
     }
 }

@@ -44,7 +44,16 @@ validation, one entry per addressed key, row versions once per request, the
 crate's error enums, the `Text` to `Float` grammar, key release on
 replacement of a retained item, and Postgres verb/group isolation. Request
 logic is now the shared internal library `fireweed-interface-engine`, used
-by `fireweed-interface-memory` and `fireweed-interface-postgres`.
+by `fireweed-interface-memory` and `fireweed-interface-postgres`. A
+second review pass in the same revision fixed: request time fixed together
+with the read snapshot, page tokens bound to their read and shape-checked,
+schema changes applying expiries due under the old policy first,
+constraints on body-derived fields, set cardinality on every written value,
+`In` evaluating every item, JSON pointers with empty member names,
+already-expired rows invisible within a group, durations bounded by the
+Timestamp span, request-size limits on every verb, claim-by-id replay
+expiry, filtered same-group claims, the full range access term in reads,
+and paging for `fw_gates`.
 
 ## Purpose
 
@@ -217,8 +226,14 @@ Schema rules:
    `schema.version` is greater. Otherwise `SchemaConflict`. Applying the
    identical schema at its stored version succeeds with no change.
 2. v1 accepts additive changes only: new objects, new nullable fields, new
-   indexes, new read versions, raised retention. Anything else is
-   `SchemaConflict`.
+   `Lookup` or `Range` indexes on existing fields, new read versions,
+   raised retention. Anything else is `SchemaConflict`, including a new
+   `Unique` index on an existing field (existing values would need checking).
+   Before a change takes effect, the implementation applies every
+   expiration due under the old policy, so raising a retention never brings
+   back a record that had already expired. Every duration in a schema
+   (retentions, TTLs, bounds, backoff) is at most the span of the Timestamp
+   domain, so time arithmetic cannot overflow.
 3. A declaration needing an unsupported shape, feature or limit (including
    request-id retention, lease duration or object count above the
    implementation's limits) fails with
@@ -1410,7 +1425,11 @@ pub struct ReadResponse {
 1. A read is declared in the schema and invoked by name and version. A
    declared version never changes. `ReadNotDeclared` otherwise.
 2. Each page is read at one linearization point. Pages of one read are not
-   one snapshot. The page token continues in `order`, then key order.
+   one snapshot. The page token is the position of the last record
+   examined, in result order (`order`, or the access field when no `order`
+   is declared, then key); it is bound to the read's name, version and
+   parameters, and a token from another read or of the wrong shape fails
+   with `InvalidRequest`.
 3. Aggregate reads return one page.
 4. Implementations backed by SQL may name a declared read
    `fw_read_v<N>_<name>` internally. Consumers never see engine tables or
@@ -1421,8 +1440,8 @@ space. Each takes the queue as a parameter `queue`.
 
 | Read | Version | Parameters | Output |
 |------|---------|------------|--------|
-| `fw_items` | 1 | `queue`; one of `state` (including `complete` and `failed` within retention), `group_key`, `worker_id`, `key_prefix` | item rows: every system field including `fw_priority`, and declared fields, no body; item-id order |
-| `fw_gates` | 1 | `queue` | blocked gate keys with `gate_epoch` |
+| `fw_items` | 1 | `queue`; exactly one of `state` (including `complete` and `failed` within retention), `group_key`, `worker_id`, `key_prefix` | item rows: every system field including `fw_priority`, and declared fields, no body; item-id order |
+| `fw_gates` | 1 | `queue` | blocked gate keys with `gate_epoch`, in gate-key order, paged by `max_read_rows` |
 | `fw_queue_counts` | 1 | `queue` | counts by `fw_state`, from the same source as `metrics`, with no scan budget |
 
 ### Metrics and discovery
@@ -1514,7 +1533,8 @@ These rules describe the target concurrent protocol. The first increment,
 write to a space takes a lock on that space's row, so writes to one space
 are serialized across all processes, and a request loads the whole queues
 and tables it references, runs the shared request logic, and writes back
-what changed. That meets this contract's ordering and time rules trivially
+what changed. Reads hold the space row `FOR SHARE` and fix their time after
+that lock, so a read and a write to one space are ordered. That meets this contract's ordering and time rules trivially
 and passes the same conformance suite, but costs a full object load per
 request; indexed loading and the protocol below are the next steps.
 
@@ -1533,10 +1553,13 @@ request; indexed loading and the protocol below are the next steps.
    `REPEATABLE READ` read-only snapshot.
    PostgreSQL's serializable checking does not cover `READ COMMITTED`
    writers, so the guarantee against write skew between a verb and a group
-   rests on the lock protocol: every row a verb changes, and every gate,
-   queue-state, cohort and group row it reads, is locked, so a group that
-   reads or writes the same rows conflicts with the verb by row lock rather
-   than by predicate. PG-3 covers group against group; a verb-against-group
+   rests on the lock protocol. Every row a verb changes is locked, and every
+   verb locks its queue's state row `FOR SHARE`. A group whose operation
+   selects or checks a queue by predicate (`Where`, `MatchExpect`) locks that
+   queue's state row `FOR UPDATE` first, so it and any verb on the same
+   queue are ordered. (Review round five showed that without this a group
+   checking "no leased items" and pausing the queue could commit alongside a
+   concurrent claim.) PG-3 covers group against group; a verb-against-group
    vector is open work.
 2. **Request records.** The request record is written in the same
    transaction as the effects. A rejected group rolls back to a savepoint
@@ -1785,12 +1808,14 @@ executable checks through `DataPlane` only. Expression rules run through
 so each implementation is tested on its own evaluation. Revision 6 adds
 vectors for every defect review round five found (ENQ-1b, GRP-4b, GRP-6b,
 GRP-8b, GRP-10b, TBL-2, RET-1, AGG-2b, AGG-5, SCH-1b, REC-3b, REC-9,
-SCAN-4b, READ-2b, LIM-1b, CAST-1b, PATCH-1b) and runs LIN-1 with threads.
+SCAN-4b, READ-2b, LIM-1b, CAST-1b, PATCH-1b, and from the second review
+EVAL-1b, PATCH-1c, GRP-14b, ENQ-1c, REC-6b, SCAN-5b, READ-3, READ-4,
+FIN-1b, TBL-3, GRP-15, SCH-1c, LIM-1c) and runs LIN-1 with threads.
 
 | Implementation | Pass | Fail | Skip |
 |----------------|------|------|------|
-| `fireweed-interface-memory` | 83 | 0 | 23 |
-| `fireweed-interface-postgres` (PostgreSQL 16) | 83 | 0 | 23 |
+| `fireweed-interface-memory` | 96 | 0 | 23 |
+| `fireweed-interface-postgres` (PostgreSQL 16) | 96 | 0 | 23 |
 
 The skipped tests need a capability neither implementation declares yet
 (cohorts, event logs, blobs, queue history, `Replicated`), a harness

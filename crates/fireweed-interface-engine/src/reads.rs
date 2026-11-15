@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use fireweed_interface::*;
 
-use crate::exec::row_key;
+use crate::exec::{access_conjuncts, row_key};
 use crate::state::*;
 
 /// Claim candidates in claim order, with the writer scan budget applied
@@ -70,13 +70,6 @@ pub fn claim_candidates(
         {
             continue;
         }
-        if r.same_group_key {
-            match &group {
-                Some(g) if *g != it.group_key => continue,
-                None => group = Some(it.group_key.clone()),
-                _ => {}
-            }
-        }
         if let Some(f) = &r.filter
             && !eval_predicate(
                 f,
@@ -90,6 +83,14 @@ pub fn claim_candidates(
             )
         {
             continue;
+        }
+        // The group is fixed by the first item that passes every check.
+        if r.same_group_key {
+            match &group {
+                Some(g) if *g != it.group_key => continue,
+                None => group = Some(it.group_key.clone()),
+                _ => {}
+            }
         }
         out.push(it.id);
     }
@@ -376,20 +377,29 @@ fn builtin(
             })
         }
         ("fw_gates", 1) => {
-            let rows = q
+            // Gate-key order; the page token is the last gate key returned.
+            let after = r.page_token.as_ref().map(|p| p.as_str().to_owned());
+            let page = limits.max_read_rows as usize;
+            let all: Vec<_> = q
                 .blocked
                 .iter()
+                .filter(|(k, _)| after.as_deref().is_none_or(|a| k.as_str() > a))
+                .collect();
+            let rows = all
+                .iter()
+                .take(page)
                 .map(|(k, e)| {
                     row(vec![
-                        ("gate_key", Value::text(k)),
-                        ("gate_epoch", Value::Int(*e as i64)),
+                        ("gate_key", Value::text(*k)),
+                        ("gate_epoch", Value::Int(**e as i64)),
                     ])
                 })
                 .collect();
+            let next = (all.len() > page).then(|| PageToken::new(all[page - 1].0.clone()));
             Ok(ReadResponse {
                 as_of: UtcMillis(t),
                 rows,
-                next_page_token: None,
+                next_page_token: next,
                 scan_limited: false,
             })
         }
@@ -406,6 +416,17 @@ fn builtin(
                         .map_err(|_| DataPlaneError::InvalidRequest("page token".into()))?,
                 ),
             };
+            // The read's access path is the index of its one selecting
+            // parameter, so the rows it returns are the records it examines.
+            let selectors = [&state, &group, &worker, &prefix]
+                .iter()
+                .filter(|x| x.is_some())
+                .count();
+            if selectors != 1 {
+                return Err(DataPlaneError::InvalidRequest(
+                    "fw_items takes exactly one of state, group_key, worker_id, key_prefix".into(),
+                ));
+            }
             let all: Vec<&Item> = q
                 .items
                 .values()
@@ -506,6 +527,7 @@ pub fn read(
     let msv = limits.max_set_values;
     // Rows as field maps, each with its key for ordering.
     let mut rows: Vec<RowEntry> = vec![];
+    let access_field: Option<FieldName>;
     let collect = |row: &dyn RowAccess, fields: &[FieldName]| -> BTreeMap<FieldName, Value> {
         fields
             .iter()
@@ -521,6 +543,7 @@ pub fn read(
     if let Some(q) = space.queues.get(&decl.source) {
         let at = access_term(&decl.filter, &|f| queue_index(&q.decl, f))
             .ok_or(DataPlaneError::SelectorNotIndexed)?;
+        access_field = Some(at.field.clone());
         all_fields = QUEUE_SYSTEM_FIELDS
             .iter()
             .map(|(n, _)| FieldName::new(*n))
@@ -536,11 +559,10 @@ pub fn read(
                 item: it,
                 decl: &q.decl,
             };
-            let acc = match &decl.filter {
-                Expr::And(xs) => xs[at.conjunct].clone(),
-                other => other.clone(),
-            };
-            if !eval_predicate(&acc, &view, &r.params, now, msv) {
+            if !access_conjuncts(&decl.filter, &at)
+                .iter()
+                .all(|c| eval_predicate(c, &view, &r.params, now, msv))
+            {
                 continue;
             }
             let selected = eval_predicate(&decl.filter, &view, &r.params, now, msv);
@@ -553,6 +575,7 @@ pub fn read(
     } else if let Some(tb) = space.tables.get(&decl.source) {
         let at = access_term(&decl.filter, &|f| table_index(&tb.decl, f))
             .ok_or(DataPlaneError::SelectorNotIndexed)?;
+        access_field = Some(at.field.clone());
         all_fields = ["fw_row_version", "fw_created_at", "fw_updated_at"]
             .iter()
             .map(|n| FieldName::new(*n))
@@ -563,11 +586,10 @@ pub fn read(
                 row: r0,
                 decl: &tb.decl,
             };
-            let acc = match &decl.filter {
-                Expr::And(xs) => xs[at.conjunct].clone(),
-                other => other.clone(),
-            };
-            if !eval_predicate(&acc, &view, &r.params, now, msv) {
+            if !access_conjuncts(&decl.filter, &at)
+                .iter()
+                .all(|c| eval_predicate(c, &view, &r.params, now, msv))
+            {
                 continue;
             }
             let selected = eval_predicate(&decl.filter, &view, &r.params, now, msv);
@@ -597,8 +619,19 @@ pub fn read(
     };
     match &decl.output {
         ReadOutput::Rows { fields } => {
+            // Result order: `order`, or the access field's value when the
+            // read declares none; then key.
+            let eff_order: Vec<(FieldName, Direction)> = if decl.order.is_empty() {
+                access_field
+                    .iter()
+                    .map(|f| (f.clone(), Direction::Asc))
+                    .collect()
+            } else {
+                decl.order.clone()
+            };
+            let eff_order = &eff_order;
             rows.sort_by(|a, b| {
-                for (f, dir) in &decl.order {
+                for (f, dir) in eff_order {
                     let (x, y) = (&a.1[f], &b.1[f]);
                     let o = sort_compare(x, y);
                     let o = if *dir == Direction::Desc {
@@ -616,12 +649,13 @@ pub fn read(
             // in result order (order fields, then key).
             let position = |row: &RowEntry| -> (Vec<Value>, Vec<Value>) {
                 (
-                    decl.order.iter().map(|(f, _)| row.1[f].clone()).collect(),
+                    eff_order.iter().map(|(f, _)| row.1[f].clone()).collect(),
                     row.0.clone(),
                 )
             };
+            let read_fp = fingerprint(&(&r.name, r.version, &r.params));
             let cmp_pos = |a: &(Vec<Value>, Vec<Value>), b: &(Vec<Value>, Vec<Value>)| {
-                for (i, (_, dir)) in decl.order.iter().enumerate() {
+                for (i, (_, dir)) in eff_order.iter().enumerate() {
                     let o = sort_compare(&a.0[i], &b.0[i]);
                     let o = if *dir == Direction::Desc {
                         o.reverse()
@@ -638,11 +672,19 @@ pub fn read(
                 None => 0,
                 Some(p) => {
                     use base64::Engine as _;
-                    let after: (Vec<Value>, Vec<Value>) = base64::engine::general_purpose::STANDARD
-                        .decode(p.as_str())
-                        .ok()
-                        .and_then(|b| serde_json::from_slice(&b).ok())
-                        .ok_or_else(|| DataPlaneError::InvalidRequest("page token".into()))?;
+                    let (fp, after): (String, (Vec<Value>, Vec<Value>)) =
+                        base64::engine::general_purpose::STANDARD
+                            .decode(p.as_str())
+                            .ok()
+                            .and_then(|b| serde_json::from_slice(&b).ok())
+                            .ok_or_else(|| DataPlaneError::InvalidRequest("page token".into()))?;
+                    // A token from another read, or of the wrong shape, is
+                    // rejected rather than compared.
+                    let key_len = rows.first().map(|r| r.0.len()).unwrap_or(after.1.len());
+                    if fp != read_fp || after.0.len() != eff_order.len() || after.1.len() != key_len
+                    {
+                        return Err(DataPlaneError::InvalidRequest("page token".into()));
+                    }
                     rows.iter()
                         .position(|row| cmp_pos(&position(row), &after) == Ordering::Greater)
                         .unwrap_or(rows.len())
@@ -652,7 +694,7 @@ pub fn read(
                 use base64::Engine as _;
                 PageToken::new(
                     base64::engine::general_purpose::STANDARD
-                        .encode(serde_json::to_vec(&position(row)).expect("serialize")),
+                        .encode(serde_json::to_vec(&(&read_fp, position(row))).expect("serialize")),
                 )
             };
             let budget = limits.max_read_scan_rows as usize;
@@ -662,7 +704,9 @@ pub fn read(
             for (examined, (i, row)) in rows.iter().enumerate().skip(start).enumerate() {
                 if out.len() >= decl.max_rows as usize || examined >= budget {
                     scan_limited = examined >= budget && out.len() < decl.max_rows as usize;
-                    next = Some(token(&rows[i - 1]));
+                    next = Some(token(
+                        &rows[i.saturating_sub(1).max(start.saturating_sub(1))],
+                    ));
                     break;
                 }
                 if row.2 == Value::Bool(true) {

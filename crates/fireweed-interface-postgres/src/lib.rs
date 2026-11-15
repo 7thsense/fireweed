@@ -74,7 +74,10 @@ pub struct PostgresDataPlane {
 }
 
 fn unavailable(e: postgres::Error) -> DataPlaneError {
-    DataPlaneError::Unavailable(e.to_string())
+    match e.as_db_error() {
+        Some(db) => DataPlaneError::Unavailable(format!("{}: {}", db.code().code(), db.message())),
+        None => DataPlaneError::Unavailable(e.to_string()),
+    }
 }
 
 fn corrupt(e: impl std::fmt::Display) -> DataPlaneError {
@@ -207,10 +210,13 @@ impl PostgresDataPlane {
         request: Option<&RequestId>,
         lock: bool,
     ) -> DpResult<Space> {
+        // Writers lock the space row FOR UPDATE; readers FOR SHARE, so a read
+        // and a write to one space are ordered and the read's time can be
+        // fixed after its lock (API-006 §Time rule 3).
         let sql = if lock {
             "SELECT schema, next_item_id, next_token, last_time FROM fw_spaces WHERE tenant=$1 AND space=$2 FOR UPDATE"
         } else {
-            "SELECT schema, next_item_id, next_token, last_time FROM fw_spaces WHERE tenant=$1 AND space=$2"
+            "SELECT schema, next_item_id, next_token, last_time FROM fw_spaces WHERE tenant=$1 AND space=$2 FOR SHARE"
         };
         let (t, s) = (key.tenant_id.as_str(), key.space_id.as_str());
         let row = tx
@@ -359,7 +365,7 @@ impl PostgresDataPlane {
         request: Option<&RequestId>,
         f: impl FnOnce(&mut Space, i64) -> DpResult<T>,
     ) -> DpResult<T> {
-        let mut client = self.client.lock().expect("lock");
+        let mut client = self.client.lock().unwrap_or_else(|p| p.into_inner());
         let mut tx = client.transaction().map_err(unavailable)?;
         let mut space = Self::load(&mut tx, key, &objects, Load::Full, request, true)?;
         let before = space.clone();
@@ -378,11 +384,14 @@ impl PostgresDataPlane {
         request: Option<&RequestId>,
         f: impl FnOnce(&Space, i64) -> DpResult<T>,
     ) -> DpResult<T> {
-        let mut client = self.client.lock().expect("lock");
+        let mut client = self.client.lock().unwrap_or_else(|p| p.into_inner());
+        // READ COMMITTED with the space row held FOR SHARE: no write to the
+        // space can commit while the read runs, so its statements see one
+        // state. (Not READ ONLY: PostgreSQL refuses row locks there; the read
+        // writes nothing.)
         let mut tx = client
             .build_transaction()
-            .isolation_level(postgres::IsolationLevel::RepeatableRead)
-            .read_only(true)
+            .isolation_level(postgres::IsolationLevel::ReadCommitted)
             .start()
             .map_err(unavailable)?;
         let schema_only = Self::load(&mut tx, key, &BTreeSet::new(), Load::Full, None, false)?;
@@ -519,7 +528,7 @@ impl DataPlane for PostgresDataPlane {
     fn apply_schema(&self, r: ApplySchemaRequest) -> DpFuture<'_, ApplySchemaResponse> {
         Self::ready((|| {
             let caps = self.capabilities();
-            let mut client = self.client.lock().expect("lock");
+            let mut client = self.client.lock().unwrap_or_else(|p| p.into_inner());
             let mut tx = client.transaction().map_err(unavailable)?;
             let (t, s) = (r.space.tenant_id.as_str(), r.space.space_id.as_str());
             let exists = tx
@@ -563,7 +572,28 @@ impl DataPlane for PostgresDataPlane {
                     .chain(probe.schema.tables.iter().map(|t| t.name.clone()))
                     .collect()
             };
-            let mut space = Self::load(&mut tx, &r.space, &names, Load::MetaOnly, None, true)?;
+            // A schema change loads every object fully, so the handler can
+            // apply expirations due under the old policy before installing
+            // the new one; request records are expired here under the old
+            // retention for the same reason.
+            let old_retention = {
+                let probe = Self::load(
+                    &mut tx,
+                    &r.space,
+                    &BTreeSet::new(),
+                    Load::MetaOnly,
+                    None,
+                    true,
+                )?;
+                probe.schema.request_id_retention_ms as i64
+            };
+            let cutoff = self.now() - old_retention;
+            tx.execute(
+                "DELETE FROM fw_requests WHERE tenant=$1 AND space=$2 AND recorded_at <= $3",
+                &[&t, &s, &cutoff],
+            )
+            .map_err(unavailable)?;
+            let mut space = Self::load(&mut tx, &r.space, &names, Load::Full, None, true)?;
             let before = space.clone();
             let (resp, _) =
                 handlers::apply_schema(Some(&mut space), &r, &caps, &PROFILE, self.now())?;

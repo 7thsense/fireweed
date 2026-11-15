@@ -68,26 +68,32 @@ pub fn check_item(q: &Queue, it: &Item, limits: &ImplementationLimits) -> Result
             reason: "too many gate keys".into(),
         });
     }
+    // Every declared field, stored or derived from the body, meets its
+    // constraints on the value the item now has.
+    let row = ItemRow {
+        item: it,
+        decl: &q.decl,
+    };
     for d in &q.decl.fields {
-        if d.source != FieldSource::Stored {
-            continue;
-        }
-        let v = it.fields.get(&d.name).cloned().unwrap_or(Value::Null(d.ty));
+        let v = row.field(&d.name).unwrap_or(Value::Null(d.ty));
         if v.is_null() && !d.nullable {
             return Err(EntryStatus::MissingField {
                 field: d.name.clone(),
             });
         }
-        if v.byte_size() > limits.max_value_bytes {
+        if v.byte_size() > limits.max_value_bytes || set_len(&v) > limits.max_set_values as usize {
             return Err(EntryStatus::ValueTooLarge);
         }
         if d.index == IndexHint::Unique && !v.is_null() {
             let dup = q.items.values().any(|o| {
                 o.id != it.id
                     && !matches!(o.state, St::Superseded | St::Tombstone)
-                    && o.fields
-                        .get(&d.name)
-                        .is_some_and(|ov| compare(ov, &v) == Some(Ordering::Equal))
+                    && ItemRow {
+                        item: o,
+                        decl: &q.decl,
+                    }
+                    .field(&d.name)
+                    .is_some_and(|ov| compare(&ov, &v) == Some(Ordering::Equal))
             });
             if dup {
                 return Err(EntryStatus::UniqueViolation {
@@ -97,6 +103,14 @@ pub fn check_item(q: &Queue, it: &Item, limits: &ImplementationLimits) -> Result
         }
     }
     Ok(())
+}
+
+fn set_len(v: &Value) -> usize {
+    match v {
+        Value::TextSet(s) => s.len(),
+        Value::BlobRefSet(s) => s.len(),
+        _ => 0,
+    }
 }
 
 pub fn check_row(
@@ -116,7 +130,7 @@ pub fn check_row(
                 field: d.name.clone(),
             });
         }
-        if v.byte_size() > limits.max_value_bytes {
+        if v.byte_size() > limits.max_value_bytes || set_len(&v) > limits.max_set_values as usize {
             return Err(EntryStatus::ValueTooLarge);
         }
         if d.index == IndexHint::Unique && !v.is_null() {
@@ -142,7 +156,9 @@ fn pointer_tokens(p: &str) -> Vec<String> {
     if p.is_empty() {
         return vec![];
     }
-    p.trim_start_matches('/')
+    // Exactly one leading slash; empty member names are valid tokens.
+    p.strip_prefix('/')
+        .unwrap_or(p)
         .split('/')
         .map(|t| t.replace("~1", "/").replace("~0", "~"))
         .collect()
@@ -729,9 +745,24 @@ pub fn row_key(decl: &TableDecl, fields: &BTreeMap<FieldName, Value>) -> Option<
         .collect()
 }
 
+/// Stores a written row. A row whose expiry is at or before request time
+/// is invisible at once (API-006 §Table): it is removed, keeping its
+/// version high-water mark, so later operations in the group do not see it.
+fn store_row(tb: &mut Table, key: Vec<KeyVal>, row: Row, t: i64) {
+    if row.expires_at.is_some_and(|e| e <= t) {
+        tb.rows.remove(&key);
+        tb.hwm.insert(key, (row.version, t));
+    } else {
+        tb.rows.insert(key.clone(), row);
+        tb.hwm.remove(&key);
+    }
+}
+
 fn expiry_for(decl: &TableDecl, fields: &BTreeMap<FieldName, Value>, t: i64) -> Option<i64> {
     match &decl.expiry {
-        Some(RowExpiry::AfterWrite { ttl_ms }) => Some(t + *ttl_ms as i64),
+        Some(RowExpiry::AfterWrite { ttl_ms }) => {
+            Some(t.saturating_add(i64::try_from(*ttl_ms).unwrap_or(i64::MAX)))
+        }
         Some(RowExpiry::AtField(f)) => match fields.get(f) {
             Some(Value::Timestamp(ts)) => Some(ts.0),
             _ => None,
@@ -813,8 +844,7 @@ pub fn put_row(
     };
     check_row(tb, &key, &row, cx.limits)?;
     let version = row.version;
-    tb.rows.insert(key.clone(), row);
-    tb.hwm.remove(&key);
+    store_row(tb, key, row, cx.t);
     Ok(EntryResult {
         status,
         item_id: None,
@@ -890,7 +920,7 @@ fn fail_at(reason: FailureReason, i: usize) -> MutateFail {
 }
 
 /// Range conjuncts on the access field, or the access conjunct alone.
-fn access_conjuncts(pred: &Expr, at: &AccessTerm) -> Vec<Expr> {
+pub fn access_conjuncts(pred: &Expr, at: &AccessTerm) -> Vec<Expr> {
     let conjuncts: Vec<Expr> = match pred {
         Expr::And(xs) => xs.clone(),
         other => vec![other.clone()],
@@ -1518,7 +1548,7 @@ fn apply_row_action(
     };
     check_row(tb, key, &row, cx.limits)?;
     let version = row.version;
-    tb.rows.insert(key.to_vec(), row);
+    store_row(tb, key.to_vec(), row, cx.t);
     res.affected += 1;
     Ok(Some(EntryResult {
         status,

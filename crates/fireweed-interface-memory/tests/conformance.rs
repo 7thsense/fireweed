@@ -13,6 +13,7 @@ fn test_limits() -> ImplementationLimits {
     l.max_read_scan_rows = 500;
     l.max_entries_per_commit = 1000;
     l.max_body_bytes = 4096;
+    l.max_request_bytes = 1 << 20;
     l
 }
 

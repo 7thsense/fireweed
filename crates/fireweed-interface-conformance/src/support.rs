@@ -80,6 +80,13 @@ pub fn base_schema() -> SpaceSchema {
             FieldDecl::stored("n", Int, true, IndexHint::Range),
             FieldDecl::stored("uniq", Text, true, IndexHint::Unique),
             FieldDecl::stored("tags", TextSet, true, IndexHint::Lookup),
+            FieldDecl {
+                name: f("ext_id"),
+                ty: Text,
+                nullable: true,
+                source: FieldSource::BodyPointer(JsonPointer::new("/id")),
+                index: IndexHint::Unique,
+            },
         ],
         history: None,
     };
@@ -183,6 +190,18 @@ pub fn base_schema() -> SpaceSchema {
                 fields: vec![f("k"), f("i")],
             },
             order: vec![(f("i"), Direction::Desc)],
+            max_rows: 10,
+        },
+        ReadDecl {
+            name: ReadName::new("rows_by_i"),
+            version: 1,
+            source: o("kv"),
+            params: vec![(ParamName::new("lo"), Int)],
+            filter: Expr::cmp(CmpOp::Ge, Expr::field("i"), Expr::param("lo")),
+            output: ReadOutput::Rows {
+                fields: vec![f("k"), f("i")],
+            },
+            order: vec![],
             max_rows: 10,
         },
         ReadDecl {

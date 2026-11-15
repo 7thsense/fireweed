@@ -541,17 +541,26 @@ pub fn eval(e: &Expr, cx: &EvalCtx<'_>) -> Result<Value, EvalError> {
         }),
         Expr::IsNull(x) => Ok(Value::Bool(eval(x, cx)?.is_null())),
         Expr::In { expr, list } => {
+            // `In` does not short-circuit: every operand is evaluated, so a
+            // fault anywhere in the list is observed (API-006 §Evaluation
+            // rule 1).
             let v = eval(expr, cx)?;
-            let mut saw_null = v.is_null();
+            let mut items = Vec::with_capacity(list.len());
             for x in list {
-                let item = eval(x, cx)?;
+                items.push(eval(x, cx)?);
+            }
+            let mut saw_null = v.is_null();
+            let mut found = false;
+            for item in &items {
                 if item.is_null() {
                     saw_null = true;
-                } else if !v.is_null() && compare(&v, &item) == Some(Ordering::Equal) {
-                    return Ok(Value::Bool(true));
+                } else if !v.is_null() && compare(&v, item) == Some(Ordering::Equal) {
+                    found = true;
                 }
             }
-            Ok(if saw_null {
+            Ok(if found {
+                Value::Bool(true)
+            } else if saw_null {
                 Value::Null(Bool)
             } else {
                 Value::Bool(false)

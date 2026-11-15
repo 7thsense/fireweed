@@ -14,7 +14,7 @@ fn test_limits() -> ImplementationLimits {
     ImplementationLimits {
         max_ops_per_commit: 64,
         max_entries_per_commit: 1000,
-        max_request_bytes: 8 << 20,
+        max_request_bytes: 1 << 20,
         max_in_list: 1000,
         max_writer_scan_rows: 50,
         max_read_scan_rows: 500,

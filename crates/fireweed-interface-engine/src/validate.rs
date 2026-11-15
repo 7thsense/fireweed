@@ -107,6 +107,17 @@ pub fn schedule_ok(s: &Schedule) -> R {
     }
 }
 
+pub fn priority_kind_ok(q: &Queue, p: &PriorityValue) -> R {
+    let pk = match p {
+        PriorityValue::Int(_) => PriorityKind::Int64,
+        _ => PriorityKind::Timestamp,
+    };
+    if pk != q.decl.spec.priority_kind {
+        return invalid("priority kind does not match the queue");
+    }
+    Ok(())
+}
+
 pub fn priority_ok(p: &PriorityValue) -> R {
     match p {
         PriorityValue::Timestamp(t) if !timestamp_in_domain(t.0) => {
@@ -158,8 +169,20 @@ fn fields(fs: &[FieldDecl], body: Option<BodyKind>) -> R {
     Ok(())
 }
 
+/// Longest representable duration: the span of the Timestamp domain, so a
+/// timestamp plus a duration cannot overflow.
+const MAX_SPAN_MS: u64 = (TIMESTAMP_MAX - TIMESTAMP_MIN) as u64;
+
+fn span_ok(ms: u64, what: &str) -> R {
+    if ms > MAX_SPAN_MS {
+        return invalid(format!("{what} longer than the Timestamp domain"));
+    }
+    Ok(())
+}
+
 pub fn schema(s: &SpaceSchema, limits: &ImplementationLimits, caps: &Capabilities) -> R {
     let unsupported = |u| Err(DataPlaneError::FeatureUnsupported(u));
+    span_ok(s.request_id_retention_ms, "request_id_retention_ms")?;
     if s.request_id_retention_ms > limits.max_request_id_retention_ms {
         return Err(DataPlaneError::FeatureUnsupported(Unsupported::Limit(
             LimitKind::RequestIdRetention,
@@ -198,6 +221,19 @@ pub fn schema(s: &SpaceSchema, limits: &ImplementationLimits, caps: &Capabilitie
         if q.history.is_some() {
             return unsupported(Unsupported::QueueHistory);
         }
+        span_ok(
+            q.spec.client_item_key_retention_ms,
+            "client_item_key_retention_ms",
+        )?;
+        span_ok(q.spec.terminal_retention_ms, "terminal_retention_ms")?;
+        if let Some(b) = q.spec.progress_bound_ms {
+            span_ok(b, "progress_bound_ms")?;
+        }
+        if let Backoff::Fixed { ms } | Backoff::Exponential { max_ms: ms, .. } =
+            q.spec.retry_backoff
+        {
+            span_ok(ms, "retry backoff")?;
+        }
         if q.spec.max_attempts == 0 {
             return invalid("max_attempts must be positive");
         }
@@ -232,6 +268,9 @@ pub fn schema(s: &SpaceSchema, limits: &ImplementationLimits, caps: &Capabilitie
                     "key field {k} must be a non-null Int, Text, Bytes or Timestamp"
                 ));
             }
+        }
+        if let Some(RowExpiry::AfterWrite { ttl_ms }) = &t.expiry {
+            span_ok(*ttl_ms, "ttl_ms")?;
         }
         if let Some(RowExpiry::AtField(f)) = &t.expiry
             && !t
@@ -305,6 +344,18 @@ pub fn schema(s: &SpaceSchema, limits: &ImplementationLimits, caps: &Capabilitie
                 }
                 for (_, a) in values {
                     aggregate_type(a, &env).map_err(type_err)?;
+                    // Operands get the full expression checks (domain, `In` size).
+                    match a {
+                        Aggregate::CountOf(e)
+                        | Aggregate::Sum(e)
+                        | Aggregate::Min(e)
+                        | Aggregate::Max(e)
+                        | Aggregate::Avg(e)
+                        | Aggregate::Percentile { expr: e, .. } => {
+                            expr(e, &env, None, limits)?;
+                        }
+                        _ => {}
+                    }
                 }
             }
             _ => return invalid("read output"),
@@ -328,7 +379,7 @@ pub fn additive(old: &SpaceSchema, new: &SpaceSchema) -> R {
             && o.ty == n.ty
             && o.nullable == n.nullable
             && o.source == n.source
-            && (o.index == n.index || o.index == IndexHint::None)
+            && (o.index == n.index || (o.index == IndexHint::None && n.index != IndexHint::Unique))
     };
     let fields_ok = |o: &[FieldDecl], n: &[FieldDecl]| {
         o.iter().all(|f| {
@@ -580,6 +631,7 @@ pub fn finalize_entries(
                 schedule_ok(not_before)?;
                 if let Some(p) = priority {
                     priority_ok(p)?;
+                    priority_kind_ok(q, p)?;
                 }
             }
             _ => {}
