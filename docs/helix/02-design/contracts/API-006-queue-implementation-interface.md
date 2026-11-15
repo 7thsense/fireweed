@@ -1394,7 +1394,8 @@ pub struct RowView { pub fields: BTreeMap<FieldName, Value>, pub row_version: u6
 pub struct QueueStateView { pub paused: bool, pub drain_intake: bool, pub blocked_gates: Vec<(String, u64)> }
 ```
 
-All targets are read at one linearization point.
+All targets are read at one linearization point. A request has at most
+`max_read_rows` targets; more is `BatchTooLarge`.
 
 ### Declared reads
 
@@ -1637,6 +1638,26 @@ Not shapes: the compiled WASM cache; the open-runs list and next-wake time
 | Delivery and engagement events | Event items deduplicated by provider id that drive workflows; an event log for timelines and export |
 | UI counts by state, lag, send rates | Declared aggregate reads over queue items, tables and event logs |
 | Rendered messages and attachments | Blobs |
+
+### Suppression (Cayce; tested by SUPP-1 to SUPP-3)
+
+Suppression is an authoritative keyed store, key (account, channel,
+address), written by events (permanent email bounce, SMS STOP, probably
+complaint). As a Fireweed table `supp` with fields `reasons` (`TextSet`) and
+`lifted_at` (`Timestamp`):
+
+| Need | Mechanism | Status |
+|------|-----------|--------|
+| (1) Keyed upsert with set-union, reasons only added | One group: `PutRows` with `RowConflict::Skip` (creates the row if absent), then `Mutate` by `Keys` with `Set reasons = SetAdd(reasons, [$reason])`. Both run at one linearization point, so there is no read-modify-write race. A lift is a separate `Mutate` that clears `reasons` and sets `lifted_at`. | Works (SUPP-1). The store does not enforce "only add": any writer allowed to send a `Mutate` can clear the set. Enforcement would need a schema-declared add-only field (ADR-025 open question 23); authorizing the lift belongs to the adapter. |
+| (2) Idempotent under duplicate and out-of-order events | The event id is the `request_id`, so a duplicate replays within `request_id_retention_ms`; `SetAdd` is idempotent and order-free, so later duplicates converge anyway. The `Mutate` filter `Coalesce(lifted_at, MIN) < $event_at` drops events older than the last lift. | Works (SUPP-1). |
+| (3) Durable before the event is acknowledged | `min_durability: Replicated` on the event's commit; `DurabilityPending` tells the caller the commit exists. | Contract: yes. Local engine: `Replicated` on request (draft). PostgreSQL: only with a synchronous standby (open questions 14, 19); the first PostgreSQL increment reports `Local` only, so it refuses `Replicated` with `InvalidRequest` today. |
+| (4) Read-your-writes at the moment of the effect | Put the check in the effect's own group: a `Mutate` on the suppression key with `filter: reasons is not null`, a no-op `Set`, and `expect: { min: 0, max: 0 }`, followed by the effect's operations. The group rejects with `MatchExpectUnmet` if the address is suppressed at that instant. | Works (SUPP-2) when the suppression table and the effect's queue are in one space (open question 2). A claim filter cannot read another object (no joins); to keep suppressed recipients from being claimed at all, the suppression event can also block a gate key such as `supp:<address>` carried by those items, in the same group. The no-op `Set` is a workaround for a missing guard-only operation (open question 24). |
+| (5) Bounded batch read at claim time | `get` with up to `max_read_rows` `Row` targets, one snapshot; more fails with `BatchTooLarge`. A declared read over `address` with `In` also works, bounded by `max_in_list` and the scan budget. | Works (SUPP-3). |
+
+This bears on open question 5: suppression needs set-union, not a counter,
+and the table shape covers it. What it lacks is a declared merge policy on
+a field (add-only sets, as here; increment-only counters; max-only
+timestamps), which open question 23 asks about.
 
 ## Profiles
 

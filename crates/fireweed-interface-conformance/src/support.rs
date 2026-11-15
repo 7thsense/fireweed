@@ -125,6 +125,20 @@ pub fn base_schema() -> SpaceSchema {
         ],
         expiry: Some(RowExpiry::AtField(f("at"))),
     };
+    // Suppression (Cayce): key (account, channel, address); reasons only
+    // grow, except through an explicit lift.
+    let supp = TableDecl {
+        name: o("supp"),
+        key: vec![f("account"), f("channel"), f("address")],
+        fields: vec![
+            FieldDecl::stored("account", Text, false, IndexHint::None),
+            FieldDecl::stored("channel", Text, false, IndexHint::None),
+            FieldDecl::stored("address", Text, false, IndexHint::Lookup),
+            FieldDecl::stored("reasons", TextSet, true, IndexHint::None),
+            FieldDecl::stored("lifted_at", Timestamp, true, IndexHint::None),
+        ],
+        expiry: None,
+    };
     let nums = TableDecl {
         name: o("nums"),
         key: vec![f("id")],
@@ -237,7 +251,7 @@ pub fn base_schema() -> SpaceSchema {
         version: 1,
         request_id_retention_ms: 600_000,
         queues: vec![work],
-        tables: vec![kv, strict, timed, nums],
+        tables: vec![kv, strict, timed, supp, nums],
         event_logs: vec![],
         blobs: None,
         reads,

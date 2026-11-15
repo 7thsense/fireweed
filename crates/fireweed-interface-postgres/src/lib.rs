@@ -686,7 +686,7 @@ impl DataPlane for PostgresDataPlane {
             &r.space,
             |_| handlers::get_objects(&r),
             None,
-            |sp, t| handlers::get(sp, t, &r),
+            |sp, t| handlers::get(sp, t, &self.limits, &r),
         ))
     }
 

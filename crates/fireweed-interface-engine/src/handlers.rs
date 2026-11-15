@@ -613,7 +613,16 @@ pub fn get_request(space: &Space, r: &GetRequestRequest) -> Option<RequestRecord
     })
 }
 
-pub fn get(space: &Space, t: i64, r: &GetRequest) -> DpResult<GetResponse> {
+/// Point reads; at most `max_read_rows` targets per request.
+pub fn get(
+    space: &Space,
+    t: i64,
+    limits: &ImplementationLimits,
+    r: &GetRequest,
+) -> DpResult<GetResponse> {
+    if r.targets.len() > limits.max_read_rows as usize {
+        return Err(DataPlaneError::BatchTooLarge(LimitKind::Entries));
+    }
     reads::get(space, r, t)
 }
 

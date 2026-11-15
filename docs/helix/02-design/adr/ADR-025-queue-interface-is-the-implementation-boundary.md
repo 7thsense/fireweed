@@ -514,7 +514,10 @@ object-log, RESP and TD-003 changes land at step 6.
    are working names.
 2. **Space granularity.** Per tenant, per campaign, or per Snorri shard?
    Group commit is atomic only within a space, and a single-writer engine's
-   throughput is per space.
+   throughput is per space. A suppression check inside an effect's group
+   (API-006 §Suppression) needs the suppression table in the same space as
+   the effect's queue; per-account or per-tenant spaces allow that,
+   per-shard spaces do not without copying suppression into each shard.
 3. **Object-log's future.** The owner said it is "likely going to
    deprecate". Not decided.
 4. **v1 scope of blobs, event logs and queue transition history.** All are
@@ -586,6 +589,17 @@ object-log, RESP and TD-003 changes land at step 6.
 22. **Moving spaces from Postgres to the local engine.** No data-migration
     design exists yet (Turso-queue open item 15); it is needed before
     Snorri and Cayce spaces move off Postgres.
+23. **Declared merge policies on fields.** Cayce's suppression store needs
+    reasons that can only be added, never cleared except by an explicit
+    lift. The request language expresses the add (`SetAdd` in one group)
+    but cannot forbid a clear. Should a schema declare per-field merge
+    policies (add-only sets, increment-only counters, max-only timestamps),
+    rejecting writes that break them unless the request is a declared lift?
+    This would also settle question 5 without a separate counter shape.
+24. **A guard-only operation.** A check that a record does or does not
+    match, inside a group, is expressed today as a `Mutate` with a no-op
+    `Set` and `expect`. Should there be a `WriteOp::Assert` (selection plus
+    expectation, no action)?
 
 ## Risks
 

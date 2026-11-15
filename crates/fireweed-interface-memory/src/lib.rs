@@ -192,7 +192,7 @@ impl DataPlane for MemoryDataPlane {
     }
 
     fn get(&self, r: GetRequest) -> DpFuture<'_, GetResponse> {
-        Self::ready(self.read_only(&r.space, |sp, t| handlers::get(sp, t, &r)))
+        Self::ready(self.read_only(&r.space, |sp, t| handlers::get(sp, t, &self.limits, &r)))
     }
 
     fn read(&self, r: ReadRequest) -> DpFuture<'_, ReadResponse> {

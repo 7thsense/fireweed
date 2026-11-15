@@ -149,6 +149,9 @@ pub const ALL: &[(&str, Test)] = &[
     ("GRP-15", grp_15),
     ("SCH-1c", sch_1c),
     ("LIM-1c", lim_1c),
+    ("SUPP-1", supp_1),
+    ("SUPP-2", supp_2),
+    ("SUPP-3", supp_3),
     ("PG-1", |_| skip("PostgreSQL implementation only")),
     ("PG-2", |_| skip("PostgreSQL implementation only")),
     ("PG-3", |_| skip("PostgreSQL implementation only")),
@@ -3622,6 +3625,252 @@ fn lim_1c(fx: &Fixture) -> T {
         ),
         "an oversized enqueue gave {:?}",
         r.map(|x| x.entries.len())
+    );
+    Ok(())
+}
+
+// ------------------------------------------------ suppression (Cayce input)
+
+fn supp_key(addr: &str) -> Vec<Value> {
+    vec![text("acct"), text("email"), text(addr)]
+}
+
+/// One suppression event: create the row if absent, then add the reason
+/// unless the row was lifted after the event's time. The event id is the
+/// request id, so a duplicate event replays.
+fn supp_event(
+    fx: &Fixture,
+    event_id: &str,
+    addr: &str,
+    reason: &str,
+    event_at: i64,
+) -> DpResult<CommitResponse> {
+    let row: BTreeMap<FieldName, Value> = [
+        (f("account"), text("acct")),
+        (f("channel"), text("email")),
+        (f("address"), text(addr)),
+    ]
+    .into_iter()
+    .collect();
+    let add = Mutate::new(
+        "supp",
+        Selection::Keys {
+            keys: vec![Keyed {
+                key: KeyRef::Row(supp_key(addr)),
+                expected_version: None,
+            }],
+            // Ignore events older than the last lift (out-of-order safety).
+            filter: Some(Expr::cmp(
+                CmpOp::Lt,
+                Expr::Coalesce(vec![
+                    Expr::field("lifted_at"),
+                    lit(Value::Timestamp(UtcMillis(TIMESTAMP_MIN))),
+                ]),
+                Expr::param("event_at"),
+            )),
+        },
+        Action::Set(vec![(
+            f("reasons"),
+            Expr::SetAdd {
+                set: bx(Expr::field("reasons")),
+                values: vec![Expr::param("reason")],
+            },
+        )]),
+        1,
+    );
+    let params: Params = [
+        (
+            ParamName::new("event_at"),
+            Value::Timestamp(UtcMillis(event_at)),
+        ),
+        (ParamName::new("reason"), text(reason)),
+    ]
+    .into_iter()
+    .collect();
+    fx.commit_with(
+        WriteHeader::new(sp(), event_id),
+        vec![
+            WriteOp::PutRows {
+                table: o("supp"),
+                rows: vec![row],
+                on_conflict: RowConflict::Skip,
+            },
+            WriteOp::Mutate(add),
+        ],
+        params,
+        false,
+    )
+}
+
+fn supp_reasons(fx: &Fixture, addr: &str) -> Result<Value, Fail> {
+    let r = ok(
+        block_on(fx.plane.get(GetRequest {
+            space: sp(),
+            targets: vec![GetTarget::Row {
+                table: o("supp"),
+                key: supp_key(addr),
+            }],
+        })),
+        "get",
+    )?;
+    match r.results.into_iter().next().flatten() {
+        Some(GetResult::Row(row)) => Ok(row.fields[&f("reasons")].clone()),
+        _ => Ok(Value::Null(ScalarType::TextSet)),
+    }
+}
+
+/// Needs (1) and (2): set-union upsert, idempotent under duplicate and
+/// out-of-order events, and a lift that older events cannot undo.
+fn supp_1(fx: &Fixture) -> T {
+    let a = ok(supp_event(fx, "ev-stop", "x@y", "stop", START - 10), "stop")?;
+    ensure!(a.status == CommitStatus::Committed, "first event: {a:?}");
+    let dup = ok(
+        supp_event(fx, "ev-stop", "x@y", "stop", START - 10),
+        "duplicate",
+    )?;
+    ensure!(dup == a, "a duplicate event did not replay");
+    ok(
+        supp_event(fx, "ev-bounce", "x@y", "bounce", START - 50),
+        "older bounce",
+    )?;
+    ensure!(
+        supp_reasons(fx, "x@y")? == Value::TextSet(set_of(&["bounce", "stop"])),
+        "reasons are not the union"
+    );
+    // Lift: an explicit action clears reasons and records the time.
+    let lift = Mutate::new(
+        "supp",
+        Selection::Keys {
+            keys: vec![Keyed {
+                key: KeyRef::Row(supp_key("x@y")),
+                expected_version: None,
+            }],
+            filter: None,
+        },
+        Action::Set(vec![
+            (f("reasons"), Expr::null(ScalarType::TextSet)),
+            (f("lifted_at"), Expr::Now),
+        ]),
+        1,
+    );
+    ok(fx.commit(vec![WriteOp::Mutate(lift)]), "lift")?;
+    // A delayed event from before the lift does not re-suppress; a later one does.
+    ok(
+        supp_event(fx, "ev-late", "x@y", "complaint", START - 5),
+        "late, older event",
+    )?;
+    ensure!(
+        supp_reasons(fx, "x@y")?.is_null(),
+        "an event older than the lift re-suppressed"
+    );
+    fx.advance(10);
+    ok(
+        supp_event(fx, "ev-new", "x@y", "stop", START + 10),
+        "newer event",
+    )?;
+    ensure!(
+        supp_reasons(fx, "x@y")? == Value::TextSet(set_of(&["stop"])),
+        "a newer event did not suppress"
+    );
+    Ok(())
+}
+
+/// Need (4): a guard in the same group as the effect, so the effect commits
+/// only if the address is not suppressed at that instant.
+fn supp_2(fx: &Fixture) -> T {
+    let guarded_send = |addr: &str, key: &str| {
+        let mut guard = Mutate::new(
+            "supp",
+            Selection::Keys {
+                keys: vec![Keyed {
+                    key: KeyRef::Row(supp_key(addr)),
+                    expected_version: None,
+                }],
+                filter: Some(Expr::Not(bx(Expr::IsNull(bx(Expr::field("reasons")))))),
+            },
+            Action::Set(vec![(f("reasons"), Expr::field("reasons"))]),
+            1,
+        );
+        guard.expect = Some(MatchExpect { min: 0, max: 0 });
+        vec![
+            WriteOp::Mutate(guard),
+            WriteOp::Enqueue {
+                queue: o("work"),
+                items: vec![NewItem::new(Some(key), PriorityValue::Int(1))],
+                on_key_conflict: KeyConflict::Reject,
+            },
+        ]
+    };
+    let r = ok(fx.commit(guarded_send("clean@y", "send-1")), "clean")?;
+    ensure!(
+        r.status == CommitStatus::Committed,
+        "send to an unsuppressed address was rejected: {r:?}"
+    );
+    ok(
+        supp_event(fx, "ev-s2", "bad@y", "stop", START - 1),
+        "suppress",
+    )?;
+    let r = ok(fx.commit(guarded_send("bad@y", "send-2")), "suppressed")?;
+    ensure!(
+        r.status == CommitStatus::Rejected
+            && matches!(
+                reason(&r),
+                Some(FailureReason::MatchExpectUnmet { matched: 1 })
+            ),
+        "send to a suppressed address was not rejected: {r:?}"
+    );
+    Ok(())
+}
+
+/// Need (5): a bounded batch read of many addresses in one request, and the
+/// bound enforced.
+fn supp_3(fx: &Fixture) -> T {
+    for i in 0..5 {
+        ok(
+            supp_event(
+                fx,
+                &format!("ev-b{i}"),
+                &format!("a{i}@y"),
+                "bounce",
+                START - 1,
+            ),
+            "suppress",
+        )?;
+    }
+    let n = (fx.limits().max_read_rows as usize).min(200);
+    let targets: Vec<GetTarget> = (0..n)
+        .map(|i| GetTarget::Row {
+            table: o("supp"),
+            key: supp_key(&format!("a{i}@y")),
+        })
+        .collect();
+    let r = ok(
+        block_on(fx.plane.get(GetRequest {
+            space: sp(),
+            targets: targets.clone(),
+        })),
+        "batch get",
+    )?;
+    let found = r.results.iter().filter(|x| x.is_some()).count();
+    ensure!(
+        found == 5 && r.results.len() == n,
+        "batch read found {found} of 5 in {} results",
+        r.results.len()
+    );
+    let too_many: Vec<GetTarget> = (0..=fx.limits().max_read_rows as usize)
+        .map(|i| GetTarget::Row {
+            table: o("supp"),
+            key: supp_key(&format!("z{i}@y")),
+        })
+        .collect();
+    let r = block_on(fx.plane.get(GetRequest {
+        space: sp(),
+        targets: too_many,
+    }));
+    ensure!(
+        matches!(r, Err(DataPlaneError::BatchTooLarge(_))),
+        "an unbounded batch read was accepted: {:?}",
+        r.is_ok()
     );
     Ok(())
 }
