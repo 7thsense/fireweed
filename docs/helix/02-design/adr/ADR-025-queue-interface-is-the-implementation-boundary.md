@@ -46,6 +46,14 @@ every type, `fireweed-interface-memory` implements the interface in memory,
 and `fireweed-interface-conformance` runs the rule-pinning tests against
 it. Three new owner questions are recorded (16 to 19).
 
+Revision 6 (2026-11-15) fixes review round five findings (API-006 revision
+6), adds the first PostgreSQL implementation, `fireweed-interface-postgres`,
+and moves the request logic into the shared internal library
+`fireweed-interface-engine`, so the in-memory and PostgreSQL
+implementations run the same code. Both pass the same 83 executable
+rule-pinning tests (23 skipped). It also records the Turso-queue session's
+inputs to open questions 13, 16, 17 and 18, and adds questions 20 to 22.
+
 ## Context
 
 ### Intent
@@ -320,9 +328,11 @@ every decision. Request time is monotonic along conflicts: a request that
 follows a conflicting one in linearization order never has an earlier
 time. An implementation may sample a provisional time to choose
 candidates, then fix the request time after locking them. Under
-conformance the authority is the injected `Clock`. The Postgres
-implementation uses `clock_timestamp()`, raised to at least the latest
-timestamp on the records it locked.
+conformance the authority is the injected `Clock`. The target Postgres
+protocol samples `clock_timestamp()` at the start of a `SERIALIZABLE`
+group, and after taking its locks in a `READ COMMITTED` verb (API-006
+§PostgreSQL rule 3). The first increment keeps request time on the space's
+row, which every write locks.
 
 `claim` and `claim_by_item_ids` take an optional `eligibility_time`. It
 replaces the authority only when deciding whether `not_before` and backoff
@@ -378,8 +388,8 @@ so every step makes progress.
 | Implementation | Status | Durability | Sharing |
 |----------------|--------|------------|---------|
 | PostgreSQL (shared server; new crate from TD-002) | First-class and production-supported. Defines correct semantics for the differential test. Snorri and Cayce build against it now. | `Local`; `Replicated` only with a synchronous standby | `MultiProcess` |
-| Local engine: Turso MVCC on NVMe, S3 log; SQLite as comparison arm | Later. Passes the same suite and the differential test. Speed gates B1 to B4 (Turso queue plan §3.8) apply here only. | `Local`; `Replicated` on request [draft pending owner] | `SingleProcess` per space |
-| In-memory (new crate) | For consumers' tests, so that nobody re-implements Fireweed in memory. | `Process` | `SingleProcess` |
+| Local engine: Turso MVCC on NVMe, S3 log; SQLite as comparison arm | Later, in the Turso-queue session's phases L0 to L5 (ADR and spike; the engine with a SQLite arm; gates; the S3 log; event logs, blobs and cohorts; moving spaces off Postgres). Passes the same suite and the differential test. Speed gates B1 to B4 (Turso queue plan §3.8) apply here only. | `Local`; `Replicated` on request [draft pending owner] | `SingleProcess` per space |
+| In-memory (`fireweed-interface-memory`) | For consumers' tests, so that nobody re-implements Fireweed in memory. Queues and tables today. | `Process` | `SingleProcess` |
 | Object log × Turso (current runtime) | Not wrapped. Its future is open question 3. | — | — |
 | Durable Objects | Possible: every request is one atomic step. Not scheduled. | — | — |
 
@@ -486,7 +496,10 @@ object-log, RESP and TD-003 changes land at step 6.
    first target. (Started in revision 5.)
 3. Build the Postgres implementation: queues and verbs, then group commit,
    tables, declared reads, event logs, then blobs. Add the differential test;
-   Postgres becomes the reference once it passes the suite.
+   Postgres becomes the reference once it passes the suite. (Started in
+   revision 6: queues, tables, group commit, request records, claims,
+   selector writes and declared reads, with a per-space lock and whole-object
+   loads; indexed loading and the concurrent protocol come next.)
 4. Cut `Fireweed` over to the interface. Snorri and Cayce adopt it on
    Postgres. The old facade and runtime stay frozen until this step lands.
 5. Build the local engine and run it through the suite, the differential
@@ -520,7 +533,10 @@ object-log, RESP and TD-003 changes land at step 6.
 11. **RESP and `StreamGroup`.** When, and over which implementation?
 12. **Protobuf schema.** Who owns it, and in which release?
 13. **Local engine durability** (§7). Draft: `Local` minimum, `Replicated`
-    on request.
+    on request. The Turso-queue session agrees: `Local` by default,
+    `Replicated` on request through a shipped watermark, send intents
+    require `Replicated`. Shipping every commit to S3 costs 17 to 64% on
+    gate B2 and is the upper bound.
 14. **Postgres `Replicated`** (§7; Snorri O15). Draft: only with a
     synchronous standby. Does production Postgres require one, or does the
     owner accept `Local` send intents?
@@ -530,24 +546,53 @@ object-log, RESP and TD-003 changes land at step 6.
 16. **Local engine stale-writer fencing** (for the Turso queue session). How
     does the local engine fence a stale writer on another host before it
     acknowledges a `Local` commit? Shipping to S3 after a `Local`
-    acknowledgement cannot do it.
+    acknowledgement cannot do it. Options from the Turso-queue session, for
+    the owner: (a) as the rule, no takeover while the old process may be
+    alive (kill it or fence its host); (b) as defence in depth, a
+    time-bounded writer lease in S3; (c) always write sequence-numbered log
+    keys with S3 conditional puts (`If-None-Match: *`, `If-Match`), which
+    fences `Replicated` commits exactly (a takeover record at the next
+    sequence) but cannot fence `Local` ones; (d) require `Replicated` for
+    loss-intolerant requests such as send intents. Turso has no lease or
+    epoch, but its `on_log_write_complete` hook can fail a commit. S3
+    conditional writes are documented by AWS but untested in the spike.
 17. **Renew and `item_version`.** API-001 makes renew and reassign change
     `item_version`, so a heartbeat makes a worker's version-guarded commit
     fail. Keep that, or exclude lease-only changes (an API-001 amendment)?
+    Purely semantic: the local engine is indifferent.
 18. **Event log sequence on Postgres.** One head-row lock per log (appends to
     one log serialize, which matters at Cayce's event volumes and for queues
-    with history), or a sequence plus a visibility watermark?
+    with history), or a sequence plus a visibility watermark? Either meets
+    the reader rule (a reader never later sees an entry with a lower
+    sequence than one already returned); the local engine assigns gapless
+    numbers in commit order inside its single writer.
 19. **Postgres per-request durability.** `Replicated` per request
     (per-transaction `synchronous_commit`, with the commit LSN recorded for
     replay waits), or cluster-wide (every commit waits for the standby,
     claims included)?
+20. **Bounding redelivery.** Under API-001, lease expiry returns an item to
+    pending and charges nothing; `max_attempts` is checked only on a retry
+    finalize. An item whose worker crashes before finalizing is redelivered
+    without limit unless the worker checks `attempt_count`. A server-side
+    bound would be an API-001 amendment for every implementation. The
+    reference and both implementations follow API-001. The Turso-queue plan
+    earlier marked such items failed; it now agrees with API-001 and leaves
+    the bound to this question.
+21. **Choices made without a ruling.** (a) A chunk step that reaches a
+    cohort it cannot take whole skips and counts it, rather than rejecting
+    the step. (b) Postgres group commits run at `SERIALIZABLE` (target
+    protocol), rather than with explicit predicate locks. (c) An expired
+    lease returns the item to pending regardless of attempts (question 20).
+22. **Moving spaces from Postgres to the local engine.** No data-migration
+    design exists yet (Turso-queue open item 15); it is needed before
+    Snorri and Cayce spaces move off Postgres.
 
 ## Risks
 
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
 | Expression and aggregate results differ between Postgres and the local engine (collation, nulls, overflow, float rounding) | H | H | API-006 fixes evaluation order, faults, casts and aggregate precision; rule-pinning tests and the differential test check them. |
-| Postgres group commits at `REPEATABLE READ` retry under contention | M | M | Bounded retries, then `Contention`; hot paths use the single-statement verbs at `READ COMMITTED`. |
+| Postgres group commits at `SERIALIZABLE` retry under contention | M | M | Bounded retries, then `Contention`; hot paths use the verbs at `READ COMMITTED` with explicit locks. The first increment serializes writes per space instead. |
 | The interface grows into a general database | M | H | No joins, capped requests, index-backed selectors, live data only; history to Niflheim. |
 | A hot table row (counter, rollup) serializes commits on Postgres | M | M | Open question 5; rate windows keyed by bucket spread the load. |
 | A single-writer engine stalls claims behind bulk work | H | M | Caps, chunked `Mutate`, and B4. |

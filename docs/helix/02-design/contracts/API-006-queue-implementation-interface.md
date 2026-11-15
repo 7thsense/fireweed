@@ -14,7 +14,7 @@ ddx:
 # API-006: Fireweed data-plane interface
 
 **Type**: Rust trait and request-type contract (implementation boundary)
-**Version**: v0 (draft, revision 5)
+**Version**: v0 (draft, revision 6)
 **Status**: draft. Proposed by ADR-025. Not normative until ADR-025 is accepted.
 **Related**: API-001, API-002, API-003, API-004, API-005, ADR-025, TD-002, TD-006
 
@@ -36,6 +36,15 @@ and non-null violations, U+0000, and archive as a metadata change. The
 crate `fireweed-interface` is now the normative definition of every type
 named here; `fireweed-interface-memory` implements it in memory; and the
 rule-pinning tests are executable in `fireweed-interface-conformance`.
+
+Revision 6 (2026-11-15) fixes review round five findings and records the
+first PostgreSQL implementation: scan counting by the access path read,
+cohort-whole chunk steps that cannot revisit, replay before state-dependent
+validation, one entry per addressed key, row versions once per request, the
+crate's error enums, the `Text` to `Float` grammar, key release on
+replacement of a retained item, and Postgres verb/group isolation. Request
+logic is now the shared internal library `fireweed-interface-engine`, used
+by `fireweed-interface-memory` and `fireweed-interface-postgres`.
 
 ## Purpose
 
@@ -88,9 +97,11 @@ states every change; ADR-025 lists the API-001 amendments.
 2. No public item exposes an implementation's internal mechanism: command
    log, command position, projection, apply frontier, ownership epoch,
    storage cell. API-001 domain fields such as `gate_epoch` are allowed.
-3. Every other public type is owned by `fireweed-interface`, is
-   `#[non_exhaustive]`, has a constructor, and derives `Serialize`,
-   `Deserialize`, `Clone`, `Debug` and `PartialEq`. No public type holds a
+3. Every other public type is owned by `fireweed-interface` and derives
+   `Serialize`, `Deserialize`, `Clone`, `Debug` and `PartialEq`. Public
+   enums are `#[non_exhaustive]`. In v0, public structs have public fields
+   and are not `#[non_exhaustive]`, so adding a struct field is a breaking
+   change until builders exist (§Compatibility). No public type holds a
    function, closure or trait object, so every request can cross a process
    boundary.
 4. An implementation crate depends on `fireweed-interface` and on no other
@@ -208,7 +219,9 @@ Schema rules:
 2. v1 accepts additive changes only: new objects, new nullable fields, new
    indexes, new read versions, raised retention. Anything else is
    `SchemaConflict`.
-3. A declaration needing an unsupported shape, feature or limit fails with
+3. A declaration needing an unsupported shape, feature or limit (including
+   request-id retention, lease duration or object count above the
+   implementation's limits) fails with
    `FeatureUnsupported` before anything changes.
 4. Indexes may build after `apply_schema` returns. A request whose access
    term or declared read needs an index that is not ready fails with
@@ -351,7 +364,7 @@ the request with `InvalidRequest` (definitive, not recorded).
 | `And`, `Or` | Bool, 1 to 64 operands | Bool |
 | `Not` | Bool | Bool |
 | `IsNull` | any | Bool (never null) |
-| `In` | `expr` and every list item of one type allowed for `Eq`; 1 to 1,000 items | Bool |
+| `In` | `expr` and every list item of one type allowed for `Eq`; at least one item (more than `max_in_list` is `BatchTooLarge`) | Bool |
 | `Contains` | TextSet and Text, or BlobRefSet and BlobRef | Bool |
 | `SetAdd`, `SetRemove` | TextSet with Text values, or BlobRefSet with BlobRef values | the set type |
 | `Arith` `Add`, `Sub`, `Mul`, `Div` | Int and Int → Int; Float and Float → Float | as stated |
@@ -365,7 +378,7 @@ Json, TextSet and BlobRefSet values are not comparable with `Cmp`; Json is
 `Cast` first. Bool is not ordered. `Set` with the same field named twice
 fails validation. `Json { field, pointer }` yields `Null(Json)` when the
 pointer is absent and `Json(null)` when the JSON value there is `null`;
-every cast of `Json(null)` yields null.
+every cast of `Json(null)` to a type other than `Json` yields null.
 
 Ordering and grouping in reads: `order` accepts the types `Cmp` can order
 plus Bool (`false < true`); null sorts before every value in `Asc` and
@@ -422,7 +435,7 @@ comparison and sort.
 | Bool | = | — | — | `true` / `false` | — | JSON bool |
 | Int | — | = | nearest, ties to even | decimal, no leading zeros | ms since epoch | JSON number |
 | Float | — | truncate toward zero; null if out of `i64` | = | shortest round-trip decimal (Rust `{}`) | — | JSON number |
-| Text | `true` / `false` exactly, else null | optional `-` and digits, in range, else null | decimal or exponent form, finite, else null | = | RFC 3339 (below), else null | JSON string |
+| Text | `true` / `false` exactly, else null | optional `-` and digits, in range, else null | optional `+` or `-`, digits with an optional point (`.5` and `5.` allowed), optional exponent; finite and in the `Float` domain, else null | = | RFC 3339 (below), else null | JSON string |
 | Timestamp | — | ms since epoch | — | RFC 3339 `…sssZ` | = | RFC 3339 string |
 | Json | JSON bool, else null | JSON integral number in range, else null | JSON number, else null | JSON string, else null | JSON string per RFC 3339, else null | = |
 
@@ -502,9 +515,11 @@ Every request does bounded work on the writer.
 | `max_body_bytes`, `max_value_bytes`, `max_set_values` | the resulting value after an action, not the request | rejection `ValueTooLarge` |
 | `max_read_rows` | rows in one read page | page boundary |
 
-Records examined are counted physically: an expired lease, row or log entry
-that is still stored counts, as does an item skipped because it is gated,
-paused, not yet due or leased. When a scan budget is reached:
+Records examined are the records the request's access path reads,
+counted physically: a row or log entry that has expired but is still stored
+counts. A claim's access path is the claim-order index of pending items
+(with expired leases), so a pending item skipped because it is gated or not
+yet due counts, and a leased item does not. When a scan budget is reached:
 
 - an unchunked `Mutate` rejects the group with `ScanLimitExceeded`;
 - a chunk step ends there and returns a continuation after the last record
@@ -574,8 +589,13 @@ Observable state is a function of committed requests and time.
 
 Applied to API-001:
 
-- **Lease expiry** at `lease_expires_at`: the item is `pending`, its token is
-  stale, `item_version` does not change, `attempt_count` follows API-001.
+- **Lease expiry**: a lease has expired when `lease_expires_at <= t` (at
+  equality the lease is already expired). The item is `pending`, its token
+  is stale, `item_version` does not change, and `attempt_count` follows
+  API-001: expiry charges nothing, the next delivery charges one, and
+  `max_attempts` is checked only on a retry finalize. An item whose worker
+  crashes before finalizing is therefore redelivered without limit unless
+  the worker checks `attempt_count` (ADR-025 open question 20).
 - **Cohort deadline** **[draft pending owner]**. API-001's deadline is
   `min(cohort_created_at, first_eligible_at) + completion_bound_ms`; since
   no member is eligible before the cohort exists, this is
@@ -639,6 +659,9 @@ returns the recorded response, with these exceptions:
 4. Each step of a chunked `Mutate` is its own request with its own
    `request_id`.
 
+A request whose id has a record replays before any validation that
+depends on stored state (schema version, continuations, object existence
+beyond the space), so a lost response can always be recovered by replay.
 A request id with no record runs as a new request. After the retention
 window, a repeated id is a new request.
 
@@ -947,7 +970,13 @@ Rules:
   same key (new `item_id`; later use of the old id reports `Superseded`); a
   leased item gives `Conflict`. `Reject` gives `Conflict` for any live or
   retained key.
-- `ItemRef::IdAndKey` gives `Conflict` unless both name the same item.
+- `ItemRef::IdAndKey` gives `Conflict` unless both name the same item,
+  including when the key names no item.
+- `ReplacePending` on a key reserved by a retained terminal item or
+  tombstone releases that reservation (the old item stays retained but is no
+  longer addressable by key) and creates the new item.
+- A keyless item reports `client_item_key` as `fw#<item_id>`; client keys
+  may not start with `fw#`.
 - `ClaimedItem` and `CohortLease` are the only types that carry a lease
   token. A whole-cohort claim issues one cohort token (API-001) and no
   per-member tokens.
@@ -1054,7 +1083,7 @@ pub enum FailureReason {
     CohortSplit { cohort_id: CohortId },
     Evaluation(EvalError),
 }
-pub enum EvalError { IntOverflow, DivideByZero, NonFiniteFloat, BucketOverflow, SetTooLarge, PointerConflict }
+pub enum EvalError { IntOverflow, DivideByZero, FloatOutOfRange, TimestampOutOfRange, SetTooLarge, PointerConflict }
 ```
 
 #### Phases
@@ -1097,6 +1126,11 @@ it, so a later operation in the group cannot repair an earlier violation.
 
 #### Mutate semantics
 
+0. **Entries.** A `Keys` selection reports one entry per addressed key, in
+   key order: `NotFound`, `Skipped` (a repeated key or one its filter
+   excludes), or the action's status. A `Where` selection reports one entry
+   per matched record, in examination order. `OpFailure.entry_index` is that
+   entry's index.
 1. **Counting.** `matched` counts records that satisfy the selection
    (addressed keys found, and their `filter` if any), before leased items
    are skipped. A key repeated in `Keys` counts once and is processed once.
@@ -1139,16 +1173,20 @@ it, so a later operation in the group cannot repair an earlier violation.
    selection includes every non-terminal member. A chunk step that reaches
    a cohort it cannot take whole within the step (not every non-terminal
    member matches, or the members would exceed the step's remaining
-   `limit` or scan budget) skips every member of that cohort, counts it in
-   `skipped_cohorts`, and moves on. The caller handles skipped cohorts with
-   a `Keys` selection of their members.
+   `limit` or scan budget, or a member lies outside the candidates the
+   step examines) skips every member of that cohort, counts it in
+   `skipped_cohorts`, and moves on; a cohort is taken only when every
+   member is inside the step's examined window, so no later step can meet
+   a taken member again. The caller handles skipped cohorts with a `Keys`
+   selection of their members.
 8. **`item_version`** increments once per item per request in which the
    item is affected by any operation: enqueue replacement, claim, renew,
    reassign, finalize, `Mutate`. Lease expiry does not change it. Responses
    return the new value. Whether renew and reassign should change it is an
    **[owner question]**: today they do (API-001), so a heartbeat makes a
    concurrently prepared `expected_item_version` guard fail.
-9. **Rows.** `fw_row_version` never repeats for a key within
+9. **Rows.** `fw_row_version` increments once per row per request in
+   which the row changes, like `item_version`. It never repeats for a key within
    `request_id_retention_ms` of the key's last deletion: the implementation
    keeps a per-key high-water mark for that long, and a re-inserted row
    starts at the mark plus one. A guard older than the retention window is
@@ -1279,11 +1317,15 @@ pub struct LogEntryView {
    expiry check against that partition.
 5. Consumers keep their cursors in a table and advance them in the same
    group commit as their processing.
-6. On PostgreSQL, how `seq` is assigned is an **[owner question]**: one
-   head-row lock per log (simple; appends to one log serialize, which
-   matters at Cayce's event volumes and for every queue with `history`), or
-   a sequence plus a visibility watermark that readers hold back to (appends
-   run concurrently; readers lag the oldest open appender).
+6. The reader-facing rule is rule 1: a reader never later sees an entry
+   with a lower `seq` than one already returned. How an implementation
+   assigns `seq` to meet it is its own: the local engine assigns gapless
+   numbers in commit order inside its single writer. On PostgreSQL the
+   choice is an **[owner question]** (ADR-025 open question 18): one
+   head-row lock per log (appends to one log serialize, which matters at
+   Cayce's event volumes and for every queue with `history`), or a sequence
+   plus a visibility watermark (appends run concurrently; readers lag the
+   oldest open appender).
 
 ### Blob
 
@@ -1379,7 +1421,7 @@ space. Each takes the queue as a parameter `queue`.
 
 | Read | Version | Parameters | Output |
 |------|---------|------------|--------|
-| `fw_items` | 1 | `queue`; one of `state` (including `complete` and `failed` within retention), `group_key`, `worker_id`, `key_prefix` | item rows (system fields and declared fields, no body), key order |
+| `fw_items` | 1 | `queue`; one of `state` (including `complete` and `failed` within retention), `group_key`, `worker_id`, `key_prefix` | item rows: every system field including `fw_priority`, and declared fields, no body; item-id order |
 | `fw_gates` | 1 | `queue` | blocked gate keys with `gate_epoch` |
 | `fw_queue_counts` | 1 | `queue` | counts by `fw_state`, from the same source as `metrics`, with no scan budget |
 
@@ -1443,7 +1485,7 @@ pub enum DataPlaneError {
     CommitTimeout, RateLimited { retry_after_ms: Option<u64> }, Unavailable(String),
     SpaceBusy, InstanceSuperseded, Internal(String),
 }
-pub enum Unsupported { Shape(ShapeKind), QueueFeature(QueueFeature), Durability(DurabilityLevel), Limit(LimitKind) }
+pub enum Unsupported { Shape(ShapeKind), QueueFeature(QueueFeature), Durability(DurabilityLevel), Limit(LimitKind), QueueHistory }
 pub enum LimitKind { Ops, Entries, RequestBytes, InList, ClaimBatch, CohortSize, LeaseDuration, RequestIdRetention, Objects }
 ```
 
@@ -1467,6 +1509,15 @@ A rejected group is a recorded outcome, not an error.
 
 ### PostgreSQL
 
+These rules describe the target concurrent protocol. The first increment,
+`fireweed-interface-postgres`, does not follow rules 1, 3 and 4 yet: every
+write to a space takes a lock on that space's row, so writes to one space
+are serialized across all processes, and a request loads the whole queues
+and tables it references, runs the shared request logic, and writes back
+what changed. That meets this contract's ordering and time rules trivially
+and passes the same conformance suite, but costs a full object load per
+request; indexed loading and the protocol below are the next steps.
+
 1. **Transactions.** Each request is one transaction. `commit` and chunk
    steps run at `SERIALIZABLE`, so guards on absent keys and `MatchExpect`
    over a range cannot be defeated by write skew. On a serialization
@@ -1480,6 +1531,13 @@ A rejected group is a recorded outcome, not an error.
    `SetQueueState` lock those rows `FOR UPDATE`, so a claim and a gate or
    pause change are ordered. Reads that span several targets use one
    `REPEATABLE READ` read-only snapshot.
+   PostgreSQL's serializable checking does not cover `READ COMMITTED`
+   writers, so the guarantee against write skew between a verb and a group
+   rests on the lock protocol: every row a verb changes, and every gate,
+   queue-state, cohort and group row it reads, is locked, so a group that
+   reads or writes the same rows conflicts with the verb by row lock rather
+   than by predicate. PG-3 covers group against group; a verb-against-group
+   vector is open work.
 2. **Request records.** The request record is written in the same
    transaction as the effects. A rejected group rolls back to a savepoint
    taken before its effects and commits the record. Concurrent attempts
@@ -1719,17 +1777,27 @@ vectors. IDs are stable and cited in failures.
 | PG-2 | Postgres time | `as_of` of conflicting requests never decreases in commit order. |
 | PG-3 | Write skew | Two groups that each require the other's key absent and insert their own: at most one commits. |
 
-### Status (revision 5)
+### Status (revision 6)
 
 `fireweed-interface-conformance` implements the rule-pinning tests as
 executable checks through `DataPlane` only. Expression rules run through
 `Mutate` `Set` (action position) and `Where` dry runs (predicate position),
-so each implementation is tested on its own evaluation. Against
-`fireweed-interface-memory` with small test limits: 65 pass, 0 fail, 24
-skip. The skipped tests need a capability the in-memory implementation does
-not declare (cohorts, event logs, blobs, queue history, `Replicated`), a
-harness control not yet built (fault hooks, child processes, concurrent
-peers, index builds), or the PostgreSQL implementation.
+so each implementation is tested on its own evaluation. Revision 6 adds
+vectors for every defect review round five found (ENQ-1b, GRP-4b, GRP-6b,
+GRP-8b, GRP-10b, TBL-2, RET-1, AGG-2b, AGG-5, SCH-1b, REC-3b, REC-9,
+SCAN-4b, READ-2b, LIM-1b, CAST-1b, PATCH-1b) and runs LIN-1 with threads.
+
+| Implementation | Pass | Fail | Skip |
+|----------------|------|------|------|
+| `fireweed-interface-memory` | 83 | 0 | 23 |
+| `fireweed-interface-postgres` (PostgreSQL 16) | 83 | 0 | 23 |
+
+The skipped tests need a capability neither implementation declares yet
+(cohorts, event logs, blobs, queue history, `Replicated`), a harness
+control not yet built (fault hooks, child processes, index builds), or the
+PostgreSQL concurrency protocol (PG-1 to PG-3). Several tests still cover
+only part of what their row claims (TYP-1, CAST-1, GRP-3); generating them
+from the tables is open work.
 
 ### Differential test
 
@@ -1756,7 +1824,7 @@ type, selector writes, chunk sequences, aggregates and clock moves.
 |----------------|------------------------|------------|---------|--------|
 | PostgreSQL (shared server; new crate from TD-002) | `Local` / `Replicated` with a synchronous standby, else `Local` | `Immediate` | `MultiProcess` | all |
 | Local engine (Turso MVCC on NVMe, S3 log; SQLite comparison arm) | `Local` / `Replicated` [draft pending owner] | `Immediate` | `SingleProcess` per space | all |
-| In-memory (new crate) | `Process` / `Process` | `Immediate` | `SingleProcess` | all |
+| In-memory (`fireweed-interface-memory`) | `Process` / `Process` | `Immediate` | `SingleProcess` | Queue, Table (others pending the owner's v1 scope) |
 
 ## Facade binding (summary for API-005)
 
@@ -1826,9 +1894,10 @@ and 10 `operator_*` methods in `crates/fireweed/src/operator.rs`.
 
 ## Compatibility
 
-- Adding an enum variant, a struct field, a shape, a queue feature, a
-  built-in read version or a `DataPlane` method with a default body is
-  compatible.
+- Adding an enum variant, a shape, a queue feature, a built-in read
+  version or a `DataPlane` method with a default body is compatible.
+- In v0, adding a public struct field is breaking (crate rule 3); it
+  becomes compatible once structs are `#[non_exhaustive]` with builders.
 - Changing a signature, a request's meaning, an expression rule or a
   rule-pinning test's expected result is breaking.
 - Changing an implementation's declared guarantees is breaking for that
@@ -1840,7 +1909,10 @@ and 10 `operator_*` methods in `crates/fireweed/src/operator.rs`.
       enforces rule 3.
 - [ ] `DataPlane` is dyn-compatible.
 - [ ] Every rule-pinning test passes on every implementation, with no
-      required scenario skipped.
+      required scenario skipped. Not met yet: the harness controls
+      (`StorageSpec`, `SharedClock`, `FaultHooks`, child processes) are not
+      built, so IDX-2, REC-4, REC-5, DUR-4, SHARE-1 and TIME-3 cannot run;
+      this blocks acceptance.
 - [ ] The differential test passes for every implementation against
       Postgres.
 - [ ] Every Snorri inventory item runs on the `snorri` profile with no
