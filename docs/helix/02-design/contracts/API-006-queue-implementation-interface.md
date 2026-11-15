@@ -11,643 +11,866 @@ ddx:
   status: draft
 ---
 
-# API-006: Queue implementation interface
+# API-006: Fireweed data-plane interface
 
-**Type**: Rust trait contract (implementation boundary)
-**Version**: v0 (draft, revision 2)
+**Type**: Rust trait and request-type contract (implementation boundary)
+**Version**: v0 (draft, revision 3)
 **Status**: draft. Proposed by ADR-025. Not normative until ADR-025 is accepted.
-**Related**: API-001, API-002, API-003, API-004, API-005, ADR-025, TD-006
+**Related**: API-001, API-002, API-003, API-004, API-005, ADR-025, TD-002, TD-006
 
-The 2026-11-14 addendum to revision 2 adds evidence from the Cayce storage
-spike: the durability point, atomic steps and per-call bounds. It does not
-answer the owner questions still open in ADR-025.
+Revision 3 (2026-11-15) replaces the method-per-operation queue trait of
+revision 2 with spaces, four storage shapes, typed requests, group commit
+and declared reads (ADR-025 D8 to D12).
 
 ## Purpose
 
-This contract defines the Rust traits every Fireweed implementation
-implements, and the rules that make implementations interchangeable. API-001
-defines what each core operation means. This contract defines how operations
-are typed, how time and ordering work, which guarantees an implementation
-declares, how optional features and families are exposed, how crates depend
-on each other, and how an implementation proves it is correct.
+This contract defines the Rust types and traits every Fireweed
+implementation implements, and the rules that make implementations
+interchangeable. It covers the data model (spaces, shapes, schema), the
+request model (verbs, write operations, expressions, reads), time and
+ordering, guarantees, limits, errors, conformance, and the binding to the
+`Fireweed` facade.
 
-Where this contract and API-001 differ, ADR-025 lists the API-001 change.
-Until those changes land, this contract governs the interface and API-001
-governs everything else.
+API-001 defines queue semantics (eligibility, leases, retries, gates,
+groups, cohorts, recurrence, idempotency). This contract refers to it for
+those and states every change. Where they differ, ADR-025 lists the API-001
+change, and until it lands this contract governs.
 
 ## Scope and boundaries
 
-- In scope: the `fireweed-interface` crate; `QueueProvider`; extension
-  family traits; the time, ordering and visibility model; `Guarantees`,
-  `Capabilities`; types and errors; dependency rules; conformance; the
-  mapping from the current `Fireweed` methods.
-- Out of scope: wire encodings (TD-006); each implementation's
-  configuration, storage, recovery and maintenance API; authentication.
+- In scope: the `fireweed-interface` crate; the `DataPlane` trait; all
+  request, response and schema types; the expression language; time,
+  ordering and durability; limits; errors; conformance; the facade binding.
+- Out of scope: wire encodings beyond serde (TD-006, open question 12 in
+  ADR-025); each implementation's configuration, storage layout, recovery,
+  replication and maintenance API; authentication and authorization.
 - Owning crate: `fireweed-interface` (working name).
-- Non-goals: a storage-port SPI; a second public facade type.
+- Non-goals: SQL; joins; a storage-port SPI; history and analytics beyond
+  live data (Niflheim).
 
 ## Terms
 
 | Term | Meaning |
 |------|---------|
-| Implementation | A type implementing `QueueProvider`, in its own crate. |
+| Implementation | A type implementing `DataPlane`, in its own crate. |
 | Instance | One constructed value of an implementation, attached to some storage. |
-| Returns | The operation's future resolved to `Ok`. |
-| Linearization point | The single instant, between call and return, at which an operation takes effect. |
-| Safety effect | An effect that removes an item from claim eligibility or changes who may act on it: a new lease, renew, reassign, finalize, purge, a gate set to `blocked`, an update that adds a blocking gate key or later `not_before`, a queue pause. |
-| New-work effect | An effect of a mutation that makes an item claimable: push, upsert, release, an update that removes a blocking condition, a gate set to `open`, a queue resume. |
-| Time-driven transition | A state change caused by time alone: lease expiry, `not_before` or retry backoff passing, cohort expiry, retention expiry. |
-| Time authority | The single source of time an implementation uses for every transition. |
+| Space | One atomic and ordering domain owned by one tenant, holding named objects. |
+| Object | A queue, table, event log or the blob store of a space. |
+| Request | One call on `DataPlane`. A write request carries a `request_id`. |
+| Commits | A write request takes effect, at its linearization point. A rejected or definitively failed request never commits. |
+| Linearization point | The single instant at which a committed request takes effect. |
+| Time authority | The single source of time for a space. |
+| Time-driven transition | A state change caused by time alone: lease expiry, cohort deadline, retention and row expiry. |
 
 ## Crate and dependency rules
 
-1. `fireweed-interface` depends on `fireweed-core` and general-purpose
-   crates only.
-2. No public item in `fireweed-interface` names a log, command, command
-   position, projection, snapshot, epoch, owner or storage cell.
-3. An implementation crate depends on `fireweed-interface`. It MUST NOT
-   depend on another implementation crate. It MAY depend on shared internal
-   libraries.
-4. `fireweed` (the facade), `fireweed-resp` and `fireweed-conformance` depend
-   on `fireweed-interface` and on no implementation crate outside
-   `[dev-dependencies]`.
-5. `fireweed-server` is the composition root. It is the only published crate
-   that names concrete implementations.
-6. Test-only crates (`publish = false`), such as the differential test
-   crate, MAY depend on several implementations.
+1. `fireweed-interface` depends on `fireweed-core` id types and
+   general-purpose crates only (`serde`, `bytes`, `serde_json`, `futures`).
+2. No public item exposes an implementation's internal mechanism: command
+   log, command position, projection, apply frontier, ownership epoch,
+   storage cell. API-001 domain fields such as `gate_epoch` are allowed.
+3. Every public type in `fireweed-interface` is owned by it,
+   `#[non_exhaustive]`, has a constructor, and derives `Serialize` and
+   `Deserialize`. It does not re-export exhaustive `fireweed-core` enums or
+   structs; it defines its own and converts.
+4. An implementation crate depends on `fireweed-interface` and on no other
+   implementation crate. It may depend on shared internal libraries.
+5. `fireweed`, `fireweed-resp` and `fireweed-conformance` depend on no
+   implementation crate outside `[dev-dependencies]`.
+6. `fireweed-server` is the only published crate that names concrete
+   implementations. Test-only crates (`publish = false`) may name several.
 
-A workspace test enforces rules 1 and 3 to 6 from `cargo metadata`.
+A workspace test enforces rules 1, 4, 5 and 6 from `cargo metadata`.
 
-## Time, ordering and visibility
+## Data model
+
+### Spaces and objects
+
+```rust
+pub struct SpaceKey { pub tenant_id: TenantId, pub space_id: SpaceId }
+pub struct ObjectName(String);   // [a-z][a-z0-9_]{0,62}, unique within a space
+pub struct FieldName(String);    // [a-z][a-z0-9_]{0,62}, unique within an object
+```
+
+A space is created by its first `apply_schema`. All objects of a space are
+declared in its schema. Every write request names one space, and every
+operation in it names an object of that space.
+
+### Schema
+
+```rust
+pub struct SpaceSchema {
+    pub version: u64,                 // strictly increasing per space
+    pub queues: Vec<QueueDecl>,
+    pub tables: Vec<TableDecl>,
+    pub event_logs: Vec<EventLogDecl>,
+    pub blobs: Option<BlobPolicy>,    // None: the space has no blob store
+    pub reads: Vec<ReadDecl>,
+}
+
+pub struct FieldDecl {
+    pub name: FieldName,
+    pub ty: FieldType,
+    pub nullable: bool,
+    pub source: FieldSource,
+    pub index: IndexHint,
+}
+
+pub enum FieldType { Bool, Int, Float, Text, Bytes, Timestamp, Json, TextSet, BlobRef }
+pub enum FieldSource { Stored, BodyPointer(JsonPointer) } // BodyPointer: derived, read-only
+pub enum IndexHint { None, Lookup, Range, Unique }
+
+pub enum BodyKind { Bytes, Json }
+
+pub struct QueueDecl {
+    pub name: ObjectName,
+    pub definition: QueueDefinition,  // API-001: priority kind, ordering, retry,
+                                      // retention, features (gates, cohorts, …)
+    pub body: BodyKind,
+    pub fields: Vec<FieldDecl>,
+    pub history: Option<ObjectName>,  // an event log receiving transition history
+}
+
+pub struct TableDecl {
+    pub name: ObjectName,
+    pub key: Vec<FieldName>,          // 1 to 4 fields of Int, Text, Bytes or Timestamp
+    pub fields: Vec<FieldDecl>,       // includes the key fields
+    pub expiry: Option<RowExpiry>,
+}
+pub enum RowExpiry { AtField(FieldName), AfterWrite { ttl_ms: u64 } }
+
+pub struct EventLogDecl {
+    pub name: ObjectName,
+    pub partition_key: FieldName,     // Text or Int
+    pub fields: Vec<FieldDecl>,
+    pub body: BodyKind,
+    pub retention: LogRetention,      // max_age_ms and/or max_entries_per_partition
+}
+
+pub struct BlobPolicy { pub orphan_grace_ms: u64 }
+```
+
+Rules:
+
+1. `apply_schema(space, schema, expected_version)` succeeds only if the
+   stored version equals `expected_version` (`None` for a new space) and
+   `schema.version` is greater. Otherwise `SchemaConflict`. Replaying the
+   identical schema at its own version succeeds with no change (ADR-018
+   exact ensure).
+2. v1 accepts additive changes only: new objects, new nullable fields, new
+   indexes, new read versions, raised retention. Anything else is
+   `SchemaConflict`.
+3. A declaration needing an unsupported feature, shape or limit fails with
+   `FeatureUnsupported` before anything changes.
+4. Indexes may build after `apply_schema` returns. A field or read whose
+   index is not ready fails with `IndexNotReady`. `get_schema` reports each
+   index's state.
+5. Queue items have system fields, always declared, usable in expressions
+   and reads: `item_id`, `client_item_key`, `state` (`pending`, `leased`,
+   `complete`, `failed`), `priority`, `not_before`, `group_key`,
+   `attempt_count`, `item_version`, `lease_expires_at`, `worker_id`,
+   `created_at`, `updated_at`, `terminal_at`, `gate_keys` (a `TextSet`).
+   `state`, `not_before`, `group_key`, `client_item_key`, `terminal_at` and
+   `gate_keys` are indexed. Tables have `row_version`, `created_at` and
+   `updated_at`. Event log entries have `seq` and `appended_at`.
+6. A `TextSet` field holds at most `limits.max_set_values` distinct values.
+   An indexed `TextSet` is indexed per value.
+7. A `BodyPointer` field is computed from the item's or entry's JSON body
+   and is read-only. If the pointer is absent, or the value has the wrong
+   type, the field is null.
+
+### Values
+
+```rust
+pub enum Value {
+    Null, Bool(bool), Int(i64), Float(f64), Text(String), Bytes(Bytes),
+    Timestamp(UtcMillis), Json(serde_json::Value), TextSet(BTreeSet<String>),
+    BlobRef(BlobRef),
+}
+pub struct BlobRef { pub sha256: [u8; 32], pub size: u64 }
+```
+
+`Float` values are finite. Timestamps are milliseconds since the Unix
+epoch, UTC. `Text` is UTF-8.
+
+## Expressions
+
+```rust
+pub enum Expr {
+    Lit(Value),
+    Field(FieldName),
+    Param(ParamName),
+    Now,
+    Json { field: FieldName, pointer: JsonPointer }, // RFC 6901; yields Json or Null
+    Cast { expr: Box<Expr>, to: ScalarType },
+    Cmp { op: CmpOp, l: Box<Expr>, r: Box<Expr> },   // = != < <= > >=
+    And(Vec<Expr>), Or(Vec<Expr>), Not(Box<Expr>), IsNull(Box<Expr>),
+    In { expr: Box<Expr>, list: Vec<Expr> },
+    Contains { set: Box<Expr>, value: Box<Expr> },   // TextSet membership
+    Arith { op: ArithOp, l: Box<Expr>, r: Box<Expr> }, // + - * / %
+    Coalesce(Vec<Expr>),
+    Bucket { expr: Box<Expr>, width_ms: u64 },
+}
+
+pub enum Aggregate {
+    Count, CountOf(Expr), Sum(Expr), Min(Expr), Max(Expr), Avg(Expr),
+    Percentile { expr: Expr, p: f64 },               // 0 < p <= 1
+}
+```
+
+Every implementation evaluates expressions with exactly these semantics.
+
+| Topic | Rule |
+|-------|------|
+| Typing | Expressions are type-checked against the schema before anything runs. `Int` and `Float` do not mix without `Cast`. `Json` must be `Cast` before comparison or arithmetic. A type error is `InvalidRequest`. |
+| Null | SQL three-valued logic. A comparison or arithmetic with a null operand is null. `And`, `Or`, `Not` follow SQL. A predicate selects a row only when it is true. `In` follows SQL, including a null in the list. |
+| Text order | Unicode code-point order (bytewise UTF-8). No locale collation. |
+| `Int` arithmetic | 64-bit signed. Overflow is an evaluation error. Division truncates toward zero; `%` takes the sign of the dividend; division or `%` by zero is an evaluation error. |
+| `Float` arithmetic | IEEE 754 double. A NaN or infinite result is an evaluation error. |
+| Timestamps | `Timestamp ± Int` (milliseconds) is a `Timestamp`; `Timestamp − Timestamp` is an `Int` of milliseconds. |
+| `Bucket` | `floor(t / width_ms) * width_ms`, flooring toward negative infinity. |
+| `Now` | The time authority at the request's linearization point; one value for the whole request. |
+| `Cast` | `Json` number to `Int` only if integral and in range; `Json` string to `Text` or `Timestamp` (RFC 3339); otherwise null. `Int` to `Float` exact where representable, else round to nearest even. |
+| Aggregates | Ignore nulls, except `Count`. Over no rows, `Count` is 0 and others are null. `Sum` of `Int` is `Int` with overflow as an error; `Avg` is `Float`. `Percentile` is nearest-rank: the smallest value v with at least ⌈p·n⌉ values ≤ v. |
+
+An evaluation error fails the whole request with `Evaluation`, and nothing
+is applied.
+
+**Index rule.** The predicate of every `Where` selection, claim filter and
+declared read must be a conjunction (possibly of one term) in which at
+least one term compares an indexed field with literals or parameters:
+`=` or `In` for `Lookup` and `Unique`; also `<`, `<=`, `>`, `>=` for
+`Range`; `Contains` for an indexed `TextSet`. Otherwise `SelectorNotIndexed`.
+Other terms are evaluated as residual filters.
+
+## Time, ordering and durability
 
 ### Time authority
 
-1. An implementation has one time authority. Every transition samples time
-   from it **after** the implementation has serialized that transition
-   against conflicting transitions (for example, after taking the row locks
-   a claim needs).
-2. All instances sharing storage use the same authority (for example,
-   database time).
+1. Each space has one time authority. A request samples it once, after the
+   implementation has serialized the request against conflicting requests
+   (for example, after taking the row locks it needs).
+2. All instances serving a space use the same authority.
 3. Every implementation accepts an `Arc<dyn Clock>` at construction. Under
    conformance it is the authority. An implementation's own configuration
-   MAY select a different authority for production (the Postgres reference
-   uses database time) and MUST document it.
-4. No operation takes a timestamp that overrides the authority, except
-   API-001 `MutateItems.evaluated_at`.
+   may select another authority for production and must document it. The
+   Postgres implementation uses `clock_timestamp()` read after its locks.
+4. `claim` and `claim_by_item_ids` take an optional `eligibility_time`. It
+   replaces the authority only when deciding whether `not_before` and retry
+   backoff have passed for that claim. Lease expiry, attempt timestamps,
+   cohort deadlines, retention, row expiry and `Now` always use the
+   authority.
+5. No other request takes a time that overrides the authority. API-001
+   `MutateItems.evaluated_at` is removed; a fixed instant is a parameter.
+6. Relative schedules (`Schedule::After`) are resolved against the authority
+   at the linearization point.
 
 ```rust
-pub trait Clock: Send + Sync {
-    fn now(&self) -> UtcTimestamp;
-}
+pub trait Clock: Send + Sync { fn now(&self) -> UtcMillis; }
 ```
 
 ### Time-driven transitions
 
-Observable state is a function of the returned mutations, each at its
-linearization point, and the current time.
+Observable state is a function of committed requests, each at its
+linearization point, and time.
 
-1. A time-driven transition takes effect at its due instant and is
-   evaluated against queue state as of that instant.
-2. Before an operation whose linearization point is at time `t` observes or
-   changes a queue, the result MUST equal having processed every transition
-   due at or before `t`, in due-instant order (ties in item-id order).
-3. Implementations MAY realize this with sweepers, lazily on access, or
-   both. No caller drives a tick, and conformance never calls one.
+1. A time-driven transition takes effect at its due instant.
+2. A request whose linearization point is at time `t` observes and acts on
+   the state after every transition due at or before `t`.
+3. Transitions due at the same instant are processed in this order: lease
+   expiries, then cohort deadlines, then retention and row expiries. Within
+   one kind: by object name, then by item id, cohort id or primary key.
+4. Implementations may sweep, evaluate lazily, or both. No caller drives a
+   tick, and conformance never calls one.
 
-Consequences, applied to API-001:
+Applied to API-001:
 
 - **Lease expiry** at `lease_expires_at`: the item is `pending` with no
-  active lease. Its token is stale. It counts as pending in reads and
-  metrics. `item_version` does not change. `attempt_count` follows API-001
-  (expiry charges nothing; the next delivery charges one). The
-  implementation remembers that the lease ended by expiry (the
-  `StreamGroup` family needs this).
-- **Cohort expiry** at the cohort deadline: if the cohort is not complete
-  and claim-eligible as of the deadline, every member becomes `failed` with
-  code `cohort-incomplete`.
-- **Retention expiry**: a request id older than `request_id_retention_ms`
-  is forgotten; a tombstone or terminal item older than
-  `client_item_key_retention_ms` stops being addressable by key.
-- **Recurring items** need no timer: a re-armed item's `not_before` is
-  evaluated like any other.
+  active lease. Its token is stale. `item_version` does not change.
+  `attempt_count` follows API-001.
+- **Cohort deadline**: at the deadline, if fewer than `cohort_size` members
+  were committed at or before it, every member becomes `failed` with code
+  `cohort-incomplete`. Whether the cohort was eligible or leased does not
+  matter. (Changed from API-001; ADR-025 open question 7.)
+- **Retention**: a request id older than `request_id_retention_ms` is
+  forgotten. A tombstone or terminal item older than
+  `client_item_key_retention_ms` stops being addressable by key. A row past
+  its expiry is gone. An event log entry past retention is gone.
+- **Recurrence**: a re-armed item's `not_before` is evaluated like any
+  other.
 
-### Linearization and safety
+### Linearization
 
-Operations on one queue are linearizable. Each takes effect at one point
-between call and return, consistent with real-time order.
-
-1. A claim or read observes every safety effect whose linearization point
-   precedes its own. This holds for every implementation, whatever it
-   declares.
-2. No item has two active leases. A stale lease token is rejected.
-3. Exception carried from API-001: replaying a claim's `request_id` while
-   its leases are active returns the original claimed set, even if a later
-   safety effect would now exclude some of those items.
-
-Operations on different queues have no ordering relationship, except as
-`MultiQueueClaim` states.
-
-### Atomic steps and per-call bounds
-
-1. Every core operation is one atomic step on storage: one request in, one
-   guarded write (or one read) out. No core operation requires a storage
-   transaction held open across more than one call, or across a round trip
-   to the caller. An implementation on a storage engine without interactive
-   multi-call transactions (for example a Durable Object, or SQLite driven
-   as a single guarded batch) can therefore implement the whole core.
-   Families that need more than one step (`ClaimedWorkCommit`,
-   `MultiQueueClaim`) are optional for this reason.
-2. Every mutating operation has a per-call bound declared in
-   `ImplementationLimits`. A request over the bound fails with
-   `BatchTooLarge` and has no effect; the caller splits it. No core
-   operation mutates an unbounded set of items in one step.
-3. On an implementation with one writer per storage unit, a mutation
-   delays every claim on that unit for as long as its step runs. The
-   bounds exist to cap that delay. In the Cayce storage spike a claim on
-   SQLite waited 2.3 s behind one 500,000-row `UPDATE`.
-4. Selector-scoped family operations (`ItemMutation::mutate_items`,
-   `OperatorRepair::purge` and `archive`) are capped by
-   `max_selector_affected`. API-001 requires `MutateItems` to apply the
-   whole request under one serialization boundary, so the cap is also the
-   largest single step such an operation can take. Whether a larger
-   selector operation may run as a sequence of bounded steps, each its own
-   linearization point, is an open question in ADR-025.
-
-### New-work visibility
-
-```rust
-#[non_exhaustive]
-pub enum Visibility { Immediate, Bounded { max_ms: u64 } }
-```
-
-- `Immediate`: a claim or read observes every new-work effect whose
-  linearization point precedes its own.
-- `Bounded { max_ms }`: a claim or read observes every new-work effect of a
-  mutation that returned more than `max_ms` of elapsed wall time before the
-  claim or read started. `max_ms` is not measured on the `Clock`.
-- A `Bounded` implementation that has a returned mutation older than
-  `max_ms` whose new-work effects are not yet visible MUST fail every claim
-  and read on that queue with `QueueError::Unavailable` until they are
-  visible.
-- Time-driven transitions are not subject to the bound. Once an item is
-  visible, its `not_before`, backoff and lease expiry are evaluated against
-  the time authority at the operation's linearization point.
-- Under `Bounded`, "eligible" in API-001 means eligible and visible. Strict
-  ordering applies over the visible eligible set. A whole-group claim
-  returns all visible eligible members of each selected group; a member not
-  yet visible may be claimed later on its own. A cohort is complete only
-  when all `cohort_size` members are visible.
-- Metrics and discovery observe the same visible set as claims. They never
-  report an item a claim at the same point could not return.
+1. Requests on one space are linearizable. A committed request takes effect
+   at one point between its invocation and its response.
+2. Every read observes every effect committed before its linearization
+   point, across all shapes of the space.
+3. No item has two active leases. A stale lease token is rejected.
+4. A request whose future is dropped, or that ends in an indeterminate
+   error (`CommitTimeout`, `Unavailable`), may commit later or never. A
+   replay of its `request_id` returns the recorded result if it committed.
+   Otherwise the replay runs it, and the original can then never commit.
+5. A definitive error (every other error) means the request never commits.
+6. Requests on different spaces have no ordering relationship.
 
 ### Replay
 
-Within `request_id_retention_ms`, a repeated `request_id` with the same
-body returns the recorded result, whether or not that result's new-work
-effects are visible yet, with these exceptions from API-001:
+Within `request_id_retention_ms`, a repeated `request_id` in the same space
+with the same body returns the recorded result, with these exceptions:
 
-1. A claim replay after every lease it returned has ended (finalized,
-   released, reassigned or expired) fails with `RequestExpired`.
-2. `MutateItems` with `dry_run = true` records nothing; its replay
-   re-evaluates.
-3. A repeated `request_id` with a different body fails with
+1. A claim replay after every lease it returned has ended fails with
+   `RequestExpired`.
+2. A rejected commit and a `dry_run` record nothing. Their replay runs them
+   again.
+3. Each step of a chunked `Mutate` is its own request with its own
+   `request_id`.
+4. A replay with a higher `min_durability` than the original waits until the
+   committed result reaches that level, or fails with `CommitTimeout`.
+5. The same `request_id` with a different body fails with
    `RequestIdConflict`.
 
-After the retention window a repeated `request_id` is a new request.
+### Durability
 
-### Reads: snapshot and `as_of`
+```rust
+#[non_exhaustive]
+pub enum DurabilityLevel { Process, Local, Replicated }  // ordered
+```
 
-1. `get_items`, `get_queue` and `metrics` read one queue at a single
-   linearization point. `as_of` in a response is the time authority's value
-   at that point.
-2. `discover_active_scopes` with a `queue_id` is a single-queue snapshot in
-   the same sense.
-3. Tenant-wide discovery reads each queue at its own point. `as_of` is the
-   earliest of those points. There is no cross-queue snapshot. A queue the
-   implementation cannot read is omitted, and the response sets
-   `partial = true`.
-4. `oldest_eligible_age_ms` is exact as of the snapshot. Counts marked
-   approximate in API-001 MAY be approximate; each implementation documents
-   which.
+| Level | Rule |
+|-------|------|
+| `Process` | Survives only as long as the instance. |
+| `Local` | Survives a process crash and reopen of the implementation's own storage. On Postgres: flushed to the primary's WAL. |
+| `Replicated` | Also survives loss of that storage: a copy outside it was durable before the response. On Postgres: a synchronous standby confirmed the flush. On the local engine: the commit is in the S3 log. |
+
+Every committing response reports the level reached (`durability`). Every
+write request may set `min_durability`. The response is then sent only once
+that level is reached, or the request fails with `CommitTimeout` (the commit
+may exist at a lower level). A `min_durability` above
+`capabilities().max_durability` fails with `InvalidRequest`.
 
 ## Guarantees and capabilities
 
 ```rust
-#[non_exhaustive]
 pub struct Guarantees {
-    pub durability: Durability,
+    pub durability: DurabilityLevel,   // minimum for every acknowledged commit
     pub new_work_visibility: Visibility,
     pub sharing: Sharing,
 }
-
-#[non_exhaustive]
-pub enum Durability { Process, Durable }
-
-#[non_exhaustive]
+pub enum Visibility { Immediate, Bounded { max_ms: u64 } }
 pub enum Sharing { SingleProcess, MultiProcess }
-```
 
-`guarantees()` returns the same value for the life of the instance.
-
-| Value | Rule |
-|-------|------|
-| `Durable` | Every mutation that returned survives the process being killed and the storage being reopened. Replay of its `request_id` after reopen returns the recorded result. The durability point is the implementation's own commit to its primary storage (for example an fsynced local SQLite commit, or a Postgres commit under the configured `synchronous_commit`). `Durable` says nothing about the loss of that storage's host or disk. |
-| `Process` | State lives only as long as the instance. |
-| `MultiProcess` | Several instances, in one or many processes, may serve the same storage at once. Together they satisfy this contract as one instance would. |
-| `SingleProcess` | At most one instance serves the storage. Opening a second instance either fails, or supersedes the first: every later operation on the first fails with `InstanceSuperseded` and has no effect. Mutations the first returned before supersession keep their durability. |
-
-An implementation that copies its storage elsewhere after commit (for
-example a shipper that uploads SQLite pages or WAL segments to object
-storage on an interval) declares `Durable` for the local commit and
-documents the copy's lag. It does not claim durability against host loss:
-in the Cayce storage spike no asynchronous shipping design made an
-acknowledged write durable in object storage at return. Durability against
-host loss at return needs synchronous replication before the mutation
-returns. Whether `Durability` gains a variant for that (for example
-`Replicated`) is an open question in ADR-025; adding one is compatible
-because the enum is `#[non_exhaustive]`.
-
-```rust
-#[non_exhaustive]
 pub struct Capabilities {
+    pub max_durability: DurabilityLevel,
+    pub shapes: BTreeSet<ShapeKind>,          // Queue and Table always; EventLog, Blob
+    pub queue_features: BTreeSet<QueueFeature>,
+    pub queue_history: bool,
     pub priority_kinds: BTreeSet<PriorityModelKind>,
     pub ordering_modes: BTreeSet<OrderingMode>,
-    pub features: BTreeSet<QueueFeature>,
     pub limits: ImplementationLimits,
 }
 
-#[non_exhaustive]
-pub enum QueueFeature {
-    DynamicGates, MetadataBlockers, Recurrence, GroupBatching, Cohorts,
-    TypedPayloadSchema, // ADR-011
-    SecondaryIndexes,   // ADR-010, ADR-011
-}
+pub enum QueueFeature { DynamicGates, MetadataBlockers, Recurrence, GroupBatching, Cohorts, TypedPayloadSchema }
 
-#[non_exhaustive]
 pub struct ImplementationLimits {
-    pub max_push_batch_size: u32,
+    pub max_ops_per_commit: u32,
+    pub max_entries_per_commit: u32,       // summed over ops; also per verb call
+    pub max_commit_bytes: u64,
+    pub max_body_bytes: u64,               // queue item and log entry bodies
+    pub max_value_bytes: u64,              // any other single value
+    pub max_set_values: u32,
+    pub max_blob_bytes: u64,
+    pub max_selector_affected: u32,        // per Mutate, and per chunk step
+    pub max_dry_run_count: u64,
+    pub max_read_rows: u32,                // per declared-read page
+    pub max_aggregate_scan_rows: u64,
     pub max_claim_batch_size: u32,
-    /// Entries per call for update, purge, claim_by_item_ids, renew,
-    /// reassign, finalize, upsert and family entry-list operations.
-    pub max_mutation_batch_size: u32,
-    /// Hard cap on items a selector-scoped family operation may affect.
-    pub max_selector_affected: u32,
     pub max_lease_duration_ms: u64,
+    pub request_id_retention_ms: u64,
     pub default_max_gate_keys_per_item: u32,
     pub default_max_gates_per_request: u32,
 }
 ```
 
-Every implementation supports `Timestamp` and `Int64` priority kinds and
-`Strict` ordering. `create_queue` rejects, before creating anything, a
-definition that needs an unlisted priority kind, ordering mode or feature,
-with `FeatureUnsupported`. A created queue supports every core operation and
-every operation of each family the implementation exposes that applies to
-its definition.
+`guarantees()` and `capabilities()` return the same values for the life of
+the instance. v1 conformance defines `Immediate` only; no v1 implementation
+declares `Bounded`.
 
-## Types
+| Sharing | Rule |
+|---------|------|
+| `MultiProcess` | Several instances, in one or many processes, may serve a space at once and together behave as one. |
+| `SingleProcess` | At most one instance serves a space. Opening a second either fails, or supersedes the first, whose every later request fails with `InstanceSuperseded` and has no effect. The implementation documents which. |
 
-All types live in `fireweed-interface`. Types already in `fireweed-core`
-(`TenantId`, `QueueId`, `ItemId`, `ClientItemKey`, `RequestId`,
-`LeaseToken`, `WorkerId`, `CohortId`, `GroupKey`, `PriorityValue`,
-`UtcTimestamp`, `Metadata`, `QueueDefinition`) are re-exported. Every
-public struct and enum here is `#[non_exhaustive]` and has a constructor;
-field lists below are the minimum.
-
-### Targets, schedules and outcomes
+## The trait
 
 ```rust
-pub struct QueueKey { pub tenant_id: TenantId, pub queue_id: QueueId }
+pub type DpResult<T> = Result<T, DataPlaneError>;
+pub type DpFuture<'a, T> = Pin<Box<dyn Future<Output = DpResult<T>> + Send + 'a>>;
 
-pub enum ItemRef { Id(ItemId), Key(ClientItemKey) }
-pub struct LeaseRef { pub item_id: ItemId, pub lease_token: LeaseToken }
-pub struct CohortLeaseRef { pub cohort_id: CohortId, pub cohort_lease_token: LeaseToken }
-pub enum LeaseTarget { Item(LeaseRef), Cohort(CohortLeaseRef) }
+pub trait DataPlane: Send + Sync {
+    fn guarantees(&self) -> Guarantees;
+    fn capabilities(&self) -> Capabilities;
 
-/// Resolved by the implementation at the transition's time.
-pub enum Schedule { At(UtcTimestamp), After { delay_ms: u64 } }
+    // Schema
+    fn apply_schema(&self, r: ApplySchemaRequest) -> DpFuture<'_, ApplySchemaResponse>;
+    fn get_schema(&self, space: SpaceKey) -> DpFuture<'_, Option<SchemaState>>;
 
-pub enum ItemStatus {
-    Accepted, Updated, Duplicate, Replaced, Claimed, Renewed, Reassigned,
-    Completed, Failed, Retried, Released, Rearmed, Purged,
-    NotFound, Invalid { reason: String }, Conflict, StaleLease, Terminal,
-    GroupTooLarge, NotEligible, Leased, Superseded, RateLimited, Unavailable,
-}
+    // Hot-path verbs
+    fn enqueue(&self, r: EnqueueRequest) -> DpFuture<'_, EnqueueResponse>;
+    fn claim(&self, r: ClaimRequest) -> DpFuture<'_, ClaimResponse>;
+    fn claim_by_item_ids(&self, r: ClaimByItemIdsRequest) -> DpFuture<'_, ClaimByItemIdsResponse>;
+    fn renew(&self, r: RenewRequest) -> DpFuture<'_, RenewResponse>;
+    fn finalize(&self, r: FinalizeRequest) -> DpFuture<'_, FinalizeResponse>;
 
-pub struct Outcome<T> {
-    pub target: T,
-    pub status: ItemStatus,
-    pub item_id: Option<ItemId>,
-    pub item_version: Option<u64>,
+    // Group commit
+    fn commit(&self, r: CommitRequest) -> DpFuture<'_, CommitResponse>;
+
+    // Reads
+    fn get(&self, r: GetRequest) -> DpFuture<'_, GetResponse>;
+    fn read(&self, r: ReadRequest) -> DpFuture<'_, ReadResponse>;
+    fn read_log(&self, r: ReadLogRequest) -> DpFuture<'_, ReadLogResponse>;
+    fn metrics(&self, r: MetricsRequest) -> DpFuture<'_, QueueMetrics>;
+    fn discover_active_scopes(&self, r: DiscoverRequest) -> DpFuture<'_, DiscoverResponse>;
+
+    // Blobs (capabilities().shapes contains Blob)
+    fn put_blob(&self, r: PutBlobRequest) -> DpFuture<'_, PutBlobResponse>;
+    fn get_blob(&self, r: GetBlobRequest) -> DpFuture<'_, Bytes>;
 }
 ```
 
-Batch responses hold one `Outcome` per request entry, in request order.
-Cohort targets use the same statuses as item targets. An ADR-011 schema
-violation is a per-item `Invalid` whose reason names the violation.
+The trait is dyn-compatible; `Arc<dyn DataPlane>` is `Send + Sync`. A
+method on a shape the implementation does not support fails with
+`FeatureUnsupported`; `apply_schema` never accepts such an object.
 
-### Items, claims and reads
+Every write request starts with a header:
+
+```rust
+pub struct WriteHeader {
+    pub space: SpaceKey,
+    pub request_id: RequestId,
+    pub min_durability: Option<DurabilityLevel>,
+}
+```
+
+## Hot-path verbs
+
+Each verb is equivalent to a `commit` of the matching operation, except that
+its entries have independent outcomes, as API-001 specifies: one stale lease
+or duplicate key affects only its own entry.
+
+| Verb | API-001 operation | Request (minimum) | Response |
+|------|-------------------|-------------------|----------|
+| `enqueue` | BatchPush / upsert | header, `queue`, `items: Vec<NewItem>`, `on_key_conflict` | per item `EntryResult`, `durability` |
+| `claim` | BatchClaim | header, `queue`, `worker_id`, `max_items`, `lease_duration_ms`, `eligibility_time`, `filter: Option<Expr>` (index rule; `params`), `group_key`, `same_group_key`, unit (`Items`, `WholeGroups { max_groups }`, `WholeCohort`) | `items: Vec<ClaimedItem>`, `cohort`, `queue_paused`, `as_of` |
+| `claim_by_item_ids` | BatchClaimByItemIds | header, `queue`, `worker_id`, `item_ids`, `lease_duration_ms`, `eligibility_time` | per distinct id, in first-occurrence order: `ClaimedItem` or `NotFound`, `NotEligible`, `Leased`, `Terminal` |
+| `renew` | BatchRenewLeases | header, `queue`, `leases: Vec<LeaseTarget>`, `lease_duration_ms` | per lease: status and new `lease_expires_at` |
+| `finalize` | BatchFinalize | header, `queue`, `entries: Vec<FinalizeEntry>` | per entry `EntryResult`, `durability` |
 
 ```rust
 pub struct NewItem {
     pub client_item_key: ClientItemKey,
     pub priority: PriorityValue,
-    pub not_before: Option<UtcTimestamp>,
+    pub not_before: Option<Schedule>,
     pub group_key: Option<GroupKey>,
-    pub cohort_size: Option<u32>,
-    pub gate_keys: Vec<String>,
-    pub payload: Option<Bytes>,
-    pub fields: BTreeMap<String, Bytes>,
+    pub cohort: Option<CohortSpec>,
+    pub gate_keys: BTreeSet<String>,
+    pub body: Option<Body>,                 // matches the queue's BodyKind
+    pub fields: BTreeMap<FieldName, Value>, // Stored fields only
+}
+pub enum Body { Bytes(Bytes), Json(serde_json::Value) }
+pub enum KeyConflict { Duplicate, ReplacePending, Reject }
+pub enum Schedule { At(UtcMillis), After { delay_ms: u64 } }
+
+pub enum ItemRef { Id(ItemId), Key(ClientItemKey), IdAndKey(ItemId, ClientItemKey) }
+pub struct LeaseRef { pub item_id: ItemId, pub lease_token: LeaseToken }
+pub struct CohortLeaseRef { pub cohort_id: CohortId, pub cohort_lease_token: LeaseToken }
+pub enum LeaseTarget { Item(LeaseRef), Cohort(CohortLeaseRef) }
+
+pub struct FinalizeEntry {
+    pub target: LeaseTarget,
+    pub expected_item_version: Option<u64>,
+    pub outcome: FinalizeOutcome,
     pub metadata: Metadata,
-    pub entity: Option<serde_json::Value>, // TypedPayloadSchema queues
+    pub set: Vec<(FieldName, Expr)>,        // applied with the outcome
+    pub patch: Vec<BodyPatch>,
+    pub body: Option<Body>,                 // replaces the body
 }
-
-pub struct ClaimedItem { /* exactly API-001 "Claimed Item Response Shape" */ }
-
-pub struct LeaseSummary {
-    pub worker_id: WorkerId,
-    pub lease_expires_at: UtcTimestamp,
-    pub ended_by_expiry: bool,
-}
-
-pub struct ItemView {
-    pub item_id: ItemId,
-    pub client_item_key: ClientItemKey,
-    pub item_version: u64,
-    pub lifecycle_state: LifecycleState, // pending | leased
-    pub priority: Option<PriorityValue>,
-    pub not_before: Option<UtcTimestamp>,
-    pub group_key: Option<GroupKey>,
-    pub attempt_count: u32,
-    pub lease: Option<LeaseSummary>,      // never the token
-    pub gate_keys: Vec<String>,
-    pub payload: Option<Bytes>,
-    pub fields: BTreeMap<String, Bytes>,
-    pub metadata: Metadata,
-}
-
-pub struct QueueMetrics {
-    pub as_of: UtcTimestamp,
-    pub pending: u64,
-    pub leased: u64,
-    pub complete: u64,
-    pub failed: u64,
-    pub retry_backlog: u64,
-    pub oldest_eligible_age_ms: Option<u64>,
-    pub progress_bound_risk_count: u64,
-    pub active_leases: u64,
-    pub recurring_pending: Option<u64>,
-    pub recurring_leased: Option<u64>,
+pub enum FinalizeOutcome {
+    Complete,
+    Fail { failure_code: String },
+    Retry { not_before: Schedule, priority: Option<PriorityValue> },
+    Release,
+    Rearm { not_before: Schedule, priority: Option<PriorityValue> },
 }
 ```
 
-## Core trait
+- `KeyConflict::Duplicate` is API-001 push dedupe: the existing item is
+  returned with status `Duplicate`. `ReplacePending` replaces a pending item
+  with the same key (new `item_id`; the old id reports `Superseded`); a
+  leased item gives `Conflict`. `Reject` gives `Conflict` for any live or
+  retained key.
+- `ItemRef::IdAndKey` fails with `Conflict` unless both name the same item.
+- `ClaimedItem` is API-001's claimed-item response shape, with the body and
+  declared fields. It is the only response that carries a lease token.
+- `claim` with `filter` is API-001 claim-by-query: the filter narrows the
+  candidates; ordering is unchanged.
+
+## Group commit
 
 ```rust
-pub type QueueResult<T> = Result<T, QueueError>;
-pub type QueueFuture<'a, T> = Pin<Box<dyn Future<Output = QueueResult<T>> + Send + 'a>>;
+pub struct CommitRequest {
+    pub header: WriteHeader,
+    pub ops: Vec<WriteOp>,
+    pub params: BTreeMap<ParamName, Value>,
+    pub dry_run: bool,
+}
 
-pub trait QueueProvider: Send + Sync {
-    fn guarantees(&self) -> Guarantees;
-    fn capabilities(&self) -> Capabilities;
+pub enum WriteOp {
+    Enqueue { queue: ObjectName, items: Vec<NewItem>, on_key_conflict: KeyConflict },
+    Finalize { queue: ObjectName, entries: Vec<FinalizeEntry> },
+    Renew { queue: ObjectName, leases: Vec<LeaseTarget>, lease_duration_ms: u64 },
+    Reassign { queue: ObjectName, leases: Vec<LeaseRef>, to_worker: WorkerId, lease_duration_ms: u64 },
+    SetGates { queue: ObjectName, gates: Vec<(String, GateState)> },
+    SetQueueState { queue: ObjectName, paused: Option<bool>, drain_intake: Option<bool> },
+    PutRows { table: ObjectName, rows: Vec<BTreeMap<FieldName, Value>>, on_conflict: RowConflict },
+    Append { log: ObjectName, entries: Vec<LogEntry> },
+    Mutate(Mutate),
+}
 
-    fn create_queue(&self, r: CreateQueueRequest) -> QueueFuture<'_, CreateQueueResponse>;
-    fn get_queue(&self, queue: QueueKey) -> QueueFuture<'_, Option<QueueDefinition>>;
+pub enum RowConflict { Reject, Skip, Replace, Merge }
+pub struct LogEntry { pub fields: BTreeMap<FieldName, Value>, pub body: Option<Body> }
 
-    fn push(&self, r: PushRequest) -> QueueFuture<'_, PushResponse>;
-    fn update(&self, r: UpdateRequest) -> QueueFuture<'_, UpdateResponse>;
-    fn set_gates(&self, r: SetGatesRequest) -> QueueFuture<'_, SetGatesResponse>;
-    fn purge(&self, r: PurgeRequest) -> QueueFuture<'_, PurgeResponse>;
+pub struct Mutate {
+    pub target: ObjectName,           // a queue or table
+    pub selection: Selection,
+    pub action: Action,
+    pub limit: u32,                   // <= limits.max_selector_affected
+    pub expect: Option<MatchExpect>,  // { min: u64, max: u64 } on the matched count
+    pub lease_policy: LeasePolicy,    // queues only
+    pub chunk: Option<Chunk>,
+}
 
-    fn claim(&self, r: ClaimRequest) -> QueueFuture<'_, ClaimResponse>;
-    fn claim_by_item_ids(&self, r: ClaimByItemIdsRequest) -> QueueFuture<'_, ClaimByItemIdsResponse>;
-    fn renew(&self, r: RenewRequest) -> QueueFuture<'_, RenewResponse>;
-    fn reassign(&self, r: ReassignRequest) -> QueueFuture<'_, ReassignResponse>;
-    fn finalize(&self, r: FinalizeRequest) -> QueueFuture<'_, FinalizeResponse>;
+pub enum Selection {
+    Keys { keys: Vec<Keyed>, filter: Option<Expr> },   // filter needs no index
+    Where { predicate: Expr },                          // index rule applies
+}
+pub struct Keyed { pub key: KeyRef, pub expected_version: Option<u64> }
+pub enum KeyRef { Item(ItemRef), Row(Vec<Value>) }
 
-    fn get_items(&self, r: GetItemsRequest) -> QueueFuture<'_, GetItemsResponse>;
-    fn metrics(&self, queue: QueueKey) -> QueueFuture<'_, QueueMetrics>;
-    fn discover_active_scopes(&self, r: DiscoverRequest) -> QueueFuture<'_, DiscoverResponse>;
+pub enum Action {
+    Set(Vec<(FieldName, Expr)>),       // Stored fields; Expr may read the old value
+    Patch(Vec<BodyPatch>),             // queue items with Json bodies
+    Reschedule { not_before: Option<Expr>, priority: Option<Expr> },
+    Transition(Transition),            // queue items
+    Gates { add: BTreeSet<String>, remove: BTreeSet<String> },
+    Retire,                            // queue: purge with tombstone; table: delete
+}
+pub enum Transition { Complete { code: Option<String> }, Fail { failure_code: String }, Redrive }
 
-    // Families. Default: not provided. Adding a defaulted accessor is compatible.
-    fn upsert(&self) -> Option<&dyn Upsert> { None }
-    fn item_mutation(&self) -> Option<&dyn ItemMutation> { None }
-    fn claimed_work_commit(&self) -> Option<&dyn ClaimedWorkCommit> { None }
-    fn index_query(&self) -> Option<&dyn IndexQuery> { None }
-    fn projection_query(&self) -> Option<&dyn ProjectionQuery> { None }
-    fn multi_queue_claim(&self) -> Option<&dyn MultiQueueClaim> { None }
-    fn stream_group(&self) -> Option<&dyn StreamGroup> { None }
-    fn operator_repair(&self) -> Option<&dyn OperatorRepair> { None }
+pub enum BodyPatch {
+    Set { pointer: JsonPointer, value: Expr },
+    Remove { pointer: JsonPointer },
+    Append { pointer: JsonPointer, value: Expr, keep_last: Option<u32> },
+}
+
+pub enum LeasePolicy { Skip, Reject, Preserve, MatchToken(LeaseToken) }
+pub enum Chunk { Start, Continue(Continuation) }
+```
+
+`params` supplies the values of every `Expr::Param` in the request.
+`ClaimRequest` and `ReadRequest` carry the same field.
+
+### Semantics
+
+1. **Atomic.** All operations apply at one linearization point, in list
+   order; each sees the effects of those before it. Either every operation
+   applies or none does.
+2. **Guards.** A group is rejected, and nothing is applied, if any of these
+   holds for any entry: a stale or unknown lease token; an
+   `expected_item_version` or `expected_version` that differs from the
+   current one; `KeyConflict::Reject` or `RowConflict::Reject` meeting an
+   existing key; a `MatchExpect` not met; matches over `limit` (without
+   `chunk`); a leased match under `LeasePolicy::Reject`; a `BlobRef` naming
+   a blob the space does not hold; a value over a size limit; an
+   `ItemRef::IdAndKey` mismatch. Statuses that are not guards (`Duplicate`
+   under `KeyConflict::Duplicate`, `Skip`ped rows, keys not found when
+   there is no `expect`) do not reject.
+3. **Rejection.** A rejected group returns `Ok` with `status: Rejected` and
+   the failure of each failing entry. It writes nothing, including no
+   request record.
+4. **Lease policy** for a `Mutate` matching a leased item: `Skip` (default)
+   leaves it out and counts it in `skipped_leased`; `Reject` rejects the
+   group; `Preserve` applies `Set`, `Patch`, `Reschedule` and `Gates` while
+   the lease stays with its token (a rescheduled `not_before` applies after
+   the lease ends); `MatchToken` applies any action when the token matches
+   and rejects otherwise. `Preserve` with `Transition` or `Retire` is
+   `InvalidRequest`. Every applied `Mutate` on an item increments its
+   `item_version` once.
+5. **`Transition`** applies to pending items (and leased items under
+   `MatchToken`). `Redrive` returns a terminal item within retention to
+   `pending` with `attempt_count = 0`.
+6. **`Retire`** on a queue item is API-001 `PurgeItems`, leaving a tombstone
+   for key retention. On a table row it deletes the row.
+7. **`Patch`** applies in order. `Append` adds to the array at `pointer`
+   (creating it) and, with `keep_last`, drops the oldest elements beyond
+   that count. A pointer through a non-object or non-array is an evaluation
+   error.
+8. **`dry_run`** evaluates everything, applies nothing, records nothing,
+   and returns per-operation `matched` counts, exact up to
+   `max_dry_run_count`.
+9. **Chunking.** A `Mutate` with `chunk` must be the only operation in its
+   commit and must use `Where`. Each step selects up to `limit` matching
+   items or rows in key order (item id, or primary key) after the
+   continuation, applies the action, and commits. The response carries the
+   next `Continuation` while more may match. Each step re-evaluates the
+   predicate at its own point. Items or rows the continuation has passed are
+   not revisited.
+10. **Durability.** One level covers the whole group.
+
+```rust
+pub struct CommitResponse {
+    pub status: CommitStatus,               // Committed | Rejected | DryRun
+    pub as_of: UtcMillis,
+    pub durability: Option<DurabilityLevel>, // Committed only
+    pub ops: Vec<OpResult>,                  // aligned with request ops
+    pub continuation: Option<Continuation>,
+}
+pub struct OpResult {
+    pub matched: u64,
+    pub affected: u64,
+    pub skipped_leased: u64,
+    pub entries: Vec<EntryResult>,           // per entry or per addressed key
+    pub failure: Option<OpFailure>,
+}
+pub struct EntryResult {
+    pub status: EntryStatus,  // Accepted, Duplicate, Replaced, Updated, Completed, Failed,
+                              // Retried, Released, Rearmed, Renewed, Reassigned, Purged,
+                              // Deleted, Skipped, NotFound, Conflict, StaleLease,
+                              // VersionMismatch, Terminal, Superseded, Invalid { reason }
+    pub item_id: Option<ItemId>,
+    pub version: Option<u64>,  // item_version or row_version after the op
+    pub lease: Option<NewLease>, // Reassign: the new token and expiry
 }
 ```
 
-`QueueProvider` and every family trait are dyn-compatible and
-`Send + Sync`. Every request carries its target queue and, when mutating, its
-`request_id`. No core method returns `FeatureUnsupported`, and none returns
-`Unavailable` for anything other than a transient condition.
+## Shapes
 
-### Core operations
+### Queue
 
-| Method | API-001 operation | Request (minimum) | Response |
-|--------|-------------------|-------------------|----------|
-| `create_queue` | CreateQueue | `queue`, `definition` | stored definition, `created` |
-| `get_queue` | (read) | `queue` | definition or `None` |
-| `push` | BatchPush | `queue`, `request_id`, `items: Vec<NewItem>` | `Vec<Outcome<ClientItemKey>>` |
-| `update` | BatchUpdate | `queue`, `request_id`, entries of `item: ItemRef`, `expected_item_version`, and optional replacements of `priority`, `not_before: Option<Schedule>`, `payload`, `fields`, `metadata`, `gate_keys` | `Vec<Outcome<ItemRef>>` |
-| `set_gates` | SetGates | `queue`, `request_id`, `gates: Vec<(String, GateState)>` | `gate_epoch: u64`, canonical gates |
-| `purge` | PurgeItems | `queue`, `request_id`, `items: Vec<ItemRef>`, `force` | `Vec<Outcome<ItemRef>>` |
-| `claim` | BatchClaim | `queue`, `request_id`, `worker_id`, `max_items`, `lease_duration_ms`, filter (`group_key`, `same_group_key`, `metadata_equals`), unit (`Items`, `WholeGroups { max_groups }`, `WholeCohort`) | `items: Vec<ClaimedItem>`, `cohort: Option<CohortLease>`, `queue_paused: bool` |
-| `claim_by_item_ids` | BatchClaimByItemIds | `queue`, `request_id`, `worker_id`, `item_ids`, `lease_duration_ms` | per id: `ClaimedItem` or reason `NotFound` / `NotEligible` / `Leased` / `Terminal` |
-| `renew` | BatchRenewLeases | `queue`, `request_id`, `leases: Vec<LeaseTarget>`, `lease_duration_ms` | `Vec<Outcome<LeaseTarget>>` with new `lease_expires_at` |
-| `reassign` | ReassignLeases (new in API-001) | `queue`, `request_id`, `leases: Vec<LeaseRef>`, `to_worker`, `lease_duration_ms` | per lease: new `ClaimedItem` (new token, one attempt charged) or status |
-| `finalize` | BatchFinalize | `queue`, `request_id`, entries of `target: LeaseTarget` and outcome `Complete`, `Fail { failure_code, metadata }`, `Retry { not_before: Schedule, priority }`, `Release`, `Rearm { not_before: Schedule, priority }` | `Vec<Outcome<LeaseTarget>>` |
-| `get_items` | BatchGetLiveItems, extended | `queue`, `items: Vec<ItemRef>` | `as_of`, `Vec<Option<ItemView>>` aligned with request |
-| `metrics` | GetQueueMetrics | `queue` | `QueueMetrics` |
-| `discover_active_scopes` | DiscoverActiveScopes | `tenant_id`, optional `queue_id`, `granularity`, `group_key`, `max_results`, `page_token`, `authorize` | `as_of`, `active_scopes`, `next_page_token`, `partial` |
+API-001 semantics, with the changes in this contract: declared fields;
+`Json` bodies patched by pointer; `claim` filters over declared fields;
+`eligibility_time`; lease policies; the cohort deadline rule; selector
+writes in place of `MutateItems`. Key retention
+(`client_item_key_retention_ms`) is the dedupe window for event items
+keyed by a provider's event id. Pause is observable: a claim on a paused
+queue returns no items and `queue_paused = true`.
 
-Notes:
+With `history` declared (and `capabilities().queue_history`), every
+committed transition of an item appends one entry to the named event log in
+the same commit: `item_id`, `client_item_key`, transition kind, outcome,
+`item_version`, `attempt_count`. Time-driven transitions are not recorded
+in v1.
 
-- **Pause.** API-002 pause is observable in the core: a claim on a paused
-  queue returns no items and `queue_paused = true`; pushes are accepted.
-  There is no pause error.
-- **`get_items`** returns live items only (`pending`, `leased`), addressed
-  by id or key. It never returns a lease token.
-- **`reassign`** moves an active lease to `to_worker`. It is how an operator
-  or worker takes over in-flight work while the lease still runs. Work
-  whose lease has expired is simply pending and is claimed normally.
-- **`authorize`** is `Option<Arc<dyn Fn(&QueueKey) -> bool + Send + Sync>>`.
-  `None` means the caller is trusted for every queue of `tenant_id`. The
-  implementation evaluates the predicate once per candidate queue, before
-  ranking and before computing `as_of`, and only for queues of `tenant_id`.
-  The predicate must be pure. A named `queue_id` it rejects fails with
-  `QueueNotFound`.
+### Table
 
-## Extension families
+Rows keyed by the declared primary key. `PutRows` inserts with the conflict
+policy; `Merge` sets only the given fields of an existing row. `Mutate`
+`Set` with `Arith` over the old value is an atomic increment. A conditional
+increment or compare-and-swap is a `Mutate` with `Keys`, a `filter` (for
+example `count < limit`) and `expect: { min: 1, max: 1 }`. `row_version`
+increments on every change. A row past its expiry is invisible at once and
+deleted later.
 
-Each family is a trait; signatures follow the core pattern (one request
-struct in, one response struct out, `QueueFuture`). An implementation that
-returns `Some` from an accessor implements every method of the family for
-every queue the family applies to.
+### Event log
 
-| Accessor | Trait and methods | Semantics |
-|----------|-------------------|-----------|
-| `upsert` | `Upsert::upsert` | Below. |
-| `item_mutation` | `ItemMutation::mutate_items` | API-001 Atomic Item Mutation. Lease-preserving reschedule of a leased item uses a lease guard of `match_token` or `require_active`. |
-| `claimed_work_commit` | `ClaimedWorkCommit::{commit, commit_multi_claim, explain_commit, get_side_records}` | Below. |
-| `index_query` | `IndexQuery::query_index` (unique, multi and typed forms are request options) | ADR-010, ADR-011. |
-| `projection_query` | `ProjectionQuery::{range_scan, grouped_aggregate, declared_bucket_segment, bounded_mutation, claim_by_query, metrics_by_query, query_capabilities}` | API-004. `query_capabilities(&QueueKey)` is synchronous and per queue. |
-| `multi_queue_claim` | `MultiQueueClaim::claim_across_queues` | Below. |
-| `stream_group` | `StreamGroup::{pending_summary, pending_page, claim_for_worker, autoclaim, ack, claimed}` | Below. |
-| `operator_repair` | `OperatorRepair::{pause, resume, admin_state, inspect_item, repair, redrive, purge, archive, get_operation, audit_records, retained_items}` | API-002. |
+```rust
+pub struct ReadLogRequest {
+    pub space: SpaceKey,
+    pub log: ObjectName,
+    pub from: LogCursor,           // Start | After(seq) | Partition { key: Value, after: Option<u64> }
+    pub max_entries: u32,
+}
+```
 
-### `Upsert`
+1. Every entry gets a `seq`, unique in the log and increasing in commit
+   order. A reader that has seen `seq = n` never later sees a new entry with
+   a smaller `seq`. Gaps are allowed.
+2. `read_log` returns entries after the cursor in `seq` order, filtered to
+   one partition if asked, with the cursor to continue from.
+3. A cursor before the earliest retained entry fails with
+   `CursorExpired { earliest }`.
+4. Consumers keep their cursors in a table and advance them in the same
+   group commit as their processing.
 
-`upsert(queue, request_id, items: Vec<NewItem>)`, per item by
-`client_item_key`:
+### Blob
 
-- no live item with the key: push, status `Accepted`;
-- a pending item with the key: atomically replace it. The old `item_id`
-  becomes superseded (any later operation addressing it reports
-  `Superseded`), a new `item_id` is assigned, status `Replaced`;
-- a leased item with the key: `Conflict`, nothing changes.
+1. `put_blob(space, bytes, media_type, min_durability)` stores immutable
+   bytes and returns `BlobRef { sha256, size }`. Putting the same bytes again
+   returns the same reference. Up to `max_blob_bytes`.
+2. A blob is referenced by any `BlobRef` field value in any shape of the
+   space. References inside a JSON body do not count.
+3. A commit that writes a `BlobRef` the space does not hold is rejected.
+4. A blob with no reference is deleted `orphan_grace_ms` after its put or
+   after its last reference was removed, whichever is later.
+5. `get_blob` returns the bytes, or `BlobNotFound`.
 
-### `ClaimedWorkCommit`
+## Reads
 
-`commit(queue, request_id, entries)` applies a vector of entries with
-independent per-entry outcomes. There is no atomicity across entries. Each
-entry is atomic and contains:
+### Point reads
 
-- `claim: LeaseRef`, validated (token and expiry) at the entry's
-  linearization point;
-- `finalize`: the finalize outcome for that claim;
-- `side_records: Vec<(key, value)>`: opaque records, never claimable, read
-  through `get_side_records`;
-- `new_items: Vec<NewItem>`: enqueued as ordinary work, `not_before`
-  allowed (timers and awaits);
-- `instance_fence: Option<{ key, expected, next }>`: the entry commits only
-  if the stored fence for `key` equals `expected` (absent reads as 0) and
-  `next > expected`. A stale `expected` gives `Conflict`; `next <= expected`
-  gives `Invalid`.
+`get(space, targets)` reads several targets at one linearization point:
+queue items by `ItemRef` (live items, plus terminal items within retention
+when `include_terminal`), table rows by key, and blob metadata. Items are
+returned as `ItemView`: system fields (lease summary, never the token),
+declared fields and body. A target not found is `None`.
 
-If any part of an entry fails, nothing of that entry is applied.
-`commit_multi_claim` is the same, except one entry may consume several
-claims, all validated before any effect. `request_id` replay covers the
-whole body. `explain_commit(queue, request_id)` returns, for a retained
-request, the per-entry outcome, consumed claims, side-record keys and new
-item ids, reconstructed from durable state. `get_side_records` reads by key
-or key prefix, paginated.
+### Declared reads
 
-These are invariants of the family, not optional flags. They replace
-`commit_capabilities`.
+```rust
+pub struct ReadDecl {
+    pub name: ReadName,
+    pub version: u32,
+    pub source: ObjectName,           // a queue, table or event log
+    pub params: Vec<(ParamName, FieldType)>,
+    pub filter: Expr,                 // index rule applies
+    pub output: ReadOutput,
+    pub order: Vec<(FieldName, Direction)>,
+    pub max_rows: u32,                // <= limits.max_read_rows
+}
+pub enum ReadOutput {
+    Rows { fields: Vec<FieldName> },
+    Aggregate { group_by: Vec<(FieldName, Expr)>, values: Vec<(FieldName, Aggregate)> },
+}
 
-### `MultiQueueClaim`
+pub struct ReadRequest {
+    pub space: SpaceKey,
+    pub name: ReadName,
+    pub version: u32,
+    pub params: BTreeMap<ParamName, Value>,
+    pub page_token: Option<PageToken>,
+}
+```
 
-`claim_across_queues(targets)` claims from several queues in one call.
-Validation of every target happens before any claim. Each target then runs
-as an independent `claim` with its own outcome, in caller order. It is not
-atomic across queues. Every target uses one lease instant.
+1. A read is declared in the schema and invoked by name and version. A
+   declared version never changes. `ReadNotDeclared` otherwise.
+2. A page is read at one linearization point and reports `as_of`. Pages of
+   one read are not one snapshot; the page token continues in `order`, then
+   key order.
+3. An aggregate that would scan more than `max_aggregate_scan_rows` rows
+   fails with `ScanLimitExceeded`.
+4. Queue rows report `state` by the time rule: an item whose lease has
+   expired reads as `pending`.
+5. Built-in reads exist in every space: `fw_items` (v1, a queue's items by
+   state, group or key), `fw_gates` (v1, blocked gates of a queue), and
+   `fw_queue_counts` (v1, counts by state per queue). Their declarations are
+   in the conformance crate and fixed per version.
 
-### `StreamGroup`
+Implementations backed by SQL may name a declared read `fw_read_v<N>_<name>`
+internally. Consumers never see engine tables or views.
 
-Redis Streams consumer-group semantics for RESP (TD-006). A lease in this
-family is identified by `item_id` and held by `worker_id`. The family does
-not use lease tokens.
+### Metrics and discovery
 
-- `claim_for_worker(queue, worker_id, item_ids, lease_duration_ms)`
-  (`XCLAIM`): for each id, lease a pending item to `worker_id`, renew if
-  `worker_id` already holds it, or reassign it from another worker.
-- `autoclaim(queue, worker_id, after: Option<ItemId>, count,
-  lease_duration_ms)` (`XAUTOCLAIM`): in item-id order after the cursor,
-  lease up to `count` pending items whose last lease ended by expiry.
-  Returns the leased items and the next cursor.
-- `ack(queue, item_ids)` (`XACK`): complete each leased item by id,
-  whichever worker holds it. Per-item outcomes.
-- `pending_summary(queue)` (`XPENDING` summary): leased count, lowest and
-  highest leased `item_id`, count per worker.
-- `pending_page(queue, after, count, worker_id: Option, min_idle_ms:
-  Option)` (`XPENDING` extended): leased items in item-id order with holder,
-  `lease_expires_at`, `attempt_count`, and next cursor.
-- `claimed(queue, item_ids)`: `ClaimedItem` for each id currently leased.
+`metrics(space, queue)` returns `QueueMetrics` at one linearization point
+(fields as revision 2: `as_of`, `pending`, `leased`, `complete`, `failed`,
+`retry_backlog`, `oldest_eligible_age_ms`, `progress_bound_risk_count`,
+`active_leases`, `recurring_pending`, `recurring_leased`).
 
-**Weaker fencing, by design.** Any caller may acknowledge or take over any
-lease by id. Core-path callers (token-addressed) and `StreamGroup` callers
-can be mixed on one queue: a `StreamGroup` takeover or ack makes the core
-holder's token stale.
+- Lifecycle counts follow API-001's definitions: `pending` includes items
+  not yet due and gated items; `leased` counts unexpired leases; terminal
+  counts cover retention.
+- `oldest_eligible_age_ms` and `progress_bound_risk_count` cover exactly the
+  items a claim with no filter and no `eligibility_time` could return at
+  that point, ignoring pause.
+
+`discover_active_scopes` follows API-001, except that each returned scope
+carries its own `observed_at`, and there is no response-wide `as_of`.
+Queues the implementation cannot read are omitted and `partial` is set.
+`authorize` is `Option<Arc<dyn Fn(&ObjectName) -> bool + Send + Sync>>`,
+evaluated once per candidate queue before ranking.
 
 ## Errors
 
 ```rust
 #[non_exhaustive]
-pub enum QueueError {
-    QueueNotFound,
-    QueueDefinitionConflict,
-    FeatureUnsupported(UnsupportedFeature),
-    GatesNotEnabled,
-    InvalidRequest(String),
-    BatchTooLarge,
-    RequestIdConflict,
-    RequestExpired,
-    CommitTimeout,
-    RateLimited { retry_after_ms: Option<u64> },
-    Unavailable(String),
-    InstanceSuperseded,
-    Family(FamilyError),
-    Internal(String),
-}
-
-#[non_exhaustive]
-pub enum FamilyError {
-    CursorInvalidated,                                  // API-004
-    CapabilityUnavailable(&'static str),                // API-004 side_record_query
-    InvalidSelector(String),                            // API-001 MutateItems, API-002
-    MatchCountMismatch { expected: u64, actual: u64 },  // API-002
-    OperatorForbidden,                                  // API-002
-    OperationNotFound,                                  // API-002
+pub enum DataPlaneError {
+    SpaceNotFound, ObjectNotFound(ObjectName),
+    SchemaConflict { current_version: Option<u64> },
+    FeatureUnsupported(Unsupported), IndexNotReady(FieldName),
+    UndeclaredField(FieldName), SelectorNotIndexed,
+    ReadNotDeclared { name: ReadName, version: u32 }, ScanLimitExceeded,
+    GatesNotEnabled, InvalidRequest(String), Evaluation(EvalError),
+    BatchTooLarge(LimitKind),
+    RequestIdConflict, RequestExpired,
+    CursorExpired { earliest: u64 }, InvalidContinuation, BlobNotFound,
+    CommitTimeout, RateLimited { retry_after_ms: Option<u64> }, Unavailable(String),
+    InstanceSuperseded, Internal(String),
 }
 ```
 
-| Error | Meaning | Retry |
-|-------|---------|-------|
-| `QueueNotFound` | Queue absent, or rejected by `authorize` | No |
-| `QueueDefinitionConflict` | API-001 | No |
-| `FeatureUnsupported` | Only from `create_queue` | No |
-| `GatesNotEnabled`, `InvalidRequest`, `BatchTooLarge` | API-001; `InvalidRequest` also covers a request that can never fit a hard limit | After fixing the request |
-| `RequestIdConflict`, `RequestExpired` | API-001 replay rules | With a new `request_id` |
-| `CommitTimeout` | Durability not confirmed in time; outcome unknown | Same `request_id` |
-| `RateLimited` | Capacity or backpressure | Same `request_id`, after `retry_after_ms` |
-| `Unavailable` | Transient: storage unreachable, shutting down, `Bounded` visibility exceeded | Same `request_id` |
-| `InstanceSuperseded` | `SingleProcess` instance replaced | No; use the new instance |
-| `Family` | As the family's contract | As the family's contract |
-| `Internal` | Broken invariant detected; the operation had no effect | No |
+| Error | Kind | Retry |
+|-------|------|-------|
+| `SpaceNotFound`, `ObjectNotFound`, `UndeclaredField`, `ReadNotDeclared`, `FeatureUnsupported` | Definitive | After a schema change |
+| `SchemaConflict` | Definitive | Re-read the schema |
+| `IndexNotReady` | Definitive | Later, same `request_id` |
+| `SelectorNotIndexed`, `GatesNotEnabled`, `InvalidRequest`, `Evaluation`, `BatchTooLarge`, `ScanLimitExceeded`, `InvalidContinuation` | Definitive | After fixing the request |
+| `RequestIdConflict`, `RequestExpired` | Definitive | With a new `request_id` |
+| `CursorExpired`, `BlobNotFound` | Definitive | No |
+| `RateLimited` | Definitive | Same `request_id`, after `retry_after_ms` |
+| `CommitTimeout`, `Unavailable` | Indeterminate | Same `request_id` |
+| `InstanceSuperseded` | Definitive | No; use the new instance |
+| `Internal` | Definitive: a broken invariant was detected and nothing was applied | No |
 
-`QueueForbidden` is not an interface error. Authentication and
-authorization belong to the wire adapter, which maps its own decisions to
-API-001's `queue-forbidden`.
+A rejected group is not an error. `QueueForbidden` is not an interface
+error; authorization belongs to the wire adapter.
 
-## Maintenance and coordination
+## Consumer inventory
 
-Not part of this contract; offered by an implementation on its own type if
-it needs them:
+What Snorri and Cayce would otherwise keep in memory, in opaque blobs or in
+their own stores, and the shape that holds it.
 
-- projection verify, delete, rebuild;
-- snapshot policy and creation, log compaction, rebuild statistics;
-- ownership acquisition and renewal, epoch fencing, redirects;
-- command positions and other progress markers.
+### Snorri
+
+From Snorri TD-012 revision 6 §3.7 (uncommitted). Rates are per recipient of
+a single-send campaign.
+
+| # | State | Size and rate | Shape and mechanism |
+|---|-------|---------------|---------------------|
+| 1 | Instance body: variables, node, waits, effect references, inbox, audit ring, engagement profile | Body up to 2 MiB; transition output up to 1 MiB; rewritten about 3 times per recipient plus once per profile update | Queue item with a `Json` body (the instance head, D8). Field-level changes are `Patch`; a profile update or inbox append is a `Mutate` with `Patch` and `LeasePolicy::Preserve`. Outputs above a threshold go to a blob, referenced by a `BlobRef` field. |
+| 2 | Consumed inputs | Up to 16 in the body, each up to 64 KiB; one per external event | Event items in an inputs queue, finalized `Complete` in the transition's group; or kept in the body and trimmed with `Patch`. |
+| 3 | Waits and await routing | Up to 128 per instance; names of 71 bytes | An indexed `TextSet` field on the instance item; routing is a `get` or read with `Contains`. |
+| 4 | Effects: request, intent, receipt (the send-intent ledger) | Up to 256 KiB per effect item; intent commit about 1.2 KiB; 3 commits per send | Effect items in an effects queue. The intent commit sets `min_durability: Replicated`. |
+| 5 | Handler idempotency: receipts, outcomes and fingerprints per idempotency key | Small; one write per handler call | Table keyed by idempotency key with `RowExpiry::AfterWrite`. |
+| 6 | External events and dedupe | Up to 64 KiB per event; 31-day dedupe; at most 3 claims per event | Event items keyed by provider event id, with `client_item_key_retention_ms` of 31 days. |
+| 7 | Audit and history | One per transition | Hash chain and last 16 summaries in the body (`Patch` `Append` with `keep_last: 16`). Full history is exhaust for Niflheim; an event log can serve as the outbox that ships it. |
+| 8 | Definitions | 31–43 KB, up to 8 MiB; once per artifact per queue | Blob, referenced from a table row keyed by artifact digest and queue. |
+| 9 | Admission in-flight chunk | About 100 B per run per shard; twice per chunk of up to 4,096 members | Table row keyed by run and shard, updated with `expected_version` (ADR-025 open question 6). |
+| 10 | Rate-limit counters (today Dragonfly in Cayce) | One counter per slot key (account, contact, hour); one conditional increment per effect intent | Table rows keyed by slot and hour bucket with expiry; conditional increment as in Table (ADR-025 open question 5). |
+
+Not shapes: the compiled WASM cache, the open-runs list and next-wake time
+(derived, read through `fw_queue_counts` and `get`), and the old adapter's
+caches.
+
+### Cayce (draft; Cayce to confirm)
+
+| State | Shape and mechanism |
+|-------|---------------------|
+| Per-recipient, per-run lifecycle | Queue item per recipient, with declared fields (campaign, step, domain, status) for claims, bulk changes and UI reads |
+| Recipient profile, suppression flags | Table keyed by recipient |
+| Frequency caps and send-rate windows | Table counters keyed by bucket |
+| Delivery and engagement events | Event items (dedupe by provider id) that drive workflows; an event log for timelines and export |
+| UI counts by state, lag, send rates | Declared aggregate reads over queue items, tables and event logs |
+| Rendered messages and attachments | Blobs |
 
 ## Profiles
 
-A profile names what a consumer needs. An implementation satisfies a
-profile when every listed family accessor returns `Some`, every listed
-feature is in `capabilities().features`, its guarantees are at least the
-listed minimum, and its limits are at least the listed minimum.
+A profile names what a consumer needs: shapes, queue features, minimum
+limits, and the maximum durability it will request. An implementation
+satisfies a profile when `capabilities()` covers all of it.
 
-| Profile | Families | Features | Minimum guarantees |
-|---------|----------|----------|--------------------|
-| `core` | none | none | none |
-| `resp-worker` | `Upsert`, `StreamGroup` | none | none |
-| `snorri` (to confirm with Snorri) | `Upsert`, `ItemMutation`, `ClaimedWorkCommit`, `IndexQuery`, `ProjectionQuery` | `TypedPayloadSchema`, `SecondaryIndexes`, `DynamicGates` | `Durable` |
-
-A deployment marked production-supported requires `Durable`.
+| Profile | Shapes and features | Minimum limits | `max_durability` |
+|---------|---------------------|----------------|------------------|
+| `snorri` | Queue, Table, Blob; `DynamicGates`; `Json` bodies | `max_body_bytes` 2 MiB; `max_set_values` 128; `max_blob_bytes` 8 MiB; key retention 31 days | `Replicated` in production |
+| `cayce-ui` | Queue, Table, EventLog; declared reads with aggregates | `max_read_rows` 1,000; `max_aggregate_scan_rows` 5,000,000 | — |
+| `recipient-lifecycle` | Queue, Table; chunked `Mutate` | `max_entries_per_commit` 10,000; `max_selector_affected` 10,000 | — |
 
 ## Conformance
 
@@ -655,104 +878,127 @@ A deployment marked production-supported requires `Durable`.
 
 ```rust
 pub trait Harness: Send + Sync + 'static {
-    type Provider: QueueProvider + 'static;
+    type Impl: DataPlane + 'static;
 
-    /// A fresh instance on fresh, isolated storage. `clock` is the time authority.
-    fn open<'a>(&'a self, clock: Arc<ManualClock>)
-        -> BoxFuture<'a, Result<Self::Provider, HarnessError>>;
+    /// Fresh, isolated storage, described by a serializable spec.
+    fn create_storage(&self) -> BoxFuture<'_, Result<StorageSpec, HarnessError>>;
 
-    /// Another instance on the same storage as `existing`, in this process.
-    fn open_peer<'a>(&'a self, existing: &'a Self::Provider, clock: Arc<ManualClock>)
-        -> BoxFuture<'a, Result<Self::Provider, HarnessError>>;
+    /// An instance on existing storage, in this process.
+    fn open<'a>(&'a self, storage: &'a StorageSpec, clock: SharedClock)
+        -> BoxFuture<'a, Result<Self::Impl, HarnessError>>;
 
-    /// Returns once every returned mutation's effects are visible (wall time).
-    /// `Immediate` implementations return at once.
-    fn settle<'a>(&'a self, provider: &'a Self::Provider) -> BoxFuture<'a, ()>;
+    /// A binary that serves `open` in a child process. Required for `Local`,
+    /// `Replicated` and `MultiProcess`.
+    fn child_binary(&self) -> Option<PathBuf>;
 
-    /// How to run this implementation in a child process. Required for
-    /// `Durable` and `MultiProcess`.
-    fn child_process(&self) -> Option<ChildProcessSpec>;
+    /// Optional fault injection; unsupported faults skip their scenarios.
+    fn inject(&self, instance: &Self::Impl, fault: Fault) -> Result<(), HarnessError> {
+        Err(HarnessError::Unsupported)
+    }
+
+    /// Optional: destroy the local copy of the storage, for `Replicated`.
+    fn lose_local_storage<'a>(&'a self, storage: &'a StorageSpec)
+        -> BoxFuture<'a, Result<(), HarnessError>> {
+        Box::pin(async { Err(HarnessError::Unsupported) })
+    }
 }
+
+pub struct StorageSpec(serde_json::Value);   // opaque to the suite
+pub enum Fault { BeforeCommit, AfterCommitBeforeResponse, StallCommit { ms: u64 } }
 ```
 
-`fireweed-conformance` provides `run_child_agent(harness)`, a `main` helper
-for a small binary in the implementation's crate. The suite drives that
-binary over stdin and stdout.
+- `SharedClock` is a manual clock backed by a file the suite owns. Every
+  process reads the same file, and only the suite advances it.
+- The child binary's `main` calls `fireweed_conformance::child_main(harness)`,
+  which opens the storage named on its command line and serves requests
+  read as JSON from stdin, writing responses to stdout. The request types'
+  serde form is the protocol.
+- Skipped scenarios are reported by name; a release requires that none of
+  the scenarios its declared guarantees need are skipped.
 
 ### Suites
 
 ```rust
-pub async fn run_core<H: Harness>(harness: H);
-pub async fn run_families<H: Harness>(harness: H); // each family whose accessor returns Some
+pub async fn run<H: Harness>(harness: H);
 ```
 
 The suite uses only `fireweed-interface`. It checks:
 
-1. Every API-001 rule, as amended by ADR-025, for each operation and each
-   declared feature.
-2. The time-driven transitions, using `ManualClock` only, with no tick.
-3. Linearization and safety: concurrent claims never produce two active
-   leases; every safety effect excludes items from claims that start after
-   it; claim replay after leases end gives `RequestExpired`.
-4. `Durable`: the child process is killed (`SIGKILL`) at chosen points
-   around acknowledged mutations and around lost responses; storage is
-   reopened in the parent; every returned mutation is present and every
-   `request_id` replays its recorded result.
-5. `MultiProcess`: peers in separate child processes race claim, renew,
-   reassign and finalize on one queue.
-6. `SingleProcess`: a second `open_peer` either fails or supersedes the
-   first, which then fails every operation with `InstanceSuperseded`.
-7. `Bounded`: effects are visible after `settle`; with apply held back by a
-   harness fault hook, claims and reads fail with `Unavailable` once the
-   bound passes.
-8. `create_queue` rejects every undeclared feature with
-   `FeatureUnsupported`, and only `create_queue` does.
-
-An implementation is releasable only when `run_core` and `run_families`
-pass from its own crate's tests.
+1. API-001 queue rules, as changed here, for each verb and each declared
+   queue feature.
+2. Group commit: atomicity, ordering within the group, every guard, the
+   rejection response, nothing recorded on rejection, `dry_run`, and
+   chunked steps.
+3. Tables, event logs (ordering, cursor, partitions, retention,
+   `CursorExpired`) and blobs (dedupe, reference rule, orphan deletion).
+4. Expressions and aggregates: every row of the semantics table, including
+   errors.
+5. Schema: versioning, additive-only changes, `FeatureUnsupported`, the
+   index rule, index state.
+6. Time rules under `SharedClock` only, with no tick, including same-instant
+   ordering and `eligibility_time`.
+7. Linearization: concurrent claims never produce two active leases; reads
+   observe prior commits across shapes.
+8. Lost responses: with `AfterCommitBeforeResponse`, a replay returns the
+   committed result; with `BeforeCommit`, a replay commits once.
+9. `Local`: a child is killed (`SIGKILL`) around acknowledged commits, the
+   storage is reopened in the parent, every acknowledged commit is present,
+   and every `request_id` replays (subject to the replay exceptions).
+10. `Replicated`: after `lose_local_storage`, reopening restores every
+    commit acknowledged at `Replicated`.
+11. `MultiProcess`: peers in separate child processes race claims and group
+    commits on one space. `SingleProcess`: a second open fails or
+    supersedes.
 
 ### Differential test
 
-A test-only crate depends on the Postgres reference and on each other
-implementation. It generates sequential histories (proptest) and applies
-each under a `ManualClock` to the reference and to the implementation under
-test. Rules:
+A test-only crate depends on the Postgres implementation and each other
+implementation. It generates sequential histories (proptest) including
+schemas, group commits, generated expressions, selector writes, aggregates
+and clock advances, and applies each to both under `SharedClock`.
 
-- queues use `Strict` ordering. Each history gives equal-priority items
-  distinct push order and uses the `created_sequence` tie-breaker, so order
-  is determined by the history;
-- after each mutation the harness calls `settle`;
-- item ids and lease tokens are compared by the `client_item_key` and
-  claim they belong to, not by value;
-- compared: every `Outcome` status and `item_version`, every claimed set
-  and its order, `ItemView` lifecycle, `attempt_count` and lease summary,
-  and the exact `QueueMetrics` fields. Fields API-001 allows to be
-  approximate are not compared.
-
-Concurrency is covered by the conformance suites, not by the differential
-test. A difference is a defect in one of the two implementations, settled
-by API-001. If API-001 is silent, it is amended first.
+- Item ids are compared by the `client_item_key` they belong to, and lease
+  tokens by the claim that returned them.
+- Within a space, item ids increase in commit order, so id-ordered ties
+  follow the history.
+- Compared: every response status, count, version, claimed set and order,
+  read rows and aggregates. `Float` results are compared with a relative
+  tolerance of 1e-9.
+- A difference is a defect in one of the two, settled by this contract and
+  API-001; if both are silent, they are amended first.
 
 ## Planned implementations
 
-| Implementation | Durability | Visibility | Sharing | Families |
-|----------------|------------|------------|---------|----------|
-| PostgreSQL reference (new crate, from TD-002) | `Durable` | `Immediate` | `MultiProcess` | core first, then all |
-| Object log × Turso (current runtime; future open in ADR-025) | `Durable` | `Bounded` (value set by evidence) | `SingleProcess` | all eight |
-| In-memory (new crate) | `Process` | `Immediate` | `SingleProcess` | core, `Upsert`, `StreamGroup` |
+| Implementation | Durability (min / max) | Visibility | Sharing | Shapes |
+|----------------|------------------------|------------|---------|--------|
+| PostgreSQL (shared server; new crate from TD-002) | `Local` / `Replicated` with a synchronous standby | `Immediate` | `MultiProcess` | all |
+| Local engine (Turso MVCC on NVMe, S3 in the commit path; SQLite comparison arm) | `Replicated` / `Replicated` | `Immediate` | `SingleProcess` per space | all |
+| In-memory (new crate) | `Process` / `Process` | `Immediate` | `SingleProcess` | all |
+
+Implementation notes (normative for the named implementation):
+
+- **Postgres.** A commit is one transaction. Guards are checked under row
+  locks taken before time is sampled. Claims use `FOR UPDATE SKIP LOCKED`.
+  Text columns use the `C` collation. Event log appends serialize per log on
+  a head row so `seq` follows commit order. Declared fields become columns
+  or expression indexes. Blobs are `bytea` rows with a reference count.
+  Reads that span targets use one `REPEATABLE READ` snapshot.
+- **Local engine.** One database per space (or per shard of spaces) with one
+  writer. A request is one write transaction, acknowledged after its commit
+  is in the S3 log. Lease expiry is lazy. Reads run on MVCC snapshots. Speed
+  gates B1 to B4 apply.
 
 ## Facade binding (summary for API-005)
 
 ```rust
 impl Fireweed {
-    pub fn new(provider: Arc<dyn QueueProvider>) -> Fireweed;
+    pub fn new(data_plane: Arc<dyn DataPlane>) -> Fireweed;
     pub fn guarantees(&self) -> Guarantees;
     pub fn capabilities(&self) -> Capabilities;
-    // One method per core operation, delegating to the provider.
-    // Helpers over core operations (single-item push, complete(lease_refs),
-    // retry_after(lease_refs, delay)) use `Schedule::After` and
-    // token-addressed targets, and return per-item outcomes.
-    // Family accessors mirror QueueProvider's and return Option.
+    // One method per DataPlane method, delegating.
+    // Helpers: single-item enqueue; complete / fail / retry_after / release /
+    // rearm over LeaseTargets (Schedule::After for relative times); typed
+    // builders for SpaceSchema, Expr, Mutate and ReadRequest.
 }
 ```
 
@@ -766,62 +1012,66 @@ and 10 `operator_*` methods in `crates/fireweed/src/operator.rs`.
 
 | Current methods | New home | Behaviour change |
 |-----------------|----------|------------------|
-| `create_queue`, `ensure_queue`, `queue_definition` | core `create_queue`, `get_queue` | none |
-| `push`, `push_with_request_id`, `push_batch`, `push_batch_with_request_id` | core `push`; single-item forms are facade helpers | none |
-| `upsert` | `Upsert` | none |
-| `batch_update` | core `update` | none |
-| `reschedule` | `ItemMutation` with a lease guard | needs the `ItemMutation` family |
-| `set_gates` | core `set_gates` | response drops command position |
-| `purge` | core `purge` | none |
-| `claim`, `claim_with`, `claim_response_with` | core `claim` | none |
-| `claim_at`, `claim_response_at`, `claim_by_query_at`, `reclaim_expired_at` | removed | they override evaluation time |
-| `claim_by_item_ids` | core `claim_by_item_ids` | none |
-| `renew`, `reassign` | core `renew`, `reassign` | token-addressed, per-item outcomes (were id-only, all-or-nothing) |
-| `ack`, `complete`, `nack`, `retry`, `release`, `fail`, `rearm` | core `finalize`; helpers take `LeaseTarget`s | token-addressed, per-item outcomes (were id-only, all-or-nothing) |
-| `nack_retry_after`, `retry_after`, `rearm_after`, `rearm_at` | core `finalize` with `Schedule::After` / `Schedule::At` | token-addressed, per-item |
-| `live_item`, `live_items` | core `get_items` | adds lease summary |
-| `claimed` | `StreamGroup::claimed` | needs the `StreamGroup` family |
-| `metrics` | core `metrics` | adds API-001 fields |
-| `discover_active_scopes`, `discover_active_scopes_stamped`, `discover` | core `discover_active_scopes` | `as_of` per the snapshot rule; `partial` flag |
-| `mutate_items` | `ItemMutation` | none |
-| `commit`, `commit_multi_claim`, `explain_commit`, `side_record`, `side_records`, `side_records_by_prefix` | `ClaimedWorkCommit` | `side_record*` become `get_side_records` |
-| `commit_capabilities` | removed | family invariants replace it |
-| `query_index`, `query_index_unique`, `query_index_typed`, `query_index_unique_typed` | `IndexQuery` | none |
-| `range_scan`, `grouped_aggregate`, `declared_bucket_segment`, `bounded_mutation`, `claim_by_query`, `metrics_by_query`, `hot_projection_capabilities` | `ProjectionQuery` | none |
-| `claim_across_queues` | `MultiQueueClaim` | none |
-| `operator_pause`, `operator_resume`, `operator_admin_state`, `operator_inspect_item`, `operator_repair`, `operator_redrive`, `operator_purge`, `operator_archive`, `operator_get_operation`, `operator_audit_records`, `retained_items` | `OperatorRepair` | none |
-| `projection_control`, `snapshot_policy`, `set_snapshot_policy`, `should_snapshot`, `snapshot_now`, `latest_snapshot_info`, `compact_log_behind_snapshot`, `last_rebuild_stats` | object-log implementation type | leave `Fireweed` |
-| `ownership`, `renew_owned`, `reclaim_expired`, `current_position`, `peek` | object-log implementation type | leave `Fireweed`; expiry follows the time rule |
+| `create_queue`, `ensure_queue`, `queue_definition` | `apply_schema`, `get_schema` | queues are declared in a space schema |
+| `push`, `push_with_request_id`, `push_batch`, `push_batch_with_request_id` | `enqueue` (single-item forms are helpers) | none |
+| `upsert` | `enqueue` with `KeyConflict::ReplacePending` | none |
+| `batch_update` | `commit` with `Mutate` by `Keys` | per-key `expected_version` |
+| `reschedule` | `Mutate` `Reschedule` with `LeasePolicy::Preserve` | none |
+| `set_gates` | `commit` with `SetGates` | response drops command position |
+| `purge` | `Mutate` `Retire` by `Keys` | none |
+| `claim`, `claim_with`, `claim_response_with` | `claim` | none |
+| `claim_at`, `claim_response_at` | `claim` with `eligibility_time` | lease time comes from the authority |
+| `claim_by_query_at` | `claim` with `filter` and `eligibility_time` | filter needs an indexed field |
+| `reclaim_expired_at` | removed | the time rule |
+| `claim_by_item_ids` | `claim_by_item_ids` | none |
+| `renew` | `renew` | token-addressed, per-item outcomes (was id-only, all-or-nothing) |
+| `reassign` | `commit` with `Reassign` | token-addressed |
+| `ack`, `complete`, `nack`, `retry`, `release`, `fail`, `rearm`, `nack_retry_after`, `retry_after`, `rearm_after`, `rearm_at` | `finalize` (helpers over `LeaseTarget`s and `Schedule`) | token-addressed, per-item (was id-only, all-or-nothing) |
+| `live_item`, `live_items` | `get` | adds lease summary and declared fields |
+| `claimed` | `read` of `fw_items` by `worker_id` | no lease tokens |
+| `metrics` | `metrics` | adds API-001 fields |
+| `discover_active_scopes`, `discover_active_scopes_stamped`, `discover` | `discover_active_scopes` | per-scope `observed_at`; `partial` |
+| `mutate_items` | `commit` with `Mutate` operations | one selection per `Mutate`; no `evaluated_at` |
+| `commit`, `commit_multi_claim` | `commit` | all-or-nothing group (was per-entry); item-version guard kept; side records become table rows |
+| `explain_commit` | `commit` replay by `request_id` | — |
+| `side_record`, `side_records`, `side_records_by_prefix` | `get` and `read` on a table | prefix reads need a `Range` index |
+| `commit_capabilities` | removed | `capabilities()` |
+| `query_index`, `query_index_unique`, `query_index_typed`, `query_index_unique_typed` | `read` (declared) or `get` by key | declared in the schema |
+| `range_scan`, `grouped_aggregate`, `declared_bucket_segment`, `metrics_by_query` | `read` (declared) | declared in the schema |
+| `bounded_mutation` | `Mutate` with `limit` or `chunk` | none |
+| `claim_by_query` | `claim` with `filter` | none |
+| `hot_projection_capabilities` | `capabilities()`, `get_schema` | — |
+| `claim_across_queues` | facade helper: one `claim` per queue with a shared `eligibility_time` | no common lease instant |
+| `operator_pause`, `operator_resume`, `operator_admin_state` | `SetQueueState`; `get_schema` | none |
+| `operator_inspect_item`, `retained_items` | `get` with `include_terminal` | none |
+| `operator_repair`, `operator_redrive` | `Mutate` with `Set` or `Transition::Redrive` | none |
+| `operator_purge`, `operator_archive` | `Mutate` `Retire` | `max_affected` becomes `limit` with `expect` |
+| `operator_get_operation` | replay by `request_id` | — |
+| `operator_audit_records` | `read_log` on the queue's history log | needs `history` declared |
+| `projection_control`, `snapshot_policy`, `set_snapshot_policy`, `should_snapshot`, `snapshot_now`, `latest_snapshot_info`, `compact_log_behind_snapshot`, `last_rebuild_stats`, `ownership`, `renew_owned`, `reclaim_expired`, `current_position`, `peek` | object-log implementation type | leave `Fireweed` (ADR-025 open question 3) |
 
 ## Compatibility
 
-- Adding a family, a defaulted accessor, an enum variant or a struct field
-  is compatible, because the types are `#[non_exhaustive]`.
-- Adding a required method to an existing trait, or changing a signature,
-  is breaking.
-- Changing a declared guarantee of an implementation is a breaking change
-  for that implementation.
+- Adding an enum variant, a struct field, a shape, a queue feature or a
+  `DataPlane` method with a default body is compatible.
+- Changing a signature, a request's meaning, or an expression rule is
+  breaking.
+- Changing an implementation's declared guarantees is breaking for that
+  implementation.
+- A declared read version and a built-in read version never change.
 
 ## Validation checklist
 
-- [ ] The dependency test enforces rules 1 and 3 to 6.
-- [ ] No public item in `fireweed-interface` names a log, command,
-      projection, snapshot, epoch, owner or cell.
-- [ ] `QueueProvider` and every family trait are dyn-compatible;
-      `Arc<dyn QueueProvider>` is `Send + Sync`.
-- [ ] Every public type is `#[non_exhaustive]` with a constructor.
-- [ ] Every implementation passes `run_core` and `run_families` from its
-      own tests, including child-process crash and peer scenarios where
-      declared.
-- [ ] Time-driven scenarios pass under `ManualClock` with no tick.
-- [ ] Every mutating operation rejects a request over its declared bound
-      with `BatchTooLarge` and no effect.
-- [ ] Each implementation documents its durability point and any
-      post-commit copy lag.
-- [ ] The differential test passes for every implementation against the
-      reference.
-- [ ] The object-log implementation passes the safety-effect scenarios
-      under induced apply lag for every safety effect, not only gates.
+- [ ] The dependency test enforces rules 1, 4, 5 and 6.
+- [ ] Every public type is owned by `fireweed-interface`,
+      `#[non_exhaustive]`, constructible and serde-serializable.
+- [ ] `DataPlane` is dyn-compatible.
+- [ ] Every implementation passes `run` from its own tests with no skipped
+      scenario its guarantees need.
+- [ ] The differential test passes for every implementation against
+      Postgres, including generated expressions and aggregates.
+- [ ] Every Snorri inventory item (1 to 10) runs on the `snorri` profile with
+      no Snorri-owned store.
 - [ ] Each mapping-table behaviour change is in the API-005 migration notes.
-- [ ] ADR-025's document changes have landed before this contract moves to
+- [ ] ADR-025's document changes have landed before this contract is
       accepted.

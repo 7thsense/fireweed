@@ -19,379 +19,481 @@ ddx:
   status: proposed
 ---
 
-# ADR-025: The queue interface is the implementation boundary
+# ADR-025: Fireweed's data-plane interface is the implementation boundary
 
 | Date | Status | Deciders | Related | Confidence |
 |------|--------|----------|---------|------------|
-| 2026-11-13 | Proposed | Project owner | API-001, API-002, API-003, API-004, API-005, API-006, ADR-007, ADR-008, ADR-012, ADR-013, ADR-022, ADR-024, TD-002, TD-006 | Medium |
+| 2026-11-13, revised 2026-11-15 | Proposed | Project owner | API-001, API-002, API-003, API-004, API-005, API-006, ADR-007, ADR-008, ADR-009, ADR-010, ADR-011, ADR-012, ADR-013, ADR-014, ADR-018, ADR-022, ADR-024, TD-002, TD-003, TD-006, TD-007, TD-008 | Medium |
 
-Revision 2 (2026-11-13) records the owner's answers to seven decisions
-raised in adversarial review, and corrects the defects that review found.
-The 2026-11-14 addendum adds evidence from the Cayce storage spike (the
-second Context table and the open questions). It answers no owner question.
+Revision 3 (2026-11-15) widens the boundary from a priority-queue interface
+to the data-plane storage interface for Snorri and Cayce. It follows owner
+decisions D8 to D12, which the Cayce project relayed with the owner's words
+(Owner decisions, below). They were not given in a Fireweed session, so the
+owner confirms them before this ADR is accepted. Revision 3 also fixes the
+round-two review defects that still apply.
 
 ## Context
 
-Fireweed is meant to be one optimized interface for priority work queues,
-with several implementations behind it. A PostgreSQL implementation is the
-reference: the simplest correct one, and the one other implementations are
-compared against.
+### Intent
 
-The repository does not deliver that. The queue semantics are written down
-in API-001, but no implementation can be written against them. Five
-decisions put the boundary somewhere else.
+The owner's statements of intent, in order:
 
-1. **ADR-007 drew the hexagon around storage.** Driven adapters "implement
-   the storage ports". The engine above them owns the claim path,
-   idempotency, fencing and validation. A second implementation plugs in
-   *below* the engine, not beside it.
+- "The intention was for fireweed to provide an optimized interface for
+  priority queues with multiple implementations. Postgres provides a good
+  reference implementation." (2026-11-13, this repository.)
+- "My hope had been that fireweed provides the complete data plane storage
+  layer for snorri via an api that is detailed enough to abstract the
+  implementation details out — for instance using a shared database server
+  for an 'oracle' while we work out the details of a local nvme db with s3
+  durability." (2026-11-14, relayed.)
+- "All durable workflow 'data' (high volume, high rate of change) necessary
+  to operate cayce and snorri must go through fireweed. The control plane
+  can be separate, but must be largely static and low volume. 'Exhaust' data
+  such as logs go to niflheim." (relayed.)
+- "To allow for bulk changes and analytics on the queue we need a lot of
+  flexibility. Maybe it should be a DSL instead of a series of methods?"
+  (relayed.)
+- "We also need to address ancillary storage needs … multiple 'shapes' using
+  the same storage abstraction … I don't want cayce and snorri re-inventing
+  fireweed in memory or jamming huge json blobs into a record over and over
+  again to work around gaps in our design." (relayed.)
+
+### What the repository does instead
+
+The queue semantics are written down in API-001, but no implementation can
+be written against them. Five decisions put the boundary somewhere else.
+
+1. **ADR-007 drew the hexagon around storage.** Driven adapters implement
+   storage ports. The engine above them owns the claim path, idempotency,
+   fencing and validation. A second implementation plugs in below the
+   engine, not beside it.
 2. **ADR-008 made one owner node per queue, fenced by a log epoch, product
-   law**, and API-001 justifies whole-group and whole-cohort atomicity by
-   that owner. A database that gives the same atomicity through row locks
-   does not fit the model.
-3. **ADR-012 made every backend `LogStore × ProjectionStore × ControlPlane`.**
-   That is the internal structure of one design, stated as the shape every
-   backend must have.
-4. **ADR-013 made the command log mandatory.** "There is no architecture that
-   drops `LogStore`."
-5. **ADR-024 then reduced the product to one cell**, S3 object log × Turso
+   law.** API-001 justifies whole-group and whole-cohort atomicity by that
+   owner. A database that gets the same atomicity from row locks does not
+   fit the model.
+3. **ADR-012 made every backend `LogStore × ProjectionStore × ControlPlane`**,
+   the internal structure of one design.
+4. **ADR-013 made the command log mandatory.**
+5. **ADR-024 reduced the product to one cell**, S3 object log × Turso
    projection, and API-005 bound the public Rust API to it.
 
-The contracts inherited those internals. API-001 requires
-`applied_command_position` in the `SetGates` response and defines discovery
-freshness as an "observed projection frontier". API-002 exposes
-`last_command_position`. API-004 defines reads by locally applied projection
-position. TD-006 requires an engine-owned `ReclaimDriver`.
-
-TD-002 shows the same drift. It specified the Postgres reference with queue
-state in relational tables and claim as one `FOR UPDATE SKIP LOCKED`
-statement. It also required a command log written in the same transaction
-("the log is never optional"), `LeaseExpired` commands, and epoch-fenced
-sweepers. The hexagonal migration deleted the crate and deferred a rebuild
-"fresh to the engine ports".
-
-The code follows these decisions.
+TD-002 drifted the same way. It put Postgres queue state in relational
+tables with a `FOR UPDATE SKIP LOCKED` claim, but also required a command log
+in the same transaction, `LeaseExpired` commands and epoch-fenced sweepers.
+The hexagonal migration then deleted the crate.
 
 | Observation | Evidence |
 |-------------|----------|
-| The trait set an implementer faces is one design's internals | `fireweed-engine` exports 53 public traits. Queue operations (`ClaimPort`, `PushPort`, `FinalizePort`) sit beside `LogStore`, `ProjectionStore`, `CommitStrategy`, `UnifiedAtomicCommitter`, `OwnedTaskDispatcher`, the async planners, `SnapshotStore` and `AsOfProjectionStore`. |
+| The trait set an implementer faces is one design's internals | `fireweed-engine` exports 53 public traits: queue ports beside `LogStore`, `ProjectionStore`, `CommitStrategy`, `UnifiedAtomicCommitter`, `SnapshotStore` and others. |
 | There is no public trait to implement | The facade's backend bound, `LibBackend` (21 traits), is `pub(crate)` in `crates/fireweed/src/lib.rs`. |
 | The facade owns implementation code | `crates/fireweed` depends on the memory, objectlog, postgres, projection and turso crates, and holds 7.8k lines of Turso composition in `turso_compose.rs`. |
-| Postgres is forced into another implementation's shape | `fireweed-postgres` (24.5k lines) depends on `fireweed-objectlog` and `fireweed-projection`, and carries `async_log_replay.rs`, `compose_log.rs` and `async_objectlog_postgres.rs`. |
-| Conformance tests the log seam, not the queue | `run_conformance<B: ConformanceBackend>` requires `SnapshotStore + LogRead`, and tests build `CommandEnvelope`s by hand. |
-| RESP is bound to engine ports | `RespBackend` requires `UpsertPort`, `ReclaimDriver`, `ControlPlaneStore`, `HotProjectionQueryPort` and `ProjectionRead` (`crates/fireweed-resp/src/lib.rs`). |
-| Internals leak into the public API | API-005 exposes `DurabilityClass`, `ResponseBarrier::AsyncProjection`, `projection_control`, snapshot and compaction methods, and "empty claim may be apply lag". |
+| Postgres is forced into another implementation's shape | `fireweed-postgres` (24.5k lines) depends on `fireweed-objectlog` and `fireweed-projection`. |
+| Conformance tests the log seam, not the queue | `run_conformance<B: ConformanceBackend>` requires `SnapshotStore + LogRead`. |
+| RESP is bound to engine ports | `RespBackend` requires `UpsertPort`, `ReclaimDriver`, `ControlPlaneStore`, `HotProjectionQueryPort` and `ProjectionRead`. |
+| Consumers work around missing shapes | Snorri keeps instance state as one JSON blob rewritten in full on every commit, input and await markers forever, and handler idempotency and seen-event sets in unbounded process memory (Snorri TD-012 rev 6 §3.7). |
 
-The Cayce project's storage spike (2026-11-14) measured candidate storage
-engines against this interface. Its report is held by the Cayce project and
-is not reproduced in this repository; the figures below are as that project
-reported them.
+### Storage spike evidence
 
-| Observation | Consequence for the contract |
-|-------------|------------------------------|
-| With one writer per database, one claim waited 2.3 s behind a 500,000-row `UPDATE`. | Every mutating operation needs a declared per-call bound (API-006, Atomic steps and per-call bounds). |
-| No asynchronous shipping design made an acknowledged SQLite write durable in S3 at return; the S3 copy lags by the shipper interval. | `Durable` is defined at the implementation's own commit. Durability against host loss needs synchronous replication. |
-| A Durable Object has no interactive multi-call transactions. | Each core operation must be one atomic step. Multi-step operations stay in optional families. |
-| A single-statement claim (`UPDATE … RETURNING` over a `UNION ALL` candidate set) works on SQLite, tursodb and a Durable Object. | The core claim is expressible as one step on all three. |
-| The object-log implementation reached about 100 recipients/s end to end, against Cayce's target of about 17,000/s. | Wrapping object-log first (migration steps 2 and 3) invests in an implementation that misses the throughput target by two orders of magnitude. |
+The Cayce project's storage spike (2026-11-14) measured candidate engines.
+Its report is held by that project; the figures are as it reported them.
+
+| Observation | Consequence |
+|-------------|-------------|
+| With one writer per database, a claim waited 2.3 s behind a 500,000-row `UPDATE`. | Every write carries a cap (§10). |
+| No asynchronous shipping design made an acknowledged write durable in S3 at return. | Durability is reported per commit as `Local` or `Replicated` (§7). |
+| A Durable Object has no interactive multi-call transactions. | Every request, including a group commit, is one atomic step (§5). |
+| A single-statement claim (`UPDATE … RETURNING` over a `UNION ALL` candidate set) works on SQLite, tursodb and a Durable Object. | The claim verb is one step on all three. |
+| The object-log implementation reached about 100 recipients/s end to end, against Cayce's target of about 17,000/s. | Object-log is not the first implementation behind the interface (§11). |
+
+### Consumer inventory
+
+Snorri's TD-012 revision 6 §3.7 (branch `claude/snorri-api-encapsulation-03e4a8`
+in the Snorri repository, not yet committed) lists every piece of state the
+Snorri engine keeps, with size and rate. API-006 maps each item to a shape.
+Scale targets: campaigns of up to 1M recipients; claim p99 gate at about
+125,000 due items per shard; about 18 KiB of commit log per single-send
+recipient. Cayce's inventory is drafted in API-006 from what is known and
+needs Cayce's confirmation.
+
+## Owner decisions
+
+| # | Decision | Source | Status in revision 3 |
+|---|----------|--------|----------------------|
+| D1 | Time-driven transitions are in the contract; no caller tick. | Owner, 2026-11-13 | Kept (§8). |
+| D2 | One time authority per storage. | Owner, 2026-11-13 | Kept. Claims take an optional eligibility time; lease time always comes from the authority (§8). The Cayce project withdrew its "clock as an input to claim and lease" wording on 2026-11-15. |
+| D3 | ADR-008 ownership becomes internal to object-log, which declares `SingleProcess`. | Owner, 2026-11-13 | Conditional on object-log's future (open question 3). |
+| D4 | `Bounded` new-work visibility allowed, fails closed. | Owner, 2026-11-13 | Kept in the type. No v1 implementation declares it, and v1 conformance defines `Immediate` only (§7). |
+| D5 | RESP gets a `StreamGroup` family. | Owner, 2026-11-13 | Deferred past v1 (open question 11). |
+| D6 | Core leases are token-fenced, with per-item outcomes. | Owner, 2026-11-13 | Kept (§9). |
+| D7 | `MutateItems` and operator repair become optional families. | Owner, 2026-11-13 | Superseded by D12: selector writes are part of the request model every implementation provides. |
+| D8 | Snorri owns no tables. Its workflow state lives in Fireweed items; Fireweed provides group commit. | Owner via Cayce, 2026-11-15 | Adopted (§5). |
+| D9 | The Postgres implementation is first-class, not only an oracle. A local engine (Turso MVCC on NVMe, S3 in the commit path; SQLite as comparison arm) follows and passes the same suite. Speed gates B1 to B4 apply to the local engine only. Durable Objects stay possible, not scheduled. | Owner via Cayce, 2026-11-15 | Adopted (§11). |
+| D10 | Cayce reads queue data only through versioned, named, declared reads, never engine tables. | Owner via Cayce, 2026-11-15 | Adopted (§6). |
+| D11 | All high-volume, fast-changing durable workflow data goes through Fireweed. The control plane is separate. Exhaust goes to Niflheim. | Owner via Cayce, 2026-11-15 | Adopted (§1). |
+| D12 | Requests are typed data with a selector, an action and a limit; a group commit is a list of them. Claim, bulk enqueue and complete stay fixed verbs. No SQL. Small expression language. Every write capped. Durability reported per commit. v1 covers what the Cayce UI and the recipient-lifecycle bulk operations need. Fireweed also provides ancillary storage shapes. | Owner via Cayce, 2026-11-15 | Adopted (§3 to §6, §10). |
 
 ## Decision
 
-### 1. The boundary is the queue operation model
+### 1. Fireweed is the data plane for Snorri and Cayce
 
-API-001 defines what a Fireweed queue does. That operation model, as Rust
-traits, is the boundary every implementation implements. The traits and
-their request and response types live in one crate, `fireweed-interface`
-(working name), defined by API-006.
+Fireweed stores all durable workflow data that is high in volume or rate of
+change and is needed to operate Snorri and Cayce: work items, workflow
+state, per-recipient state, counters, ledgers, operational events and large
+payloads.
 
-`fireweed-interface` depends on `fireweed-core` and general-purpose crates
-only. Its public items name no log, command, command position, projection,
-snapshot, epoch, owner or storage cell.
+Outside Fireweed:
 
-The interface types are defined from API-001, not moved from the engine.
-Where today's engine types are missing API-001 fields (for example
-`QueueMetrics` has only lifecycle counts), the implementation adds them; the
-interface does not shrink to fit.
+- the control plane (tenants, campaign definitions, configuration), which is
+  largely static and low in volume, in its own Postgres;
+- exhaust (logs, traces, full audit history, long-term analytics, joins
+  across data sets), in Niflheim. Snorri's full transition history is
+  exhaust.
 
-### 2. An implementation is a crate that implements the interface
+Fireweed's analytics cover live data only: counts by state, lag, and rate
+windows.
 
-An implementation crate implements the API-006 traits with whatever internal
-design suits it. It depends on `fireweed-interface`, `fireweed-core`, its own
-drivers, and any shared internal library it chooses (for example the current
-log and projection engine). It does not depend on another implementation
-crate. `fireweed-interface` never depends on a shared internal library.
+### 2. The boundary is one interface crate
 
-### 3. Implementations differ only in declared guarantees
+API-006 defines the interface as Rust types and traits in one crate,
+`fireweed-interface` (working name). It depends on `fireweed-core` id types
+and general-purpose crates only. No public item exposes an implementation's
+internal mechanism: command log, command position, projection, apply
+frontier, ownership epoch, storage cell.
 
-Every implementation gives the same observable results for the same history,
-with three exceptions that it declares in `Guarantees` and that conformance
-tests.
+An implementation is a crate that implements the interface with whatever
+internal design suits it. It depends on no other implementation crate.
+Consumers (`Fireweed` facade, Snorri, Cayce, `fireweed-resp`,
+`fireweed-conformance`) depend on the interface, not on implementations.
+`fireweed-server` and the embedding application are composition roots.
+
+### 3. Spaces and shapes
+
+A **space** is one atomic and ordering domain, owned by one tenant. It holds
+named objects of four shapes, declared in the space's schema:
+
+| Shape | Holds | Covers |
+|-------|-------|--------|
+| Queue | Work items: priority, schedule, leases, retries, gates, groups, cohorts, recurrence, declared typed fields, a JSON body patched by path, and key retention for dedupe | Recipient and workflow work; Snorri instance heads and their await fields (D8); effect items and send intents; external events deduplicated by provider id |
+| Table | Rows by typed primary key, with typed columns; atomic set, increment and conditional update; row expiry | Keyed state (per-recipient, per-run), handler idempotency records, admission chunk state, suppression flags, rollups, rate and slot counters, consumer cursors |
+| Event log | Append-only entries with a log-wide sequence in commit order and a declared partition key; read by partition or from a cursor; retention by age or count | Delivery and engagement events, outbox feeds (including export to Niflheim), queue transition history |
+| Blob | Immutable byte objects, content-addressed, referenced from other shapes | Large transition outputs, workflow definitions, rendered messages, attachments |
+
+Counters are table columns with atomic increment, and a conditional
+increment is a guarded `Mutate` (§4). Rate and slot windows are table rows
+keyed by a time bucket, with expiry. A separate counter shape is open
+question 5, needed only if hot-key increments prove too slow.
+
+Across shapes in one space: a group commit is atomic; every read observes
+one snapshot; `request_id` is scoped to the space; one durability level
+covers the whole commit; caps apply to the whole commit. Across spaces there
+is no atomicity or ordering. A Snorri shard is a space.
+
+### 4. Requests are typed data
+
+Every request is a Rust value, serializable as JSON and protobuf. There is
+no method per operation and no SQL or SQL subset.
+
+- **Hot-path verbs** stay fixed and hand-tuned: `enqueue` (bulk push),
+  `claim`, `claim_by_item_ids`, `renew`, `finalize` (complete, fail, retry,
+  release, rearm).
+- **Writes** are operations: `Enqueue`, `Finalize`, `Renew`, `Reassign`,
+  `SetGates`, `SetQueueState`, `PutRows`, `Append`, and `Mutate`. A `Mutate`
+  has a target object, a selection (keys, or a predicate over declared
+  fields), an action (set or increment fields, patch a JSON body by path,
+  reschedule, transition, change item gates, retire), a limit, and an
+  optional expectation on the number of matches. An unmet expectation
+  rejects the group, which gives compare-and-swap and conditional
+  increment.
+- **Reads** are point gets by id or key, and declared reads (§6).
+
+The expression language has literals, declared-field and JSON-path access,
+parameters, `now()`, comparison and boolean operators, `in`, arithmetic,
+`coalesce`, `is_null` and time bucketing. Aggregates are count, sum, min,
+max, avg and percentile, with group by. There are no joins, no user
+functions and no loops. API-006 fixes null, overflow, collation and
+time-bucket semantics so implementations agree.
+
+### 5. Group commit
+
+`commit` applies a list of write operations in one space, in list order, at
+one linearization point, all or nothing. Later operations see earlier
+operations' effects. Guards (lease token, `expected_item_version`, row
+version, key conflict policy, match expectations) are checked at that
+point. If any guard fails or any cap is exceeded, nothing is applied and the
+response names each failure. A rejected group writes nothing, including no
+request record.
+
+A Snorri transition is one group: finalize the instance-head item with a
+patch to its body and await fields (token and `expected_item_version`
+guarded), finalize the consumed event item, enqueue effect items and
+follow-on work, and update table rows such as counters.
+
+The standalone verbs keep API-001's per-item outcomes: a stale lease in a
+`finalize` call affects that entry only. Inside a group the same staleness
+rejects the group.
+
+### 6. Declared schema and declared reads
+
+Each space has a versioned schema: its objects, their typed fields, index
+hints, retention, and its declared reads. Only declared fields can appear in
+selectors, filters and reads. A field may be multi-valued (a set of text
+values, such as an instance's await keys) and indexed per value. The
+implementation turns declarations into indexes. A field becomes usable once
+its index is ready, and `get_schema` reports index state. v1 schema changes
+are additive; other changes are open question 9.
+
+A declared read has a name, a version, a source object, parameters, a
+filter, a projection or aggregate, an order and a row cap. Consumers invoke
+reads by name and version. A version never changes once declared. Cayce
+reads only through declared reads (D10). Built-in reads cover queue items,
+gates and queue metrics.
+
+Every selector and every declared read must constrain at least one indexed
+field by equality, range or `in`. A request that does not is rejected. This
+is what makes the caps (§10) meaningful on a single-writer engine.
+
+### 7. Guarantees and durability
+
+Each implementation declares:
 
 | Guarantee | Values | Meaning |
 |-----------|--------|---------|
-| Durability | `Process`, `Durable` | Whether a returned mutation survives a process crash and reopen. `Durable` is measured at the implementation's own commit, not at any later copy to object storage. |
-| New-work visibility | `Immediate`, `Bounded { max_ms }` | How soon a returned mutation's new-work effects become claimable and readable. `max_ms` is elapsed wall time, not `Clock` time. |
-| Sharing | `SingleProcess`, `MultiProcess` | Whether several instances may serve the same storage at once. |
+| Durability | `Process`, `Local`, `Replicated` | The minimum level of every acknowledged commit. `Local`: survives a process crash and reopen of the implementation's own storage. `Replicated`: also survives loss of that storage, because a copy outside it was durable before the acknowledgement. |
+| New-work visibility | `Immediate`, `Bounded { max_ms }` | v1 implementations are `Immediate`, and v1 conformance defines only `Immediate`. |
+| Sharing | `SingleProcess`, `MultiProcess` | Whether several instances may serve one space at once. |
 
-The ordering model is linearizable per queue. Every operation takes effect
-at one point between its call and its return. A claim or read observes every
-**safety effect** (a lease, finalize, purge, gate block, pause, or update
-that removes eligibility) whose point precedes its own, for every
-implementation. Only **new-work effects** (an item becoming claimable
-because of a mutation) may lag, and only by the declared bound.
+Every commit response reports the level that commit reached. A request may
+require `Replicated`; the commit is then acknowledged only once it reaches
+that level, or fails with `CommitTimeout`. Replaying a committed
+`request_id` with a higher required level waits for that level, so a caller
+can wait for `Replicated` after a `Local` acknowledgement.
 
-A `Bounded` implementation that cannot make a returned mutation visible
-within `max_ms` fails closed: claims and reads on that queue return
-`Unavailable` until it can. Time-driven effects are not subject to the
-bound. Once an item is visible, its `not_before`, lease expiry and retry
-backoff are evaluated against the clock at claim time.
+On Postgres, `Local` is a commit flushed to the primary's WAL, and
+`Replicated` is a commit a synchronous standby has confirmed flushed. On the
+local engine, every commit is `Replicated`, because the commit is in the S3
+log before the acknowledgement.
 
-### 4. Time is part of the contract (owner decisions 1 and 2)
+Operations on one space are linearizable. Every read observes every effect
+committed before its linearization point.
 
-**Observable state is a function of returned mutations and time.** Lease
-expiry, cohort expiry, retention expiry and `not_before` take effect at their
-due instant, evaluated against queue state as of that instant. Before an
-operation at time `t` is served, the observable result equals processing
-every transition due at or before `t` in due-instant order. An
-implementation may realize this with sweepers, lazily on access, or both.
-The contract does not care which, and no caller drives a tick.
+### 8. Time
 
-API-001 changes to match. Lease expiry MUST NOT change `item_version` (it
-says MAY today), so a lazy implementation and a sweeping one agree. Cohort
-expiry is evaluated against the cohort's state at its deadline.
+**Observable state is a function of committed operations and time.** Lease
+expiry, `not_before` and backoff, cohort deadlines and retention take effect
+at their due instant. An implementation may sweep, evaluate lazily, or both.
+No caller drives a tick. API-006 fixes the processing order for transitions
+due at the same instant.
 
-**One time authority per storage.** An implementation samples time for a
-transition from one authority, after it has serialized that transition
-against conflicting ones (for example after taking row locks). All instances
-sharing storage use the same authority. The Postgres reference uses database
-time in production. Under conformance, every implementation uses the
-injected `Clock` as its authority.
+**One time authority per space**, sampled after the operation is
+serialized against conflicting operations. Under conformance it is the
+injected `Clock`. The Postgres implementation uses database time in
+production (`clock_timestamp()` after locks, not transaction-start `now()`).
 
-Relative schedules (`retry after 30 s`) are resolved by the implementation
-at the transition's time, so callers never compute absolute times from a
-clock they do not own.
+`claim` and `claim_by_item_ids` take an optional `eligibility_time`. It
+replaces the authority only when deciding whether `not_before` and backoff
+have passed for that claim. Lease expiry, attempt timestamps, cohort
+deadlines, retention and `now()` in expressions always use the authority.
+This carries Snorri CONTRACT-005's separate execution and lease times. No
+other request overrides time. A selector that needs a fixed instant uses a
+parameter.
 
-### 5. Queue features are declared, not discovered by failure
+Cohort deadlines are simplified: a cohort fails with `cohort-incomplete` at
+its deadline only if fewer than `cohort_size` members were committed by
+then. Eligibility at the deadline no longer matters. This is a drafting
+decision for owner confirmation (open question 7).
 
-Optional queue features (cohorts, group batching, recurrence, dynamic gates,
-metadata blockers, typed payload schemas, secondary indexes, and priority
-kinds other than timestamp and int64) are listed in `Capabilities`.
-`create_queue` rejects a definition that needs an unlisted feature with
-`FeatureUnsupported`, before creating anything. An operation on an existing
-queue never fails because the implementation lacks a feature.
+### 9. Leases are fenced by token
 
-### 6. A small core, with optional families (owner decisions 5 and 7)
+Renew, reassign and finalize address a lease by item id and token (or
+cohort id and cohort token). Finalize and `Mutate` may also carry
+`expected_item_version`. Reads never return a lease token. The id-only,
+all-or-nothing facade helpers are removed.
 
-The core trait is API-001's batch operations except `MutateItems`, plus
-lease reassignment. Every implementation implements all of it.
+A `Mutate` that selects a leased item applies its lease policy: skip it
+(default), reject the group, preserve the lease (only for reschedule, field
+and body changes), or require a matching token.
 
-Other operation families are extension traits. Implementing a family means
-implementing all of it for every queue it applies to.
+### 10. Every write is capped
 
-| Family | Source of semantics |
-|--------|---------------------|
-| `Upsert` | API-006 (TD-006 pending-item replacement) |
-| `ItemMutation` | API-001 Atomic Item Mutation, now optional |
-| `ClaimedWorkCommit` | API-006 (today only Rust doc comments) |
-| `IndexQuery` | ADR-010, ADR-011 |
-| `ProjectionQuery` | API-004 |
-| `MultiQueueClaim` | API-006 |
-| `StreamGroup` | API-006, TD-006: Redis Streams consumer-group leases, pending-entry listing, token-less acknowledgement |
-| `OperatorRepair` | API-002, now optional |
+`ImplementationLimits` declares the caps: operations per commit, entries per
+operation and per commit, bytes per commit and per value, items a selector
+may affect, and rows an aggregate read may scan. A request over a cap fails
+with no effect.
 
-A consumer states its needs as a profile: families, queue features, minimum
-guarantees and minimum limits. RESP is a consumer with the `resp-worker`
-profile (`Upsert` plus `StreamGroup`). Snorri has the `snorri` profile.
+`dry_run` evaluates a commit's guards and selections, returns the counts it
+would affect, and records nothing.
 
-### 7. Leases are fenced by token (owner decision 6)
+A `Mutate` whose selection exceeds the cap may instead run as a sequence of
+bounded steps: the response returns a continuation, and the caller submits
+the next step. Each step is its own linearization point and its own commit,
+and steps advance in key order. A chunked `Mutate` must be the only
+operation in its commit.
 
-Core renew, reassign and finalize address a lease by `item_id` plus
-`lease_token` (or cohort id plus cohort token), and report per-item
-outcomes, as API-001 specifies. The current `Fireweed` helpers that
-finalize by item id alone, all-or-nothing, are removed. Snorri migrates to
-token-addressed, per-item calls.
+### 11. Implementations
 
-`StreamGroup` is the one exception. Redis Streams lets any member of a
-consumer group acknowledge an entry by id. That family provides token-less
-acknowledgement and claim by worker name, with weaker fencing that API-006
-states explicitly. It exists for RESP compatibility and is not a substitute
-for the core path.
+| Implementation | Status | Durability | Sharing |
+|----------------|--------|------------|---------|
+| PostgreSQL (shared server; new crate from TD-002) | First-class and production-supported. Defines correct semantics for the differential test. Snorri and Cayce build against it now. | `Local`; `Replicated` with a synchronous standby | `MultiProcess` |
+| Local engine: Turso MVCC on NVMe, S3 in the commit path; SQLite as comparison arm | Later. Passes the same suite and the differential test. Speed gates B1 to B4 (Turso queue plan §3.8) apply here only. | `Replicated` | `SingleProcess` per space |
+| In-memory (new crate) | For consumers' tests, so that nobody re-implements Fireweed in memory. | `Process` | `SingleProcess` |
+| Object log × Turso (current runtime) | Not wrapped. Its future is open question 3. | — | — |
+| Durable Objects | Possible: every request is one atomic step. Not scheduled. | — | — |
 
-### 8. Single ownership becomes one implementation's design (owner decision 3)
+The Postgres implementation keeps TD-002's queue tables, indexes, `SKIP
+LOCKED` claim and group and cohort locking, and drops the command log,
+`LeaseExpired` commands, `assignment_epoch` fencing and epoch-fenced
+sweepers.
 
-ADR-008's one-owner-per-queue rule, epoch fencing and redirects become
-internal design of the object-log implementation. The contract states the
-atomicity it requires (whole groups and whole cohorts leased all-or-nothing,
-no two active leases on one item) without saying how. The Postgres reference
-gets it from transactions and row locks.
+### 12. Conformance
 
-The object-log implementation declares `SingleProcess`. A second instance on
-the same storage supersedes the first: every later operation on the first
-fails with `InstanceSuperseded`. Multi-node object-log deployments with
-redirects are outside the interface until that implementation can serve or
-forward any queue from any instance. The RESP cluster is single-node today
-(`crates/fireweed-resp/src/cluster.rs`), so nothing shipped is lost.
+`fireweed-conformance` tests through the interface only. It reads
+`Guarantees` and `Capabilities`, and covers every shape, group commit
+atomicity, caps and chunking, declared reads, the expression semantics, the
+time rules under a manual clock, concurrent claims, and crash and reopen in
+a killed child process. A test-only crate runs a differential test against
+the Postgres implementation, including generated expressions and
+aggregates.
 
-### 9. Maintenance belongs to the implementation
+### 13. The facade and RESP
 
-Projection verify, delete and rebuild; snapshots and log compaction;
-ownership renewal; command positions: these are methods on the
-implementation's own type. They are not on the interface or on `Fireweed`.
-An embedder that needs them keeps a handle to the concrete type.
-
-### 10. Black-box conformance, with Postgres as the oracle
-
-`fireweed-conformance` is rewritten against `fireweed-interface` only. It
-reads `Guarantees` and `Capabilities` and runs every applicable scenario,
-including concurrent claims, crash and reopen in a killed child process for
-`Durable`, peers in separate processes for `MultiProcess`, supersession for
-`SingleProcess`, and fail-closed behaviour for `Bounded`.
-
-A separate test-only crate runs a differential test: the same generated
-sequential history, under a manual clock, against the Postgres reference
-and the implementation under test, comparing outcomes and state. A
-difference is a defect in one of the two, settled by API-001.
-
-### 11. The Postgres reference is built from TD-002
-
-The reference is a new crate. It keeps TD-002's queue-state tables, indexes,
-`SKIP LOCKED` claim, and group and cohort locking. It drops the mandatory
-command log, `LeaseExpired` commands, `assignment_epoch` fencing and
-epoch-fenced sweepers, which ADR-013 and ADR-008 required. Time-driven
-transitions follow §4. A command table may remain as audit. It declares
-`Durable`, `Immediate` and `MultiProcess`, and is supported in production.
-
-### 12. The facade and RESP sit on the interface
-
-`Fireweed` (API-005) becomes a concrete wrapper over
-`Arc<dyn QueueProvider>`, depending on `fireweed-interface` only. The
-embedder builds an implementation from its crate and passes it to
-`Fireweed::new`. `fireweed-resp` depends on `fireweed-interface` only and
-requires the `resp-worker` profile. `fireweed-server` is the composition
-root and is the one crate that names concrete implementations.
+`Fireweed` (API-005) becomes a concrete wrapper over `Arc<dyn DataPlane>`,
+with convenience helpers over the verbs and request types. It names no
+implementation. `fireweed-resp` stays on the current runtime until RESP's
+place is decided (open question 11).
 
 ADR-007's two driving interfaces and ADR-022's single concrete `Fireweed`
 stand. What sits under them changes.
+
+### 14. Maintenance belongs to the implementation
+
+Projection control, snapshots, compaction, ownership, S3 shipping, index
+builds and storage placement are methods on the implementation's own type,
+not on the interface or on `Fireweed`.
 
 ## Alternatives
 
 | Option | Pros | Cons | Evaluation |
 |--------|------|------|------------|
-| Keep ADR-024: one cell, storage ports as the seam | No rework | Contradicts the product intent; no second implementation without editing the facade | Rejected |
-| Restore the 12-cell `Log × Projection` matrix | Re-uses existing adapters | Still forces every implementation through a command log; defines no queue contract | Rejected |
-| Make the engine's storage ports public and stable | Smallest change | Publishes 53 implementation-shaped traits; locks future implementations into CQRS | Rejected |
-| Every implementation `Immediate` | Simpler contract | Object-log must wait for apply before returning, which defeats its batching design | Rejected (owner decision 4) |
-| Keep id-only, all-or-nothing finalize in the core | No Snorri migration | Weakens API-001's token fencing for every implementation | Rejected (owner decision 6) |
-| **Queue operation model as the boundary, declared guarantees, time in the contract, black-box conformance, Postgres oracle** | Matches the intent; any design can implement it; correctness independent of storage | Large migration; contract and code changes listed below | **Proposed** |
+| Keep ADR-024: one cell, storage ports as the seam | No rework | Contradicts the intent; no second implementation | Rejected |
+| A queue-only interface; Snorri keeps its own tables (Turso queue plan Part 2) | Small interface | Snorri and Cayce each build a storage layer; contradicts D8 and D11 | Rejected (D8) |
+| One method per operation (revision 2) | Simple to type-check | Every bulk change and analytic needs a new method; the owner asked for flexibility | Rejected (D12) |
+| Expose SQL or a SQL subset | Maximum flexibility | Ties every implementation to SQL semantics; uncapped work on a single writer | Rejected (D12) |
+| Postgres as test oracle only | Less to support | Snorri and Cayce cannot build until the local engine exists | Rejected (D9) |
+| A separate store per shape | Each store tuned to its shape | No atomic commit across shapes; consumers coordinate stores themselves | Rejected |
+| Caller-supplied lease time, or a two-reading `Clock` (Turso queue plan §1.4 options A and C) | Matches CONTRACT-005 directly | Two time sources for lease fencing | Rejected for lease time; eligibility time adopted |
+| **One data-plane interface: spaces, four shapes, typed requests, group commit, declared reads, Postgres first** | Matches the intent; one abstraction for all workflow data | Large interface to specify and test | **Proposed** |
 
 ## Consequences
 
 | Type | Impact |
 |------|--------|
-| Positive | A new implementation needs `fireweed-interface`, its drivers and the conformance suite, nothing else. |
-| Positive | Correctness is defined by observable behaviour and checked against a reference. |
-| Positive | The public API loses storage vocabulary. |
-| Positive | Time-driven behaviour is deterministic under a manual clock, so expiry is testable. |
-| Negative | Interface types are new. Downstream imports and some shapes change. |
-| Negative | Snorri migrates from id-only, all-or-nothing finalize to token-addressed, per-item calls, and from `commit_capabilities` to the `ClaimedWorkCommit` family. |
-| Negative | The object-log implementation must meet the safety-effect rule for every effect, not only gates, and must report missed visibility bounds as `Unavailable`. Neither is verified yet. |
-| Negative | Multi-node object-log deployment is outside the interface until that implementation can serve any queue from any instance. |
-| Neutral | Object-log × Turso survives as one implementation, with ADR-008, ADR-012, ADR-013, ADR-015, ADR-016 and ADR-017 as its internal design. |
+| Positive | Snorri and Cayce get one storage abstraction for all fast-changing workflow data, with atomic commits across shapes. |
+| Positive | Snorri and Cayce can build now on Postgres. The local engine slots in behind the same interface and suite. |
+| Positive | Bulk changes and live analytics need no new methods, only declarations and requests. |
+| Positive | Body patches and blob references replace whole-body rewrites of instance state. |
+| Positive | Correctness is defined by observable behaviour and checked against Postgres. |
+| Negative | The interface is much larger than a queue API. The expression language must behave identically on every implementation. |
+| Negative | Snorri migrates its side records, fences and in-memory idempotency to Fireweed shapes, and to token-addressed finalize. |
+| Negative | Every selector and read needs an index-backed conjunct, which constrains ad-hoc queries. |
+| Negative | The current object-log runtime stays behind the old facade until the new facade lands, so two boundaries coexist for a while. |
+| Neutral | Joins and full history stay in Niflheim. |
 
 ### Documents this ADR changes on acceptance
 
 | Document | Change |
 |----------|--------|
 | ADR-024 | Superseded. |
-| ADR-007 | Amended: the driven side of the hexagon is the queue interface. |
-| ADR-008 | Rescoped to the object-log implementation. Its atomicity outcomes move into API-001 as requirements stated without an owner. |
-| ADR-012, ADR-013, ADR-016, ADR-017 | Rescoped to the object-log implementation. |
-| ADR-022 | Stands, except `projection_control()` moves to the implementation type. |
-| API-001 (major version) | Remove storage language (object log, `AsyncProjection`, projection-position fence, `PurgeItemsCommand`, `fireweed_group_summary`, observed projection frontier). Remove `SetGates.applied_command_position`; keep `gate_epoch`. Make `BatchClaimByItemIds` required core and drop its capability flag. Make `MutateItems` an optional family. Add `ReassignLeases`, item-id addressing for live reads, and the time-driven transition rule. Change lease expiry to MUST NOT change `item_version`. Give cohort renew and finalize the common status vocabulary. Restate whole-group and whole-cohort atomicity without an owner. Restate visibility, discovery `as_of` and metrics in terms of API-006 guarantees. |
-| API-002 | Becomes the optional `OperatorRepair` family. Replace `last_command_position` and "durable terminal command position" with `item_version` and timestamps. Remove Class B text. |
-| API-003 | Defines profiles in API-006 terms (families, features, guarantees, limits). |
-| API-004 | Becomes the `ProjectionQuery` family. Restate the watermark rule as read-your-writes on the queue's linearization order. |
-| API-005 | Rewritten as the binding of API-006 to `Fireweed`. `StorageConfig` leaves the facade. |
-| TD-002 | Revised per §11. |
-| TD-006 | Bound to the `resp-worker` profile. Line 252's required `ReclaimDriver` is replaced by the §4 time rule. |
-| AGENTS.md | The projection-lifecycle test rule names the object-log implementation's own projection control, not `Fireweed::projection_control()`. |
+| ADR-007 | Amended: the driven side is the data-plane interface. |
+| ADR-008, ADR-012, ADR-013, ADR-016, ADR-017 | Rescoped to the object-log implementation, pending open question 3. ADR-008's atomicity outcomes move into API-001 without an owner. |
+| ADR-009 | Amended: the facade holds a `dyn DataPlane`; its "no dyn backend" and crate-private-constructor rules and the publish topology change accordingly. |
+| ADR-010, ADR-011 | Restated as schema declarations: declared fields, index hints, typed payload schemas. |
+| ADR-014 | The Kafka consumer surface reads event logs and queue transition history. |
+| ADR-018 | Exact ensure becomes `apply_schema` with an expected version. |
+| ADR-022 | Stands for the single concrete `Fireweed`, except `projection_control()`, `StorageConfig` and maintenance leave it. |
+| API-001 | Major version. Remove storage language and `SetGates.applied_command_position`. Replace `MutateItems` with `Mutate` requests and drop `evaluated_at`. Add `eligibility_time` to claims, declared-field filters, `ReassignLeases`, lease policies, the cohort deadline rule (§8), the time rule, and lease expiry not changing `item_version`. Restate atomicity without an owner. |
+| API-002 | Operator actions become requests: pause and resume are `SetQueueState`; redrive and repair are `Mutate` transitions; purge and archive are `Mutate` retire; audit is an event log; operation lookup is `request_id` replay. `max_affected` becomes the per-request limit. |
+| API-003 | Profiles are restated in API-006 terms. |
+| API-004 | Replaced by declared reads. |
+| API-005 | Rewritten as the binding of API-006 to `Fireweed`. |
+| TD-002 | Revised per §11, extended to tables, event logs, blobs and declared reads. |
+| TD-003 | Ownership and fencing become object-log internals. |
+| TD-006 | Bound to RESP's decision (open question 11). Its required `ReclaimDriver` is replaced by the time rule. |
+| TD-007 | Durability classes become §7's levels; `ReclaimDriver` is replaced by the time rule; `UpsertPort` becomes `Enqueue` with a key-conflict policy. |
+| TD-008 | Queue change records become queue transition history in an event log. |
+| Turso queue implementation plan | Part 2 (Snorri tables) and §3.4a (SQL read views) give way to Fireweed shapes and declared reads. |
+| AGENTS.md | The projection-lifecycle test rule names the object-log implementation's own projection control. |
 
 ### Migration order
 
-Each step lands with the conformance suite green on every implementation
-that exists at that point, and with the dependency test enforcing the
-crates that exist.
+1. Create `fireweed-interface` with API-006's v1 types and traits. Add the
+   dependency test.
+2. Write `fireweed-conformance` against it, and the in-memory implementation
+   alongside, so the suite has a first target.
+3. Build the Postgres implementation: queues and verbs, then group commit,
+   tables, declared reads, event logs, then blobs. Add the differential test;
+   Postgres becomes the reference once it passes the suite.
+4. Cut `Fireweed` over to the interface. Snorri and Cayce adopt it on
+   Postgres. The old facade and runtime stay frozen until this step lands.
+5. Build the local engine and run it through the suite, the differential
+   test and gates B1 to B4.
+6. Decide object-log and RESP (open questions 3 and 11). Retire
+   `StorageConfig`, `RETIRED_STORAGE_CELL` and whatever the decisions remove.
+   Apply the document changes above.
 
-1. Create `fireweed-interface` with the API-006 traits and types, defined
-   from API-001. Add the dependency test for that crate.
-2. Implement `QueueProvider` and the families it already supports over the
-   current object-log runtime. Fill gaps the interface exposes (missing
-   metrics fields, lease data in reads, the time rule).
-3. Rewrite `fireweed-conformance` as the black-box suite. Run it against
-   the object-log implementation.
-4. Cut `Fireweed` and `fireweed-resp` over to the interface. Extend the
-   dependency test to them. From here there is one boundary.
-5. Build the in-memory implementation. It is the first second
-   implementation and proves interchangeability cheaply.
-6. Build the Postgres reference: core first, then families. Add the
-   differential test.
-7. Retire `StorageConfig` and `RETIRED_STORAGE_CELL`. Apply the document
-   changes above.
+## Open questions for the owner
 
-## Remaining open questions
-
-1. **Names.** `fireweed-interface`, `QueueProvider` and the family names are
-   working names.
-2. **Snorri profile.** Proposed: `Upsert`, `ItemMutation`,
-   `ClaimedWorkCommit`, `IndexQuery`, `ProjectionQuery`; features
-   `TypedPayloadSchema`, `SecondaryIndexes`, `DynamicGates`; `Durable`.
-   Snorri's owners should confirm. The profile depends on where Snorri's
-   workflow state lives: in Snorri-owned tables (core, `Upsert`,
-   `DynamicGates`), or in Fireweed items as Snorri TD-011 D1 states (which
-   keeps a commit-group family).
-3. **Claim time.** Whether `claim` and `claim_by_item_ids` take an optional
-   `eligibility_time`, with lease time always from the time authority, to
-   carry Snorri CONTRACT-005's separate execution and lease times.
-4. **Object-log's future.** Whether object-log × Turso stays an
-   implementation, given the spike's throughput figure. If it does not,
-   migration steps 2 and 3 move to the implementation that replaces it.
-5. **Production engine.** Which engine backs the production
-   implementation. The spike's working assumption is SQLite with a
-   separately owned S3 shipper; the owner has not confirmed it.
-6. **Replicated durability.** Whether `Durability` gains a variant for
-   writes made durable against host loss before return.
-7. **Bulk selector operations.** Whether a selector-scoped operation larger
-   than `max_selector_affected` may run as a sequence of bounded steps, each
-   its own linearization point, instead of failing.
+1. **Names.** `fireweed-interface`, `DataPlane`, "space", and the shape names
+   are working names.
+2. **Space granularity.** Per tenant, per campaign, or per Snorri shard?
+   Group commit is atomic only within a space, and a single-writer engine's
+   throughput is per space.
+3. **Object-log's future.** The owner said it is "likely going to
+   deprecate". Not decided.
+4. **v1 scope of blobs, event logs and queue transition history.** All are
+   specified. Snorri's inventory needs blobs (large outputs, definitions) but
+   sends its full history to Niflheim. Does v1 need event logs?
+5. **Counters.** Are table increments enough, or is a dedicated counter shape
+   needed for hot keys? Moving Cayce's rate-limit counters out of Dragonfly
+   is Snorri open item O16.
+6. **Admission chunk state.** Snorri proposes a per-run, per-shard table row
+   instead of a Postgres control-plane compare-and-swap (Snorri O16).
+7. **Cohort deadline rule** (§8). Drafting decision: completeness only.
+8. **Rejected groups are not recorded** (§5). Drafting decision: a replay of
+   a rejected group re-evaluates it.
+9. **Schema evolution** beyond additive changes.
+10. **Percentile** exact (v1 draft) or approximate.
+11. **RESP and `StreamGroup`.** When, and over which implementation?
+12. **Protobuf schema.** Who owns it, and in which release?
 
 ## Risks
 
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
-| Object-log claims can return an item whose purge, pause or eligibility-removing update has committed but not applied | M | H | Conformance tests each safety effect under induced apply lag before step 4. If it fails, object-log fences those effects as API-001 already requires for gates. |
-| The interface copies the facade's 84 methods and stays implementation-shaped | M | H | API-006 maps every method. Convenience forms stay on `Fireweed` as helpers over the trait. |
-| The time rule is costly for a lazy implementation (cohort expiry against state at the deadline) | M | M | Sweeping at the due instant satisfies the rule. Laziness is allowed, not required. |
-| The Postgres reference grows behaviour outside the contract | L | M | New behaviour goes into API-001, API-006 or a family contract first. |
-| Migration stalls with two boundaries | M | H | Step 4 removes the old boundary before any new implementation is built. |
-| A single-writer implementation stalls claims behind a large mutation | H | M | Per-call bounds in `ImplementationLimits`, rejected with `BatchTooLarge`. |
-| Callers read `Durable` as "safe in object storage" | M | H | API-006 defines the durability point; each implementation documents its post-commit copy lag. |
+| Expression and aggregate results differ between Postgres and the local engine (collation, nulls, overflow, float rounding) | H | H | API-006 fixes the semantics; the differential test generates expressions. |
+| The interface grows into a general database | M | H | No joins, capped requests, index-backed selectors, live data only; history to Niflheim. |
+| A hot table row (counter, rollup) serializes commits on Postgres | M | M | Open question 5; rate windows keyed by bucket spread the load. |
+| A single-writer engine stalls claims behind bulk work | H | M | Caps, chunked `Mutate`, and B4. |
+| Waiting for `Replicated` on every send-intent commit limits throughput | M | M | Only commits that require it wait; the local engine is `Replicated` by design. |
+| Snorri and Cayce adopt Postgres and never move to the local engine | M | M | Same interface and suite; the facade names no implementation. |
+| Two boundaries coexist while the old runtime is frozen | M | M | No new features on the old facade; step 4 cuts over. |
+| Relayed decisions are misread | L | H | The owner confirms D8 to D12 before acceptance. |
 
 ## Validation
 
 | Success metric | Review trigger |
 |----------------|----------------|
-| `cargo metadata`: `fireweed-interface` depends on no `fireweed-*` crate except `fireweed-core` | A storage or engine crate enters its tree. |
-| `fireweed`, `fireweed-resp` and `fireweed-conformance` depend on no implementation crate outside `[dev-dependencies]` | A facade or RESP change needs an implementation type. |
-| No implementation crate depends on another | A shared need is met by importing an implementation. |
-| Every implementation passes the black-box suite for what it declares; the Postgres reference passes the differential test against each | An implementation released without both. |
-| Time-driven scenarios (lease expiry, cohort expiry, retention) pass under a manual clock with no tick | A test or caller needs to drive a tick. |
+| `fireweed-interface` depends on no `fireweed-*` crate except `fireweed-core` | A storage or engine crate enters its tree. |
+| No consumer crate depends on an implementation outside `[dev-dependencies]` | A consumer needs an implementation type. |
+| Every implementation passes the suite for what it declares; each passes the differential test against Postgres | An implementation released without both. |
+| Snorri runs with no Snorri-owned tables and no unbounded in-memory state (TD-012 §3.7 items 1 to 10 mapped) | Snorri adds a table or cache to work around a gap. |
+| Cayce's UI uses declared reads only | Cayce reads an engine table. |
+| The local engine meets B1 to B4 | A gate misses its floor. |
 
 ## Concern Impact
 
-- `resilience`: durability is a declared guarantee per implementation.
-  Recovery is each implementation's business.
-- `technology-radar`: storage engines are chosen per implementation; adding
-  one does not change the product contract.
+- `resilience`: durability is declared per implementation and reported per
+  commit.
+- `technology-radar`: storage engines are chosen per implementation.
 
 ## References
 
@@ -404,4 +506,7 @@ crates that exist.
 - `docs/helix/02-design/adr/ADR-024-s3-turso-public-cell.md`
 - `docs/helix/02-design/technical-designs/TD-002-postgres-native-reference-mode.md`
 - `docs/helix/02-design/technical-designs/TD-006-resp-wire-adapter.md`
-- `crates/fireweed/src/lib.rs` (`LibBackend`), `crates/fireweed-conformance/src/lib.rs` (`ConformanceBackend`), `crates/fireweed-resp/src/lib.rs` (`RespBackend`)
+- `docs/helix/04-build/turso-queue-implementation-plan.md` (branch
+  `claude/fireweed-sqlite-s3-logs-37f26c`, commit `1b943868`)
+- Snorri `CONTRACT-005-workflow-state-store-port.md`; Snorri TD-012 rev 6 §3.7
+  (branch `claude/snorri-api-encapsulation-03e4a8`, uncommitted)
