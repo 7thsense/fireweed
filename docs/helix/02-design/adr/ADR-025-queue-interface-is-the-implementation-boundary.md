@@ -32,6 +32,14 @@ decisions D8 to D12, which the Cayce project relayed with the owner's words
 owner confirms them before this ADR is accepted. Revision 3 also fixes the
 round-two review defects that still apply.
 
+Revision 4 (2026-11-15) pins the request model for cross-engine behaviour
+(API-006 revision 4) and applies four recommendations from review round
+three, each marked **draft pending owner**: the local engine's durability
+range (§7), Postgres `Replicated` only with a synchronous standby (§7), the
+cohort deadline rule (§8), and recording rejected requests (§5). Snorri's
+open items O2, O14, O15 and O16 remain with the owner; text that depends on
+them is marked.
+
 ## Context
 
 ### Intent
@@ -120,7 +128,7 @@ needs Cayce's confirmation.
 | # | Decision | Source | Status in revision 3 |
 |---|----------|--------|----------------------|
 | D1 | Time-driven transitions are in the contract; no caller tick. | Owner, 2026-11-13 | Kept (§8). |
-| D2 | One time authority per storage. | Owner, 2026-11-13 | Kept. Claims take an optional eligibility time; lease time always comes from the authority (§8). The Cayce project withdrew its "clock as an input to claim and lease" wording on 2026-11-15. |
+| D2 | One time authority per storage. | Owner, 2026-11-13 | Kept. Claims take an optional eligibility time; lease time always comes from the authority (§8), pending Snorri O2. The Cayce project withdrew its "clock as an input to claim and lease" wording on 2026-11-15. |
 | D3 | ADR-008 ownership becomes internal to object-log, which declares `SingleProcess`. | Owner, 2026-11-13 | Conditional on object-log's future (open question 3). |
 | D4 | `Bounded` new-work visibility allowed, fails closed. | Owner, 2026-11-13 | Kept in the type. No v1 implementation declares it, and v1 conformance defines `Immediate` only (§7). |
 | D5 | RESP gets a `StreamGroup` family. | Owner, 2026-11-13 | Deferred past v1 (open question 11). |
@@ -186,7 +194,8 @@ question 5, needed only if hot-key increments prove too slow.
 Across shapes in one space: a group commit is atomic; every read observes
 one snapshot; `request_id` is scoped to the space; one durability level
 covers the whole commit; caps apply to the whole commit. Across spaces there
-is no atomicity or ordering. A Snorri shard is a space.
+is no atomicity or ordering. How spaces map to tenants, campaigns or Snorri
+shards is open question 2.
 
 ### 4. Requests are typed data
 
@@ -217,11 +226,17 @@ time-bucket semantics so implementations agree.
 
 `commit` applies a list of write operations in one space, in list order, at
 one linearization point, all or nothing. Later operations see earlier
-operations' effects. Guards (lease token, `expected_item_version`, row
-version, key conflict policy, match expectations) are checked at that
-point. If any guard fails or any cap is exceeded, nothing is applied and the
-response names each failure. A rejected group writes nothing, including no
-request record.
+operations' effects. A commit runs in two phases. Validation (types, schema
+references, structural caps) fails with an error and records nothing.
+Execution stops at the first rejecting condition in API-006's decision
+table (stale lease, version mismatch, key conflict, unmet match
+expectation, scan or match limit, cohort split, a fault in a written
+value), applies nothing, and reports that operation and entry.
+
+**[Draft pending owner]** A rejected group leaves a request record, so its
+replay returns the same rejection and no stalled earlier attempt can commit
+afterwards. Revision 3 recorded nothing; review round three showed that a
+replay could then be rejected while the original still committed.
 
 A Snorri transition is one group: finalize the instance-head item with a
 patch to its body and await fields (token and `expected_item_version`
@@ -248,9 +263,11 @@ reads by name and version. A version never changes once declared. Cayce
 reads only through declared reads (D10). Built-in reads cover queue items,
 gates and queue metrics.
 
-Every selector and every declared read must constrain at least one indexed
-field by equality, range or `in`. A request that does not is rejected. This
-is what makes the caps (§10) meaningful on a single-writer engine.
+Every `Where` selector, claim filter and declared read must constrain at
+least one indexed field by equality, range, `in` or set membership: its
+access term. A request that does not fails. A `Keys` selection is bounded by
+its keys and needs no access term. The access term alone does not bound
+work; the scan budget in §10 does.
 
 ### 7. Guarantees and durability
 
@@ -262,19 +279,27 @@ Each implementation declares:
 | New-work visibility | `Immediate`, `Bounded { max_ms }` | v1 implementations are `Immediate`, and v1 conformance defines only `Immediate`. |
 | Sharing | `SingleProcess`, `MultiProcess` | Whether several instances may serve one space at once. |
 
-Every commit response reports the level that commit reached. A request may
+Every write response reports the level that commit reached. A request may
 require `Replicated`; the commit is then acknowledged only once it reaches
-that level, or fails with `CommitTimeout`. Replaying a committed
-`request_id` with a higher required level waits for that level, so a caller
-can wait for `Replicated` after a `Local` acknowledgement.
+that level. If it committed but has not reached the level in time, the
+request fails with `DurabilityPending { reached }`, which tells the caller
+the commit exists. `CommitTimeout` is kept for "outcome unknown". Replaying
+the `request_id` waits again, so a caller can wait for `Replicated` after a
+`Local` acknowledgement.
 
-On Postgres, `Local` is a commit flushed to the primary's WAL, and
-`Replicated` is a commit a synchronous standby has confirmed flushed. On the
-local engine, every commit is `Replicated`, because the commit is in the S3
-log before the acknowledgement.
+| Implementation | Minimum | Maximum |
+|----------------|---------|---------|
+| Postgres | `Local`: flushed to the primary's WAL | `Replicated` only when a synchronous standby is configured (a standby confirmed the flush); otherwise `Local`, and a request requiring `Replicated` fails. **[Draft pending owner; Snorri O15]** |
+| Local engine | `Local`: fsynced locally | `Replicated`: the commit is in the S3 log. Commits ship in batches; a request requiring `Replicated` waits for its batch. **[Draft pending owner]** |
+
+Revision 3 made every local-engine commit `Replicated`, which puts an S3
+round trip on every claim and conflicts with speed gate B2. Without a
+synchronous standby, Snorri's zero-loss send path cannot run on Postgres;
+the owner either requires a standby in production or accepts `Local` send
+intents and possible re-sends after losing the primary.
 
 Operations on one space are linearizable. Every read observes every effect
-committed before its linearization point.
+committed before its linearization point, whatever its durability level.
 
 ### 8. Time
 
@@ -284,10 +309,14 @@ at their due instant. An implementation may sweep, evaluate lazily, or both.
 No caller drives a tick. API-006 fixes the processing order for transitions
 due at the same instant.
 
-**One time authority per space**, sampled after the operation is
-serialized against conflicting operations. Under conformance it is the
-injected `Clock`. The Postgres implementation uses database time in
-production (`clock_timestamp()` after locks, not transaction-start `now()`).
+**One time authority per space.** Each request uses one request time for
+every decision. Request time is monotonic along conflicts: a request that
+follows a conflicting one in linearization order never has an earlier
+time. An implementation may sample a provisional time to choose
+candidates, then fix the request time after locking them. Under
+conformance the authority is the injected `Clock`. The Postgres
+implementation uses `clock_timestamp()`, raised to at least the latest
+timestamp on the records it locked.
 
 `claim` and `claim_by_item_ids` take an optional `eligibility_time`. It
 replaces the authority only when deciding whether `not_before` and backoff
@@ -297,10 +326,12 @@ This carries Snorri CONTRACT-005's separate execution and lease times. No
 other request overrides time. A selector that needs a fixed instant uses a
 parameter.
 
-Cohort deadlines are simplified: a cohort fails with `cohort-incomplete` at
-its deadline only if fewer than `cohort_size` members were committed by
-then. Eligibility at the deadline no longer matters. This is a drafting
-decision for owner confirmation (open question 7).
+**[Draft pending owner]** Cohort deadlines follow API-001, evaluated at
+the deadline instant: unless the cohort has been claimed, it fails with
+`cohort-incomplete` if fewer than `cohort_size` members are non-terminal,
+or if a non-terminal member is not eligible. Revision 3 counted committed
+members only; review showed that let a cohort with a retired member never
+expire, and let one gated member withhold its siblings indefinitely.
 
 ### 9. Leases are fenced by token
 
@@ -310,15 +341,18 @@ cohort id and cohort token). Finalize and `Mutate` may also carry
 all-or-nothing facade helpers are removed.
 
 A `Mutate` that selects a leased item applies its lease policy: skip it
-(default), reject the group, preserve the lease (only for reschedule, field
-and body changes), or require a matching token.
+(default), reject the group, preserve the lease (only for reschedule,
+field, body and gate changes), require a matching token, or break the lease
+(operator force actions, API-002).
 
 ### 10. Every write is capped
 
-`ImplementationLimits` declares the caps: operations per commit, entries per
-operation and per commit, bytes per commit and per value, items a selector
-may affect, and rows an aggregate read may scan. A request over a cap fails
-with no effect.
+`ImplementationLimits` declares the caps: operations, entries and bytes per
+request; the resulting size of every value; records a selector may match or
+affect; and a scan budget, `max_scan_rows`, on the candidates any selection,
+claim filter or read examines. Structural caps fail validation. A scan or
+match over budget rejects an unchunked write, ends a chunk step or page with
+a continuation, or returns a partial claim.
 
 `dry_run` evaluates a commit's guards and selections, returns the counts it
 would affect, and records nothing.
@@ -333,8 +367,8 @@ operation in its commit.
 
 | Implementation | Status | Durability | Sharing |
 |----------------|--------|------------|---------|
-| PostgreSQL (shared server; new crate from TD-002) | First-class and production-supported. Defines correct semantics for the differential test. Snorri and Cayce build against it now. | `Local`; `Replicated` with a synchronous standby | `MultiProcess` |
-| Local engine: Turso MVCC on NVMe, S3 in the commit path; SQLite as comparison arm | Later. Passes the same suite and the differential test. Speed gates B1 to B4 (Turso queue plan §3.8) apply here only. | `Replicated` | `SingleProcess` per space |
+| PostgreSQL (shared server; new crate from TD-002) | First-class and production-supported. Defines correct semantics for the differential test. Snorri and Cayce build against it now. | `Local`; `Replicated` only with a synchronous standby | `MultiProcess` |
+| Local engine: Turso MVCC on NVMe, S3 log; SQLite as comparison arm | Later. Passes the same suite and the differential test. Speed gates B1 to B4 (Turso queue plan §3.8) apply here only. | `Local`; `Replicated` on request [draft pending owner] | `SingleProcess` per space |
 | In-memory (new crate) | For consumers' tests, so that nobody re-implements Fireweed in memory. | `Process` | `SingleProcess` |
 | Object log × Turso (current runtime) | Not wrapped. Its future is open question 3. | — | — |
 | Durable Objects | Possible: every request is one atomic step. Not scheduled. | — | — |
@@ -390,7 +424,8 @@ not on the interface or on `Fireweed`.
 | Positive | Snorri and Cayce get one storage abstraction for all fast-changing workflow data, with atomic commits across shapes. |
 | Positive | Snorri and Cayce can build now on Postgres. The local engine slots in behind the same interface and suite. |
 | Positive | Bulk changes and live analytics need no new methods, only declarations and requests. |
-| Positive | Body patches and blob references replace whole-body rewrites of instance state. |
+| Positive | Body patches shrink requests, and blob references and table rows take large or independently changing data out of the instance body. Engines still rewrite a stored JSON value on update. |
+| Positive | Expression, aggregate, group-commit and time rules are pinned by named conformance tests that both engines run. |
 | Positive | Correctness is defined by observable behaviour and checked against Postgres. |
 | Negative | The interface is much larger than a queue API. The expression language must behave identically on every implementation. |
 | Negative | Snorri migrates its side records, fences and in-memory idempotency to Fireweed shapes, and to token-addressed finalize. |
@@ -410,7 +445,7 @@ not on the interface or on `Fireweed`.
 | ADR-014 | The Kafka consumer surface reads event logs and queue transition history. |
 | ADR-018 | Exact ensure becomes `apply_schema` with an expected version. |
 | ADR-022 | Stands for the single concrete `Fireweed`, except `projection_control()`, `StorageConfig` and maintenance leave it. |
-| API-001 | Major version. Remove storage language and `SetGates.applied_command_position`. Replace `MutateItems` with `Mutate` requests and drop `evaluated_at`. Add `eligibility_time` to claims, declared-field filters, `ReassignLeases`, lease policies, the cohort deadline rule (§8), the time rule, and lease expiry not changing `item_version`. Restate atomicity without an owner. |
+| API-001 | Major version. Remove storage language and `SetGates.applied_command_position`. Replace `MutateItems` with `Mutate` requests, drop `evaluated_at` and ordered-selector first-match ownership. Add `eligibility_time` to claims, declared-field filters, `ReassignLeases`, lease policies including lease break, the cohort deadline rule evaluated at the deadline instant (§8), the time rule, request records for rejected requests, and lease expiry not changing `item_version`. Define progress metrics by base eligibility. Restate atomicity without an owner. Move discovery authorization to the adapter. |
 | API-002 | Operator actions become requests: pause and resume are `SetQueueState`; redrive and repair are `Mutate` transitions; purge and archive are `Mutate` retire; audit is an event log; operation lookup is `request_id` replay. `max_affected` becomes the per-request limit. |
 | API-003 | Profiles are restated in API-006 terms. |
 | API-004 | Replaced by declared reads. |
@@ -422,6 +457,10 @@ not on the interface or on `Fireweed`.
 | TD-008 | Queue change records become queue transition history in an event log. |
 | Turso queue implementation plan | Part 2 (Snorri tables) and §3.4a (SQL read views) give way to Fireweed shapes and declared reads. |
 | AGENTS.md | The projection-lifecycle test rule names the object-log implementation's own projection control. |
+
+The contract changes (API-001 to API-005, TD-002, TD-007) land with
+acceptance, before consumers adopt the interface in migration step 4. The
+object-log, RESP and TD-003 changes land at step 6.
 
 ### Migration order
 
@@ -457,19 +496,28 @@ not on the interface or on `Fireweed`.
    is Snorri open item O16.
 6. **Admission chunk state.** Snorri proposes a per-run, per-shard table row
    instead of a Postgres control-plane compare-and-swap (Snorri O16).
-7. **Cohort deadline rule** (§8). Drafting decision: completeness only.
-8. **Rejected groups are not recorded** (§5). Drafting decision: a replay of
-   a rejected group re-evaluates it.
+7. **Cohort deadline rule** (§8). Draft: API-001's rule, evaluated at the
+   deadline instant, with claimed cohorts exempt.
+8. **Rejected requests recorded** (§5). Draft: yes.
 9. **Schema evolution** beyond additive changes.
 10. **Percentile** exact (v1 draft) or approximate.
 11. **RESP and `StreamGroup`.** When, and over which implementation?
 12. **Protobuf schema.** Who owns it, and in which release?
+13. **Local engine durability** (§7). Draft: `Local` minimum, `Replicated`
+    on request.
+14. **Postgres `Replicated`** (§7; Snorri O15). Draft: only with a
+    synchronous standby. Does production Postgres require one, or does the
+    owner accept `Local` send intents?
+15. **Snorri's open items.** O2 (claim time), O14, O15 (durability) and O16
+    (counters and admission state in Fireweed) are with the owner. ADR-025
+    and API-006 text that depends on them is marked.
 
 ## Risks
 
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
-| Expression and aggregate results differ between Postgres and the local engine (collation, nulls, overflow, float rounding) | H | H | API-006 fixes the semantics; the differential test generates expressions. |
+| Expression and aggregate results differ between Postgres and the local engine (collation, nulls, overflow, float rounding) | H | H | API-006 fixes evaluation order, faults, casts and aggregate precision; rule-pinning tests and the differential test check them. |
+| Postgres group commits at `REPEATABLE READ` retry under contention | M | M | Bounded retries, then `Contention`; hot paths use the single-statement verbs at `READ COMMITTED`. |
 | The interface grows into a general database | M | H | No joins, capped requests, index-backed selectors, live data only; history to Niflheim. |
 | A hot table row (counter, rollup) serializes commits on Postgres | M | M | Open question 5; rate windows keyed by bucket spread the load. |
 | A single-writer engine stalls claims behind bulk work | H | M | Caps, chunked `Mutate`, and B4. |
