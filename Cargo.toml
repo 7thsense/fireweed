@@ -24,6 +24,8 @@ members = [
     "crates/fireweed-interface",
     "crates/fireweed-interface-memory",
     "crates/fireweed-interface-conformance",
+    "crates/fireweed-interface-engine",
+    "crates/fireweed-interface-postgres",
 ]
 exclude = ["vendor/turso_core", "vendor/turso", "vendor/turso_sdk_kit", "vendor/turso_sync_sdk_kit", "vendor/turso_sync_engine"]
 resolver = "3"

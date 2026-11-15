@@ -86,6 +86,44 @@ fn value_matches(v: &Value, ty: ScalarType) -> bool {
     v.ty() == ty
 }
 
+/// No U+0000 (API-006 §Values).
+pub fn text_ok(s: &str, what: &str) -> R {
+    if s.contains('\0') {
+        return invalid(format!("{what} contains U+0000"));
+    }
+    Ok(())
+}
+
+/// `Schedule::At` in the Timestamp domain; `After` within its span.
+pub fn schedule_ok(s: &Schedule) -> R {
+    match s {
+        Schedule::At(t) if !timestamp_in_domain(t.0) => {
+            invalid("schedule outside the Timestamp domain")
+        }
+        Schedule::After { delay_ms } if *delay_ms > (TIMESTAMP_MAX - TIMESTAMP_MIN) as u64 => {
+            invalid("schedule delay too large")
+        }
+        _ => Ok(()),
+    }
+}
+
+pub fn priority_ok(p: &PriorityValue) -> R {
+    match p {
+        PriorityValue::Timestamp(t) if !timestamp_in_domain(t.0) => {
+            invalid("priority outside the Timestamp domain")
+        }
+        _ => Ok(()),
+    }
+}
+
+fn metadata_ok(m: &Metadata) -> R {
+    for (k, v) in m {
+        text_ok(k, "metadata key")?;
+        normalize_json(v).map_err(|e| DataPlaneError::InvalidRequest(e.to_string()))?;
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ schema
 
 fn name(s: &str, what: &str) -> R {
@@ -120,10 +158,12 @@ fn fields(fs: &[FieldDecl], body: Option<BodyKind>) -> R {
     Ok(())
 }
 
-pub(crate) fn schema(s: &SpaceSchema, limits: &ImplementationLimits, caps: &Capabilities) -> R {
+pub fn schema(s: &SpaceSchema, limits: &ImplementationLimits, caps: &Capabilities) -> R {
     let unsupported = |u| Err(DataPlaneError::FeatureUnsupported(u));
     if s.request_id_retention_ms > limits.max_request_id_retention_ms {
-        return Err(DataPlaneError::BatchTooLarge(LimitKind::RequestIdRetention));
+        return Err(DataPlaneError::FeatureUnsupported(Unsupported::Limit(
+            LimitKind::RequestIdRetention,
+        )));
     }
     if !s.event_logs.is_empty() {
         return unsupported(Unsupported::Shape(ShapeKind::EventLog));
@@ -133,7 +173,9 @@ pub(crate) fn schema(s: &SpaceSchema, limits: &ImplementationLimits, caps: &Capa
     }
     let count = s.queues.len() + s.tables.len() + s.event_logs.len();
     if count > limits.max_objects_per_space as usize {
-        return Err(DataPlaneError::BatchTooLarge(LimitKind::Objects));
+        return Err(DataPlaneError::FeatureUnsupported(Unsupported::Limit(
+            LimitKind::Objects,
+        )));
     }
     let mut names = BTreeSet::new();
     for q in &s.queues {
@@ -160,7 +202,9 @@ pub(crate) fn schema(s: &SpaceSchema, limits: &ImplementationLimits, caps: &Capa
             return invalid("max_attempts must be positive");
         }
         if q.spec.default_lease_duration_ms > limits.max_lease_duration_ms {
-            return Err(DataPlaneError::BatchTooLarge(LimitKind::LeaseDuration));
+            return Err(DataPlaneError::FeatureUnsupported(Unsupported::Limit(
+                LimitKind::LeaseDuration,
+            )));
         }
         fields(&q.fields, Some(q.body))?;
     }
@@ -269,7 +313,7 @@ pub(crate) fn schema(s: &SpaceSchema, limits: &ImplementationLimits, caps: &Capa
     Ok(())
 }
 
-pub(crate) fn additive(old: &SpaceSchema, new: &SpaceSchema) -> R {
+pub fn additive(old: &SpaceSchema, new: &SpaceSchema) -> R {
     let conflict = || {
         Err(DataPlaneError::SchemaConflict {
             current_version: Some(old.version),
@@ -278,18 +322,35 @@ pub(crate) fn additive(old: &SpaceSchema, new: &SpaceSchema) -> R {
     if new.request_id_retention_ms < old.request_id_retention_ms {
         return conflict();
     }
+    // An old field may gain an index; nothing else about it may change.
+    let field_ok = |o: &FieldDecl, n: &FieldDecl| {
+        o.name == n.name
+            && o.ty == n.ty
+            && o.nullable == n.nullable
+            && o.source == n.source
+            && (o.index == n.index || o.index == IndexHint::None)
+    };
     let fields_ok = |o: &[FieldDecl], n: &[FieldDecl]| {
-        o.iter().all(|f| n.contains(f))
-            && n.iter()
-                .filter(|f| !o.iter().any(|x| x.name == f.name))
-                .all(|f| f.nullable)
-            && o.iter()
-                .all(|f| n.iter().filter(|x| x.name == f.name).count() == 1)
+        o.iter().all(|f| {
+            n.iter().filter(|x| x.name == f.name).count() == 1 && n.iter().any(|x| field_ok(f, x))
+        }) && n
+            .iter()
+            .filter(|f| !o.iter().any(|x| x.name == f.name))
+            .all(|f| f.nullable)
+    };
+    // Retentions may only be raised; the rest of the spec is fixed.
+    let spec_ok = |o: &QueueSpec, n: &QueueSpec| {
+        let mut relaxed = n.clone();
+        relaxed.client_item_key_retention_ms = o.client_item_key_retention_ms;
+        relaxed.terminal_retention_ms = o.terminal_retention_ms;
+        relaxed == *o
+            && n.client_item_key_retention_ms >= o.client_item_key_retention_ms
+            && n.terminal_retention_ms >= o.terminal_retention_ms
     };
     for q in &old.queues {
         match new.queues.iter().find(|n| n.name == q.name) {
             Some(n)
-                if n.spec == q.spec
+                if spec_ok(&q.spec, &n.spec)
                     && n.body == q.body
                     && n.history == q.history
                     && fields_ok(&q.fields, &n.fields) => {}
@@ -342,7 +403,7 @@ fn body_kind(q: &Queue, b: &Option<Body>) -> R {
     Ok(())
 }
 
-pub(crate) fn new_items(q: &Queue, items: &[NewItem]) -> R {
+pub fn new_items(q: &Queue, items: &[NewItem]) -> R {
     for it in items {
         let pk = match it.priority {
             PriorityValue::Int(_) => PriorityKind::Int64,
@@ -364,11 +425,16 @@ pub(crate) fn new_items(q: &Queue, items: &[NewItem]) -> R {
         {
             return invalid("invalid client item key");
         }
-        for (k, v) in &it.metadata {
-            if k.contains('\0') {
-                return invalid("metadata key contains U+0000");
-            }
-            normalize_json(v).map_err(|e| DataPlaneError::InvalidRequest(e.to_string()))?;
+        metadata_ok(&it.metadata)?;
+        priority_ok(&it.priority)?;
+        if let Some(nb) = &it.not_before {
+            schedule_ok(nb)?;
+        }
+        if let Some(g) = &it.group_key {
+            text_ok(g.as_str(), "group key")?;
+        }
+        for g in &it.gate_keys {
+            text_ok(g, "gate key")?;
         }
         item_fields(q, &it.fields)?;
         body_kind(q, &it.body)?;
@@ -376,7 +442,7 @@ pub(crate) fn new_items(q: &Queue, items: &[NewItem]) -> R {
     Ok(())
 }
 
-pub(crate) fn enqueue_items(
+pub fn enqueue_items(
     space: &Space,
     queue: &ObjectName,
     items: &[NewItem],
@@ -392,7 +458,16 @@ pub(crate) fn enqueue_items(
     new_items(q, items)
 }
 
-pub(crate) fn claim(q: &Queue, r: &ClaimRequest, limits: &ImplementationLimits) -> R {
+pub fn claim(q: &Queue, r: &ClaimRequest, limits: &ImplementationLimits) -> R {
+    text_ok(r.worker_id.as_str(), "worker id")?;
+    if let Some(g) = &r.group_key {
+        text_ok(g.as_str(), "group key")?;
+    }
+    if let Some(e) = r.eligibility_time
+        && !timestamp_in_domain(e.0)
+    {
+        return invalid("eligibility_time outside the Timestamp domain");
+    }
     if r.max_items == 0 || r.max_items > limits.max_claim_batch_size {
         return Err(DataPlaneError::BatchTooLarge(LimitKind::ClaimBatch));
     }
@@ -474,7 +549,7 @@ fn patches(q: &Queue, env: &MapTypeEnv, ps: &[BodyPatch], limits: &Implementatio
     Ok(())
 }
 
-pub(crate) fn finalize_entries(
+pub fn finalize_entries(
     q: &Queue,
     es: &[FinalizeEntry],
     p: &Params,
@@ -490,9 +565,24 @@ pub(crate) fn finalize_entries(
         patches(q, &env, &e.patch, limits)?;
         body_kind(q, &e.body)?;
         if let Some(m) = &e.metadata {
-            for v in m.values() {
-                normalize_json(v).map_err(|x| DataPlaneError::InvalidRequest(x.to_string()))?;
+            metadata_ok(m)?;
+        }
+        match &e.outcome {
+            FinalizeOutcome::Fail { failure_code } => text_ok(failure_code, "failure code")?,
+            FinalizeOutcome::Retry {
+                not_before,
+                priority,
             }
+            | FinalizeOutcome::Rearm {
+                not_before,
+                priority,
+            } => {
+                schedule_ok(not_before)?;
+                if let Some(p) = priority {
+                    priority_ok(p)?;
+                }
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -524,7 +614,7 @@ fn queue<'a>(space: &'a Space, n: &ObjectName) -> DpResult<&'a Queue> {
         .ok_or_else(|| DataPlaneError::ObjectNotFound(n.clone()))
 }
 
-pub(crate) fn commit(space: &Space, r: &CommitRequest, limits: &ImplementationLimits) -> R {
+pub fn commit(space: &Space, r: &CommitRequest, limits: &ImplementationLimits) -> R {
     if r.ops.len() > limits.max_ops_per_commit as usize {
         return Err(DataPlaneError::BatchTooLarge(LimitKind::Ops));
     }
@@ -545,6 +635,9 @@ pub(crate) fn commit(space: &Space, r: &CommitRequest, limits: &ImplementationLi
             } => new_items(queue(space, qn)?, items)?,
             WriteOp::Finalize { queue: qn, entries } => {
                 finalize_entries(queue(space, qn)?, entries, &r.params, limits)?
+            }
+            WriteOp::Reassign { to_worker, .. } if to_worker.as_str().contains('\0') => {
+                return invalid("worker id contains U+0000");
             }
             WriteOp::Renew {
                 queue: qn,
@@ -616,17 +709,21 @@ fn transition_result(a: &Action) -> Option<&'static str> {
     }
 }
 
-fn literal_texts(pred: &Expr, at: &AccessTerm) -> Vec<String> {
+fn literal_texts(pred: &Expr, at: &AccessTerm, params: &Params) -> Vec<String> {
     let conj = match pred {
         Expr::And(xs) => xs.get(at.conjunct).cloned(),
         other => Some(other.clone()),
     };
     let mut out = vec![];
     if let Some(c) = conj {
-        walk(&c, &mut |x| {
-            if let Expr::Lit(Value::Text(s)) = x {
-                out.push(s.clone());
+        walk(&c, &mut |x| match x {
+            Expr::Lit(Value::Text(s)) => out.push(s.clone()),
+            Expr::Param(p) => {
+                if let Some(Value::Text(s)) = params.get(p) {
+                    out.push(s.clone());
+                }
             }
+            _ => {}
         });
     }
     out
@@ -699,7 +796,14 @@ fn mutate(space: &Space, r: &CommitRequest, m: &Mutate, limits: &ImplementationL
         (Action::Retire, _) => {}
         (Action::Patch(ps), true) => patches(&space.queues[&m.target], &env, ps, limits)?,
         (Action::ReplaceBody(b), true) => body_kind(&space.queues[&m.target], b)?,
-        (Action::SetMetadata(_), true) => {}
+        (Action::SetMetadata(changes), true) => {
+            for (k, v) in changes {
+                text_ok(k, "metadata key")?;
+                if let Some(v) = v {
+                    normalize_json(v).map_err(|e| DataPlaneError::InvalidRequest(e.to_string()))?;
+                }
+            }
+        }
         (
             Action::Reschedule {
                 not_before,
@@ -715,11 +819,14 @@ fn mutate(space: &Space, r: &CommitRequest, m: &Mutate, limits: &ImplementationL
                 expr(p, &env, Some(want), limits)?;
             }
         }
-        (Action::Transition(tr), true) => {
-            if let Transition::Retry { not_before } = tr {
+        (Action::Transition(tr), true) => match tr {
+            Transition::Retry { not_before } => {
                 expr(not_before, &env, Some(ScalarType::Timestamp), limits)?;
             }
-        }
+            Transition::Fail { failure_code } => text_ok(failure_code, "failure code")?,
+            Transition::Complete { code: Some(c) } => text_ok(c, "code")?,
+            _ => {}
+        },
         (Action::Gates { add, .. }, true) => {
             if space.queues[&m.target].decl.spec.gates.is_none() {
                 return Err(DataPlaneError::GatesNotEnabled);
@@ -755,14 +862,21 @@ fn mutate(space: &Space, r: &CommitRequest, m: &Mutate, limits: &ImplementationL
             return invalid("a chunked Mutate needs a Where selection");
         };
         let f = at.field.as_str();
+        let body_derived = space.queues.get(&m.target).is_some_and(|q| {
+            q.decl
+                .fields
+                .iter()
+                .any(|d| d.name == at.field && matches!(d.source, FieldSource::BodyPointer(_)))
+        });
         let changes_access = match &m.action {
             Action::Set(sets) => sets.iter().any(|(x, _)| x == &at.field),
+            Action::Patch(_) | Action::ReplaceBody(_) => body_derived,
             Action::Reschedule { .. } => matches!(f, "fw_not_before" | "fw_priority"),
             Action::Gates { .. } => f == "fw_gate_keys",
             Action::Transition(_) | Action::Retire => match f {
                 "fw_state" => {
                     let vals = match &m.selection {
-                        Selection::Where { predicate } => literal_texts(predicate, &at),
+                        Selection::Where { predicate } => literal_texts(predicate, &at, &r.params),
                         _ => vec![],
                     };
                     at.kind != AccessKind::Equality

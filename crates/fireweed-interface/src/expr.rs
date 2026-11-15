@@ -890,9 +890,7 @@ pub fn aggregate(
                         acc += *i as i128;
                     }
                 }
-                let q = acc / n;
-                let r = acc % n;
-                Ok(Value::Float(q as f64 + r as f64 / n as f64))
+                Ok(Value::Float(exact_quotient_f64(acc, n)))
             } else {
                 let s: f64 = non_null.iter().filter_map(|v| as_f64(v)).sum();
                 Ok(Value::Float(s / n as f64))
@@ -916,6 +914,30 @@ pub fn aggregate(
             Ok(sorted[(rank - 1) as usize].clone())
         }
     }
+}
+
+/// `num / den` rounded once to the nearest `f64` (ties to even), by
+/// writing the exact decimal with a sticky digit and letting Rust's
+/// correctly rounded parser round it.
+pub fn exact_quotient_f64(num: i128, den: i128) -> f64 {
+    let neg = (num < 0) != (den < 0);
+    let (n, d) = (num.unsigned_abs(), den.unsigned_abs());
+    let mut s = String::new();
+    if neg {
+        s.push('-');
+    }
+    s.push_str(&(n / d).to_string());
+    s.push('.');
+    let mut r = n % d;
+    for _ in 0..60 {
+        r *= 10;
+        s.push(char::from(b'0' + (r / d) as u8));
+        r %= d;
+    }
+    if r != 0 {
+        s.push('1');
+    }
+    s.parse().expect("decimal parses")
 }
 
 /// Nearest-rank: `ceil(p × n / 1,000,000)` in integer arithmetic, at least 1.

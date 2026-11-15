@@ -1398,13 +1398,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "fireweed-interface-memory"
+name = "fireweed-interface-engine"
 version = "0.31.32"
 dependencies = [
  "base64 0.22.1",
+ "fireweed-interface",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fireweed-interface-memory"
+version = "0.31.32"
+dependencies = [
  "bytes",
  "fireweed-interface",
  "fireweed-interface-conformance",
+ "fireweed-interface-engine",
+]
+
+[[package]]
+name = "fireweed-interface-postgres"
+version = "0.31.32"
+dependencies = [
+ "bytes",
+ "fireweed-interface",
+ "fireweed-interface-conformance",
+ "fireweed-interface-engine",
+ "futures",
+ "postgres",
  "serde",
  "serde_json",
 ]

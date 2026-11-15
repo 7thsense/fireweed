@@ -90,15 +90,13 @@ impl Clock for ManualClock {
 }
 
 fn strip_min_durability(v: &mut serde_json::Value) {
-    match v {
-        serde_json::Value::Object(map) => {
-            map.remove("min_durability");
-            for x in map.values_mut() {
-                strip_min_durability(x);
-            }
+    // Only the request's own durability requirement: `header.min_durability`
+    // and, for schema and blob requests, a top-level `min_durability`.
+    if let serde_json::Value::Object(map) = v {
+        map.remove("min_durability");
+        if let Some(serde_json::Value::Object(h)) = map.get_mut("header") {
+            h.remove("min_durability");
         }
-        serde_json::Value::Array(a) => a.iter_mut().for_each(strip_min_durability),
-        _ => {}
     }
 }
 
@@ -179,5 +177,30 @@ mod tests {
         assert_eq!(a, fingerprint(&h));
         h.actor = Some("x".into());
         assert_ne!(a, fingerprint(&h));
+    }
+
+    #[test]
+    fn fingerprint_keeps_user_min_durability_keys() {
+        let mk = |v: i64| EnqueueRequest {
+            header: WriteHeader::new(SpaceKey::new("t", "s"), "r"),
+            queue: ObjectName::new("q"),
+            items: vec![{
+                let mut it = NewItem::new(Some("k"), PriorityValue::Int(1));
+                it.metadata
+                    .insert("min_durability".into(), serde_json::json!(v));
+                it
+            }],
+            on_key_conflict: KeyConflict::Duplicate,
+        };
+        assert_ne!(fingerprint(&mk(1)), fingerprint(&mk(2)));
+    }
+
+    #[test]
+    fn int_avg_rounds_once() {
+        let v = [Value::Int(9007199254740993), Value::Int(9007199254740994)];
+        let r = aggregate(&Aggregate::Avg(Expr::int(0)), 2, &v, ScalarType::Float).unwrap();
+        assert_eq!(r, Value::Float(9007199254740994.0));
+        assert_eq!(exact_quotient_f64(1, 3), 1.0 / 3.0);
+        assert_eq!(exact_quotient_f64(-7, 2), -3.5);
     }
 }

@@ -95,9 +95,7 @@ pub const ALL: &[(&str, Test)] = &[
     ("DUR-6", |f| {
         if_replicated(f, "needs the HoldReplication fault hook")
     }),
-    ("LIN-1", |_| {
-        skip("needs concurrent peers in child processes")
-    }),
+    ("LIN-1", lin_1),
     ("LIN-2", lin_2),
     ("SHARE-1", |_| {
         skip("needs a second instance on the same storage")
@@ -121,6 +119,23 @@ pub const ALL: &[(&str, Test)] = &[
     ("ENQ-1", enq_1),
     ("TBL-1", tbl_1),
     ("MET-1", met_1),
+    ("ENQ-1b", enq_1b),
+    ("GRP-4b", grp_4b),
+    ("GRP-6b", grp_6b),
+    ("GRP-8b", grp_8b),
+    ("GRP-10b", grp_10b),
+    ("TBL-2", tbl_2),
+    ("RET-1", ret_1),
+    ("AGG-2b", agg_2b),
+    ("AGG-5", agg_5),
+    ("SCH-1b", sch_1b),
+    ("REC-3b", rec_3b),
+    ("REC-9", rec_9),
+    ("SCAN-4b", scan_4b),
+    ("READ-2b", read_2b),
+    ("LIM-1b", lim_1b),
+    ("CAST-1b", cast_1b),
+    ("PATCH-1b", patch_1b),
     ("PG-1", |_| skip("PostgreSQL implementation only")),
     ("PG-2", |_| skip("PostgreSQL implementation only")),
     ("PG-3", |_| skip("PostgreSQL implementation only")),
@@ -2745,6 +2760,512 @@ fn met_1(fx: &Fixture) -> T {
         m.oldest_eligible_age_ms.is_none(),
         "a paused queue has eligible items: {:?}",
         m.oldest_eligible_age_ms
+    );
+    Ok(())
+}
+
+// ------------------------------------------------- revision 5 review vectors
+
+fn enq_1b(fx: &Fixture) -> T {
+    let mk = |k: &str, u: &str| {
+        let mut it = NewItem::new(Some(k), PriorityValue::Int(1));
+        it.fields.insert(f("uniq"), text(u));
+        it
+    };
+    let r = ok(
+        fx.enqueue(vec![mk("r1", "x"), mk("r2", "y")], KeyConflict::Duplicate),
+        "enqueue",
+    )?;
+    let old = r.entries[0].item_id.unwrap();
+    let r = ok(
+        fx.enqueue(vec![mk("r1", "y")], KeyConflict::ReplacePending),
+        "failing replace",
+    )?;
+    ensure!(
+        matches!(r.entries[0].status, EntryStatus::UniqueViolation { .. }),
+        "replacement with a duplicate unique value: {:?}",
+        r.entries[0]
+    );
+    let v = fx.get_item(old, false);
+    ensure!(
+        v.is_some_and(|v| v.state == ItemState::Pending),
+        "a failed replacement lost the old item"
+    );
+    let r = ok(
+        fx.enqueue(vec![mk("r1", "x")], KeyConflict::ReplacePending),
+        "replace, same unique value",
+    )?;
+    ensure!(
+        r.entries[0].status == EntryStatus::Replaced,
+        "replacing with its own unique value: {:?}",
+        r.entries[0]
+    );
+    Ok(())
+}
+
+fn grp_4b(fx: &Fixture) -> T {
+    ok(fx.put_kv(1, vec![], RowConflict::Skip), "put")?;
+    let mut m = Mutate::new(
+        "kv",
+        keys(&[1]),
+        Action::Set(vec![(f("i"), Expr::int(1))]),
+        1,
+    );
+    m.expect = Some(MatchExpect { min: 2, max: 2 });
+    let r = ok(fx.commit(vec![WriteOp::Mutate(m)]), "commit")?;
+    ensure!(
+        r.status == CommitStatus::Rejected && r.ops[0].matched == 1,
+        "counts up to the failure: {:?}",
+        r.ops[0]
+    );
+    Ok(())
+}
+
+fn grp_6b(fx: &Fixture) -> T {
+    for (n, tr, want) in [
+        (0, Transition::Release, ItemState::Pending),
+        (1, Transition::Complete { code: None }, ItemState::Complete),
+        (
+            2,
+            Transition::Retry {
+                not_before: Expr::Now,
+            },
+            ItemState::Pending,
+        ),
+    ] {
+        // Each round's item sorts first, so the claim takes it, not an earlier released one.
+        let id = fx.push(&format!("brk{n}"), -(n as i64) - 10);
+        let c = ok(fx.claim(1, 60_000), "claim")?;
+        let mut m = Mutate::new("work", item_keys(&[id]), Action::Transition(tr.clone()), 1);
+        m.lease_policy = LeasePolicy::Break;
+        let r = ok(fx.commit(vec![WriteOp::Mutate(m)]), "break")?;
+        ensure!(
+            r.status == CommitStatus::Committed && r.ops[0].affected == 1,
+            "Break with {tr:?}: {r:?}"
+        );
+        let v = fx.get_item(id, true).unwrap();
+        ensure!(
+            v.state == want && v.lease.is_none(),
+            "Break with {tr:?} left {v:?}"
+        );
+        let f2 = ok(
+            fx.finalize(vec![FinalizeEntry::new(
+                lease_of(&c.items[0]),
+                FinalizeOutcome::Complete,
+            )]),
+            "old token",
+        )?;
+        ensure!(
+            f2.entries[0].status != EntryStatus::Completed,
+            "the broken lease's token still works after {tr:?}"
+        );
+    }
+    Ok(())
+}
+
+fn grp_8b(fx: &Fixture) -> T {
+    ok(fx.put_kv(1, vec![], RowConflict::Skip), "put")?;
+    let m = Mutate::new(
+        "kv",
+        keys(&[5, 1, 1]),
+        Action::Set(vec![(f("i"), Expr::int(1))]),
+        5,
+    );
+    let r = ok(fx.commit(vec![WriteOp::Mutate(m)]), "commit")?;
+    let st: Vec<_> = r.ops[0].entries.iter().map(|e| e.status.clone()).collect();
+    ensure!(
+        st == vec![
+            EntryStatus::NotFound,
+            EntryStatus::Updated,
+            EntryStatus::Skipped
+        ],
+        "one entry per addressed key, in key order: {st:?}"
+    );
+    Ok(())
+}
+
+fn grp_10b(fx: &Fixture) -> T {
+    ok(fx.put_kv(3, vec![], RowConflict::Replace), "put")?;
+    let v0 = fx.get_row("kv", 3).unwrap().row_version;
+    let set = |n| {
+        WriteOp::Mutate(Mutate::new(
+            "kv",
+            keys(&[3]),
+            Action::Set(vec![(f("i"), Expr::int(n))]),
+            1,
+        ))
+    };
+    ok(fx.commit(vec![set(1), set(2)]), "two sets")?;
+    let v1 = fx.get_row("kv", 3).unwrap().row_version;
+    ensure!(
+        v1 == v0 + 1,
+        "fw_row_version must change once per request: {v0} -> {v1}"
+    );
+    Ok(())
+}
+
+fn tbl_2(fx: &Fixture) -> T {
+    let ts = |ms: i64| Value::Timestamp(UtcMillis(ms));
+    let row: BTreeMap<FieldName, Value> = [(f("k"), Value::Int(1)), (f("at"), ts(START + 2_000))]
+        .into_iter()
+        .collect();
+    ok(
+        fx.commit(vec![WriteOp::PutRows {
+            table: o("timed"),
+            rows: vec![row],
+            on_conflict: RowConflict::Reject,
+        }]),
+        "put",
+    )?;
+    let m = Mutate::new(
+        "timed",
+        keys(&[1]),
+        Action::Set(vec![(f("at"), Expr::lit(ts(START + 1_000_000)))]),
+        1,
+    );
+    ok(fx.commit(vec![WriteOp::Mutate(m)]), "move expiry")?;
+    fx.advance(5_000);
+    ensure!(
+        fx.get_row("timed", 1).is_some(),
+        "AtField expiry was not recomputed by Set"
+    );
+    Ok(())
+}
+
+fn ret_1(fx: &Fixture) -> T {
+    let id = fx.push("ret", 1);
+    let c = ok(fx.claim(1, 60_000), "claim")?;
+    ok(
+        fx.finalize(vec![FinalizeEntry::new(
+            lease_of(&c.items[0]),
+            FinalizeOutcome::Complete,
+        )]),
+        "complete",
+    )?;
+    fx.advance(59_999);
+    ensure!(
+        fx.get_item(id, true).is_some(),
+        "terminal item gone before its retention"
+    );
+    fx.advance(1);
+    ensure!(
+        fx.get_item(id, true).is_none(),
+        "terminal item addressable after terminal retention"
+    );
+    let r = ok(
+        fx.enqueue(
+            vec![NewItem::new(Some("ret"), PriorityValue::Int(1))],
+            KeyConflict::Reject,
+        ),
+        "reserved",
+    )?;
+    ensure!(
+        r.entries[0].status == EntryStatus::Conflict,
+        "key not reserved during key retention: {:?}",
+        r.entries[0]
+    );
+    fx.advance(60_000);
+    let r = ok(
+        fx.enqueue(
+            vec![NewItem::new(Some("ret"), PriorityValue::Int(1))],
+            KeyConflict::Reject,
+        ),
+        "released",
+    )?;
+    ensure!(
+        r.entries[0].status == EntryStatus::Accepted,
+        "key still reserved after key retention: {:?}",
+        r.entries[0]
+    );
+    Ok(())
+}
+
+fn agg_2b(fx: &Fixture) -> T {
+    put_nums(
+        fx,
+        vec![
+            (1, "big", Some(9007199254740993), None),
+            (2, "big", Some(9007199254740994), None),
+        ],
+    )?;
+    let r = ok(fx.read("stats", vec![("g", text("big"))]), "read")?;
+    let got = one_row(&r)?[&f("avg_v")].clone();
+    ensure!(
+        got == Value::Float(9007199254740994.0),
+        "Int Avg must round once: {got:?}"
+    );
+    Ok(())
+}
+
+fn agg_5(fx: &Fixture) -> T {
+    let n = fx.limits().max_read_scan_rows;
+    if n > 5000 {
+        return skip("max_read_scan_rows too large for this test; use test limits");
+    }
+    let rows: Vec<_> = (0..=n as i64)
+        .map(|i| (1000 + i, "huge", Some(1), None))
+        .collect();
+    put_nums(fx, rows)?;
+    let r = fx.read("stats", vec![("g", text("huge"))]);
+    ensure!(
+        matches!(r, Err(DataPlaneError::ScanLimitExceeded)),
+        "aggregate over the budget gave {r:?}"
+    );
+    Ok(())
+}
+
+fn sch_1b(fx: &Fixture) -> T {
+    let mut s = base_schema();
+    s.version = 2;
+    s.queues[0].spec.terminal_retention_ms += 1_000;
+    s.queues[0].spec.client_item_key_retention_ms += 1_000;
+    if let Some(d) = s.tables[0]
+        .fields
+        .iter_mut()
+        .find(|d| d.name.as_str() == "b")
+    {
+        d.index = IndexHint::Lookup;
+    }
+    let r = block_on(fx.plane.apply_schema(ApplySchemaRequest {
+        space: sp(),
+        schema: s.clone(),
+        expected_version: Some(1),
+        min_durability: None,
+    }));
+    ensure!(
+        matches!(r, Ok(ref x) if x.changed),
+        "raised retention and a new index are additive: {r:?}"
+    );
+    let mut lower = s;
+    lower.version = 3;
+    lower.queues[0].spec.terminal_retention_ms -= 5_000;
+    let r = block_on(fx.plane.apply_schema(ApplySchemaRequest {
+        space: sp(),
+        schema: lower,
+        expected_version: Some(2),
+        min_durability: None,
+    }));
+    ensure!(
+        matches!(r, Err(DataPlaneError::SchemaConflict { .. })),
+        "lowering retention gave {r:?}"
+    );
+    Ok(())
+}
+
+fn rec_3b(fx: &Fixture) -> T {
+    let h = fx.hdr();
+    let mk = |v: i64| {
+        let mut it = NewItem::new(Some("md"), PriorityValue::Int(1));
+        it.metadata
+            .insert("min_durability".into(), serde_json::json!(v));
+        EnqueueRequest {
+            header: h.clone(),
+            queue: o("work"),
+            items: vec![it],
+            on_key_conflict: KeyConflict::Duplicate,
+        }
+    };
+    ok(block_on(fx.plane.enqueue(mk(1))), "first")?;
+    let r = block_on(fx.plane.enqueue(mk(2)));
+    ensure!(
+        matches!(r, Err(DataPlaneError::RequestIdConflict)),
+        "user data named min_durability was ignored: {r:?}"
+    );
+    Ok(())
+}
+
+fn rec_9(fx: &Fixture) -> T {
+    fill_kv(fx, 30, "rr")?;
+    let mut m = Mutate::new(
+        "kv",
+        Selection::Where {
+            predicate: Expr::eq(Expr::field("s"), Expr::text("rr")),
+        },
+        Action::Set(vec![(f("b"), Expr::boolean(true))]),
+        5,
+    );
+    m.chunk = Some(Chunk::Start);
+    let h = fx.hdr();
+    let first = ok(
+        fx.commit_with(
+            h.clone(),
+            vec![WriteOp::Mutate(m.clone())],
+            Params::new(),
+            false,
+        ),
+        "step",
+    )?;
+    let mut s = base_schema();
+    s.version = 2;
+    s.tables[0].fields.push(FieldDecl::stored(
+        "extra2",
+        ScalarType::Int,
+        true,
+        IndexHint::None,
+    ));
+    ok(
+        block_on(fx.plane.apply_schema(ApplySchemaRequest {
+            space: sp(),
+            schema: s,
+            expected_version: Some(1),
+            min_durability: None,
+        })),
+        "schema",
+    )?;
+    let again = ok(
+        fx.commit_with(h, vec![WriteOp::Mutate(m)], Params::new(), false),
+        "replay after schema change",
+    )?;
+    ensure!(
+        again == first,
+        "a recorded request did not replay before validation"
+    );
+    Ok(())
+}
+
+fn scan_4b(fx: &Fixture) -> T {
+    let n = fx.limits().max_read_scan_rows;
+    if n > 900 {
+        return skip("max_read_scan_rows too large for this test; use test limits");
+    }
+    fill_kv(fx, n + 5, "big")?;
+    let r = ok(fx.read("rows_sparse", vec![("s", text("big"))]), "read")?;
+    ensure!(
+        r.rows.is_empty() && r.scan_limited && r.next_page_token.is_some(),
+        "scan budget not applied: limited {} next {:?}",
+        r.scan_limited,
+        r.next_page_token
+    );
+    let r2 = ok(
+        block_on(fx.plane.read(ReadRequest {
+            space: sp(),
+            name: ReadName::new("rows_sparse"),
+            version: 1,
+            params: [(ParamName::new("s"), text("big"))].into_iter().collect(),
+            page_token: r.next_page_token,
+        })),
+        "next page",
+    )?;
+    ensure!(
+        !r2.scan_limited && r2.next_page_token.is_none(),
+        "the next page did not finish the scan"
+    );
+    Ok(())
+}
+
+fn read_2b(fx: &Fixture) -> T {
+    ok(
+        fx.put_kv(
+            1,
+            vec![("s", text("nd")), ("i", Value::Int(5))],
+            RowConflict::Replace,
+        ),
+        "put",
+    )?;
+    ok(
+        fx.put_kv(2, vec![("s", text("nd"))], RowConflict::Replace),
+        "put null",
+    )?;
+    ok(
+        fx.put_kv(
+            3,
+            vec![("s", text("nd")), ("i", Value::Int(9))],
+            RowConflict::Replace,
+        ),
+        "put",
+    )?;
+    let r = ok(fx.read("rows_by_s_desc", vec![("s", text("nd"))]), "read")?;
+    let got: Vec<_> = r.rows.iter().map(|row| row[&f("i")].clone()).collect();
+    ensure!(
+        got == vec![Value::Int(9), Value::Int(5), Value::Null(ScalarType::Int)],
+        "descending order with null last: {got:?}"
+    );
+    Ok(())
+}
+
+fn lim_1b(fx: &Fixture) -> T {
+    let r = fx.claim(1, fx.limits().max_lease_duration_ms + 1);
+    ensure!(
+        matches!(
+            r,
+            Err(DataPlaneError::BatchTooLarge(LimitKind::LeaseDuration))
+        ),
+        "lease over cap gave {r:?}"
+    );
+    Ok(())
+}
+
+fn cast_1b(fx: &Fixture) -> T {
+    use ScalarType::*;
+    let cases: Vec<(Expr, ScalarType, Value)> = vec![
+        (Expr::float(0.1), Text, text("0.1")),
+        (Expr::float(-2.5), Text, text("-2.5")),
+        (Expr::text("+1"), Float, Value::Float(1.0)),
+        (Expr::text(".5"), Float, Value::Float(0.5)),
+        (Expr::text("5."), Float, Value::Float(5.0)),
+        (Expr::text("1e999"), Float, Value::Null(Float)),
+    ];
+    for (e, to, want) in cases {
+        let v = act(fx, Expr::cast(e.clone(), to), to)?;
+        ensure!(v == want, "cast {e:?} to {to:?}: got {v:?}, want {want:?}");
+    }
+    Ok(())
+}
+
+fn patch_1b(fx: &Fixture) -> T {
+    let id = fx.push("pn", 1);
+    patch(
+        fx,
+        id,
+        vec![BodyPatch::Set {
+            pointer: ptr("/x"),
+            value: Expr::float(3.0),
+        }],
+    )?;
+    ensure!(
+        body_of(fx, id) == Some(serde_json::json!({"x": 3})),
+        "patched numbers are not normalized: {:?}",
+        body_of(fx, id)
+    );
+    Ok(())
+}
+
+fn lin_1(fx: &Fixture) -> T {
+    let items = (0..40)
+        .map(|i| NewItem::new(Some(&format!("lin{i}")), PriorityValue::Int(i)))
+        .collect();
+    ok(fx.enqueue(items, KeyConflict::Duplicate), "enqueue")?;
+    let got: Vec<ItemId> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|w| {
+                scope.spawn(move || {
+                    let mut ids = vec![];
+                    for _ in 0..12 {
+                        let mut req =
+                            ClaimRequest::new(fx.hdr(), "work", &format!("w{w}"), 2, 60_000);
+                        req.header.request_id = RequestId::new(fx.rid());
+                        if let Ok(r) = fx.claim_req(req) {
+                            ids.extend(r.items.into_iter().map(|i| i.item_id));
+                        }
+                    }
+                    ids
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
+    });
+    let distinct: std::collections::BTreeSet<_> = got.iter().collect();
+    ensure!(
+        distinct.len() == got.len(),
+        "an item was leased twice by concurrent claims"
+    );
+    ensure!(
+        got.len() == 40,
+        "concurrent claims returned {} of 40 items",
+        got.len()
     );
     Ok(())
 }

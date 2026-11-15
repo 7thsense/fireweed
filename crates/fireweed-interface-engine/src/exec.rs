@@ -10,13 +10,15 @@ use serde::{Deserialize, Serialize};
 use crate::state::*;
 
 /// Per-request execution context.
-pub(crate) struct Cx<'a> {
+pub struct Cx<'a> {
     pub t: i64,
     pub limits: &'a ImplementationLimits,
     pub params: &'a Params,
     pub space_key: &'a SpaceKey,
     /// Items whose `item_version` this request already incremented.
     pub bumped: BTreeSet<(ObjectName, u64)>,
+    /// Rows whose `fw_row_version` this request already incremented.
+    pub bumped_rows: BTreeSet<(ObjectName, Vec<KeyVal>)>,
 }
 
 impl Cx<'_> {
@@ -55,11 +57,7 @@ fn body_size(b: &Option<Body>) -> u64 {
 
 /// Constraint checks on an item after a change (API-006 §Rejecting
 /// conditions, last paragraph).
-pub(crate) fn check_item(
-    q: &Queue,
-    it: &Item,
-    limits: &ImplementationLimits,
-) -> Result<(), EntryStatus> {
+pub fn check_item(q: &Queue, it: &Item, limits: &ImplementationLimits) -> Result<(), EntryStatus> {
     if body_size(&it.body) > limits.max_body_bytes {
         return Err(EntryStatus::ValueTooLarge);
     }
@@ -101,7 +99,7 @@ pub(crate) fn check_item(
     Ok(())
 }
 
-pub(crate) fn check_row(
+pub fn check_row(
     tb: &Table,
     key: &[KeyVal],
     row: &Row,
@@ -173,7 +171,7 @@ fn parent_mut<'a>(
 
 /// Applies one patch (API-006 §Patch). Returns `true` if the body is now
 /// removed (root `Remove`).
-pub(crate) fn apply_patch(
+pub fn apply_patch(
     body: &mut serde_json::Value,
     patch: &BodyPatch,
     value: Option<serde_json::Value>,
@@ -279,7 +277,7 @@ fn patch_value(p: &BodyPatch) -> Option<&Expr> {
 }
 
 /// Applies patches in order; each value sees the item as changed so far.
-pub(crate) fn apply_patches(
+pub fn apply_patches(
     it: &mut Item,
     decl: &QueueDecl,
     patches: &[BodyPatch],
@@ -300,6 +298,9 @@ pub(crate) fn apply_patches(
             _ => serde_json::Value::Object(Default::default()),
         };
         let removed = apply_patch(&mut body, p, value).map_err(EntryStatus::EvaluationFault)?;
+        let body = normalize_json(&body).map_err(|e| EntryStatus::Invalid {
+            reason: e.to_string(),
+        })?;
         it.body = if removed {
             None
         } else {
@@ -310,7 +311,7 @@ pub(crate) fn apply_patches(
 }
 
 /// `Set`: every right-hand side sees the record as it was before.
-pub(crate) fn apply_item_set(
+pub fn apply_item_set(
     it: &mut Item,
     decl: &QueueDecl,
     sets: &[(FieldName, Expr)],
@@ -332,7 +333,7 @@ pub(crate) fn apply_item_set(
 }
 
 /// Normalizes a value before it is stored (API-006 §Canonical JSON).
-pub(crate) fn normalize_value(v: Value) -> Result<Value, EntryStatus> {
+pub fn normalize_value(v: Value) -> Result<Value, EntryStatus> {
     match v {
         Value::Json(j) => normalize_json(&j)
             .map(Value::Json)
@@ -376,11 +377,11 @@ fn normalize_body(b: &Option<Body>) -> Result<Option<Body>, EntryStatus> {
 
 // ----------------------------------------------------------------- enqueue
 
-pub(crate) struct EnqueueOutcome {
+pub struct EnqueueOutcome {
     pub result: EntryResult,
 }
 
-pub(crate) fn enqueue_item(
+pub fn enqueue_item(
     space_next_id: &mut u64,
     q: &mut Queue,
     item: &NewItem,
@@ -393,10 +394,11 @@ pub(crate) fn enqueue_item(
         });
     }
     let mut superseded = None;
+    let mut released = None;
     if let Some(key) = &item.client_item_key
         && let Some(&id) = q.keys.get(key.as_str())
+        && let Some(existing) = q.items.get(&id)
     {
-        let existing = &q.items[&id];
         match policy {
             KeyConflict::Duplicate => {
                 return Ok(EnqueueOutcome {
@@ -412,7 +414,10 @@ pub(crate) fn enqueue_item(
             KeyConflict::ReplacePending => match existing.state {
                 St::Pending => superseded = Some(id),
                 St::Leased => return Err(EntryStatus::Conflict),
-                _ => {}
+                // A retained terminal item or tombstone gives up its key
+                // reservation; it stays retained but is no longer
+                // addressable by key.
+                _ => released = Some(id),
             },
             _ => return Err(EntryStatus::Conflict),
         }
@@ -443,13 +448,31 @@ pub(crate) fn enqueue_item(
         terminal_at: None,
         code: None,
     };
-    if let Some(old) = superseded
+    // Supersede the old item tentatively (so it does not count against
+    // unique fields), check the new one, and restore the old item if the
+    // check fails: a failed replacement leaves the old item as it was.
+    let previous =
+        superseded.and_then(|old| q.items.get(&old).map(|o| (old, o.state, o.updated_at)));
+    if let Some((old, _, _)) = previous
         && let Some(o) = q.items.get_mut(&old)
     {
         o.state = St::Superseded;
         o.updated_at = cx.t;
     }
-    check_item(q, &new, cx.limits)?;
+    if let Err(e) = check_item(q, &new, cx.limits) {
+        if let Some((old, state, at)) = previous
+            && let Some(o) = q.items.get_mut(&old)
+        {
+            o.state = state;
+            o.updated_at = at;
+        }
+        return Err(e);
+    }
+    if let Some(old) = released
+        && let Some(o) = q.items.get_mut(&old)
+    {
+        o.keyed = false;
+    }
     q.items.insert(id, new);
     cx.bumped.insert((q.decl.name.clone(), id));
     if item.client_item_key.is_some() {
@@ -474,7 +497,7 @@ pub(crate) fn enqueue_item(
 
 /// Resolves a lease target to an item id with a valid lease, or the
 /// status explaining why not.
-pub(crate) fn valid_lease(q: &Queue, target: &LeaseTarget) -> Result<u64, EntryStatus> {
+pub fn valid_lease(q: &Queue, target: &LeaseTarget) -> Result<u64, EntryStatus> {
     match target {
         LeaseTarget::Item(l) => match q.items.get(&l.item_id.0) {
             None => Err(EntryStatus::StaleLease),
@@ -496,7 +519,7 @@ pub(crate) fn valid_lease(q: &Queue, target: &LeaseTarget) -> Result<u64, EntryS
     }
 }
 
-pub(crate) fn lease_item(
+pub fn lease_item(
     next_token: &mut u64,
     q: &mut Queue,
     id: u64,
@@ -518,7 +541,7 @@ pub(crate) fn lease_item(
     claimed_view(it, token)
 }
 
-pub(crate) fn claimed_view(it: &Item, token: String) -> ClaimedItem {
+pub fn claimed_view(it: &Item, token: String) -> ClaimedItem {
     ClaimedItem {
         item_id: ItemId(it.id),
         client_item_key: ClientItemKey::new(it.key.clone()),
@@ -537,7 +560,7 @@ pub(crate) fn claimed_view(it: &Item, token: String) -> ClaimedItem {
     }
 }
 
-pub(crate) fn renew_one(
+pub fn renew_one(
     q: &mut Queue,
     target: &LeaseTarget,
     duration_ms: u64,
@@ -567,7 +590,7 @@ pub(crate) fn renew_one(
     }
 }
 
-pub(crate) fn reassign_one(
+pub fn reassign_one(
     next_token: &mut u64,
     q: &mut Queue,
     target: &LeaseRef,
@@ -596,7 +619,7 @@ pub(crate) fn reassign_one(
 
 // --------------------------------------------------------------- finalize
 
-pub(crate) fn finalize_one(q: &mut Queue, e: &FinalizeEntry, cx: &mut Cx<'_>) -> EntryResult {
+pub fn finalize_one(q: &mut Queue, e: &FinalizeEntry, cx: &mut Cx<'_>) -> EntryResult {
     let id = match valid_lease(q, &e.target) {
         Ok(id) => id,
         Err(s) => return EntryResult::status(s),
@@ -699,10 +722,7 @@ pub(crate) fn finalize_one(q: &mut Queue, e: &FinalizeEntry, cx: &mut Cx<'_>) ->
 
 // ----------------------------------------------------------------- tables
 
-pub(crate) fn row_key(
-    decl: &TableDecl,
-    fields: &BTreeMap<FieldName, Value>,
-) -> Option<Vec<KeyVal>> {
+pub fn row_key(decl: &TableDecl, fields: &BTreeMap<FieldName, Value>) -> Option<Vec<KeyVal>> {
     decl.key
         .iter()
         .map(|k| fields.get(k).and_then(KeyVal::from_value))
@@ -720,11 +740,11 @@ fn expiry_for(decl: &TableDecl, fields: &BTreeMap<FieldName, Value>, t: i64) -> 
     }
 }
 
-pub(crate) fn put_row(
+pub fn put_row(
     tb: &mut Table,
     fields: &BTreeMap<FieldName, Value>,
     policy: RowConflict,
-    cx: &Cx<'_>,
+    cx: &mut Cx<'_>,
 ) -> Result<EntryResult, EntryStatus> {
     let fields = &normalize_fields(fields)?;
     let key = row_key(&tb.decl, fields).ok_or(EntryStatus::MissingField {
@@ -745,7 +765,9 @@ pub(crate) fn put_row(
             RowConflict::Replace => {
                 let mut r = existing.clone();
                 r.fields = fields.clone();
-                r.version += 1;
+                if cx.bumped_rows.insert((tb.decl.name.clone(), key.clone())) {
+                    r.version += 1;
+                }
                 r.updated_at = cx.t;
                 r.expires_at = expiry_for(&tb.decl, &r.fields, cx.t);
                 (EntryStatus::Updated, r)
@@ -768,7 +790,9 @@ pub(crate) fn put_row(
                         lease: None,
                     });
                 }
-                r.version += 1;
+                if cx.bumped_rows.insert((tb.decl.name.clone(), key.clone())) {
+                    r.version += 1;
+                }
                 r.updated_at = cx.t;
                 r.expires_at = expiry_for(&tb.decl, &r.fields, cx.t);
                 (EntryStatus::Updated, r)
@@ -776,6 +800,7 @@ pub(crate) fn put_row(
         },
         None => {
             let base = tb.hwm.get(&key).map(|(v, _)| *v).unwrap_or(0);
+            cx.bumped_rows.insert((tb.decl.name.clone(), key.clone()));
             let r = Row {
                 fields: fields.clone(),
                 version: base + 1,
@@ -803,7 +828,7 @@ pub(crate) fn put_row(
 
 /// Record key for ordering and continuations.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub(crate) enum RecKey {
+pub enum RecKey {
     Item(u64),
     Row(Vec<KeyVal>),
 }
@@ -819,7 +844,7 @@ fn continuation_fp(cx: &Cx<'_>, m: &Mutate, schema_version: u64) -> String {
     continuation_fp_for(cx.space_key, m, schema_version, cx.params)
 }
 
-pub(crate) fn continuation_fp_for(
+pub fn continuation_fp_for(
     space: &SpaceKey,
     m: &Mutate,
     schema_version: u64,
@@ -837,7 +862,7 @@ pub(crate) fn continuation_fp_for(
 }
 
 /// True if a continuation was issued for this request's selection.
-pub(crate) fn continuation_matches(
+pub fn continuation_matches(
     space: &SpaceKey,
     m: &Mutate,
     schema_version: u64,
@@ -852,7 +877,7 @@ pub(crate) fn continuation_matches(
         .is_some_and(|b| b.fp == fp)
 }
 
-pub(crate) enum MutateFail {
+pub enum MutateFail {
     Reason(FailureReason, Option<u32>),
 }
 
@@ -890,13 +915,13 @@ fn access_conjuncts(pred: &Expr, at: &AccessTerm) -> Vec<Expr> {
     }
 }
 
-pub(crate) struct Candidate {
+pub struct Candidate {
     pub key: RecKey,
     pub access: Value,
 }
 
 /// Candidates of a `Where` predicate in access-term order.
-pub(crate) fn where_candidates(
+pub fn where_candidates(
     space: &Space,
     target: &ObjectName,
     pred: &Expr,
@@ -1021,8 +1046,7 @@ fn resolve_item_ref(q: &Queue, r: &ItemRef) -> Result<Option<u64>, ()> {
         ItemRef::Id(id) => Ok(live(id.0)),
         ItemRef::Key(k) => Ok(q.keys.get(k.as_str()).and_then(|id| live(*id))),
         ItemRef::IdAndKey(id, k) => {
-            let by_key = q.keys.get(k.as_str()).copied();
-            if by_key.is_some() && by_key != Some(id.0) {
+            if q.keys.get(k.as_str()).copied() != Some(id.0) {
                 return Err(());
             }
             Ok(live(id.0))
@@ -1032,18 +1056,44 @@ fn resolve_item_ref(q: &Queue, r: &ItemRef) -> Result<Option<u64>, ()> {
 }
 
 /// Executes a `Mutate` on the working space.
-pub(crate) fn exec_mutate(
+/// Executes a `Mutate` on the working space. On rejection, returns the
+/// counts reached before the failure with it (API-006 §Phases rule 3).
+pub fn exec_mutate(
     space: &mut Space,
     m: &Mutate,
     cx: &mut Cx<'_>,
-) -> Result<(OpResult, Option<Continuation>), MutateFail> {
+) -> Result<(OpResult, Option<Continuation>), MutateRejection> {
     let mut res = OpResult {
         evaluated: true,
         ..Default::default()
     };
+    match exec_mutate_inner(space, m, cx, &mut res) {
+        Ok(c) => Ok((res, c)),
+        Err(MutateFail::Reason(r, e)) => Err((r, e, res)),
+    }
+}
+
+/// A rejected `Mutate`: the reason, the entry it names, and the counts
+/// reached before it.
+pub type MutateRejection = (FailureReason, Option<u32>, OpResult);
+
+/// One slot per addressed key, in key order.
+enum Slot {
+    NotFound,
+    Skipped,
+    Record(RecKey),
+}
+
+fn exec_mutate_inner(
+    space: &mut Space,
+    m: &Mutate,
+    cx: &mut Cx<'_>,
+    res: &mut OpResult,
+) -> Result<Option<Continuation>, MutateFail> {
     let is_queue = space.queues.contains_key(&m.target);
     // Selection.
     let mut selected: Vec<RecKey> = Vec::new();
+    let mut slots: Vec<Slot> = Vec::new();
     let mut continuation = None;
     let chunked = m.chunk.is_some();
     match &m.selection {
@@ -1091,16 +1141,19 @@ pub(crate) fn exec_mutate(
                     }
                     _ => {}
                 }
-                match rk {
-                    None => res.entries.push(EntryResult::status(EntryStatus::NotFound)),
+                slots.push(match rk {
+                    None => Slot::NotFound,
                     Some(k) => {
                         if seen.insert(k.clone())
                             && record_matches(space, &m.target, &k, filter.as_ref(), cx)
                         {
-                            selected.push(k);
+                            selected.push(k.clone());
+                            Slot::Record(k)
+                        } else {
+                            Slot::Skipped
                         }
                     }
-                }
+                });
             }
         }
         Selection::Where { predicate } => {
@@ -1168,6 +1221,9 @@ pub(crate) fn exec_mutate(
             })));
         }
     }
+    if matches!(m.selection, Selection::Where { .. }) {
+        slots = selected.iter().cloned().map(Slot::Record).collect();
+    }
     // Lease policy, counting.
     res.matched = selected.len() as u64;
     if !chunked && res.matched > m.limit as u64 {
@@ -1182,20 +1238,25 @@ pub(crate) fn exec_mutate(
             matched: res.matched,
         }));
     }
-    for (i, k) in selected.iter().enumerate() {
-        let entry =
-            match k {
-                RecKey::Item(id) => apply_item_action(space, &m.target, *id, m, cx, &mut res)?,
-                RecKey::Row(key) => apply_row_action(space, &m.target, key, m, cx, &mut res)
-                    .map_err(|s| match entry_fail(s) {
-                        MutateFail::Reason(r, _) => MutateFail::Reason(r, Some(i as u32)),
-                    })?,
-            };
+    // One entry per slot, in key order; a failure names the slot.
+    for (i, slot) in slots.iter().enumerate() {
+        let at = |f: MutateFail| match f {
+            MutateFail::Reason(r, _) => MutateFail::Reason(r, Some(i as u32)),
+        };
+        let entry = match slot {
+            Slot::NotFound => Some(EntryResult::status(EntryStatus::NotFound)),
+            Slot::Skipped => Some(EntryResult::status(EntryStatus::Skipped)),
+            Slot::Record(RecKey::Item(id)) => {
+                apply_item_action(space, &m.target, *id, m, cx, res).map_err(at)?
+            }
+            Slot::Record(RecKey::Row(key)) => apply_row_action(space, &m.target, key, m, cx, res)
+                .map_err(|s| at(entry_fail(s)))?,
+        };
         if let Some(e) = entry {
             res.entries.push(e);
         }
     }
-    Ok((res, continuation))
+    Ok(continuation)
 }
 
 fn transition_status(t: &Transition) -> EntryStatus {
@@ -1331,7 +1392,8 @@ fn apply_item_action(
         Action::Transition(tr) => {
             let ok = match tr {
                 Transition::Redrive => terminal,
-                Transition::Release => it.state == St::Leased,
+                // Applicability is decided on the state before any lease break.
+                Transition::Release => leased,
                 _ => !terminal,
             };
             if !ok {
@@ -1432,11 +1494,11 @@ fn apply_row_action(
             for (f, v) in out {
                 row.fields.insert(f, normalize_value(v)?);
             }
-            row.version += 1;
-            row.updated_at = cx.t;
-            if let Some(RowExpiry::AfterWrite { ttl_ms }) = &tb.decl.expiry {
-                row.expires_at = Some(cx.t + *ttl_ms as i64);
+            if cx.bumped_rows.insert((target.clone(), key.to_vec())) {
+                row.version += 1;
             }
+            row.updated_at = cx.t;
+            row.expires_at = expiry_for(&tb.decl, &row.fields, cx.t);
             EntryStatus::Updated
         }
         Action::Retire => {

@@ -11,7 +11,7 @@ use crate::state::*;
 /// Claim candidates in claim order, with the writer scan budget applied
 /// (API-006 §Work limits). Returns the chosen ids and whether the scan
 /// was cut short.
-pub(crate) fn claim_candidates(
+pub fn claim_candidates(
     q: &Queue,
     r: &ClaimRequest,
     t: i64,
@@ -141,7 +141,7 @@ fn item_view(q: &Queue, it: &Item) -> ItemView {
     }
 }
 
-pub(crate) fn get(space: &Space, r: &GetRequest, t: i64) -> DpResult<GetResponse> {
+pub fn get(space: &Space, r: &GetRequest, t: i64) -> DpResult<GetResponse> {
     let mut results = vec![];
     for target in &r.targets {
         results.push(match target {
@@ -207,7 +207,7 @@ pub(crate) fn get(space: &Space, r: &GetRequest, t: i64) -> DpResult<GetResponse
     })
 }
 
-pub(crate) fn metrics(q: &Queue, t: i64) -> QueueMetrics {
+pub fn metrics(q: &Queue, t: i64) -> QueueMetrics {
     let mut m = QueueMetrics {
         as_of: UtcMillis(t),
         pending: 0,
@@ -258,7 +258,7 @@ pub(crate) fn metrics(q: &Queue, t: i64) -> QueueMetrics {
     m
 }
 
-pub(crate) fn discover(space: &Space, r: &DiscoverRequest, t: i64) -> DiscoverResponse {
+pub fn discover(space: &Space, r: &DiscoverRequest, t: i64) -> DiscoverResponse {
     let mut scopes = vec![];
     for (name, q) in &space.queues {
         if r.queues.as_ref().is_some_and(|allow| !allow.contains(name)) || q.paused {
@@ -292,29 +292,38 @@ pub(crate) fn discover(space: &Space, r: &DiscoverRequest, t: i64) -> DiscoverRe
             });
         }
     }
-    scopes.sort_by_key(|s| std::cmp::Reverse(s.oldest_eligible_age_ms));
-    scopes.truncate(r.max_results as usize);
+    scopes.sort_by(|a, b| {
+        b.oldest_eligible_age_ms
+            .cmp(&a.oldest_eligible_age_ms)
+            .then_with(|| a.queue.cmp(&b.queue))
+            .then_with(|| a.group_key.cmp(&b.group_key))
+    });
+    let offset: usize = r
+        .page_token
+        .as_ref()
+        .and_then(|p| p.as_str().parse().ok())
+        .unwrap_or(0);
+    let total = scopes.len();
+    let page: Vec<ActiveScope> = scopes
+        .into_iter()
+        .skip(offset)
+        .take(r.max_results as usize)
+        .collect();
+    let next = offset + page.len();
     DiscoverResponse {
-        scopes,
-        next_page_token: None,
+        scopes: page,
+        next_page_token: (next < total).then(|| PageToken::new(next.to_string())),
         partial: false,
     }
 }
+
+/// A candidate row: its key, its fields, and whether the filter selected it.
+type RowEntry = (Vec<Value>, BTreeMap<FieldName, Value>, Value);
 
 /// Group-by values and the rows in the group.
 type Group<'a> = (Vec<Value>, Vec<&'a BTreeMap<FieldName, Value>>);
 
 // ------------------------------------------------------------ declared reads
-
-fn page_offset(tok: &Option<PageToken>) -> DpResult<usize> {
-    match tok {
-        None => Ok(0),
-        Some(p) => p
-            .as_str()
-            .parse()
-            .map_err(|_| DataPlaneError::InvalidRequest("page token".into())),
-    }
-}
 
 fn text_param(r: &ReadRequest, name: &str) -> Option<String> {
     match r.params.get(&ParamName::new(name)) {
@@ -389,10 +398,18 @@ fn builtin(
             let group = text_param(r, "group_key");
             let worker = text_param(r, "worker_id");
             let prefix = text_param(r, "key_prefix");
-            let offset = page_offset(&r.page_token)?;
+            let after: Option<u64> = match &r.page_token {
+                None => None,
+                Some(p) => Some(
+                    p.as_str()
+                        .parse()
+                        .map_err(|_| DataPlaneError::InvalidRequest("page token".into()))?,
+                ),
+            };
             let all: Vec<&Item> = q
                 .items
                 .values()
+                .filter(|it| after.is_none_or(|a| it.id > a))
                 .filter(|it| it.is_live() || it.is_terminal())
                 .filter(|it| {
                     state
@@ -418,7 +435,6 @@ fn builtin(
             let page = limits.max_read_rows as usize;
             let rows: Vec<_> = all
                 .iter()
-                .skip(offset)
                 .take(page)
                 .map(|it| {
                     let view = ItemRow {
@@ -431,14 +447,17 @@ fn builtin(
                             (FieldName::new(*n), view.field(&FieldName::new(*n)).unwrap())
                         })
                         .collect();
+                    m.insert(
+                        FieldName::new("fw_priority"),
+                        view.field(&FieldName::new("fw_priority")).unwrap(),
+                    );
                     for d in &q.decl.fields {
                         m.insert(d.name.clone(), view.field(&d.name).unwrap());
                     }
                     m
                 })
                 .collect();
-            let next =
-                (offset + page < all.len()).then(|| PageToken::new((offset + page).to_string()));
+            let next = (all.len() > page).then(|| PageToken::new(all[page - 1].id.to_string()));
             Ok(ReadResponse {
                 as_of: UtcMillis(t),
                 rows,
@@ -453,7 +472,7 @@ fn builtin(
     }
 }
 
-pub(crate) fn read(
+pub fn read(
     space: &Space,
     r: &ReadRequest,
     t: i64,
@@ -486,7 +505,7 @@ pub(crate) fn read(
     let now = UtcMillis(t);
     let msv = limits.max_set_values;
     // Rows as field maps, each with its key for ordering.
-    let mut rows: Vec<(Vec<Value>, BTreeMap<FieldName, Value>, Value)> = vec![];
+    let mut rows: Vec<RowEntry> = vec![];
     let collect = |row: &dyn RowAccess, fields: &[FieldName]| -> BTreeMap<FieldName, Value> {
         fields
             .iter()
@@ -593,28 +612,64 @@ pub(crate) fn read(
                 }
                 key_cmp(&a.0, &b.0)
             });
-            let offset = page_offset(&r.page_token)?;
+            // The page token is the position of the last record examined,
+            // in result order (order fields, then key).
+            let position = |row: &RowEntry| -> (Vec<Value>, Vec<Value>) {
+                (
+                    decl.order.iter().map(|(f, _)| row.1[f].clone()).collect(),
+                    row.0.clone(),
+                )
+            };
+            let cmp_pos = |a: &(Vec<Value>, Vec<Value>), b: &(Vec<Value>, Vec<Value>)| {
+                for (i, (_, dir)) in decl.order.iter().enumerate() {
+                    let o = sort_compare(&a.0[i], &b.0[i]);
+                    let o = if *dir == Direction::Desc {
+                        o.reverse()
+                    } else {
+                        o
+                    };
+                    if o != Ordering::Equal {
+                        return o;
+                    }
+                }
+                key_cmp(&a.1, &b.1)
+            };
+            let start = match &r.page_token {
+                None => 0,
+                Some(p) => {
+                    use base64::Engine as _;
+                    let after: (Vec<Value>, Vec<Value>) = base64::engine::general_purpose::STANDARD
+                        .decode(p.as_str())
+                        .ok()
+                        .and_then(|b| serde_json::from_slice(&b).ok())
+                        .ok_or_else(|| DataPlaneError::InvalidRequest("page token".into()))?;
+                    rows.iter()
+                        .position(|row| cmp_pos(&position(row), &after) == Ordering::Greater)
+                        .unwrap_or(rows.len())
+                }
+            };
+            let token = |row: &RowEntry| {
+                use base64::Engine as _;
+                PageToken::new(
+                    base64::engine::general_purpose::STANDARD
+                        .encode(serde_json::to_vec(&position(row)).expect("serialize")),
+                )
+            };
             let budget = limits.max_read_scan_rows as usize;
             let mut out = vec![];
             let mut next = None;
             let mut scan_limited = false;
-            for (examined, (i, (_, fields_map, sel))) in
-                rows.iter().enumerate().skip(offset).enumerate()
-            {
-                if out.len() >= decl.max_rows as usize {
-                    next = Some(PageToken::new(i.to_string()));
+            for (examined, (i, row)) in rows.iter().enumerate().skip(start).enumerate() {
+                if out.len() >= decl.max_rows as usize || examined >= budget {
+                    scan_limited = examined >= budget && out.len() < decl.max_rows as usize;
+                    next = Some(token(&rows[i - 1]));
                     break;
                 }
-                if examined >= budget {
-                    next = Some(PageToken::new(i.to_string()));
-                    scan_limited = true;
-                    break;
-                }
-                if *sel == Value::Bool(true) {
+                if row.2 == Value::Bool(true) {
                     out.push(
                         fields
                             .iter()
-                            .map(|f| (f.clone(), fields_map[f].clone()))
+                            .map(|f| (f.clone(), row.1[f].clone()))
                             .collect(),
                     );
                 }

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use fireweed_interface::*;
 
 #[derive(Clone, Debug)]
-pub(crate) struct Space {
+pub struct Space {
     pub schema: SpaceSchema,
     pub queues: BTreeMap<ObjectName, Queue>,
     pub tables: BTreeMap<ObjectName, Table>,
@@ -15,15 +15,15 @@ pub(crate) struct Space {
     pub last_time: i64,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct Record {
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Record {
     pub fingerprint: String,
     pub recorded_at: i64,
     pub response: RecordedResponse,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Queue {
+pub struct Queue {
     pub decl: QueueDecl,
     pub items: BTreeMap<u64, Item>,
     /// Client key to item id, for live and retained items.
@@ -34,8 +34,8 @@ pub(crate) struct Queue {
     pub gate_epoch: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum St {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum St {
     Pending,
     Leased,
     Complete,
@@ -44,15 +44,15 @@ pub(crate) enum St {
     Superseded,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct Lease {
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Lease {
     pub token: String,
     pub worker: WorkerId,
     pub expires_at: i64,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct Item {
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Item {
     pub id: u64,
     pub key: String,
     pub keyed: bool,
@@ -91,7 +91,7 @@ impl Item {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-pub(crate) enum KeyVal {
+pub enum KeyVal {
     Int(i64),
     Text(String),
     Bytes(Vec<u8>),
@@ -111,15 +111,15 @@ impl KeyVal {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Table {
+pub struct Table {
     pub decl: TableDecl,
     pub rows: BTreeMap<Vec<KeyVal>, Row>,
     /// Per-key version high-water mark and deletion time.
     pub hwm: BTreeMap<Vec<KeyVal>, (u64, i64)>,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct Row {
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Row {
     pub fields: BTreeMap<FieldName, Value>,
     pub version: u64,
     pub created_at: i64,
@@ -129,7 +129,7 @@ pub(crate) struct Row {
 
 // ----------------------------------------------------------- type envs
 
-pub(crate) const QUEUE_SYSTEM_FIELDS: &[(&str, ScalarType)] = &[
+pub const QUEUE_SYSTEM_FIELDS: &[(&str, ScalarType)] = &[
     ("fw_item_id", ScalarType::Int),
     ("fw_key", ScalarType::Text),
     ("fw_state", ScalarType::Text),
@@ -147,14 +147,14 @@ pub(crate) const QUEUE_SYSTEM_FIELDS: &[(&str, ScalarType)] = &[
     ("fw_metadata", ScalarType::Json),
 ];
 
-pub(crate) fn priority_type(kind: PriorityKind) -> ScalarType {
+pub fn priority_type(kind: PriorityKind) -> ScalarType {
     match kind {
         PriorityKind::Timestamp => ScalarType::Timestamp,
         _ => ScalarType::Int,
     }
 }
 
-pub(crate) fn queue_type_env(decl: &QueueDecl, params: &Params) -> MapTypeEnv {
+pub fn queue_type_env(decl: &QueueDecl, params: &Params) -> MapTypeEnv {
     let mut env = MapTypeEnv::default();
     for (n, t) in QUEUE_SYSTEM_FIELDS {
         env.fields.insert(FieldName::new(*n), *t);
@@ -172,7 +172,7 @@ pub(crate) fn queue_type_env(decl: &QueueDecl, params: &Params) -> MapTypeEnv {
     env
 }
 
-pub(crate) fn table_type_env(decl: &TableDecl, params: &Params) -> MapTypeEnv {
+pub fn table_type_env(decl: &TableDecl, params: &Params) -> MapTypeEnv {
     let mut env = MapTypeEnv::default();
     env.fields
         .insert(FieldName::new("fw_row_version"), ScalarType::Int);
@@ -200,7 +200,7 @@ fn hint_kind(f: &FieldDecl) -> Option<IndexKind> {
     }
 }
 
-pub(crate) fn queue_index(decl: &QueueDecl, f: &FieldName) -> Option<IndexKind> {
+pub fn queue_index(decl: &QueueDecl, f: &FieldName) -> Option<IndexKind> {
     match f.as_str() {
         "fw_item_id" | "fw_key" => Some(IndexKind::Unique),
         "fw_state" | "fw_group_key" | "fw_cohort_id" | "fw_worker_id" => Some(IndexKind::Lookup),
@@ -214,7 +214,7 @@ pub(crate) fn queue_index(decl: &QueueDecl, f: &FieldName) -> Option<IndexKind> 
     }
 }
 
-pub(crate) fn table_index(decl: &TableDecl, f: &FieldName) -> Option<IndexKind> {
+pub fn table_index(decl: &TableDecl, f: &FieldName) -> Option<IndexKind> {
     if decl.key.first() == Some(f) {
         return Some(if decl.key.len() == 1 {
             IndexKind::Unique
@@ -230,7 +230,7 @@ pub(crate) fn table_index(decl: &TableDecl, f: &FieldName) -> Option<IndexKind> 
 
 // ------------------------------------------------------------- row views
 
-pub(crate) struct ItemRow<'a> {
+pub struct ItemRow<'a> {
     pub item: &'a Item,
     pub decl: &'a QueueDecl,
 }
@@ -245,7 +245,7 @@ fn opt_text(v: Option<&str>) -> Value {
         .unwrap_or(Value::Null(ScalarType::Text))
 }
 
-pub(crate) fn priority_value(p: PriorityValue) -> Value {
+pub fn priority_value(p: PriorityValue) -> Value {
     match p {
         PriorityValue::Int(i) => Value::Int(i),
         PriorityValue::Timestamp(t) => Value::Timestamp(t),
@@ -292,7 +292,7 @@ impl RowAccess for ItemRow<'_> {
     }
 }
 
-pub(crate) struct TableRow<'a> {
+pub struct TableRow<'a> {
     pub row: &'a Row,
     pub decl: &'a TableDecl,
 }
@@ -315,7 +315,7 @@ impl RowAccess for TableRow<'_> {
 
 /// Applies every transition due at or before `t` (API-006 §Time-driven
 /// transitions): lease expiry, then retention.
-pub(crate) fn settle(space: &mut Space, t: i64) {
+pub fn settle(space: &mut Space, t: i64) {
     let retention = space.schema.request_id_retention_ms as i64;
     space.records.retain(|_, r| r.recorded_at + retention > t);
     for q in space.queues.values_mut() {
@@ -330,14 +330,20 @@ pub(crate) fn settle(space: &mut Space, t: i64) {
                 it.state = St::Pending;
                 it.lease = None;
             }
-            if let Some(ta) = it.terminal_at
-                && matches!(it.state, St::Complete | St::Failed | St::Tombstone)
-                && ta
-                    + spec
-                        .client_item_key_retention_ms
-                        .max(spec.terminal_retention_ms) as i64
-                    <= t
-            {
+            if let Some(ta) = it.terminal_at {
+                // Terminal retention ends addressability; the item becomes a
+                // tombstone that still reserves its key.
+                if matches!(it.state, St::Complete | St::Failed)
+                    && ta + spec.terminal_retention_ms as i64 <= t
+                {
+                    it.state = St::Tombstone;
+                }
+                // Key retention ends the reservation.
+                if it.state == St::Tombstone && ta + spec.client_item_key_retention_ms as i64 <= t {
+                    forget.push(it.id);
+                }
+            }
+            if it.state == St::Superseded && it.updated_at + retention <= t {
                 forget.push(it.id);
             }
         }
@@ -348,8 +354,6 @@ pub(crate) fn settle(space: &mut Space, t: i64) {
                 q.keys.remove(&it.key);
             }
         }
-        q.items
-            .retain(|_, it| it.state != St::Superseded || it.updated_at + retention > t);
     }
     for tb in space.tables.values_mut() {
         let expired: Vec<Vec<KeyVal>> = tb
@@ -369,7 +373,7 @@ pub(crate) fn settle(space: &mut Space, t: i64) {
 
 /// True if the item is eligible under API-001 Eligibility Precedence A at
 /// `eligibility_time` (pause handled by the caller).
-pub(crate) fn eligible(q: &Queue, it: &Item, eligibility_time: i64) -> bool {
+pub fn eligible(q: &Queue, it: &Item, eligibility_time: i64) -> bool {
     if it.state != St::Pending {
         return false;
     }
@@ -390,7 +394,7 @@ pub(crate) fn eligible(q: &Queue, it: &Item, eligibility_time: i64) -> bool {
 }
 
 /// Claim order: priority (by direction), then item id.
-pub(crate) fn claim_order(q: &Queue, a: &Item, b: &Item) -> std::cmp::Ordering {
+pub fn claim_order(q: &Queue, a: &Item, b: &Item) -> std::cmp::Ordering {
     let p = a.priority.cmp(&b.priority);
     let p = if q.decl.spec.priority_direction == Direction::Desc {
         p.reverse()
@@ -400,7 +404,7 @@ pub(crate) fn claim_order(q: &Queue, a: &Item, b: &Item) -> std::cmp::Ordering {
     p.then(a.id.cmp(&b.id))
 }
 
-pub(crate) fn resolve_schedule(s: &Schedule, t: i64) -> i64 {
+pub fn resolve_schedule(s: &Schedule, t: i64) -> i64 {
     match s {
         Schedule::At(at) => at.0,
         Schedule::After { delay_ms } => t.saturating_add(*delay_ms as i64),

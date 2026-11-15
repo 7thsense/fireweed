@@ -38,3 +38,30 @@ fn conformance_depends_on_no_implementation() {
         "fireweed-interface-conformance depends on {bad:?}"
     );
 }
+
+/// Rule 4: implementations depend on the interface and shared internal
+/// libraries only, never on another implementation.
+#[test]
+fn implementations_depend_on_no_other_implementation() {
+    let allowed = ["fireweed-interface", "fireweed-interface-engine"];
+    for (name, manifest) in [
+        (
+            "fireweed-interface-memory",
+            include_str!("../../fireweed-interface-memory/Cargo.toml"),
+        ),
+        (
+            "fireweed-interface-postgres",
+            include_str!("../../fireweed-interface-postgres/Cargo.toml"),
+        ),
+        (
+            "fireweed-interface-engine",
+            include_str!("../../fireweed-interface-engine/Cargo.toml"),
+        ),
+    ] {
+        let bad: Vec<_> = dependencies(manifest)
+            .into_iter()
+            .filter(|d| d.starts_with("fireweed") && !allowed.contains(&d.as_str()))
+            .collect();
+        assert!(bad.is_empty(), "{name} depends on {bad:?}");
+    }
+}

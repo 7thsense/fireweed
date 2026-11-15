@@ -67,7 +67,9 @@ pub fn base_schema() -> SpaceSchema {
     });
     spec.recurrence = true;
     spec.max_attempts = 2;
-    spec.client_item_key_retention_ms = 60_000;
+    // Different retentions, so addressability and key reservation end at
+    // different instants (RET-1).
+    spec.client_item_key_retention_ms = 120_000;
     spec.terminal_retention_ms = 60_000;
     let work = QueueDecl {
         name: o("work"),
@@ -106,6 +108,15 @@ pub fn base_schema() -> SpaceSchema {
             FieldDecl::stored("req", Text, false, IndexHint::None),
         ],
         expiry: Some(RowExpiry::AfterWrite { ttl_ms: 10_000 }),
+    };
+    let timed = TableDecl {
+        name: o("timed"),
+        key: vec![f("k")],
+        fields: vec![
+            FieldDecl::stored("k", Int, false, IndexHint::Unique),
+            FieldDecl::stored("at", Timestamp, true, IndexHint::None),
+        ],
+        expiry: Some(RowExpiry::AtField(f("at"))),
     };
     let nums = TableDecl {
         name: o("nums"),
@@ -162,6 +173,33 @@ pub fn base_schema() -> SpaceSchema {
             order: vec![(f("i"), Direction::Asc)],
             max_rows: 2,
         },
+        ReadDecl {
+            name: ReadName::new("rows_by_s_desc"),
+            version: 1,
+            source: o("kv"),
+            params: vec![(ParamName::new("s"), Text)],
+            filter: Expr::eq(Expr::field("s"), Expr::param("s")),
+            output: ReadOutput::Rows {
+                fields: vec![f("k"), f("i")],
+            },
+            order: vec![(f("i"), Direction::Desc)],
+            max_rows: 10,
+        },
+        ReadDecl {
+            name: ReadName::new("rows_sparse"),
+            version: 1,
+            source: o("kv"),
+            params: vec![(ParamName::new("s"), Text)],
+            filter: Expr::And(vec![
+                Expr::eq(Expr::field("s"), Expr::param("s")),
+                Expr::eq(Expr::field("i"), Expr::int(-1)),
+            ]),
+            output: ReadOutput::Rows {
+                fields: vec![f("k")],
+            },
+            order: vec![],
+            max_rows: 10,
+        },
     ];
     for p in PCTS {
         reads.push(by_g(
@@ -180,7 +218,7 @@ pub fn base_schema() -> SpaceSchema {
         version: 1,
         request_id_retention_ms: 600_000,
         queues: vec![work],
-        tables: vec![kv, strict, nums],
+        tables: vec![kv, strict, timed, nums],
         event_logs: vec![],
         blobs: None,
         reads,
