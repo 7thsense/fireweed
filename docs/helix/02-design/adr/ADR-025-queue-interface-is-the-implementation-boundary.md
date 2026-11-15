@@ -40,6 +40,12 @@ cohort deadline rule (§8), and recording rejected requests (§5). Snorri's
 open items O2, O14, O15 and O16 remain with the owner; text that depends on
 them is marked.
 
+Revision 5 (2026-11-15) fixes the review round four defects (API-006
+revision 5) and starts the code: the crate `fireweed-interface` now defines
+every type, `fireweed-interface-memory` implements the interface in memory,
+and `fireweed-interface-conformance` runs the rule-pinning tests against
+it. Three new owner questions are recorded (16 to 19).
+
 ## Context
 
 ### Intent
@@ -125,7 +131,7 @@ needs Cayce's confirmation.
 
 ## Owner decisions
 
-| # | Decision | Source | Status in revision 3 |
+| # | Decision | Source | Status in revision 5 |
 |---|----------|--------|----------------------|
 | D1 | Time-driven transitions are in the contract; no caller tick. | Owner, 2026-11-13 | Kept (§8). |
 | D2 | One time authority per storage. | Owner, 2026-11-13 | Kept. Claims take an optional eligibility time; lease time always comes from the authority (§8), pending Snorri O2. The Cayce project withdrew its "clock as an input to claim and lease" wording on 2026-11-15. |
@@ -183,7 +189,7 @@ named objects of four shapes, declared in the space's schema:
 |-------|-------|--------|
 | Queue | Work items: priority, schedule, leases, retries, gates, groups, cohorts, recurrence, declared typed fields, a JSON body patched by path, and key retention for dedupe | Recipient and workflow work; Snorri instance heads and their await fields (D8); effect items and send intents; external events deduplicated by provider id |
 | Table | Rows by typed primary key, with typed columns; atomic set, increment and conditional update; row expiry | Keyed state (per-recipient, per-run), handler idempotency records, admission chunk state, suppression flags, rollups, rate and slot counters, consumer cursors |
-| Event log | Append-only entries with a log-wide sequence in commit order and a declared partition key; read by partition or from a cursor; retention by age or count | Delivery and engagement events, outbox feeds (including export to Niflheim), queue transition history |
+| Event log | Append-only entries with a log-wide sequence in commit order and a declared partition key; read by partition or from a cursor; retention by age | Delivery and engagement events, outbox feeds (including export to Niflheim), queue transition history |
 | Blob | Immutable byte objects, content-addressed, referenced from other shapes | Large transition outputs, workflow definitions, rendered messages, attachments |
 
 Counters are table columns with atomic increment, and a conditional
@@ -349,10 +355,12 @@ field, body and gate changes), require a matching token, or break the lease
 
 `ImplementationLimits` declares the caps: operations, entries and bytes per
 request; the resulting size of every value; records a selector may match or
-affect; and a scan budget, `max_scan_rows`, on the candidates any selection,
-claim filter or read examines. Structural caps fail validation. A scan or
-match over budget rejects an unchunked write, ends a chunk step or page with
-a continuation, or returns a partial claim.
+affect; cohort size; and two scan budgets on records examined, one for the
+writer (claims, `Mutate`, chunk steps) and one for snapshot reads.
+Structural caps fail validation. A scan or match over budget rejects an
+unchunked write, ends a chunk step or page with a continuation, or returns
+a partial claim that is a prefix of claim order. Records are examined in
+result order, which composite indexes make possible.
 
 `dry_run` evaluates a commit's guards and selections, returns the counts it
 would affect, and records nothing.
@@ -360,8 +368,10 @@ would affect, and records nothing.
 A `Mutate` whose selection exceeds the cap may instead run as a sequence of
 bounded steps: the response returns a continuation, and the caller submits
 the next step. Each step is its own linearization point and its own commit,
-and steps advance in key order. A chunked `Mutate` must be the only
-operation in its commit.
+and steps advance in access-term order (the access field's value, then
+key). A chunked `Mutate` must be the only operation in its commit. A step
+that reaches a cohort it cannot take whole skips that cohort and counts it,
+so every step makes progress.
 
 ### 11. Implementations
 
@@ -376,17 +386,22 @@ operation in its commit.
 The Postgres implementation keeps TD-002's queue tables, indexes, `SKIP
 LOCKED` claim and group and cohort locking, and drops the command log,
 `LeaseExpired` commands, `assignment_epoch` fencing and epoch-fenced
-sweepers.
+sweepers. Group commits and chunk steps run at `SERIALIZABLE`, so absence
+guards and range expectations cannot be defeated by write skew; verbs run
+at `READ COMMITTED` with an explicit lock protocol (API-006).
 
 ### 12. Conformance
 
-`fireweed-conformance` tests through the interface only. It reads
+The conformance suite tests through the interface only. It reads
 `Guarantees` and `Capabilities`, and covers every shape, group commit
 atomicity, caps and chunking, declared reads, the expression semantics, the
 time rules under a manual clock, concurrent claims, and crash and reopen in
-a killed child process. A test-only crate runs a differential test against
-the Postgres implementation, including generated expressions and
-aggregates.
+a killed child process. Each rule is pinned by a named test (API-006
+§Rule-pinning tests) that every implementation runs. A test-only crate runs
+a differential test against the Postgres implementation, including
+generated expressions and aggregates. The suite starts as
+`fireweed-interface-conformance` beside the existing `fireweed-conformance`,
+which keeps testing the current runtime until migration step 6.
 
 ### 13. The facade and RESP
 
@@ -446,7 +461,7 @@ not on the interface or on `Fireweed`.
 | ADR-018 | Exact ensure becomes `apply_schema` with an expected version. |
 | ADR-022 | Stands for the single concrete `Fireweed`, except `projection_control()`, `StorageConfig` and maintenance leave it. |
 | API-001 | Major version. Remove storage language and `SetGates.applied_command_position`. Replace `MutateItems` with `Mutate` requests, drop `evaluated_at` and ordered-selector first-match ownership. Add `eligibility_time` to claims, declared-field filters, `ReassignLeases`, lease policies including lease break, the cohort deadline rule evaluated at the deadline instant (§8), the time rule, request records for rejected requests, and lease expiry not changing `item_version`. Define progress metrics by base eligibility. Restate atomicity without an owner. Move discovery authorization to the adapter. |
-| API-002 | Operator actions become requests: pause and resume are `SetQueueState`; redrive and repair are `Mutate` transitions; purge and archive are `Mutate` retire; audit is an event log; operation lookup is `request_id` replay. `max_affected` becomes the per-request limit. |
+| API-002 | Operator actions become requests: pause and resume are `SetQueueState`; redrive and repair are `Mutate` transitions with lease break where forced; purge is `Mutate` retire; archive sets item metadata and deletes nothing; audit is an event log; operation lookup is `request_id` replay. `max_affected` becomes the per-request limit. |
 | API-003 | Profiles are restated in API-006 terms. |
 | API-004 | Replaced by declared reads. |
 | API-005 | Rewritten as the binding of API-006 to `Fireweed`. |
@@ -465,9 +480,10 @@ object-log, RESP and TD-003 changes land at step 6.
 ### Migration order
 
 1. Create `fireweed-interface` with API-006's v1 types and traits. Add the
-   dependency test.
-2. Write `fireweed-conformance` against it, and the in-memory implementation
-   alongside, so the suite has a first target.
+   dependency test. (Started in revision 5.)
+2. Write `fireweed-interface-conformance` against it, and the in-memory
+   implementation `fireweed-interface-memory` alongside, so the suite has a
+   first target. (Started in revision 5.)
 3. Build the Postgres implementation: queues and verbs, then group commit,
    tables, declared reads, event logs, then blobs. Add the differential test;
    Postgres becomes the reference once it passes the suite.
@@ -511,6 +527,20 @@ object-log, RESP and TD-003 changes land at step 6.
 15. **Snorri's open items.** O2 (claim time), O14, O15 (durability) and O16
     (counters and admission state in Fireweed) are with the owner. ADR-025
     and API-006 text that depends on them is marked.
+16. **Local engine stale-writer fencing** (for the Turso queue session). How
+    does the local engine fence a stale writer on another host before it
+    acknowledges a `Local` commit? Shipping to S3 after a `Local`
+    acknowledgement cannot do it.
+17. **Renew and `item_version`.** API-001 makes renew and reassign change
+    `item_version`, so a heartbeat makes a worker's version-guarded commit
+    fail. Keep that, or exclude lease-only changes (an API-001 amendment)?
+18. **Event log sequence on Postgres.** One head-row lock per log (appends to
+    one log serialize, which matters at Cayce's event volumes and for queues
+    with history), or a sequence plus a visibility watermark?
+19. **Postgres per-request durability.** `Replicated` per request
+    (per-transaction `synchronous_commit`, with the commit LSN recorded for
+    replay waits), or cluster-wide (every commit waits for the standby,
+    claims included)?
 
 ## Risks
 
@@ -521,7 +551,7 @@ object-log, RESP and TD-003 changes land at step 6.
 | The interface grows into a general database | M | H | No joins, capped requests, index-backed selectors, live data only; history to Niflheim. |
 | A hot table row (counter, rollup) serializes commits on Postgres | M | M | Open question 5; rate windows keyed by bucket spread the load. |
 | A single-writer engine stalls claims behind bulk work | H | M | Caps, chunked `Mutate`, and B4. |
-| Waiting for `Replicated` on every send-intent commit limits throughput | M | M | Only commits that require it wait; the local engine is `Replicated` by design. |
+| Waiting for `Replicated` on every send-intent commit limits throughput | M | M | Only commits that require it wait; the local engine reaches `Replicated` by batching shipments to S3. |
 | Snorri and Cayce adopt Postgres and never move to the local engine | M | M | Same interface and suite; the facade names no implementation. |
 | Two boundaries coexist while the old runtime is frozen | M | M | No new features on the old facade; step 4 cuts over. |
 | Relayed decisions are misread | L | H | The owner confirms D8 to D12 before acceptance. |

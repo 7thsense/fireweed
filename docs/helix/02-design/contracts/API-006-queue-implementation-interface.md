@@ -14,7 +14,7 @@ ddx:
 # API-006: Fireweed data-plane interface
 
 **Type**: Rust trait and request-type contract (implementation boundary)
-**Version**: v0 (draft, revision 4)
+**Version**: v0 (draft, revision 5)
 **Status**: draft. Proposed by ADR-025. Not normative until ADR-025 is accepted.
 **Related**: API-001, API-002, API-003, API-004, API-005, ADR-025, TD-002, TD-006
 
@@ -24,7 +24,18 @@ commit decision table; request records for rejected requests; the time and
 isolation rules; durability levels per implementation; every referenced
 type; and a conformance list that checks each rule. Text marked
 **[draft pending owner]** follows a recommendation the owner has not ruled
-on (ADR-025, Open questions).
+on, and **[owner question]** marks a choice left open (ADR-025, Open
+questions).
+
+Revision 5 (2026-11-15) fixes the review round four defects: scanning in
+result order, Postgres group commits at `SERIALIZABLE`, chunk steps that
+skip cohorts they cannot take whole, row version high-water marks, guards
+on absent records, pause and gate changes as cohort-deadline triggers,
+schema and rejection durability, the stall point for replay tests, unique
+and non-null violations, U+0000, and archive as a metadata change. The
+crate `fireweed-interface` is now the normative definition of every type
+named here; `fireweed-interface-memory` implements it in memory; and the
+rule-pinning tests are executable in `fireweed-interface-conformance`.
 
 ## Purpose
 
@@ -70,10 +81,10 @@ states every change; ADR-025 lists the API-001 amendments.
 
 ## Crate and dependency rules
 
-1. `fireweed-interface` depends on `fireweed-core` id newtypes (`TenantId`,
-   `ItemId`, `ClientItemKey`, `RequestId`, `LeaseToken`, `WorkerId`,
-   `CohortId`, `GroupKey`) and on `serde`, `serde_json`, `bytes`, `futures`
-   only.
+1. `fireweed-interface` depends on no `fireweed-*` crate. It defines its own
+   id newtypes (`TenantId`, `ItemId`, `ClientItemKey`, `RequestId`,
+   `LeaseToken`, `WorkerId`, `CohortId`, `GroupKey`) and depends only on
+   `serde`, `serde_json`, `bytes`, `futures`, `sha2` and `base64`.
 2. No public item exposes an implementation's internal mechanism: command
    log, command position, projection, apply frontier, ownership epoch,
    storage cell. API-001 domain fields such as `gate_epoch` are allowed.
@@ -256,18 +267,30 @@ pub enum Value {
 pub struct BlobRef { pub sha256: [u8; 32], pub size: u64 }
 ```
 
-`Float` values are finite. A null carries its type.
+A null carries its type. Value domains, enforced on every write and by
+every expression (a value outside its domain is a fault, §Evaluation):
+
+- `Float`: finite, with magnitude at most 1e290. Sums of up to 2⁴⁰ such
+  values cannot overflow.
+- `Timestamp`: years 0000 to 9999 (`-62167219200000` to `253402300799999`
+  milliseconds), so every timestamp has an RFC 3339 form.
+- `Text`, JSON strings and JSON object keys: valid UTF-8 without U+0000,
+  which PostgreSQL cannot store. A request containing U+0000 in a literal,
+  parameter or supplied value fails validation with `InvalidRequest`.
 
 ### Canonical JSON
 
 Every JSON value Fireweed stores (bodies, `Json` fields, metadata) is
-canonical:
+normalized before it is stored and compared:
 
-1. Object keys are unique; a duplicate key rejects the write. Key order is
-   not significant and is not preserved.
-2. A number is stored as an `Int` if it is integral and within `i64`,
-   otherwise as an `f64`. A number outside `f64` range, or an integral
-   number outside `i64` with a fractional part lost, rejects the write.
+1. JSON reaches the interface as `serde_json::Value`, which has no
+   duplicate keys. Rejecting duplicate keys in a wire encoding is the wire
+   adapter's job. Key order is not significant and is not preserved.
+2. Numbers are normalized: a number that is integral and within `i64` is
+   stored as an integer (so `3.0` becomes `3`); any other number is stored
+   as the nearest `f64`, which must be within the `Float` domain. An
+   unsigned integer above `i64::MAX` becomes an `f64` if that conversion is
+   exact, and otherwise rejects the write.
 3. Two JSON values are equal when they are equal after rule 2, with object
    keys compared as sets.
 
@@ -338,7 +361,15 @@ the request with `InvalidRequest` (definitive, not recorded).
 | `Bucket` | Timestamp; `width_ms` 1 to 315,576,000,000 (10 years) | Timestamp |
 
 Json, TextSet and BlobRefSet values are not comparable with `Cmp`; Json is
-`Cast` first. Bool is not ordered.
+`Cast` first. Bool is not ordered. `Set` with the same field named twice
+fails validation. `Json { field, pointer }` yields `Null(Json)` when the
+pointer is absent and `Json(null)` when the JSON value there is `null`;
+every cast of `Json(null)` yields null.
+
+Ordering and grouping in reads: `order` accepts the types `Cmp` can order
+plus Bool (`false < true`); null sorts before every value in `Asc` and
+after every value in `Desc`. `group_by` accepts Bool, Int, Text, Bytes and
+Timestamp expressions; all nulls form one group.
 
 ### Evaluation
 
@@ -349,16 +380,20 @@ Json, TextSet and BlobRefSet values are not comparable with `Cmp`; Json is
    `Coalesce`, `SetAdd` and `SetRemove` yields null if an evaluated operand
    is null. `And`, `Or` and `Not` follow SQL three-valued logic. `In` yields
    true if any item equals, else null if `expr` or any item is null, else
-   false. `SetAdd` and `SetRemove` on a null set treat it as empty. A
-   predicate selects a record only when it evaluates to true.
+   false. `SetAdd` and `SetRemove` on a null set treat it as empty, and
+   ignore null values. A predicate selects a record only when it evaluates
+   to true.
 3. **Faults.** These are faults: `Int` overflow; `Div` or `Rem` by zero;
-   a `Float` result that is NaN or infinite; `Bucket` overflow; a set that
-   would exceed `max_set_values`. Where a fault occurs decides its effect:
+   a `Float` result outside the `Float` domain; a `Timestamp` result
+   outside the `Timestamp` domain; a set that would exceed
+   `max_set_values`. Where a fault occurs decides its effect:
    - in a predicate (selection, claim filter, read filter, `MatchExpect`
      filter) or a read output expression: the faulting expression yields
      null. No error is raised.
-   - in a value written by an action (`Set`, `Patch`, `Reschedule`,
-     `FinalizeEntry.set`): the group is rejected with `Evaluation`.
+   - in any expression in an action position (`Set`, `Patch`,
+     `Reschedule`, `Transition::Retry`, `FinalizeEntry.set` and `patch`):
+     the group is rejected with `Evaluation`; in a standalone verb, that
+     entry fails with `EntryStatus::EvaluationFault`.
 4. **Domain.** A predicate is evaluated only for candidates (records
    matching the access term), each independently. Because faults in
    predicates yield null, the result does not depend on the order in which
@@ -373,7 +408,11 @@ Json, TextSet and BlobRefSet values are not comparable with `Cmp`; Json is
 
 SQL implementations must compile error-capable operators so that the
 engine cannot raise an error or change a result by reordering, for example
-by guarding each `Div` with `CASE WHEN divisor = 0 THEN NULL`.
+by guarding each `Div` with `CASE WHEN divisor = 0 THEN NULL`. They must
+implement the cast table and comparisons as written, not with engine casts
+(PostgreSQL's `int8` input accepts `+`, whitespace and underscores; SQLite
+casts `'12abc'` to 12), and must apply `COLLATE "C"` to every compiled text
+comparison and sort.
 
 ### Casts
 
@@ -413,8 +452,9 @@ and `BlobRefSet` cast only to Json (§Canonical JSON).
    1,000,000)` computed in integer arithmetic.
 4. **Approximate results.** `Float` `Sum` and `Avg` may be computed in any
    order. Two implementations' results for n values `x` differ by at most
-   `2 × n × 2⁻⁵³ × Σ|x|` (for `Avg`, divided by n). `Int` `Avg` is the exact
-   quotient rounded to the nearest `f64`.
+   `2 × n × 2⁻⁵³ × Σ|x|` (for `Avg`, divided by n). The `Float` domain
+   keeps every such sum finite. `Int` `Avg` is the exact quotient rounded
+   to the nearest `f64`.
 
 ### Index rule and access term
 
@@ -431,6 +471,18 @@ parameters:
 A predicate with no access term fails with `SelectorNotIndexed`. A `Keys`
 selection needs no access term: its candidates are the addressed records.
 
+Two further restrictions keep examination order equal to result order:
+
+- A **claim filter's** access term must be `Eq` or `In` on a `Lookup` or
+  `Unique` field. The implementation keeps a composite index on (field,
+  claim order), so candidates for each value arrive in claim order; for
+  `In`, the per-value streams are merged in claim order.
+- A **declared read with `order`** must have an access term that is `Eq` or
+  `In` on a field, followed by `order`; or a range on the first `order`
+  field itself. `apply_schema` creates the composite index (access field,
+  `order` fields, key) and rejects a read it cannot serve that way with
+  `SelectorNotIndexed`.
+
 ## Work limits
 
 Every request does bounded work on the writer.
@@ -439,57 +491,67 @@ Every request does bounded work on the writer.
 |-------|--------|---------------|
 | `max_ops_per_commit` | operations in a commit | `BatchTooLarge` (validation) |
 | `max_entries_per_commit` | explicit entries over all operations: new items, finalize entries, leases, gates, rows, log entries, addressed keys | `BatchTooLarge` (validation) |
-| `max_request_bytes` | serialized request size | `BatchTooLarge` (validation) |
-| `max_in_list` | `In` items | `InvalidRequest` (validation) |
-| `max_scan_rows` | candidates examined by one `Where` selection, claim filter, read page or aggregate | see below |
+| `max_request_bytes` | serialized request size (`put_blob` is exempt; it has `max_blob_bytes`) | `BatchTooLarge` (validation) |
+| `max_in_list` | `In` items | `BatchTooLarge` (validation) |
+| `max_claim_batch_size` | items one claim returns | `BatchTooLarge` (validation) |
+| `max_cohort_size` | members of one cohort | `BatchTooLarge` (validation), or rejection `Invalid` on enqueue |
+| `max_writer_scan_rows` | records examined on the writer by one claim, `Where` `Mutate` or chunk step | see below |
+| `max_read_scan_rows` | records examined by one read page or aggregate | see below |
 | `max_selector_affected` | records a `Where` `Mutate` matches (unchunked) or affects (per chunk step) | rejection `LimitExceeded`, or chunk step boundary |
 | `max_body_bytes`, `max_value_bytes`, `max_set_values` | the resulting value after an action, not the request | rejection `ValueTooLarge` |
 | `max_read_rows` | rows in one read page | page boundary |
-| `max_claim_batch_size` | items one claim returns | `InvalidRequest` (validation) |
 
-When `max_scan_rows` is reached:
+Records examined are counted physically: an expired lease, row or log entry
+that is still stored counts, as does an item skipped because it is gated,
+paused, not yet due or leased. When a scan budget is reached:
 
 - an unchunked `Mutate` rejects the group with `ScanLimitExceeded`;
-- a chunk step ends there and returns a continuation after the last
-  candidate examined, so every step makes progress even if nothing matched;
-- a claim returns the items found so far and sets `scan_limited = true`;
-- a read page ends there and returns a page token after the last candidate
-  examined, with `scan_limited = true`;
+- a chunk step ends there and returns a continuation after the last record
+  examined, so every step makes progress even if nothing matched;
+- a claim, with or without a filter, returns the items found so far, which
+  are a prefix of the claim order, and sets `scan_limited = true`;
+- a rows read page ends there, with a page token after the last record
+  examined, in result order, and `scan_limited = true`;
 - an aggregate read fails with `ScanLimitExceeded`.
 
-Candidates are examined in access-term order: the access field's value,
-ascending, then the record key (item id, primary key, `fw_seq`). Writes the
-implementation makes on its own (history entries, index entries) do not
-count against these limits; each implementation sets its limits to absorb
-them.
+Examination order is result order: claim order for claims; `order` then key
+for ordered reads; for `Mutate` and unordered reads, the access field's
+value ascending, then the record key (item id, primary key, `fw_seq`).
+
+Writes the implementation makes on its own (history entries, index entries,
+due time-driven transitions) do not count against these limits. Due
+transitions may run as separate internal commits ordered before the
+request, each bounded by `max_cohort_size` and `max_writer_scan_rows`.
 
 ## Time
 
 ### Time authority and request time
 
-1. Each space has one time authority. Under conformance it is the injected
-   `Clock`. An implementation's production configuration may select another
-   authority and must document it.
-2. Each request has one request time `t`. It is sampled once and used for
-   every decision in the request: eligibility, lease expiry, cohort
-   deadlines, retention, row expiry, `Now`, and timestamps written.
-3. **Monotonic along conflicts.** If request B conflicts with request A and
-   follows it in linearization order, then `t_B ≥ t_A`. An implementation
-   achieves this by taking `t = max(sampled, latest timestamp written to any
-   record it locks or reads for update)`, or, on a single writer, by keeping
-   time non-decreasing for the space.
-4. **Selection with time.** An implementation may sample a provisional time
-   to choose candidates before it locks them, then fix `t` by rule 3. A
-   record is selected only if it qualifies at `t`. Records that became
-   eligible after the provisional sample may be missed by that request.
+1. Each space has one time authority, and it never moves backward. Under
+   conformance it is the injected `Clock`, which the suite only advances.
+   An implementation's production configuration may select another
+   authority (the PostgreSQL server clock), must document it, and must keep
+   it non-decreasing.
+2. Each request has one request time `t`, fixed before the request
+   evaluates any expression, and used for every decision in the request:
+   eligibility, lease expiry, cohort deadlines, retention, row expiry,
+   `Now`, and timestamps written.
+3. **Monotonic along visibility.** If request B observes or conflicts with
+   the effects of request A, then `t_B ≥ t_A`. With a non-decreasing
+   authority this holds when each request samples `t` after every effect it
+   can observe has committed: at the start of its snapshot (`SERIALIZABLE`
+   and single-writer engines), or after acquiring its locks (`READ
+   COMMITTED` verbs, rule 4).
+4. **Selection with time.** A verb that locks rows may sample a provisional
+   time to choose candidates, lock them, then fix `t` after the locks. A
+   record is selected only if it qualifies at both times. Records that
+   became eligible between the two samples may be missed by that request.
 5. `claim` and `claim_by_item_ids` take an optional `eligibility_time`. It
    replaces `t` only when deciding whether `fw_not_before` and retry backoff
    have passed. It may be earlier or later than `t`. Everything else uses
    `t`. **[draft pending owner: Snorri O2]**
 6. No other request overrides time. A fixed instant in a predicate is a
    parameter.
-7. A `Clock` that moves backward does not move request time backward
-   (rule 3 holds).
 
 ```rust
 pub trait Clock: Send + Sync { fn now(&self) -> UtcMillis; }
@@ -513,16 +575,19 @@ Applied to API-001:
 
 - **Lease expiry** at `lease_expires_at`: the item is `pending`, its token is
   stale, `item_version` does not change, `attempt_count` follows API-001.
-- **Cohort deadline** **[draft pending owner]**. The deadline is API-001's
-  `min(cohort_created_at, first_eligible_at) + completion_bound_ms`. At the
-  deadline, unless the cohort has been claimed at least once, the cohort
-  fails if fewer than `cohort_size` of its members are non-terminal, or if
-  any non-terminal member is not eligible (API-001 Eligibility Precedence
-  A) at that instant. A failed cohort's non-terminal members become
+- **Cohort deadline** **[draft pending owner]**. API-001's deadline is
+  `min(cohort_created_at, first_eligible_at) + completion_bound_ms`; since
+  no member is eligible before the cohort exists, this is
+  `cohort_created_at + completion_bound_ms`. At the deadline, unless the
+  cohort has been claimed at least once, the cohort fails if fewer than
+  `cohort_size` of its members are non-terminal, or if any non-terminal
+  member is not eligible (API-001 Eligibility Precedence A, including
+  pause) at that instant. A failed cohort's non-terminal members become
   `failed` with code `cohort-incomplete`. A member enqueued after its
-  cohort failed is rejected (`CohortFailed`). An implementation processes a
-  queue's due cohort deadlines before any request that touches the cohort,
-  its members, or the gates its members carry.
+  cohort failed is rejected (`CohortFailed`). Before a request that touches
+  a cohort, one of its members, a gate one of its members carries, or its
+  queue's state (`SetQueueState`), the implementation processes every due
+  deadline of the cohorts affected.
 - **Retention**: a request record older than `request_id_retention_ms` is
   forgotten. A terminal item or tombstone older than its retention stops
   being addressable. A row is gone at its expiry. An event log entry is
@@ -553,7 +618,10 @@ Applied to API-001:
 4. Recording is atomic with the outcome. Once a request id has a record, no
    other attempt with that id can commit.
 5. `get_request(space, request_id)` returns the record, or `None`, and never
-   executes anything.
+   executes anything. It returns the response with every lease token
+   removed; only a replay of the same request returns tokens.
+6. A request record is durable to the level reported in its response,
+   whether the outcome is `Committed` or `Rejected`.
 
 ### Replay
 
@@ -591,8 +659,11 @@ pub enum DurabilityLevel { Process, Local, Replicated }   // ordered
 | `Local` | Survives a process crash and a reopen of the implementation's own storage. |
 | `Replicated` | Also survives loss of that storage: a copy outside it was durable before the response. |
 
-1. Every committing response, and every claim, renew and finalize response,
-   reports `durability`: the level reached when the response was sent.
+1. Every write response (verbs, `commit` whether `Committed` or
+   `Rejected`, `apply_schema`, `put_blob`) reports `durability`: the level
+   its effects and request record reached when the response was sent.
+   `apply_schema` and `put_blob` have no `request_id`; they are idempotent by
+   schema version and by content.
 2. Every write request may set `min_durability`. A level above
    `capabilities().max_durability` fails with `InvalidRequest`.
 3. With `min_durability`, the response is sent once the commit reaches that
@@ -607,12 +678,15 @@ pub enum DurabilityLevel { Process, Local, Replicated }   // ordered
    `Replicated` can disappear.
 6. A blob referenced by a commit is brought to the commit's level before the
    commit reports that level.
+7. Levels are prefix-closed within a space: when a commit reaches
+   `Replicated`, every commit before it in linearization order has too.
+   Write-ahead logs and in-order shipping both give this.
 
 Levels per implementation:
 
 | Implementation | Minimum | Maximum | Notes |
 |----------------|---------|---------|-------|
-| PostgreSQL | `Local` (flushed to the primary's WAL) | `Replicated` only with a synchronous standby; otherwise `Local` | `Replicated` means a synchronous standby confirmed the WAL flush. **[draft pending owner: Snorri O15]** |
+| PostgreSQL | `Local` (flushed to the primary's WAL) | `Replicated` only with a synchronous standby; otherwise `Local` | `Replicated` means a synchronous standby confirmed the WAL flush. **[draft pending owner: Snorri O15]** **[owner question]** whether `Replicated` is per request (per-transaction `synchronous_commit`, `local` by default and `on` when required, with the commit LSN recorded so a replay can wait for the standby) or cluster-wide (every commit waits for the standby, including claims). |
 | Local engine | `Local` (fsynced locally) | `Replicated` (the commit is in the S3 log) | Commits ship to S3 in batches; `min_durability: Replicated` waits for the batch. **[draft pending owner]** |
 | In-memory | `Process` | `Process` | — |
 
@@ -644,7 +718,9 @@ pub struct ImplementationLimits {
     pub max_entries_per_commit: u32,
     pub max_request_bytes: u64,
     pub max_in_list: u32,
-    pub max_scan_rows: u64,
+    pub max_writer_scan_rows: u64,
+    pub max_read_scan_rows: u64,
+    pub max_cohort_size: u32,
     pub max_selector_affected: u32,
     pub max_body_bytes: u64,
     pub max_value_bytes: u64,
@@ -666,7 +742,14 @@ declares `Bounded`.
 | Sharing | Rule |
 |---------|------|
 | `MultiProcess` | Several instances, in one or many processes, may serve a space at once and together behave as one. |
-| `SingleProcess` | At most one live instance serves a space. Opening a second while the first lives either fails with `SpaceBusy` or supersedes the first, whose later requests fail with `InstanceSuperseded` and have no effect. After the holding process dies, a new open succeeds. The implementation documents which it does. |
+| `SingleProcess` | At most one live instance serves a space. Opening a second while the first lives either fails with `SpaceBusy` or supersedes the first, whose later requests fail with `InstanceSuperseded` and have no effect. After the holding process dies, a new open succeeds. The implementation documents which it does, and how it fences a holder on another host. |
+
+## Types
+
+The crate `fireweed-interface` is the normative definition of every type
+this contract names, including those summarized here only by their fields.
+Where this document and the crate differ, the difference is a defect to
+fix in one of them before acceptance.
 
 ## The trait
 
@@ -733,6 +816,7 @@ pub struct Continuation(String);    // opaque; bound to its request (below)
 pub struct EntryResult {
     pub status: EntryStatus,
     pub item_id: Option<ItemId>,
+    pub superseded_item_id: Option<ItemId>, // ReplacePending: the replaced item
     pub version: Option<u64>,        // item_version or fw_row_version after the entry
     pub lease: Option<NewLease>,     // claim, renew, reassign
 }
@@ -743,16 +827,20 @@ pub enum EntryStatus {
     Rearmed, Renewed, Reassigned, Redriven, Purged, Inserted, Deleted, Appended,
     Skipped, Inapplicable, NotFound,
     // only as per-entry statuses of verbs, or in OpFailure of a rejected group:
-    Conflict, StaleLease, VersionMismatch, Terminal, Superseded, NotEligible, Leased,
-    CohortFailed, MissingField, ValueTooLarge, BlobMissing, Invalid { reason: String },
+    Conflict, UniqueViolation { field: FieldName }, StaleLease, VersionMismatch,
+    Terminal, Superseded, NotEligible, Leased, CohortFailed, MissingField { field: FieldName },
+    ValueTooLarge, BlobMissing, EvaluationFault(EvalError), Invalid { reason: String },
 }
 ```
 
 ### Schema
 
 ```rust
-pub struct ApplySchemaRequest { pub space: SpaceKey, pub schema: SpaceSchema, pub expected_version: Option<u64> }
-pub struct ApplySchemaResponse { pub version: u64, pub changed: bool }
+pub struct ApplySchemaRequest {
+    pub space: SpaceKey, pub schema: SpaceSchema, pub expected_version: Option<u64>,
+    pub min_durability: Option<DurabilityLevel>,
+}
+pub struct ApplySchemaResponse { pub version: u64, pub changed: bool, pub durability: DurabilityLevel }
 pub struct SchemaState { pub schema: SpaceSchema, pub indexes: Vec<IndexState> }
 pub struct IndexState { pub object: ObjectName, pub field: FieldName, pub ready: bool }
 ```
@@ -798,7 +886,8 @@ pub struct ClaimResponse {
 }
 pub struct ClaimedItem {
     pub item_id: ItemId, pub client_item_key: ClientItemKey,
-    pub lease_token: LeaseToken, pub lease_expires_at: UtcMillis,
+    pub lease_token: Option<LeaseToken>,   // None for members of a cohort lease
+    pub lease_expires_at: UtcMillis,
     pub item_version: u64, pub attempt_count: u32,
     pub priority: PriorityValue, pub not_before: Option<UtcMillis>,
     pub group_key: Option<GroupKey>, pub cohort_id: Option<CohortId>,
@@ -855,7 +944,9 @@ Rules:
   leased item gives `Conflict`. `Reject` gives `Conflict` for any live or
   retained key.
 - `ItemRef::IdAndKey` gives `Conflict` unless both name the same item.
-- `ClaimedItem` is the only type that carries a lease token.
+- `ClaimedItem` and `CohortLease` are the only types that carry a lease
+  token. A whole-cohort claim issues one cohort token (API-001) and no
+  per-member tokens.
 - A `FinalizeEntry` applies, in order: `metadata`, `body`, `patch`, `set`,
   then the outcome. `expected_item_version` is compared before any of them.
 - A cohort target applies its outcome to every member.
@@ -905,11 +996,14 @@ pub enum KeyRef { Item(ItemRef), Row(Vec<Value>) }
 pub enum Action {
     Set(Vec<(FieldName, Expr)>),
     Patch(Vec<BodyPatch>),
-    Reschedule { not_before: Option<Expr>, priority: Option<Expr> },
+    ReplaceBody(Option<Body>),
+    SetMetadata(BTreeMap<String, Option<serde_json::Value>>), // None removes a key
+    Reschedule { not_before: ScheduleChange, priority: Option<Expr> },
     Transition(Transition),
     Gates { add: BTreeSet<String>, remove: BTreeSet<String> },
     Retire,
 }
+pub enum ScheduleChange { Keep, Clear, Set(Expr) }
 pub enum Transition {
     Complete { code: Option<String> },
     Fail { failure_code: String },
@@ -922,13 +1016,13 @@ pub enum BodyPatch {
     Remove { pointer: JsonPointer },
     Append { pointer: JsonPointer, value: Expr, keep_last: Option<u32> },
 }
-pub enum LeasePolicy { Skip, Reject, Preserve, MatchToken(LeaseToken), Break }
+pub enum LeasePolicy { Skip, Reject, Preserve, MatchToken(LeaseToken), MatchCohortToken(LeaseToken), Break }
 pub enum Chunk { Start, Continue(Continuation) }
 
 pub struct CommitResponse {
     pub status: CommitStatus,                // Committed | Rejected | DryRun
     pub as_of: UtcMillis,                    // request time
-    pub durability: Option<DurabilityLevel>, // Committed only
+    pub durability: Option<DurabilityLevel>, // Committed and Rejected (the record's level)
     pub ops: Vec<OpResult>,                  // aligned with request ops
     pub failure: Option<OpFailure>,          // Rejected only
     pub continuation: Option<Continuation>,
@@ -938,6 +1032,7 @@ pub struct OpResult {
     pub matched: u64,
     pub affected: u64,
     pub skipped_leased: u64,
+    pub skipped_cohorts: u64,                // chunk steps only
     pub inapplicable: u64,
     pub entries: Vec<EntryResult>,           // explicit entries and addressed keys
 }
@@ -984,13 +1079,17 @@ the validation caps. A failure is a definitive `Err`; nothing is recorded.
 
 | Operation | Rejects the group | Does not reject (recorded as entry status) |
 |-----------|-------------------|--------------------------------------------|
-| `Enqueue` | `Conflict` (`Reject` policy, or `ReplacePending` on a leased item); `CohortFailed`; `MissingField`; `ValueTooLarge`; `BlobMissing`; gate keys over the queue's limit (`Invalid`) | `Duplicate`, `Replaced`, `Accepted` |
-| `Finalize` | `StaleLease`; `VersionMismatch`; `Terminal`; `Superseded`; an `Evaluation` fault in `set` or `patch`; `ValueTooLarge` | — |
+| `Enqueue` | `Conflict` (`Reject` policy, or `ReplacePending` on a leased item); `UniqueViolation`; `CohortFailed`; `MissingField`; `ValueTooLarge`; `BlobMissing`; gate keys over the queue's limit or a cohort over `max_cohort_size` (`Invalid`) | `Duplicate`, `Replaced`, `Accepted` |
+| `Finalize` | `StaleLease`; `VersionMismatch`; `Terminal`; `Superseded`; `EvaluationFault` in `set` or `patch`; `UniqueViolation`; `MissingField` (null into a non-nullable field); `ValueTooLarge`; `BlobMissing` | — |
 | `Renew`, `Reassign` | `StaleLease`; `Terminal` | — |
 | `SetGates`, `SetQueueState` | none at execution | — |
-| `PutRows` | `Conflict` (`Reject` policy); `MissingField`; `ValueTooLarge`; `BlobMissing` | `Skipped` (`Skip` policy), `Inserted`, `Updated` |
+| `PutRows` | `Conflict` (`Reject` policy); `UniqueViolation`; `MissingField`; `ValueTooLarge`; `BlobMissing` | `Skipped` (`Skip` policy), `Inserted`, `Updated` |
 | `Append` | `MissingField`; `ValueTooLarge`; `BlobMissing` | `Appended` |
-| `Mutate` | `VersionMismatch` on a `Keyed` guard (including `Some(0)` on an existing record); `MatchExpectUnmet`; `LimitExceeded` (unchunked); `ScanLimitExceeded` (unchunked); `LeasedMatch` (`Reject` policy); `StaleLease` (`MatchToken` mismatch); `CohortSplit`; an `Evaluation` fault in an action value; `ValueTooLarge`; `BlobMissing`; `Conflict` from `IdAndKey` | `NotFound` for an addressed key; `Skipped` leased items; `Inapplicable` |
+| `Mutate` | `VersionMismatch` on a `Keyed` guard: `Some(0)` on an existing record, or `Some(n > 0)` on an absent record or a different version; `MatchExpectUnmet`; `LimitExceeded` (unchunked); `ScanLimitExceeded` (unchunked); `LeasedMatch` (`Reject` policy); `StaleLease` (`MatchToken` or `MatchCohortToken` mismatch); `CohortSplit` (unchunked); `EvaluationFault` in any action expression; `UniqueViolation`; `MissingField` (null into a non-nullable field); gate keys over the queue's limit (`Invalid`); `ValueTooLarge`; `BlobMissing`; `Conflict` from `IdAndKey` | `NotFound` for an addressed key with no guard; `Skipped` leased items; skipped cohorts (chunk steps); `Inapplicable` |
+
+Constraints (unique fields, non-nullable fields, size limits, blob
+references) are checked on each record after each operation's change to
+it, so a later operation in the group cannot repair an earlier violation.
 
 #### Mutate semantics
 
@@ -1006,7 +1105,11 @@ the validation caps. A failure is a definitive `Err`; nothing is recorded.
      and token stay. A rescheduled `not_before` applies after the lease
      ends. With `Transition` or `Retire`: validation error.
    - `MatchToken`: any action applies when the token matches; a mismatch
-     rejects. Only with a single-key `Keys` selection.
+     rejects. Only with a single-key `Keys` selection of an item that is not
+     leased as part of a cohort.
+   - `MatchCohortToken`: any action applies to every member of the cohort
+     whose lease the token names; the selection must address exactly those
+     members.
    - `Break`: the lease ends (its token becomes stale, no attempt is
      charged), then the action applies. For operator force actions
      (API-002).
@@ -1015,7 +1118,10 @@ the validation caps. A failure is a definitive `Err`; nothing is recorded.
    `Redrive` on a live item, `Reschedule` or `Gates` on a terminal item.
 4. **`Set`** evaluates every right-hand side against the record as it was
    before the action, then assigns. It may not name a system field, a
-   `BodyPointer` field or a table key field.
+   `BodyPointer` field or a table key field, or name one field twice.
+   `SetMetadata` sets or removes metadata keys; `ReplaceBody` replaces a
+   bytes or JSON body. Both apply to items in any state, including terminal
+   items within retention.
 5. **`Transition`.** `Complete` and `Fail` make the item terminal. `Retry`
    returns it to `pending` with `not_before` and charges nothing. `Release`
    returns a leased item to `pending` (needs `MatchToken` or `Break`).
@@ -1025,25 +1131,37 @@ the validation caps. A failure is a definitive `Err`; nothing is recorded.
    tombstone for key retention. On a table row, it deletes the row.
 7. **Cohorts.** An action that would make some but not all non-terminal
    members of a cohort terminal, or move some but not all of them between
-   live states, rejects the group with `CohortSplit`, unless the selection
-   includes every non-terminal member. A chunk step that would split a
-   cohort ends before that cohort and leaves it for the next step.
+   live states, rejects an unchunked group with `CohortSplit`, unless the
+   selection includes every non-terminal member. A chunk step that reaches
+   a cohort it cannot take whole within the step (not every non-terminal
+   member matches, or the members would exceed the step's remaining
+   `limit` or scan budget) skips every member of that cohort, counts it in
+   `skipped_cohorts`, and moves on. The caller handles skipped cohorts with
+   a `Keys` selection of their members.
 8. **`item_version`** increments once per item per request in which the
    item is affected by any operation: enqueue replacement, claim, renew,
    reassign, finalize, `Mutate`. Lease expiry does not change it. Responses
-   return the new value.
-9. **Rows.** `fw_row_version` starts at 1 on insert and increments on every
-   change. A deleted or expired row that is inserted again starts at 1 with
-   a new incarnation, so `expected_version: Some(n)` taken from the old row
-   is a `VersionMismatch` (the implementation keeps an incarnation counter
-   per key for `request_id_retention_ms`). `RowExpiry::AfterWrite` is reset
-   by every applied write to the row, and not by `Skip` or a `Merge` that
-   changes nothing.
+   return the new value. Whether renew and reassign should change it is an
+   **[owner question]**: today they do (API-001), so a heartbeat makes a
+   concurrently prepared `expected_item_version` guard fail.
+9. **Rows.** `fw_row_version` never repeats for a key within
+   `request_id_retention_ms` of the key's last deletion: the implementation
+   keeps a per-key high-water mark for that long, and a re-inserted row
+   starts at the mark plus one. A guard older than the retention window is
+   not supported. `RowExpiry::AfterWrite` is reset by every applied write to
+   the row, and not by `Skip` or a `Merge` that changes nothing.
+10. **Guards on absent records.** `Keyed { expected_version: Some(0) }`
+    requires the record to be absent and creates nothing; to create a row
+    if absent, use `PutRows` with `RowConflict::Reject` or `Skip`.
+    `Some(n > 0)` on an absent record rejects with `VersionMismatch`.
 
 #### `Patch`
 
-Patches apply in order to the JSON body (a `None` body starts as `{}`).
-Values are encoded per §Canonical JSON.
+Patches apply in order to the JSON body (a `None` body starts as `{}`,
+including after a root `Remove`). Each patch's value expression sees the
+record as changed by the patches before it. Values are encoded per
+§Canonical JSON. `keep_last` must be at least 1. `Append` creates missing
+parent objects as `Set` does.
 
 | Patch | Target state | Effect |
 |-------|--------------|--------|
@@ -1075,16 +1193,19 @@ may not be combined with `chunk`.
 1. A `Mutate` with `chunk` must be the only operation in its commit and must
    use `Where`. Its action may not change the access-term field or a key
    field, except a `Transition` or `Retire` when the access term is an
-   equality or `In` on `fw_state`.
+   equality or `In` on `fw_state` and the resulting state is not one of the
+   access term's values.
 2. Each step examines candidates in access-term order after the
-   continuation, up to `max_scan_rows`, and affects up to `limit` matches.
+   continuation, up to `max_writer_scan_rows`, and affects up to `limit`
+   matches.
    It commits them and returns a `Continuation` positioned after the last
    candidate examined, or `None` when the access range is exhausted.
 3. Each step re-evaluates the predicate at its own request time. Candidates
    the continuation has passed are not revisited.
-4. A `Continuation` is bound to the fingerprint of the selection, action,
-   lease policy and parameters. A step presenting it with any of those
-   changed fails with `InvalidContinuation`. `expect` applies to each step.
+4. A `Continuation` is bound to the space, target object, schema version,
+   and the fingerprint of the selection, action, lease policy and
+   parameters. A step presenting it with any of those changed fails with
+   `InvalidContinuation`. `expect` applies to each step.
 
 ## Shapes
 
@@ -1097,14 +1218,19 @@ filter's access term bounds the scan. Key retention
 (`client_item_key_retention_ms`) is the dedupe window for event items keyed
 by a provider's event id.
 
-**History.** With `history` declared, every committed change of an item
-(enqueue, claim, renew, reassign, finalize, `Mutate`, lease break) and every
-`SetGates` and `SetQueueState` appends one entry to the named log in the
-same commit: kind, `fw_item_id`, `fw_key`, outcome, `item_version`,
-`attempt_count`, `actor`, `reason`, `request_id`, and request time.
-Time-driven transitions are not recorded in v1. On Postgres every append
-takes the log's head-row lock (§PostgreSQL), so a history log should serve
-one queue.
+**History.** With `history: Some(name)`, `apply_schema` creates the event
+log `name` with this fixed schema (declaring it separately fails with
+`SchemaConflict`): partition key `item_id` (Int; 0 for queue-level events),
+and fields `kind` (Text: `enqueue`, `claim`, `renew`, `reassign`,
+`finalize`, `mutate`, `break`, `set_gates`, `set_queue_state`), `key`
+(Text, nullable), `outcome` (Text, nullable), `item_version` (Int,
+nullable), `attempt_count` (Int, nullable), `actor` (Text, nullable),
+`reason` (Text, nullable), `request_id` (Text), and no body. Every committed
+change of an item and every `SetGates` and `SetQueueState` appends one entry
+in the same commit. Rejected and dry-run requests append nothing; their
+request records are the audit for them. Time-driven transitions are not
+recorded in v1. The history log's retention is its own; an exporter that
+must not lose entries keeps its cursor ahead of retention.
 
 ### Table
 
@@ -1142,11 +1268,18 @@ pub struct LogEntryView {
    prefix of the log.
 3. `Start` reads from the earliest retained entry. `After(n)` fails with
    `CursorExpired { earliest }` if an entry with `seq > n` has been removed
-   by retention. On an empty log, `next` is the cursor given.
+   by retention; `earliest` is the earliest retained `seq`, or `None` if
+   retention has removed every entry. On an empty log, `next` is the cursor
+   given.
 4. A `Partition` cursor reads one partition in `seq` order, with the same
    expiry check against that partition.
 5. Consumers keep their cursors in a table and advance them in the same
    group commit as their processing.
+6. On PostgreSQL, how `seq` is assigned is an **[owner question]**: one
+   head-row lock per log (simple; appends to one log serialize, which
+   matters at Cayce's event volumes and for every queue with `history`), or
+   a sequence plus a visibility watermark that readers hold back to (appends
+   run concurrently; readers lag the oldest open appender).
 
 ### Blob
 
@@ -1161,11 +1294,14 @@ pub struct LogEntryView {
 3. A reference ends when its value is overwritten or removed, or when its
    record is retired, deleted, expires or leaves retention, at that
    transition's instant.
-4. A blob with no reference is deleted after `orphan_grace_ms` measured from
-   the later of its last put and its last reference ending. Deletion is
-   serialized with commits: a commit that references a blob being deleted is
-   rejected with `BlobMissing`, never left dangling.
+4. Orphan deletion is a time-driven transition. A blob with no reference
+   is deleted at `max(last put, last reference end) + orphan_grace_ms`. A
+   request whose time is at or after that instant sees the blob as absent,
+   so a commit that references it is rejected with `BlobMissing`. Physical
+   removal may happen later.
 5. `get_blob` returns the bytes, or `BlobNotFound`.
+6. `media_type` is metadata of the put, not of the content: a later put of
+   the same bytes with another media type replaces it.
 
 ## Reads
 
@@ -1239,9 +1375,9 @@ space. Each takes the queue as a parameter `queue`.
 
 | Read | Version | Parameters | Output |
 |------|---------|------------|--------|
-| `fw_items` | 1 | `queue`; one of `state`, `group_key`, `worker_id`, `key_prefix` | item rows (system fields and declared fields, no body), key order |
+| `fw_items` | 1 | `queue`; one of `state` (including `complete` and `failed` within retention), `group_key`, `worker_id`, `key_prefix` | item rows (system fields and declared fields, no body), key order |
 | `fw_gates` | 1 | `queue` | blocked gate keys with `gate_epoch` |
-| `fw_queue_counts` | 1 | `queue` | counts by `fw_state` |
+| `fw_queue_counts` | 1 | `queue` | counts by `fw_state`, from the same source as `metrics`, with no scan budget |
 
 ### Metrics and discovery
 
@@ -1297,14 +1433,14 @@ pub enum DataPlaneError {
     Evaluation(EvalError),            // reads only (Int Sum overflow)
     ScanLimitExceeded,                // aggregate reads only
     RequestIdConflict, RequestExpired,
-    CursorExpired { earliest: u64 }, InvalidContinuation, BlobNotFound,
+    CursorExpired { earliest: Option<u64> }, InvalidContinuation, BlobNotFound,
     DurabilityPending { reached: DurabilityLevel },
     Contention,
     CommitTimeout, RateLimited { retry_after_ms: Option<u64> }, Unavailable(String),
     SpaceBusy, InstanceSuperseded, Internal(String),
 }
 pub enum Unsupported { Shape(ShapeKind), QueueFeature(QueueFeature), Durability(DurabilityLevel), Limit(LimitKind) }
-pub enum LimitKind { Ops, Entries, RequestBytes, InList, ClaimBatch, LeaseDuration, RequestIdRetention, Objects }
+pub enum LimitKind { Ops, Entries, RequestBytes, InList, ClaimBatch, CohortSize, LeaseDuration, RequestIdRetention, Objects }
 ```
 
 | Error | Kind | Retry |
@@ -1327,30 +1463,40 @@ A rejected group is a recorded outcome, not an error.
 
 ### PostgreSQL
 
-1. **Transactions.** Each request is one transaction. Verbs (`enqueue`,
-   `claim`, `claim_by_item_ids`, `renew`, `finalize`) run at `READ
-   COMMITTED`, each as single statements that lock what they change. A
-   `commit`, a chunk step and a multi-target `get` run at `REPEATABLE READ`.
-   On a serialization failure the implementation retries the whole request
-   up to a documented bound, then returns `Contention`. Nothing from a
-   failed attempt survives.
-2. **Request records.** A write request inserts its request row first. A
-   rejected group rolls back to a savepoint after that insert and commits
-   the record.
-3. **Time.** The provisional time is `clock_timestamp()` at the start of
-   the request. After locking, `t = max(provisional, clock_timestamp(),
-   greatest fw_updated_at of the locked records)`, passed to every later
-   statement as a parameter. Rule 4 of §Time applies to claims.
+1. **Transactions.** Each request is one transaction. `commit` and chunk
+   steps run at `SERIALIZABLE`, so guards on absent keys and `MatchExpect`
+   over a range cannot be defeated by write skew. On a serialization
+   failure the implementation retries the whole request up to a documented
+   bound, then returns `Contention`. Nothing from a failed attempt survives.
+   Verbs (`enqueue`, `claim`, `claim_by_item_ids`, `renew`, `finalize`) run
+   at `READ COMMITTED` with this lock protocol, in several statements: lock
+   the queue-state row `FOR SHARE`; lock the gate rows of candidate items
+   `FOR SHARE`; lock cohort and group rows the verb changes `FOR UPDATE`;
+   lock items `FOR UPDATE` (`SKIP LOCKED` for claims). `SetGates` and
+   `SetQueueState` lock those rows `FOR UPDATE`, so a claim and a gate or
+   pause change are ordered. Reads that span several targets use one
+   `REPEATABLE READ` read-only snapshot.
+2. **Request records.** The request record is written in the same
+   transaction as the effects. A rejected group rolls back to a savepoint
+   taken before its effects and commits the record. Concurrent attempts
+   with one `request_id` conflict on the record's unique key; the loser
+   reads the winner's record.
+3. **Time.** The authority is the server clock, read with
+   `clock_timestamp()` (under conformance, the `SharedClock` value read by
+   the implementation at the same points). `commit` and chunk steps sample
+   `t` as their first action. Verbs sample a provisional time, lock, then
+   sample `t` (§Time rule 4). `t` is passed to every statement as a
+   parameter; no statement calls `now()` or `clock_timestamp()` itself.
 4. **Claims** use `FOR UPDATE SKIP LOCKED` over the access-term index.
-5. **Text** columns and indexes use the `C` collation.
-6. **JSON** is stored as `jsonb`; numbers are checked against §Canonical
-   JSON before writing.
+5. **Text** columns, indexes and compiled comparisons use the `C`
+   collation.
+6. **JSON** is stored as `jsonb` after normalization (§Canonical JSON).
 7. **`Int` `Sum`** accumulates in `numeric` and checks the final range.
-8. **Event logs** take the log's head-row lock to assign `fw_seq`, so `seq`
-   follows commit order. Appends to one log serialize.
-9. **Durability.** `Local` is `synchronous_commit = on` without a
-   synchronous standby. `Replicated` requires `synchronous_standby_names`
-   to name at least one standby; then every commit reports `Replicated`.
+8. **Event logs** assign `fw_seq` so that it follows commit order
+   (§Event log rule 6 is an owner question).
+9. **Durability.** `Local` is a commit flushed to the primary's WAL.
+   `Replicated` needs a synchronous standby; whether it is per request or
+   cluster-wide is an owner question (§Durability).
 10. **Blobs** are `bytea` rows with a reference count maintained in the
     referencing transaction.
 
@@ -1361,10 +1507,11 @@ A rejected group is a recorded outcome, not an error.
 2. Commits are fsynced locally (`Local`) and shipped to the S3 log in
    batches. `min_durability: Replicated` waits for its batch.
    **[draft pending owner]**
-3. A second open fails with `SpaceBusy` while the holder lives (a lock on
-   the database file). Fencing across hosts uses a conditional put on the
-   next S3 log segment, so a stale writer's next commit fails before it is
-   acknowledged. The local engine's TD specifies it.
+3. A second open on one host fails with `SpaceBusy` while the holder lives
+   (a lock on the database file). Fencing a stale writer on another host,
+   before it acknowledges a `Local` commit, is an open design question for
+   the Turso queue implementation (ADR-025 open question 16). Shipping to S3
+   after a `Local` acknowledgement cannot provide it.
 4. Lease expiry and row expiry are lazy. Reads run on MVCC snapshots.
 5. Speed gates B1 to B4 apply.
 
@@ -1388,8 +1535,8 @@ repository). Rates are per recipient of a single-send campaign.
 | 6 | External events and dedupe | Up to 64 KiB per event; 31-day dedupe; at most 3 claims per event | Event items keyed by provider event id, with `client_item_key_retention_ms` of 31 days. |
 | 7 | Audit and history | One per transition | Hash chain and last 16 summaries in the body (`Patch` `Append`, `keep_last: 16`). Full history is exhaust for Niflheim (Snorri's TransitionObserver). |
 | 8 | Definitions | 31–43 KB, up to 8 MiB; once per artifact per queue | Blob, referenced from a table row keyed by artifact digest and queue. |
-| 9 | Admission in-flight chunk | About 100 B per run per shard; twice per chunk | Table row keyed by run and shard, created with `expected_version: Some(0)` and updated with the current version. **[pending owner: Snorri O16]** |
-| 10 | Rate-limit counters (today Dragonfly in Cayce) | One counter per slot key (account, contact, hour); one conditional increment per effect intent | Table rows keyed by slot and hour bucket with expiry; conditional increment as in §Table. **[pending owner: Snorri O16]** |
+| 9 | Admission in-flight chunk | About 100 B per run per shard; twice per chunk | Table row keyed by run and shard: created with `PutRows` and `RowConflict::Reject`, then updated by `Mutate` with `Keys` and `expected_version` set to the version last read. **[pending owner: Snorri O16]** |
+| 10 | Rate-limit counters (today Dragonfly in Cayce) | One counter per slot key (account, contact, hour); one conditional increment per effect intent | Table rows keyed by slot and hour bucket with expiry. In one group: `PutRows` with `RowConflict::Skip` and `count = 0` (creates the bucket if absent), then `Mutate` with `Keys`, `filter: count < limit`, `Set count = count + 1` and `expect: { min: 1, max: 1 }`. **[pending owner: Snorri O16]** |
 
 Not shapes: the compiled WASM cache; the open-runs list and next-wake time
 (derived through `fw_queue_counts` and a declared read ordered by
@@ -1414,8 +1561,8 @@ profile when `capabilities()` covers all of it.
 | Profile | Shapes and features | Minimum limits | `max_durability` |
 |---------|---------------------|----------------|------------------|
 | `snorri` | Queue, Table, Blob; `DynamicGates`; `Json` bodies | `max_body_bytes` 2 MiB; `max_value_bytes` 256 KiB; `max_set_values` 128; `max_blob_bytes` 8 MiB; `max_request_bytes` 4 MiB; `max_entries_per_commit` 4,096; key retention 31 days | `Replicated` for the zero-loss send path |
-| `cayce-ui` | Queue, Table, EventLog; declared reads with aggregates | `max_read_rows` 1,000; `max_scan_rows` 5,000,000 | — |
-| `recipient-lifecycle` | Queue, Table; chunked `Mutate` | `max_entries_per_commit` 10,000; `max_selector_affected` 10,000 | — |
+| `cayce-ui` | Queue, Table, EventLog; declared reads with aggregates | `max_read_rows` 1,000; `max_read_scan_rows` 5,000,000 (snapshot reads, not the writer) | — |
+| `recipient-lifecycle` | Queue, Table; chunked `Mutate` | `max_entries_per_commit` 10,000; `max_selector_affected` 10,000; `max_writer_scan_rows` 50,000 | — |
 
 ## Conformance
 
@@ -1439,8 +1586,18 @@ pub enum HarnessError { Unsupported, Setup(String) }
 pub trait FaultHooks: Send + Sync {           // implemented inside the implementation crate
     fn arm(&self, fault: Fault);
 }
-pub enum Fault { BeforeCommit, AfterCommitBeforeResponse, StallBeforeCommit { until_released: bool } }
+pub enum Fault {
+    BeforeCommit,                // fail the attempt before anything is written
+    AfterCommitBeforeResponse,   // commit, then drop the response
+    StallAtReceive,              // hold the request after receipt, before its record is read
+    HoldReplication,             // keep commits below Replicated until released
+}
 ```
+
+`StallAtReceive` holds the request before it reads or writes its request
+record or takes any lock, so a replay can run to completion meanwhile.
+`FaultHooks` are compiled in with the implementation crate's
+`conformance-faults` cargo feature, which the child binary enables.
 
 1. Every process reads time from the `SharedClock` file; only the suite
    advances it.
@@ -1448,7 +1605,8 @@ pub enum Fault { BeforeCommit, AfterCommitBeforeResponse, StallBeforeCommit { un
    which opens the storage named on its command line and serves framed JSON
    messages on stdin and stdout. Each message carries an id; requests may be
    concurrent. Messages are either `DataPlane` requests (the request types'
-   serde form) or control messages: `ArmFault`, `ReleaseStall`, `Exit`.
+   serde form) or control messages: `ArmFault`, `FaultReached` (sent by the
+   child when an armed fault is hit), `Release`, `Exit`.
 3. Faults act inside the implementation's commit path through `FaultHooks`,
    which the implementation compiles in for test builds. A wrapper around
    `DataPlane` does not satisfy them.
@@ -1469,30 +1627,34 @@ vectors. IDs are stable and cited in failures.
 |----|------|----------|
 | TYP-1 | Typing table | Every operator with every disallowed operand type fails validation with `InvalidRequest`; every allowed signature passes. |
 | TYP-2 | Typed nulls and params | `Lit(Null(Int))` compares as Int; a parameter of the wrong type fails validation. |
-| EVAL-1 | Short-circuit order | `And([false, 1/0 = 0])` is false; `Or([true, …])` true; `Coalesce([1, 1/0])` is 1. |
-| EVAL-2 | Faults in predicates are null | `Where x / 0 = 1` matches nothing and raises nothing, with the faulting conjunct first or last. |
+| EVAL-1 | Short-circuit order | In an action value, where a fault would reject: `Set n = Coalesce([1, 1/0])` sets 1; a `Set` of `And([false, 1/0 = 0])` sets false; `Or([true, …])` sets true. |
+| EVAL-2 | Faults in predicates are null | `Where status = 'x' AND n / 0 = 1` (indexed `status`) matches nothing and raises nothing, with the faulting conjunct second or last. |
 | EVAL-3 | Faults in action values reject | `Set n = i64::MAX + 1` rejects the group with `Evaluation(IntOverflow)`; nothing applied; record written. |
 | EVAL-4 | Int division | `-7 / 2 = -3`, `-7 % 2 = -1`, `i64::MIN / -1` faults. |
 | EVAL-5 | Float faults | `1.0 / 0.0` and an overflowing product fault. |
 | EVAL-6 | Three-valued logic | Truth tables for `And`, `Or`, `Not`, `In` with nulls. |
 | EVAL-7 | Text and Bytes order | Code-point order with non-ASCII strings that sort differently under locale collation; byte prefix order. |
 | EVAL-8 | Bucket | Negative timestamps floor toward negative infinity; width 0 and > 10 years fail validation. |
+| EVAL-11 | Value domains | U+0000 in a parameter fails validation; a Float above 1e290 and a Timestamp after year 9999 are faults. |
 | EVAL-9 | Now | Every `Now` in one request, including across group operations, is the same value. |
 | EVAL-10 | Sets | `SetAdd` past `max_set_values` faults; `SetRemove` of an absent value is a no-op. |
 | CAST-1 | Cast table | Every cell, including null results for out-of-range and unparsable inputs. |
 | CAST-2 | RFC 3339 | Offsets, sub-millisecond truncation, leap second → null. |
-| JSON-1 | Canonical JSON | Duplicate keys rejected; key order not significant; large integers and non-finite numbers rejected. |
+| JSON-1 | Canonical JSON | `3.0` is stored and read back as `3`; key order not significant; an unsigned integer above `i64::MAX` that `f64` cannot hold exactly is rejected. |
 | JSON-2 | Value to JSON | Each `Value` variant's encoding. |
+| JSON-3 | Null versus absent | `Json { pointer }` on a JSON `null` yields `Json(null)`; on an absent pointer yields `Null(Json)`; both cast to null. |
 | AGG-1 | Aggregate types | Each aggregate's operand and result types; null handling; empty input with and without `group_by`. |
 | AGG-2 | Exact Int sum | `Sum` over values whose running sum overflows but final sum fits returns the final sum; a final overflow fails `Evaluation`. |
 | AGG-3 | Float tolerance | `Sum` and `Avg` over cancelling values fall within the stated bound. |
-| AGG-4 | Percentile rank | Ranks at n = 1, 2, 3, 100 for p = 1, 500,000, 999,999, 1,000,000 millionths. |
+| AGG-4 | Percentile rank | Ranks at n = 1, 2, 3, 100 for p = 1, 70,000, 140,000, 500,000, 550,000, 999,999, 1,000,000 millionths; (70,000, 100) is rank 7, which floating-point rank computation gets wrong. |
 | IDX-1 | Access term | First qualifying conjunct is chosen; a predicate with none fails `SelectorNotIndexed`; `Keys` needs none. |
 | IDX-2 | Index readiness | A request on a building index fails `IndexNotReady`. |
-| SCAN-1 | Unchunked scan limit | A `Where` whose matches lie beyond `max_scan_rows` candidates rejects with `ScanLimitExceeded`. |
-| SCAN-2 | Chunk progress | Steps over a range with no matches advance and finish; each step examines at most `max_scan_rows`. |
-| SCAN-3 | Claim scan limit | A filtered claim over sparse matches returns partial results with `scan_limited`. |
-| SCAN-4 | Read scan limit | A rows read pages at the limit with `scan_limited`; an aggregate fails. |
+| SCAN-1 | Unchunked scan limit | A `Where` whose matches lie beyond `max_writer_scan_rows` records rejects with `ScanLimitExceeded`. |
+| SCAN-2 | Chunk progress | Steps over a range with no matches advance and finish; each step examines at most `max_writer_scan_rows`. |
+| SCAN-3 | Claim scan limit | A claim over a queue whose head is gated returns a prefix of claim order with `scan_limited`. |
+| SCAN-4 | Read scan limit | A rows read pages at the limit with `scan_limited`, and the concatenated pages are in `order`; an aggregate fails. |
+| SCAN-5 | Strict filtered claim | A filtered claim on a `Strict` queue returns exactly the best-priority matches, also when scan-limited. |
+| SCAN-6 | Physical counting | A `Where` over many expired-but-stored rows reaches the scan budget. |
 | LIM-1 | Validation caps | Each `LimitKind` over its cap fails with `BatchTooLarge` and no record. |
 | LIM-2 | Resulting sizes | A small `Patch` `Append` that grows a body past `max_body_bytes` rejects with `ValueTooLarge`. |
 | GRP-1 | Atomicity | A group whose last operation rejects leaves no effect from earlier operations. |
@@ -1503,44 +1665,55 @@ vectors. IDs are stable and cited in failures.
 | GRP-6 | Lease policies | `Skip`, `Reject`, `Preserve`, `MatchToken`, `Break` on leased matches, including invalid combinations. |
 | GRP-7 | Set reads old values | `Set [a = b, b = a]` swaps. |
 | GRP-8 | Counting | Repeated keys count once; leased skips count in `matched`; `expect` uses `matched`. |
-| GRP-9 | Cohort split | A `Retire` of one member of a live cohort rejects with `CohortSplit`; selecting all members succeeds; a chunk step stops before the cohort. |
+| GRP-9 | Cohort split | A `Retire` of one member of a live cohort rejects with `CohortSplit`; selecting all members succeeds. |
 | GRP-10 | Version bumps | Each operation's effect on `item_version` and `fw_row_version`; renew returns the new version; lease expiry does not bump. |
-| GRP-11 | Row incarnation | Delete, re-insert, then a guard with the old version mismatches; `Some(0)` on an existing row mismatches. |
+| GRP-11 | Row incarnation | Delete, re-insert: the new row's version is above the old one, and a guard with the old version mismatches. |
+| GRP-12 | Absent guards | `Some(0)` on an existing row and `Some(3)` on an absent row both reject with `VersionMismatch`. |
+| GRP-13 | Chunk and cohorts | A chunk step over a cohort that is partly unmatched, or larger than `limit`, skips it, counts it in `skipped_cohorts`, and still advances. |
+| GRP-14 | Constraints | A `Set` that duplicates a `Unique` value rejects with `UniqueViolation`; a `Set` of null into a non-nullable field rejects with `MissingField`. |
 | PATCH-1 | Patch matrix | Every row of the §Patch table. |
 | FIN-1 | Finalize order | `metadata`, `body`, `patch`, `set`, outcome, with `expected_item_version` checked first. |
 | CHK-1 | Continuation binding | Changing selection, action, policy or params with a continuation fails `InvalidContinuation`. |
-| CHK-2 | Chunk restrictions | A chunked `Mutate` with another operation, a `Keys` selection, or an action on the access field fails validation. |
+| CHK-2 | Chunk restrictions | A chunked `Mutate` with another operation, a `Keys` selection, or an action on the access field fails validation; a `Transition` out of an `fw_state` access term is allowed; one back into it is not. |
 | DRY-1 | Dry run | Counts match a real run; nothing applied or recorded; the `request_id` stays unused. |
 | REC-1 | Rejections recorded | A rejected group's replay returns the same rejection, even after state changes that would let it commit. |
 | REC-2 | Validation not recorded | A request failing validation can be resent with the same id after fixing it. |
 | REC-3 | Fingerprint | Changing `min_durability` is not a conflict; changing anything else is `RequestIdConflict`. |
-| REC-4 | Stalled original | With `StallBeforeCommit`, a replay commits or rejects; the released original then returns the recorded result and does not commit. |
+| REC-4 | Stalled original | With `StallAtReceive` on the original, a replay commits or rejects; after `Release`, the original returns the recorded result and does not commit. |
+| REC-7 | Verb replay | A `finalize` and a `renew` with mixed per-entry outcomes replay the same per-entry outcomes. |
+| REC-8 | Token redaction | `get_request` of a claim returns no tokens; a replay returns them. |
 | REC-5 | Lost response | With `AfterCommitBeforeResponse`, `get_request` and replay return the committed result. |
 | REC-6 | Claim replay | Replay while leases are active returns the same claim; after they end, `RequestExpired`; an empty claim replays empty. |
 | TIME-1 | Time-driven transitions | Lease expiry, cohort deadline, retention and row expiry under `SharedClock`, with no tick. |
-| TIME-2 | Same-instant order | Lease expiry, cohort deadline and row expiry due at one instant process in the stated order. |
-| TIME-3 | Monotonic along conflicts | With the clock moved backward, a conflicting request's `as_of` does not decrease. |
+| TIME-3 | Monotonic along visibility | Under concurrent conflicting requests, `as_of` never decreases along observed effects (peers in child processes). |
 | TIME-4 | eligibility_time | Earlier and later than the authority; lease expiry still from the authority. |
 | TIME-5 | Lazy before act | A request touching a record first applies that record's due transitions. |
-| COH-1 | Cohort deadline | Retired member, gated member and missing member each fail the cohort at the deadline; a claimed cohort is exempt; enqueue after failure is `CohortFailed`. |
-| DUR-1 | Levels reported | Every write response reports a level within the declared range. |
+| COH-1 | Cohort deadline | A missing member, a gated member and a paused queue each fail the cohort at the deadline, including when the gate or pause is removed after the deadline before any request touches the cohort; a claimed cohort is exempt; enqueue after failure is `CohortFailed`. |
+| DUR-1 | Levels reported | Every write response, including rejections and `apply_schema`, reports a level within the declared range. |
 | DUR-2 | min_durability above max | Fails `InvalidRequest`. |
-| DUR-3 | DurabilityPending | With replication held back, the request returns `DurabilityPending { reached: Local }`; a replay after release returns `Replicated`. |
+| DUR-3 | DurabilityPending | With `HoldReplication`, the request returns `DurabilityPending { reached: Local }`; a replay after `Release` returns `Replicated`. |
+| DUR-6 | Prefix-closed | After a later commit reaches `Replicated`, every earlier commit reports `Replicated` on replay. |
 | DUR-4 | Local crash | Kill the server or child around acknowledged commits; every acknowledged commit is present after reopen. |
 | DUR-5 | Replicated loss | After `lose_local_storage`, every commit acknowledged at `Replicated` is present. |
 | LIN-1 | Concurrent claims | Peers never hold two active leases on one item. |
 | LIN-2 | Read after commit | A read starting after a commit's response observes it, across shapes. |
 | SHARE-1 | SingleProcess | A second open fails or supersedes while the holder lives; after the holder is killed, open succeeds. |
 | LOG-1 | Seq order | Concurrent appenders never let a reader see a smaller `seq` after a larger one. |
-| LOG-2 | Retention and cursors | `CursorExpired` exactly when an entry after the cursor was removed; `Start`; empty log. |
+| LOG-2 | Retention and cursors | `CursorExpired` exactly when an entry after the cursor was removed; `earliest: None` when retention removed everything; `Start`; empty log. |
+| LOG-3 | Partition cursors | The same checks for a `Partition` cursor. |
+| HIST-1 | History | Each kind of change appends one entry with the fixed schema; rejected and dry-run requests append nothing. |
 | BLOB-1 | Reference lifecycle | Overwrite, retire, expiry and retention end references at the transition instant; orphan deletion after grace; re-put restarts grace. |
-| BLOB-2 | Deletion race | A commit referencing a blob concurrently being deleted rejects with `BlobMissing`. |
+| BLOB-2 | Orphan instant | A commit referencing a blob at or after its orphan-deletion instant rejects with `BlobMissing`; one instant earlier, it succeeds and keeps the blob. |
 | BLOB-3 | Blob durability | A `Replicated` commit referencing a fresh blob survives `lose_local_storage` with the blob. |
 | SCH-1 | Schema versioning | Expected-version conflict; identical re-apply; non-additive change rejected; unsupported feature rejected. |
 | READ-1 | Declared reads | Version immutability; pagination; built-in reads by each parameter. |
+| READ-2 | Null ordering and grouping | Nulls sort first ascending and last descending; nulls form one group. |
+| ENQ-1 | Key conflicts | `Duplicate`, `ReplacePending` (with `superseded_item_id`, and `Superseded` on the old id) and `Reject`. |
+| TBL-1 | Expiry refresh | `AfterWrite` resets on an applied write, not on `Skip` or a no-op `Merge`. |
 | MET-1 | Metrics populations | Lifecycle counts include not-yet-due and gated items; progress metrics exclude paused queues and use base eligibility. |
 | PG-1 | Postgres isolation | Under concurrent group commits, `Contention` is returned only after retries, and no partial effect survives. |
 | PG-2 | Postgres time | `as_of` of conflicting requests never decreases in commit order. |
+| PG-3 | Write skew | Two groups that each require the other's key absent and insert their own: at most one commits. |
 
 ### Differential test
 
@@ -1596,9 +1769,9 @@ and 10 `operator_*` methods in `crates/fireweed/src/operator.rs`.
 |-----------------|----------|------------------|
 | `create_queue`, `ensure_queue`, `queue_definition` | `apply_schema`, `get_schema` | queues are declared in a space schema; `QueueDefinition` becomes `QueueSpec` |
 | `push`, `push_with_request_id`, `push_batch`, `push_batch_with_request_id` | `enqueue` | a request id is required (the helper generates one); key optional as today |
-| `upsert` | `enqueue` with `KeyConflict::ReplacePending` | none |
-| `batch_update` | `commit` with `Mutate` by `Keys` | now all-or-nothing across entries (was per entry); per-key `expected_version` |
-| `reschedule` | `Mutate` `Reschedule` with `LeasePolicy::Preserve` | none |
+| `upsert` | `enqueue` with `KeyConflict::ReplacePending` | needs a request id (helper generates one); `superseded_item_id` returned in `EntryResult` |
+| `batch_update` | `commit` with `Mutate` by `Keys` (`Set`, `SetMetadata`, `ReplaceBody`, `Reschedule`, `Gates`) | now all-or-nothing across entries (was per entry); per-key `expected_version` |
+| `reschedule` | `Mutate` `Reschedule` with `LeasePolicy::Preserve`; clearing `not_before` is `ScheduleChange::Clear` | none |
 | `set_gates` | `commit` with `SetGates` | response drops command position |
 | `purge` | `Mutate` `Retire` by `Keys`; `force` maps to `LeasePolicy::Break` | none |
 | `claim`, `claim_with`, `claim_response_with` | `claim` | none |
@@ -1621,14 +1794,16 @@ and 10 `operator_*` methods in `crates/fireweed/src/operator.rs`.
 | `query_index`, `query_index_unique`, `query_index_typed`, `query_index_unique_typed` | declared `read` or `get` by key | declared in the schema |
 | `range_scan`, `grouped_aggregate`, `declared_bucket_segment`, `metrics_by_query` | declared `read` | declared in the schema |
 | `bounded_mutation` | `Mutate` with `limit` or `chunk` | none |
-| `claim_by_query` | `claim` with `filter` | none |
+| `claim_by_query` | `claim` with `filter` | the filter needs an `Eq`/`In` access term on a `Lookup` field; results may be partial (`scan_limited`) |
 | `hot_projection_capabilities` | `capabilities()`, `get_schema` | — |
 | `claim_across_queues` | facade helper: one `claim` per queue with a shared `eligibility_time` | no common lease instant; not atomic |
 | `operator_pause`, `operator_resume` | `SetQueueState` | none |
 | `operator_admin_state` | `get` of `QueueState` | none |
-| `operator_inspect_item`, `retained_items` | `get` with `include_terminal` | none |
+| `operator_inspect_item` | `get` with `include_terminal` | none |
+| `retained_items` | built-in read `fw_items` with `state` `complete` or `failed`, paged in key order | none |
 | `operator_repair`, `operator_redrive` | `Mutate` with `Set`, `Transition` (`Release`, `Retry`, `Redrive`) and `LeasePolicy::Break` for forced actions | none |
-| `operator_purge`, `operator_archive` | `Mutate` `Retire` | `max_affected` becomes `limit` with `expect`; archive as a separate store is removed |
+| `operator_purge` | `Mutate` `Retire` | `max_affected` becomes `limit` with `expect` |
+| `operator_archive` | `Mutate` `SetMetadata` (`archived: true`) on retained terminal items | none: the item stays retained; nothing is deleted |
 | `operator_get_operation` | `get_request` | read-only |
 | `operator_audit_records` | `read_log` on the queue's history log | needs `history`; principal and reason come from `actor` and `reason` |
 | `projection_control`, `snapshot_policy`, `set_snapshot_policy`, `should_snapshot`, `snapshot_now`, `latest_snapshot_info`, `compact_log_behind_snapshot`, `last_rebuild_stats`, `ownership`, `renew_owned`, `reclaim_expired`, `current_position`, `peek` | object-log implementation type | leave `Fireweed` (ADR-025 open question 3) |
