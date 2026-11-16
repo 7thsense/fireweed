@@ -1801,6 +1801,11 @@ same gaps:
 | `open_competing(clock)` | Opens the space a second time on one host without a new grant; must fail | SHARE-1 |
 | `take_over(clock)` | The control plane grants the space to a new owner at a higher epoch | FENCE-1 |
 
+Tests that replay a request compare the replay with the original through
+`same_replay`: equal in every field except durability, which may be higher
+on the replay and never lower (§Replay rule 2), because an engine that
+ships commits after acknowledging them reports the level reached by then.
+
 The child-process protocol below remains the design for faults inside one
 request (`StallAtReceive`, REC-4) and for SIGKILL; an engine may implement
 `crash_and_reopen` with it.

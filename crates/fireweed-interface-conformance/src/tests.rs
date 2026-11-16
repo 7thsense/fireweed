@@ -350,7 +350,10 @@ fn eval_3(fx: &Fixture) -> T {
         fx.commit_with(h, vec![WriteOp::Mutate(m)], Params::new(), false),
         "replay",
     )?;
-    ensure!(again == r, "replay differs from the recorded rejection");
+    ensure!(
+        same_replay(&r, &again),
+        "replay differs from the recorded rejection"
+    );
     Ok(())
 }
 
@@ -2153,7 +2156,10 @@ fn rec_1(fx: &Fixture) -> T {
         fx.commit_with(h, vec![guarded(20, 1)], Params::new(), false),
         "replay",
     )?;
-    ensure!(r2 == r1, "replay of a rejection re-evaluated: {r2:?}");
+    ensure!(
+        same_replay(&r1, &r2),
+        "replay of a rejection re-evaluated: {r2:?}"
+    );
     Ok(())
 }
 
@@ -2211,7 +2217,7 @@ fn rec_6(fx: &Fixture) -> T {
     let req = ClaimRequest::new(h.clone(), "work", "w", 1, 60_000);
     let c1 = ok(fx.claim_req(req.clone()), "claim")?;
     let c2 = ok(fx.claim_req(req.clone()), "replay")?;
-    ensure!(c1 == c2, "replay while active differs");
+    ensure!(same_replay(&c1, &c2), "replay while active differs");
     ok(
         fx.finalize(vec![FinalizeEntry::new(
             lease_of(&c1.items[0]),
@@ -2229,7 +2235,7 @@ fn rec_6(fx: &Fixture) -> T {
     fx.push("c2", 1);
     let e2 = ok(fx.claim_req(empty), "empty replay")?;
     ensure!(
-        e1.items.is_empty() && e2 == e1,
+        e1.items.is_empty() && same_replay(&e1, &e2),
         "an empty claim must replay empty"
     );
     Ok(())
@@ -2256,7 +2262,7 @@ fn rec_7(fx: &Fixture) -> T {
     let a = ok(block_on(fx.plane.finalize(req.clone())), "finalize")?;
     let b = ok(block_on(fx.plane.finalize(req)), "replay")?;
     ensure!(
-        a == b && a.entries[0].status == EntryStatus::Completed,
+        same_replay(&a, &b) && a.entries[0].status == EntryStatus::Completed,
         "verb replay differs"
     );
     Ok(())
@@ -3331,7 +3337,7 @@ fn rec_9(fx: &Fixture) -> T {
         "replay after schema change",
     )?;
     ensure!(
-        again == first,
+        same_replay(&first, &again),
         "a recorded request did not replay before validation"
     );
     Ok(())
@@ -3926,7 +3932,7 @@ fn supp_1(fx: &Fixture) -> T {
         supp_event(fx, "ev-stop", "x@y", "stop", START - 10),
         "duplicate",
     )?;
-    ensure!(dup == a, "a duplicate event did not replay");
+    ensure!(same_replay(&a, &dup), "a duplicate event did not replay");
     ok(
         supp_event(fx, "ev-bounce", "x@y", "bounce", START - 50),
         "older bounce",

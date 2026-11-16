@@ -721,3 +721,55 @@ impl Fixture {
         }))
     }
 }
+
+/// A response that reports the durability level its request reached.
+pub trait Reached: Clone + PartialEq {
+    fn reached(&self) -> Option<DurabilityLevel>;
+    fn with_reached(self, level: Option<DurabilityLevel>) -> Self;
+}
+
+macro_rules! reached_plain {
+    ($($t:ty),*) => {$(
+        impl Reached for $t {
+            fn reached(&self) -> Option<DurabilityLevel> {
+                Some(self.durability)
+            }
+            fn with_reached(mut self, level: Option<DurabilityLevel>) -> Self {
+                if let Some(l) = level {
+                    self.durability = l;
+                }
+                self
+            }
+        }
+    )*};
+}
+reached_plain!(
+    EnqueueResponse,
+    ClaimResponse,
+    ClaimByItemIdsResponse,
+    RenewResponse,
+    FinalizeResponse
+);
+
+impl Reached for CommitResponse {
+    fn reached(&self) -> Option<DurabilityLevel> {
+        self.durability
+    }
+    fn with_reached(mut self, level: Option<DurabilityLevel>) -> Self {
+        self.durability = level;
+        self
+    }
+}
+
+/// API-006 §Replay rule 2: a replay returns the recorded response, except
+/// that its durability is the level the commit has reached now. So the
+/// replay equals the original in everything else, and its level is never
+/// lower than the one first reported (it rises on an engine that ships
+/// commits after acknowledging them).
+pub fn same_replay<R: Reached>(first: &R, replay: &R) -> bool {
+    let level_ok = match (first.reached(), replay.reached()) {
+        (Some(a), Some(b)) => b >= a,
+        (a, b) => a == b,
+    };
+    level_ok && replay.clone().with_reached(first.reached()) == *first
+}

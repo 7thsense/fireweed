@@ -848,7 +848,7 @@ fn dsl_send_suppressed(fx: &Fixture) -> T {
         Params::new(),
     );
     ensure!(
-        matches!((&r, &again), (Ok(x), Ok(y)) if x == y),
+        matches!((&r, &again), (Ok(x), Ok(y)) if same_replay(x, y)),
         "send replay differs"
     );
     let r = commit_on(
@@ -2088,7 +2088,7 @@ fn dsl_effect_outcome_unknown(fx: &Fixture) -> T {
         "record unknown: {t1:?}"
     );
     let t1b = ok(fx.commit_with(h, ops, Params::new(), false), "replay")?;
-    ensure!(t1b == t1, "replayed transition differs");
+    ensure!(same_replay(&t1, &t1b), "replayed transition differs");
     let again = ok(
         fx.commit(
             intent_ops("eff-1")
@@ -2185,7 +2185,7 @@ fn dsl_crash_before_provider_call(fx: &Fixture) -> T {
         fx.commit_with(h, intent_ops("eff-2"), Params::new(), false),
         "replay",
     )?;
-    ensure!(replay == intent, "replayed intent differs");
+    ensure!(same_replay(&intent, &replay), "replayed intent differs");
     ensure!(
         effects_with_key(fx, "eff-2")? == 1,
         "replay created an effect"
