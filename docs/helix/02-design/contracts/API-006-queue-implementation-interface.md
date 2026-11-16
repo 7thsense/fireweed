@@ -232,7 +232,28 @@ refused when the program is checked.
 
 `{and: [p, …]}`, `{or: [p, …]}`, `{not: p}`;
 `{eq|ne|lt|le|gt|ge: [a, b]}`; `{in: [a, [v, …]]}`;
-`{contains: [set_field, v]}`; `{is_null: a}`; `{not_null: a}`.
+`{contains: [set_field, v]}`; `{is_null: a}`; `{not_null: a}`;
+`{exists: {in: object, match: {…}, where: …}}` (below).
+
+### Lookups (`exists`)
+
+```yaml
+where:
+  not:
+    exists:
+      in: suppression                    # another queue or table in the same space
+      match: {address: {field: email}}   # its field = a value or the outer row's field
+      where: {is_null: lifted_at}        # optional, over the other object
+```
+
+`exists` is true when a row of `in` matches every `match` pair and passes
+its own `where`. A `match` value is a literal, a `{param}` or a `{field}`
+of the statement's own object. One `match` field must be indexed in the
+other object. A lookup tests existence only: it returns no columns, and
+there are no joins (ADR-025 §14).
+
+A claim's `where` made only of `not exists` exclusions needs no access
+term. Its claim reads past the few items it excludes.
 
 A comparison with a null is false, as in SQL.
 
@@ -319,7 +340,8 @@ Priority breaks ties among items due at the same instant (ADR-025 D42). Each one
 token, `due_at` = now + `lease`, one more attempt, and a new version.
 Items that other transactions hold are skipped, not waited for. `where`
 filters further and follows the index rule, so a rare value narrows
-through its index. `eligible_at` replaces now only when
+through its index. Exclusions written as `not exists` are allowed without
+an access term (§Lookups). `eligible_at` replaces now only when
 testing whether a pending item is due (Snorri CONTRACT-005); leases use
 now. A paused queue returns no items.
 
@@ -626,7 +648,8 @@ index rule and step through `(run, id)`.
 | State | In the DSL |
 |-------|-----------|
 | Per-recipient lifecycle | Queue items with indexed fields (campaign, step, domain, status) |
-| Suppression | Table with `reasons: text_set, merge: add_only`. A send's program first runs `assert` on the address with `expect: {max: 0}` (question 25 for spaces). |
+| Suppression | Host-supplied fact table in each workflow space, written by Cayce (ADR-025 §13, §14), with `reasons: text_set, merge: add_only`. A send's claim excludes suppressed contacts with `not exists`, or a send's program runs `assert` on the address with `expect: {max: 0}`. |
+| Dedupe by resolved entity | Cayce stamps an indexed `entity` field at admission. Guard: `not exists` an item with the same entity in a done state (ADR-025 §14). |
 | Caps and rate windows | Not Fireweed's (ADR-025 D49) |
 | Delivery and engagement events | Queue items keyed by provider id; a sequenced table for timelines |
 | UI counts and lists | Declared reads |

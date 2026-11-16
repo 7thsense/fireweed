@@ -176,6 +176,7 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D50 | Asked "Did you rule that Snorri has no shards, with one space per workflow?" (relayed from the Snorri session): "Yes, per workflow". | Owner, 2026-11-16 | Adopted; supersedes D32. A Snorri space is one workflow, holding every run. The run is an indexed field on items and rows, and there are no shards. D13 is unchanged: a space is still never wider than one workflow or one campaign. |
 | D51 | Asked "Can a Snorri re-entry family span more than one workflow?": "No, one workflow". | Owner, 2026-11-16 | Adopted. Resolves question 41. The re-entry record lives in the workflow's space, so admission and the re-entry check are one transaction, and there are no family spaces. |
 | D52 | "it's definitely not one space per run, shard. Snorri doesn't need to know about shards. Shards are only necessary from a tenant / workflow load balancing standpoint across nodes, which means they are a cayce level concern, not snorri (single workflow) and fireweed (single space)" | Owner via the Cayce session, 2026-11-16 | Adopted with D50. Fireweed sees one space at a time and Snorri one workflow; neither has shards. Placing workflows' spaces onto nodes is Cayce's load balancing, done through the control plane that grants a space's writer (D15). Rechecked against shards: D13 (atomicity per workflow or campaign), D29 (now D51), D30 and D31 assume none. |
+| D53 | "Fix up *all* the relevant specs, comments, and implementatinos so we stop getting wound around this axle. a) i think we can debate workflow per space vs. run per space. Given there are workflow specific tables to be stored, I think we can get away with per-workflow until proven otherwise, and put some constraint on number of runs, etc. b) account level state is in the control plane (fast, small, static) / niflheim (large, slow, delayed). If we need state that fits neither model we must design for it carefully. c) A guard should be able to access anything in the space it needs. But if there are technical constraints or limitations, we can address them. We will definitely need guards like "suppress contacts in the suppression list" and "dedupe by resolved entity" d) We need to figure this out, it should be part of the direct snorri AND OR fireweed DSL" | Owner via the Cayce session, 2026-11-16 | Adopted:<br>(a) one space per workflow until measurement shows otherwise, with a limit on open runs (§3);<br>(b) account-level state lives in the control plane or Niflheim, never in a Fireweed space, and §13 lists what fits neither;<br>(c) guards read any object in their space through indexed `exists` lookups (§14, API-006 §Lookups);<br>(d) host-supplied facts are written with ordinary DSL programs into the workflow space (§14). |
 
 ## Decision
 
@@ -294,7 +295,18 @@ transaction, and there are no family spaces.
 Work on one run is a selection on its `run` field:
 - cancelling a run is a stepped `update` over `{eq: [run, r]}`;
 - an event for instances in several runs is one program;
-- retiring a finished run deletes its items and rows (question 31).
+- retiring a finished run deletes its items and rows (questions 31 and
+  42).
+
+**Until shown otherwise (D53).** One space per workflow holds the
+workflow's own tables beside its queues. If measurement shows a workflow
+outgrowing one space, the alternative is one space per run.
+
+**A limit on runs.** A workflow space keeps at most a fixed number of open
+runs; the draft is 64. Snorri sets the number, and finished runs are
+retired (question 42). Fireweed doesn't count runs until question 42
+gives the schema a declared run key.
+
 A field updated with `{add: …}` holds a count within a space.
 
 ### 4. The executor is plain SQL
@@ -510,6 +522,87 @@ programs: enqueue, claim, complete and renew. RESP is deprecated (D25).
 Maintenance belongs to each executor: sweeps, index builds, S3 shipping
 and ownership.
 
+### 13. Account-level state
+
+Account-level state is not in any Fireweed space (D53). It lives in one of
+two places:
+- **the control plane**, for small, static state that's fast to read:
+  tenants, configuration and campaign definitions;
+- **Niflheim**, for large state that can be slow and delayed: history,
+  analytics and exports.
+
+Three kinds of state that Snorri and Cayce need fit neither. Each needs its
+own design, and each is drafted here for the owner:
+
+1. **The suppression list.** It is account-wide and written by events
+   (bounce, STOP, complaint), and must be exact at send time. That makes
+   it neither static nor delayed. Draft: Cayce keeps the authoritative list
+   in its control-plane PostgreSQL, accepting that it isn't static, and
+   writes each entry into every active workflow space as a host-supplied
+   fact (§14). Send guards then read it inside their own space (D53 c).
+2. **Resolved entities, for dedupe.** Mapping a contact to its resolved
+   entity is account-level identity resolution: large, and built
+   elsewhere. Draft: Cayce resolves the entity when it admits a contact,
+   and stamps it on the item as an indexed `entity` field. The dedupe
+   guard then reads only its space, for example "no completed item with
+   this entity" (§14). Where the resolution graph itself lives, and how
+   fresh it must be at admission, is Cayce's design.
+3. **Per-contact send caps.** These are high-rate, real-time counters
+   shared across a tenant's workflows. The owner kept them in Dragonfly
+   (D45, Cayce ADR-015), which is neither the control plane nor Niflheim.
+   That makes Dragonfly the one existing third store, and D53's "design
+   for it carefully" applies to it. The owner should confirm Dragonfly as
+   that design.
+
+### 14. Guards and host-supplied facts
+
+**Guards.** A guard is a DSL statement that checks space state before a
+send or admission commits:
+- `assert`, or `update`/`delete` with `expect`. With `on_unmet: report`, a
+  guard returns `met: false` instead of rejecting its program, so a batch
+  gets one result per guard.
+- Any `where`, including a claim's, can test another object of the same
+  space with an indexed lookup:
+  `{exists: {in: <object>, match: {<field>: <value or outer field>}, where: …}}`
+  (API-006 §Lookups).
+
+The two guards D53 names:
+- "suppress contacts in the suppression list":
+  `claim … where: {not: {exists: {in: suppression, match: {address: {field: email}}}}}`
+  for a batch, or `assert` on the address before one send;
+- "dedupe by resolved entity":
+  `{not: {exists: {in: instances, match: {entity: {field: entity}}, where: {eq: [state, complete]}}}}`.
+
+A lookup must match an indexed field of the other object. A claim filter
+made only of `not exists` exclusions needs no access term of its own,
+because it skips only the few items it excludes. There are no joins: a
+lookup tests existence and returns no columns. That limit is technical,
+and D53 allows revisiting it if a guard needs more.
+
+**Host-supplied facts.** Facts the host owns, such as suppression entries
+(§13), reach a workflow space through ordinary DSL programs, which Cayce
+runs with the Fireweed executor:
+- `insert … on_conflict: update`, with reasons `add_only`, so copies
+  converge;
+- a `request_id` built from the event and the space, so a retry replays.
+
+Snorri's workflow schema declares the fact tables, and Snorri's guards read
+them. Snorri itself doesn't write them.
+
+**Ordering against a send.** Within one space it is linearizable:
+- a fact committed before a send's program is seen by that program's guard;
+- a send that commits first went out before the fact, which is a valid
+  order;
+- a guard locks the fact rows it reads (`FOR SHARE`), so a change to an
+  existing fact waits for it.
+
+A fact row that doesn't exist yet can't be locked. So a new fact committing
+beside a send orders as if the send ran first.
+
+Across spaces there is no atomicity. Cayce writes each active workflow
+space separately, and seeds a new workflow space from its own record when
+the space is created.
+
 ## Alternatives
 
 | Option | Evaluation |
@@ -576,15 +669,10 @@ Questions 1 to 4, 6 to 24 and 26 to 36 were resolved in revisions 7 and 8
 (D13 to D40). Question 5 (counters) is closed: tenant-wide counters are not
 Fireweed's (D45, D49).
 
-25. **Suppression.** Suppression belongs to an account, but a transaction
-    can't span spaces. Either:
-    - **(a)** copies live in every campaign space, as Fireweed tables, and
-      each send's program checks its own copy with `assert`. The copies
-      converge because reasons are `add_only`.
-    - **(b)** suppression isn't Fireweed's. It's checked outside Fireweed,
-      for example by Cayce behind a Snorri port.
-
-    Only (a) touches Fireweed.
+25. **Suppression.** Draft, following D53 (c): the authoritative list is
+    Cayce's (§13, item 1), and copies are written into each workflow space
+    as host-supplied facts (§14), so guards read them in-space. Owner to
+    confirm, together with where Cayce keeps the authoritative list.
 31. **PostgreSQL layout.** Each space gets its own tables, or spaces share
     tables with the space id leading every key and index. Both are being
     measured (D36):

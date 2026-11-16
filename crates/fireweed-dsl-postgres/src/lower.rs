@@ -2,7 +2,7 @@
 //! fragments with bound parameters. Every value is bound as text and cast in
 //! SQL; names are validated DSL names.
 
-use fireweed_dsl::check::{CmpOp, Column, Expr, Kind, Operand, RPatch, RPred};
+use fireweed_dsl::check::{CmpOp, Column, Expr, Kind, Obj as DslObj, Operand, RPatch, RPred};
 use fireweed_dsl::{FieldType, MaxAttempts, MergeRule};
 use serde_json::Value;
 
@@ -79,7 +79,8 @@ pub fn cast(t: FieldType) -> &'static str {
     }
 }
 
-/// The object being lowered: aliased `o` in every statement.
+/// The object being lowered. A statement's own object is aliased `o`; a
+/// lookup into another object of the space gets its own alias.
 pub struct Obj {
     /// The qualified table name.
     pub table: String,
@@ -87,6 +88,41 @@ pub struct Obj {
     pub max_attempts: MaxAttempts,
     /// A table's key fields.
     pub key: Vec<String>,
+    pub alias: String,
+    /// The space, for lookups into its other objects.
+    pub schema_name: String,
+    pub schema: std::sync::Arc<fireweed_dsl::Schema>,
+}
+
+impl Obj {
+    pub fn new(
+        schema_name: &str,
+        schema: &std::sync::Arc<fireweed_dsl::Schema>,
+        o: &DslObj,
+        alias: &str,
+    ) -> Obj {
+        let (table, max_attempts, key) = match o.kind {
+            Kind::Queue => (
+                crate::ddl::queue_table(schema_name, &o.name),
+                schema.queues[&o.name].max_attempts,
+                vec![],
+            ),
+            Kind::Table => (
+                crate::ddl::table_table(schema_name, &o.name),
+                MaxAttempts::Unlimited,
+                schema.tables[&o.name].key.clone(),
+            ),
+        };
+        Obj {
+            table,
+            kind: o.kind,
+            max_attempts,
+            key,
+            alias: alias.into(),
+            schema_name: schema_name.into(),
+            schema: schema.clone(),
+        }
+    }
 }
 
 pub const NOW: &str = "fireweed.now()";
@@ -120,19 +156,23 @@ impl Obj {
     /// A column read through alias `o`. A queue's `state` is its effective
     /// state (API-006 §Time).
     pub fn col(&self, c: &Column) -> String {
+        let a = &self.alias;
         if self.kind == Kind::Queue && c.system && c.name == "state" {
             return format!(
-                "(CASE WHEN o.state = 'leased' AND o.due_at <= {NOW} THEN CASE WHEN {} THEN 'failed' ELSE 'pending' END ELSE o.state END)",
-                self.exhausted("o")
+                "(CASE WHEN {a}.state = 'leased' AND {a}.due_at <= {NOW} THEN CASE WHEN {} THEN 'failed' ELSE 'pending' END ELSE {a}.state END)",
+                self.exhausted(a)
             );
         }
-        format!("o.{}", Self::col_name(c))
+        format!("{a}.{}", Self::col_name(c))
     }
 
     /// Rows that are live: a table row past its expiry is gone.
     pub fn live(&self) -> String {
         match self.kind {
-            Kind::Table => format!("(o.expires_at IS NULL OR o.expires_at > {NOW})"),
+            Kind::Table => format!(
+                "({a}.expires_at IS NULL OR {a}.expires_at > {NOW})",
+                a = self.alias
+            ),
             Kind::Queue => "true".into(),
         }
     }
@@ -146,10 +186,12 @@ impl Obj {
             Operand::Path(p, t) => {
                 let path = q.path(p);
                 match t {
-                    FieldType::Json => format!("(o.body #> {path})"),
-                    FieldType::TextSet => format!("fireweed.text_set(o.body #> {path})"),
-                    FieldType::Text => format!("(o.body #>> {path})"),
-                    other => format!("((o.body #>> {path})::{})", cast(*other)),
+                    FieldType::Json => format!("({}.body #> {path})", self.alias),
+                    FieldType::TextSet => {
+                        format!("fireweed.text_set({}.body #> {path})", self.alias)
+                    }
+                    FieldType::Text => format!("({}.body #>> {path})", self.alias),
+                    other => format!("(({}.body #>> {path})::{})", self.alias, cast(*other)),
                 }
             }
         }
@@ -196,6 +238,32 @@ impl Obj {
             }
             RPred::IsNull(a) => format!("({} IS NULL)", self.operand(q, a)),
             RPred::NotNull(a) => format!("({} IS NOT NULL)", self.operand(q, a)),
+            RPred::Exists {
+                obj,
+                matches,
+                filter,
+            } => {
+                // An indexed lookup into another object of the same space.
+                let inner = Obj::new(
+                    &self.schema_name,
+                    &self.schema,
+                    obj,
+                    &format!("{}_x", self.alias),
+                );
+                let mut conds = vec![inner.live()];
+                for (c, v) in matches {
+                    conds.push(format!("{} = {}", inner.col(c), self.operand(q, v)));
+                }
+                if let Some(f) = filter {
+                    conds.push(inner.pred(q, f));
+                }
+                format!(
+                    "EXISTS (SELECT 1 FROM {} {} WHERE {})",
+                    inner.table,
+                    inner.alias,
+                    conds.join(" AND ")
+                )
+            }
         }
     }
 

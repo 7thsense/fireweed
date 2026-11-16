@@ -7,8 +7,8 @@ use fireweed_dsl::check::{
     RStatement, Selection,
 };
 use fireweed_dsl::{
-    Expect, FieldType, LeasedPolicy, MaxAttempts, MergeRule, OnConflict, OnLimit, OnUnmet,
-    Outcome as Settle, RejectReason,
+    Expect, FieldType, LeasedPolicy, MergeRule, OnConflict, OnLimit, OnUnmet, Outcome as Settle,
+    RejectReason,
 };
 use serde_json::{Value, json};
 use tokio_postgres::{Row, Transaction};
@@ -25,20 +25,7 @@ pub enum Outcome {
 type R = std::result::Result<Outcome, Attempt>;
 
 fn obj(sp: &Space, o: &DslObj) -> Obj {
-    match o.kind {
-        Kind::Queue => Obj {
-            table: queue_table(&sp.schema_name, &o.name),
-            kind: Kind::Queue,
-            max_attempts: sp.schema.queues[&o.name].max_attempts,
-            key: vec![],
-        },
-        Kind::Table => Obj {
-            table: table_table(&sp.schema_name, &o.name),
-            kind: Kind::Table,
-            max_attempts: MaxAttempts::Unlimited,
-            key: sp.schema.tables[&o.name].key.clone(),
-        },
-    }
+    Obj::new(&sp.schema_name, &sp.schema, o, "o")
 }
 
 async fn query(tx: &Transaction<'_>, q: &Q) -> std::result::Result<Vec<Row>, Attempt> {
@@ -1009,12 +996,13 @@ pub async fn sweep(
         |col: &str| format!("o.{col} <= {NOW} - $2::text::bigint * interval '1 millisecond'");
     for (name, decl) in &sp.schema.queues {
         let t = queue_table(&sp.schema_name, name);
-        let ob = Obj {
-            table: t.clone(),
-            kind: Kind::Queue,
-            max_attempts: decl.max_attempts,
-            key: vec![],
-        };
+        let ob = obj(
+            sp,
+            &DslObj {
+                name: name.clone(),
+                kind: Kind::Queue,
+            },
+        );
         let exhausted = ob.exhausted("o");
         let expired = format!("o.state = 'leased' AND o.due_at <= {NOW}");
         work.push((

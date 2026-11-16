@@ -37,6 +37,8 @@ queues:
       campaign: {type: text, index: true}
       awaits:   {type: text_set, index: true}
       step:     {type: int}
+      email:    {type: text}
+      entity:   {type: text, index: true}
 tables:
   slots:
     key: [contact, hour]
@@ -623,6 +625,8 @@ async fn programs_that_break_the_rules_are_refused() {
         "statements:\n  - select: {from: work, where: {eq: [campaign, {field: campaign}]}, fields: [id], limit: 1}\n",
         // A claim filter without an access term.
         "request_id: x\nstatements:\n  - claim: {from: work, limit: 1, lease: 30s, worker: w, where: {eq: [step, 1]}}\n",
+        // A lookup must use an index of the other object (email isn't indexed).
+        "statements:\n  - select: {from: work, where: {and: [{eq: [campaign, c]}, {exists: {in: work, match: {email: x}}}]}, fields: [id], limit: 1}\n",
         // A key twice in one insert.
         "request_id: x\nstatements:\n  - insert: {into: work, rows: [{key: a}, {key: a}]}\n",
         // A write after a sequenced insert.
@@ -992,4 +996,67 @@ statements:
             json!({"contact": "b", "count": 1})
         ]
     );
+}
+
+/// Guards read other objects of the space through indexed lookups:
+/// a claim skips suppressed contacts and contacts whose resolved entity
+/// already has a completed item, and an assert checks one address.
+#[tokio::test]
+async fn guards_look_up_other_objects_in_the_space() {
+    let Some((mut c, sp)) = setup("lookups").await else {
+        return;
+    };
+    run(
+        &mut c,
+        &sp,
+        r#"
+request_id: f
+statements:
+  - insert: {into: supp, rows: [{address: b@x, reasons: [bounce]}]}
+  - insert:
+      into: work
+      rows:
+        - {key: done, email: d@x, entity: e1}
+        - {key: a, email: a@x, entity: e2}
+        - {key: b, email: b@x, entity: e3}
+        - {key: d, email: d2@x, entity: e1}
+"#,
+    )
+    .await;
+    // Complete the first e1 item, so e1 is already served.
+    let r = run(
+        &mut c,
+        &sp,
+        "request_id: c0\nstatements:\n  - claim: {from: work, limit: 1, lease: 30s, worker: w}\n",
+    )
+    .await;
+    let first = rows(&r, 0)[0].clone();
+    assert_eq!(first["key"], "done");
+    run(&mut c, &sp, &format!(
+        "request_id: s0\nstatements:\n  - settle: {{queue: work, outcome: complete, items: [{{id: {}, token: \"{}\"}}]}}\n",
+        first["id"], first["token"].as_str().unwrap()
+    )).await;
+    let r = run(&mut c, &sp, r#"
+request_id: c1
+statements:
+  - claim:
+      from: work
+      limit: 10
+      lease: 30s
+      worker: w
+      where:
+        and:
+          - {not: {exists: {in: supp, match: {address: {field: email}}}}}
+          - {not: {exists: {in: work, match: {entity: {field: entity}}, where: {eq: [state, complete]}}}}
+  - assert: {target: supp, keys: [{address: b@x}], expect: {max: 0, on_unmet: report}}
+"#).await;
+    // b is suppressed; d's entity e1 already has a completed item.
+    assert_eq!(
+        rows(&r, 0)
+            .iter()
+            .map(|i| i["key"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["a"]
+    );
+    assert_eq!(r.results[1], json!({"matched": 1, "met": false}));
 }

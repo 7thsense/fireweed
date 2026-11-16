@@ -56,7 +56,7 @@ pub(crate) async fn rows(
 /// A space as stored in the catalog.
 pub(crate) struct Space {
     pub schema_name: String,
-    pub schema: Schema,
+    pub schema: std::sync::Arc<Schema>,
 }
 
 async fn load(c: &Client, tenant: &str, space: &str) -> Result<Option<(i64, Schema)>> {
@@ -267,7 +267,7 @@ async fn attempt(
         .map_err(|e| Attempt::Failed(Error::Unavailable(format!("stored schema: {e}"))))?;
     let sp = Space {
         schema_name: ddl::schema_name(id),
-        schema,
+        schema: schema.into(),
     };
     let r = check::resolve(&sp.schema, p)?;
     if !row.get::<_, bool>(4) {
@@ -356,7 +356,7 @@ pub async fn sweep(c: &mut Client, tenant: &str, space: &str, batch: u32) -> Res
     let (id, schema) = load(c, tenant, space).await?.ok_or(Error::SpaceNotFound)?;
     let sp = Space {
         schema_name: ddl::schema_name(id),
-        schema,
+        schema: schema.into(),
     };
     let tx = c.transaction().await.map_err(db)?;
     let out = run::sweep(&tx, &sp, batch as i64).await.map_err(db)?;

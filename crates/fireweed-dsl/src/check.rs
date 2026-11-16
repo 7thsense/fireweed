@@ -279,6 +279,13 @@ pub enum RPred {
     Contains(Operand, Operand),
     IsNull(Operand),
     NotNull(Operand),
+    /// Rows of another object match: each `(inner column, outer operand)`
+    /// pair is an equality, and `filter` is over the inner object.
+    Exists {
+        obj: Obj,
+        matches: Vec<(Column, Operand)>,
+        filter: Option<Box<RPred>>,
+    },
 }
 
 /// The value assigned to a field.
@@ -486,6 +493,7 @@ type Params = BTreeMap<String, Value>;
 
 /// Name resolution for one object.
 struct Ctx<'a> {
+    schema: &'a Schema,
     obj: Obj,
     queue: Option<&'a QueueDecl>,
     table: Option<&'a TableDecl>,
@@ -495,6 +503,7 @@ struct Ctx<'a> {
 fn ctx<'a>(s: &'a Schema, name: &str, params: &'a Params) -> Result<Ctx<'a>> {
     if let Some(q) = s.queues.get(name) {
         Ok(Ctx {
+            schema: s,
             obj: Obj {
                 name: name.into(),
                 kind: Kind::Queue,
@@ -505,6 +514,7 @@ fn ctx<'a>(s: &'a Schema, name: &str, params: &'a Params) -> Result<Ctx<'a>> {
         })
     } else if let Some(t) = s.tables.get(name) {
         Ok(Ctx {
+            schema: s,
             obj: Obj {
                 name: name.into(),
                 kind: Kind::Table,
@@ -712,6 +722,35 @@ impl Ctx<'_> {
                 self.typed(v, true)?
                     .ok_or_else(|| Error::Invalid("not_null takes a column".into()))?,
             ),
+            Pred::Exists(l) => {
+                let inner = ctx(self.schema, &l.object, self.params)?;
+                if l.matches.is_empty() {
+                    return invalid("exists needs at least one match");
+                }
+                let mut matches = vec![];
+                for (k, v) in &l.matches {
+                    let col = inner.column(k)?;
+                    matches.push((col.clone(), self.operand(v, col.ty)?));
+                }
+                // The lookup itself must use an index of the inner object.
+                if !matches.iter().any(|(c, _)| inner.indexed(c)) {
+                    return invalid(format!(
+                        "exists in {}: match an indexed field (API-006 §Index rule)",
+                        l.object
+                    ));
+                }
+                let filter = l
+                    .filter
+                    .as_ref()
+                    .map(|f| inner.pred(f))
+                    .transpose()?
+                    .map(Box::new);
+                RPred::Exists {
+                    obj: inner.obj,
+                    matches,
+                    filter,
+                }
+            }
         })
     }
 
@@ -945,6 +984,16 @@ impl Ctx<'_> {
     }
 }
 
+/// True for a claim filter made only of `not exists` lookups: it skips the
+/// few items it excludes, so it needs no access term of its own.
+fn exclusion_only(p: &RPred) -> bool {
+    match p {
+        RPred::Not(b) => matches!(**b, RPred::Exists { .. }),
+        RPred::And(ps) => !ps.is_empty() && ps.iter().all(exclusion_only),
+        _ => false,
+    }
+}
+
 fn two(a: &[Value]) -> Result<[&Value; 2]> {
     match a {
         [x, y] => Ok([x, y]),
@@ -1105,7 +1154,7 @@ fn statement(s: &Schema, st: &Statement, params: &Params) -> Result<RStatement> 
                         let p = c.pred(p)?;
                         // A claim filter must narrow through an index too, or
                         // a rare value walks the whole claim index.
-                        if !c.has_access(&p) {
+                        if !c.has_access(&p) && !exclusion_only(&p) {
                             return invalid(
                                 "a claim's where needs an access term (API-006 §Index rule)",
                             );

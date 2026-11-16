@@ -480,6 +480,22 @@ pub enum Pred {
     Contains(Vec<Value>),
     IsNull(Value),
     NotNull(Value),
+    /// A row exists in another object of the same space (API-006 §Lookups).
+    Exists(Lookup),
+}
+
+/// `{exists: {in: suppression, match: {address: {field: email}}, where: …}}`:
+/// rows of `in` whose `match` fields equal the given operands, where the
+/// operands are literals, params or the outer row's fields.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lookup {
+    #[serde(rename = "in")]
+    pub object: String,
+    #[serde(rename = "match")]
+    pub matches: BTreeMap<String, Value>,
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Box<Pred>>,
 }
 
 /// A body patch (API-006 §Body patches).
