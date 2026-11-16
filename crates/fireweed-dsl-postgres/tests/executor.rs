@@ -146,6 +146,16 @@ async fn schema_creates_tables_and_indexes_and_only_adds() {
         apply_schema(&mut c, "t", &sp, &s, Some(5)).await,
         Err(Error::SchemaConflict { current: Some(1) })
     );
+    // An index on a live object would block its writes while it builds.
+    assert!(matches!(
+        apply_schema(&mut c, "t", &sp, &s, Some(1)).await,
+        Err(Error::Invalid(_))
+    ));
+    s.queues
+        .get_mut("work")
+        .unwrap()
+        .fields
+        .insert("region".into(), from_yaml("{type: text}").unwrap());
     assert!(
         apply_schema(&mut c, "t", &sp, &s, Some(1))
             .await
@@ -179,7 +189,7 @@ statements:
         - {key: a, priority: 2, campaign: c1, body: {n: 1}}
         - {key: b, priority: 1, campaign: c1}
         - {key: c, priority: 3, campaign: c2, after: 1h}
-        - {key: a, priority: 9}
+  - insert: {into: work, rows: [{key: a, priority: 9}]}
 "#,
     )
     .await;
@@ -188,9 +198,10 @@ statements:
         ins.iter()
             .map(|e| e["status"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["inserted", "inserted", "inserted", "exists"]
+        ["inserted", "inserted", "inserted"]
     );
-    assert_eq!(ins[3]["id"], ins[0]["id"]);
+    assert_eq!(rows(&r, 1)[0]["status"], "exists");
+    assert_eq!(rows(&r, 1)[0]["id"], ins[0]["id"]);
 
     let r = run(
         &mut c,
@@ -217,7 +228,7 @@ statements:
     let r = run(&mut c, &sp, &format!(r#"
 request_id: s1
 statements:
-  - complete: {{queue: work, items: [{{id: {b}, token: "{tok_b}"}}, {{id: {a}, token: wrong}}], set: {{step: 5}}}}
+  - settle: {{queue: work, outcome: complete, items: [{{id: {b}, token: "{tok_b}"}}, {{id: {a}, token: wrong}}], set: {{step: 5}}}}
 "#)).await;
     assert_eq!(
         rows(&r, 0),
@@ -497,9 +508,11 @@ statements:
     .await;
     let (mut after, mut steps, mut total) = (None::<i64>, 0, 0);
     loop {
-        let a = after.map(|a| format!(", after: {a}")).unwrap_or_default();
+        let a = after
+            .map(|a| format!(", {{gt: [id, {a}]}}"))
+            .unwrap_or_default();
         let r = run(&mut c, &sp, &format!(
-            "request_id: step{steps}\nstatements:\n  - update: {{target: work, where: {{eq: [campaign, bulk]}}, set: {{step: 1}}, limit: 10, on_limit: step{a}}}\n"
+            "request_id: step{steps}\nstatements:\n  - update: {{target: work, where: {{and: [{{eq: [campaign, bulk]}}{a}]}}, set: {{step: 1}}, limit: 10, on_limit: step}}\n"
         )).await;
         let out = &r.results[0];
         total += out["matched"].as_u64().unwrap();
@@ -554,7 +567,8 @@ statements:
         r#"
 request_id: i2
 statements:
-  - release:
+  - settle:
+      outcome: release
       queue: work
       items: [{{id: {}, token: "{}"}}]
       set: {{awaits: {{set_remove: [evt-1]}}}}
@@ -601,6 +615,16 @@ async fn programs_that_break_the_rules_are_refused() {
         "statements:\n  - select: {from: work, where: {eq: [campaign, 3]}, fields: [id], limit: 1}\n",
         // Unknown field.
         "statements:\n  - select: {from: work, where: {eq: [nope, a]}, fields: [id], limit: 1}\n",
+        // due_at's only index is partial, so it isn't an access term.
+        "statements:\n  - select: {from: work, where: {lt: [due_at, {now: {}}]}, fields: [id], limit: 1}\n",
+        // A range alone can match everything.
+        "statements:\n  - select: {from: work, where: {ge: [id, 0]}, fields: [id], limit: 1}\n",
+        // Comparing a column with itself isn't an access term.
+        "statements:\n  - select: {from: work, where: {eq: [campaign, {field: campaign}]}, fields: [id], limit: 1}\n",
+        // A key twice in one insert.
+        "request_id: x\nstatements:\n  - insert: {into: work, rows: [{key: a}, {key: a}]}\n",
+        // A write after a sequenced insert.
+        "request_id: x\nstatements:\n  - insert: {into: timeline, rows: [{instance: 1, event: a}]}\n  - insert: {into: work, rows: [{key: a}]}\n",
     ];
     for doc in bad {
         assert!(
@@ -690,4 +714,106 @@ async fn seq_scans(c: &Client, schema: &str) -> i64 {
     .await
     .unwrap()
     .get(0)
+}
+
+/// A claim reads only a handful of claim-index entries, whether the queue is
+/// mostly sleeping or mostly due (review finding: the scan must stop after
+/// `limit` claimable items).
+#[tokio::test]
+async fn claims_read_few_index_entries() {
+    let Some((mut c, sp)) = setup("sleepy").await else {
+        return;
+    };
+    // 5,000 sleeping items, then 3 due ones.
+    for b in 0..5 {
+        let items: Vec<String> = (0..1000)
+            .map(|i| format!("{{key: s{b}-{i}, priority: {}, after: 1h}}", i % 9))
+            .collect();
+        run(
+            &mut c,
+            &sp,
+            &format!(
+                "request_id: f{b}\nstatements:\n  - insert: {{into: work, rows: [{}]}}\n",
+                items.join(", ")
+            ),
+        )
+        .await;
+    }
+    run(&mut c, &sp, "request_id: due\nstatements:\n  - insert: {into: work, rows: [{key: d1}, {key: d2}, {key: d3}]}\n").await;
+    let schema: String = c
+        .query_one(
+            "SELECT 'fws_' || id FROM fireweed.spaces WHERE tenant = 't' AND space = $1",
+            &[&sp],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    c.batch_execute(&format!("ANALYZE \"{schema}\".q_work"))
+        .await
+        .unwrap();
+    let before = index_reads(&c, &schema).await;
+    let r = run(
+        &mut c,
+        &sp,
+        "request_id: c1\nstatements:\n  - claim: {from: work, limit: 10, lease: 30s, worker: w}\n",
+    )
+    .await;
+    assert_eq!(rows(&r, 0).len(), 3);
+    let read = index_reads(&c, &schema).await - before;
+    assert!(
+        read < 50,
+        "a claim read {read} index entries of a mostly sleeping queue"
+    );
+}
+
+/// Index entries read from the queue table's indexes so far.
+async fn index_reads(c: &Client, schema: &str) -> i64 {
+    c.batch_execute("SELECT pg_stat_force_next_flush(); SELECT pg_stat_clear_snapshot();")
+        .await
+        .unwrap();
+    c.query_one(
+        "SELECT coalesce(sum(idx_tup_read), 0)::bigint FROM pg_stat_user_indexes WHERE schemaname = $1 AND relname = 'q_work'",
+        &[&schema],
+    )
+    .await
+    .unwrap()
+    .get(0)
+}
+
+/// An update reschedules and reprioritises unleased items in bulk.
+#[tokio::test]
+async fn update_reschedules_unleased_items() {
+    let Some((mut c, sp)) = setup("resched").await else {
+        return;
+    };
+    run(&mut c, &sp, "request_id: f\nstatements:\n  - insert: {into: work, rows: [{key: a, campaign: x}, {key: b, campaign: x}]}\n").await;
+    let r = run(&mut c, &sp, r#"
+request_id: u1
+statements:
+  - update: {target: work, where: {eq: [campaign, x]}, set: {due_at: "2100-01-01T00:00:00Z", priority: 7}}
+  - claim: {from: work, limit: 5, lease: 30s, worker: w}
+  - select: {from: work, where: {eq: [campaign, x]}, fields: [key, priority, state], order_by: [{field: key}], limit: 5}
+"#).await;
+    assert_eq!(r.results[0]["matched"], json!(2));
+    assert!(rows(&r, 1).is_empty(), "rescheduled items are not due");
+    assert_eq!(
+        rows(&r, 2),
+        vec![
+            json!({"key": "a", "priority": 7, "state": "pending"}),
+            json!({"key": "b", "priority": 7, "state": "pending"}),
+        ]
+    );
+    // Cancelling: state complete.
+    let r = run(
+        &mut c,
+        &sp,
+        r#"
+request_id: u2
+statements:
+  - update: {target: work, keys: [a], set: {state: complete}}
+  - select: {from: work, where: {eq: [key, a]}, fields: [state], limit: 1}
+"#,
+    )
+    .await;
+    assert_eq!(rows(&r, 1), vec![json!({"state": "complete"})]);
 }

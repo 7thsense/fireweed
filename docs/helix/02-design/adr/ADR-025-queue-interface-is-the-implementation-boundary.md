@@ -48,8 +48,16 @@ Revisions 5 to 8 went the other way, and revision 9 removes that design:
   boundary.
 
 The owner's rulings D1 to D40 stand except where the table below says
-revision 9 changes them. API-006 still describes revision 8 and is
-rewritten to match this ADR.
+revision 9 changes them. API-006 revision 9 is the DSL reference.
+
+A fresh-eyes review of the first revision 9 code found the following
+(D42). Every one is fixed in the same PR:
+- the sweep could clear a lease another worker had just taken;
+- a claim walked the whole claim index on a mostly sleeping queue;
+- the index rule admitted ranges, partial-index columns and unbounded
+  aggregates;
+- stepped updates re-read every match;
+- statements cost several round trips each.
 
 ## Context
 
@@ -134,7 +142,7 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D16 | "this system isn't really meant to store blobs. even history will need to be supported for timeline and event triggering … fireweed is exposing a generic interface similar to a sql database but with more constraints. define another table, be done." | Owner, 2026-11-15 | Kept: queues and tables; history is a sequenced table (§3). |
 | D17 | "yes, add max_attempts": lease expiry counts toward `max_attempts`. | Owner, 2026-11-15 | Kept (§8). |
 | D18 | "yes, bump item_version" on renew and reassign. | Owner, 2026-11-15 | Kept (§8). |
-| D19 | Cohort deadline draft: "yes". Rejected requests recorded: "yes." Choices made without a ruling: "yes, as needed. serializable transactions seems pretty aggressive but if it's necessary..." | Owner, 2026-11-15 | Rejected requests are recorded (§5); `SERIALIZABLE` only for guarded programs (§5). Cohorts leave v1, so the deadline rule waits with them (question 37). |
+| D19 | Cohort deadline draft: "yes". Rejected requests recorded: "yes." Choices made without a ruling: "yes, as needed. serializable transactions seems pretty aggressive but if it's necessary..." | Owner, 2026-11-15 | Rejected requests are recorded (§5). `SERIALIZABLE` turned out not to be necessary: guards lock the rows they count (§5). Cohorts leave v1, so the deadline rule waits with them (question 37). |
 | D20 | Field merge rules: "yes add merge rules". A guard-only operation: "agree". | Owner, 2026-11-15 | Kept (§3, §4). |
 | D21 | "all high-volume ops should be in the data plane, not control plane." | Owner, 2026-11-15 | Kept: admission chunk state is a table row. |
 | D22 | "no need for complex schema changes. these spaces will not have infinite lifetime" | Owner, 2026-11-15 | Kept: schema changes only add (§3). |
@@ -154,9 +162,10 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D36 | "we need to measure. i'm worried deletes and indices will become problematic if we don't use indpendent tables" | Owner, 2026-11-16 | Open question 31. |
 | D37 | "yaml (json) syntax is ok for now." | Owner, 2026-11-16 | Kept (§4). |
 | D38 | The `umf.fireweed` extension "can live in umf". | Owner, 2026-11-16 | Kept: DocumentDrivenDX/umf#172. |
-| D39 | No UMF declarative actions in v1; a narrow engine trait; claim indexes lead with due time; no combined-action statement; `Rearm` for non-charging waits. | Owner, 2026-11-16 | Kept, with a second claim index in claim order (question 40). `Rearm` is `release` with `after`. |
+| D39 | No UMF declarative actions in v1; a narrow engine trait; claim indexes lead with due time; no combined-action statement; `Rearm` for non-charging waits. | Owner, 2026-11-16 | Kept: one claim index, `(due_at, priority, id)`, and claims in that order (D42). `Rearm` is a `release` settle with `after`. |
 | D40 | Extract shared crates from weft and evolve weft's tooling with them. | Owner, 2026-11-16 | Done: DocumentDrivenDX/weft#70, merged. |
 | D41 | "This really shouldn't be much more than some sql to manipulate groups of rows in the database. If there are a bunch of in memory stores, caches, memos, or full table scans, the design is broken." | Owner, 2026-11-16 | Adopted: revision 9. |
+| D42 | "Fix them all", on the review findings, with claims ordered by due time and priority breaking ties, as recommended. | Owner, 2026-11-16 | Adopted in revision 9 (§3, §4, §5, §9). |
 
 ## Decision
 
@@ -184,7 +193,8 @@ the reference for both.
   transaction:
   - `insert`;
   - `claim`;
-  - `complete`, `fail`, `retry` and `release`;
+  - `settle`, which ends a lease as `complete`, `fail`, `retry` or
+    `release`;
   - `renew`;
   - `update`, `delete` and `assert`;
   - `select` and `read`;
@@ -196,7 +206,7 @@ the reference for both.
 ```yaml
 request_id: transition-r1-7
 statements:
-  - complete: {queue: instances, items: [{id: 41, token: "6f1c…"}], set: {step: 3}, require_all: true}
+  - settle: {queue: instances, outcome: complete, items: [{id: 41, token: "6f1c…"}], set: {step: 3}, require_all: true}
   - insert:   {into: effects, rows: [{key: "r1-send-1", body: {template: welcome}}], on_conflict: reject}
   - update:
       target: send_slots
@@ -232,13 +242,20 @@ each becomes a real table:
 | Sequenced table | A table whose `id` is assigned from a counter row in the same transaction, so ids are gapless and in commit order. Rows are immutable and leave by expiry. | Timelines, transition history, delivery events, outbox feeds |
 
 The executor creates for every queue:
-- two claim indexes over pending and leased items: `(due_at, priority,
-  id)` (D39) and `(priority, due_at, id)`. The planner uses the second
-  when most items are due, the first when most are sleeping (question 40);
+- the claim index `(due_at, priority, id)` over pending and leased items
+  (D39). Claims run in that order, so a claim reads about `limit` index
+  entries whether most items are due or most are sleeping. Priority
+  breaks ties among items due at the same instant (D42);
 - a unique index on `key`;
 - an index on `finished_at` for retention;
-- one index per declared indexed field, GIN for a `text_set`, such as
-  Snorri's await keys.
+- one index per declared indexed field. A btree index is `(field, id)`, so
+  a stepped update on the field is a range scan; a `text_set` gets a GIN
+  index, such as for Snorri's await keys.
+
+Queue tables leave 20% free space per page (`fillfactor = 80`), so updates
+that change no indexed column can stay on their page. Indexes come only
+with new objects. A field added to a live object is unindexed, because an
+index build would block the object's writes.
 
 Whether each space gets its own PostgreSQL tables, or spaces share tables
 keyed by space id, is decided by measurement (question 31). The v1
@@ -275,20 +292,29 @@ Each call reads the space's schema row, checks the program, and runs it.
 
 | Statement | SQL on PostgreSQL |
 |-----------|-------------------|
-| `insert` | `INSERT … SELECT … FROM jsonb_to_recordset($rows) … ON CONFLICT … RETURNING` |
-| `claim` | `UPDATE q SET state='leased', lease_token=gen_random_uuid(), due_at=now+lease, attempts=attempts+1, version=version+1 FROM (SELECT id FROM q WHERE <claimable> AND <where> ORDER BY priority, due_at, id LIMIT $n FOR UPDATE SKIP LOCKED) c WHERE q.id=c.id RETURNING …` |
-| `complete`, `fail`, `retry`, `release`, `renew` | `UPDATE q SET … FROM jsonb_to_recordset($items) i WHERE q.id=i.id AND q.lease_token=i.token AND <lease unexpired> RETURNING q.id` |
-| `update` | `SELECT id … ORDER BY id LIMIT $limit+1 FOR UPDATE`, then `UPDATE … FROM (old values) … RETURNING <merge checks>` |
-| `delete` | `DELETE … WHERE id IN (SELECT … FOR UPDATE)` |
-| `assert` | `SELECT count(*) FROM (SELECT 1 FROM obj WHERE <where> LIMIT $max+1)` |
-| `select`, `read` | `SELECT jsonb_build_object(…) FROM obj WHERE … GROUP BY … ORDER BY … LIMIT $n` |
+| `insert` | `INSERT … SELECT … FROM jsonb_to_recordset($rows) … ON CONFLICT (key) DO NOTHING / DO UPDATE … WHERE <expired or merge rules hold> RETURNING`, joined back to the rows in the same statement |
+| `claim` | `UPDATE q SET state='leased', lease_token=gen_random_uuid(), due_at=now+lease, attempts=attempts+1, version=version+1 FROM (SELECT id FROM q WHERE <claimable> AND <where> ORDER BY due_at, priority, id LIMIT $n FOR UPDATE SKIP LOCKED) c WHERE q.id=c.id RETURNING …` |
+| `settle`, `renew` | `UPDATE q SET … FROM jsonb_to_recordset($items) i WHERE q.id=i.id AND q.lease_token=i.token AND <lease unexpired> RETURNING q.id` |
+| `update` | One statement: a `FOR UPDATE` CTE of up to `limit + 1` rows in id order, their count, and `UPDATE … FROM` the first `limit` when the count allows, returning merge-rule checks |
+| `delete` | The same shape with `DELETE … USING` |
+| `assert` | `SELECT count(*) FROM (SELECT 1 FROM obj WHERE <where> LIMIT $max+1 FOR KEY SHARE)` |
+| `select`, `read` | `SELECT jsonb_build_object(…) FROM obj WHERE … LIMIT $n`; sorted or aggregating selects read through a CTE capped at 100,000 rows |
 | `pause`, `resume` | `INSERT … ON CONFLICT DO UPDATE` on the space's queue-state row |
 
-Only `claim`, the settle statements and `renew` write an item's system
-columns. A settle or renew whose token is stale, or whose lease has
-expired, reports that item `stale` and leaves the others alone (D6).
-`update` on a queue skips leased items unless it asks to preserve or break
-the lease (API-002).
+Only `claim`, `settle` and `renew` write an item's lease columns. An
+`update` may set `priority`, `due_at` and `state` on items that aren't
+leased, which gives bulk reschedule, reprioritise and cancel. A `settle` or
+`renew` whose token is stale, or whose lease has expired, reports that item
+`stale` and leaves the others alone (D6). `update` on a queue skips leased
+items unless it asks to preserve or break the lease (API-002).
+
+Each statement is one round trip. Queries are sent unprepared with text
+parameters, so nothing is prepared or cached per connection. A program
+with a request id adds four fixed round trips:
+- writing the request record;
+- the settings and savepoint;
+- writing the response;
+- the commit.
 
 ### 5. One program is one transaction
 
@@ -311,17 +337,22 @@ Request ids give idempotent replay. The space's `fw_requests` table holds
    written to the row, and the transaction commits. A replay therefore
    returns the same rejection (D19).
 
-Programs run at `READ COMMITTED`. A program with an `assert`, or an
-`expect` on an `update` or `delete`, runs at `SERIALIZABLE`, so write skew
-can't defeat the guard. It retries a bounded number of times, then fails
-with `contention`.
+Programs run at `READ COMMITTED`. Guards lock the rows they count:
+- `update` and `delete` lock them `FOR UPDATE`;
+- `assert` locks them `FOR KEY SHARE`.
+
+A count can't change under a guard before commit. An `assert` that
+expects no row can't lock a row that doesn't exist yet. A concurrent
+insert of that key can therefore commit beside it, and the two order as if
+the guard ran first. A program retries deadlocks a bounded number of
+times, then fails with `contention`.
 
 A Snorri transition is one program:
-- complete or release the instance-head item, patching its body and await
-  fields;
-- complete the consumed event item;
+- settle the instance-head item, patching its body and await fields;
+- settle the consumed event item;
 - insert effect items;
-- update counter rows.
+- update counter rows;
+- insert its timeline row last.
 
 ### 6. Durability
 
@@ -370,29 +401,33 @@ never settles or renews, whatever the clocks say.
 
 ### 8. Leases
 
-`complete`, `fail`, `retry`, `release` and `renew` address an item by id
-and lease token (D6), and bump its `version` (D18). Only `claim` returns a
-token.
+`settle` and `renew` address an item by id and lease token (D6), and bump
+its `version` (D18). Only `claim` returns a token.
 
 Each claim charges an attempt. When a lease expires with attempts used up,
 the item fails (D17). A queue may opt out with `max_attempts: unlimited`,
 and its embedder then bounds redelivery itself (D30). Snorri parks an item
 after K claims without a commit. `release` gives the attempt back, so a
-timer that charges nothing is a `release` with `after` (D39).
+timer that charges nothing is a `release` settle with `after` (D39).
 
 ### 9. Every statement is bounded
 
 - Every statement that reads or writes rows has a `LIMIT`. API-006 fixes
   the caps on statements, rows and bytes per program, checked before any
   SQL runs.
-- Every `where` in `select`, `update`, `delete` and `assert` must constrain
-  an indexed column by a comparison, `in` or `contains`. The checker
-  refuses a program that has none. A selection by ids or keys is bounded
-  by them, and `claim` uses the claim index.
+- Every `where` in `select`, `update`, `delete` and `assert` must compare
+  an indexed column with a value by equality, `in` or `contains`. Ranges
+  don't count, because a range alone can match everything. `due_at`
+  doesn't count either, because its only index is partial. The checker
+  refuses a program without such a term. A selection by ids or keys is
+  bounded by them, and `claim` uses the claim index.
+- A `select` that sorts or aggregates reads at most 100,000 rows and
+  rejects past that, so `limit` bounds rows read, not only rows returned.
 - Every transaction runs under a statement timeout.
 - An `update` larger than its limit either rejects, or runs as steps. Each
   step changes up to `limit` rows in id order, returns the last id it
-  changed, and is its own commit.
+  changed, and is its own commit. The next step adds `{gt: [id, last]}` to
+  its `where`, a range scan on the `(field, id)` index.
 
 ### 10. Backends
 
@@ -422,7 +457,9 @@ the results and the rows left behind. They cover:
 - concurrent claims from several connections;
 - lease expiry and attempt exhaustion under a fixed `fireweed.now`;
 - merge rules, expectations and stepping;
-- `EXPLAIN` checks that claims and selections use indexes.
+- checks that a claim on a mostly sleeping queue reads a handful of index
+  entries, and that claims, selections and keyed updates over thousands of
+  items do no sequential scans.
 
 The SQLite and Turso executors run the same documents.
 
@@ -525,31 +562,41 @@ Questions 1 to 4, 6 to 24 and 26 to 36 were resolved in revisions 7 and 8
     with UMF's scalar types (§2). Draft: add a loader from a UMF document
     with the `umf.fireweed` extension (D34, D38) once a consumer keeps its
     schemas in UMF.
-40. **A second claim index.** With only `(due_at, priority, id)`, a claim
-    on a queue where every item is due scans and sorts the whole queue;
-    the executor's test caught it. Revision 9 adds `(priority, due_at, id)`,
-    which costs one more index write per claim and settle. Draft: keep
-    both, and measure the write cost in question 31's run.
+    - **Where index choices live.** UMF keeps them out of the logical field,
+      in a physical binding (CONTRACT-042), and the loader takes them from
+      there into `index: true`. Fireweed's own document keeps `index` on
+      the field.
+    - **weft.** Its shared crates have no `json` or set types, and no `not`,
+      `in` or `contains`, so v1 doesn't use them. Its PostgreSQL identifier
+      and parameter helpers fit once published. Until then, names are
+      validated `[a-z0-9_]` and quoted.
+40. **A narrow lease table.** Every claim, settle and renew changes
+    indexed columns (`state`, `due_at`), so it writes every index on the
+    item, including the field indexes and the GIN index. Splitting the
+    lease columns into a narrow table beside the item would keep lease
+    churn off those indexes, at the cost of a join on reads. Draft: measure
+    it in question 31's run before deciding.
 
 ## Risks
 
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
 | PostgreSQL and SQLite disagree on an expression result | M | H | API-006 pins each difference and the SQL that removes it; the suite runs on both. |
-| A guarded request at `SERIALIZABLE` retries under contention | M | M | Bounded retries, then `Contention`; unguarded requests run at `READ COMMITTED`. |
+| Every transition in a space waits on its sequenced table's counter row | M | M | Sequenced inserts come last in a program, so the row is held only for the final round trips. Question 31 measures it. |
+| An absence `assert` misses a concurrent insert of the same key | L | M | The two order as if the guard ran first. Copying suppression into each campaign space (question 25) keeps checks keyed. |
 | The interface grows into a general database | M | H | No joins, capped statements, index-backed selections, live data only. |
 | A hot counter row serializes commits on PostgreSQL | L | M | Question 5; buckets spread the load. |
 | A suppression checked outside the send's transaction lets a send through | M | H | Question 25. |
 | A single writer stalls claims behind a bulk change on the local engine | H | M | Statement caps, stepped bulk changes, gate B4. |
-| Thousands of per-space tables strain PostgreSQL's catalog | M | M | Question 31's measurement. |
+| Thousands of per-space tables strain PostgreSQL's catalog | M | M | Question 31's measurement. The review measured 119 ms to plan a first query on a new table and 0.4 ms warm: a cost per connection and per space. |
 
 ## Validation
 
 | Success metric | Review trigger |
 |----------------|----------------|
 | No backend loads an object whole or holds request state in memory | A request's work grows with queue size, or a cache appears. |
-| Every statement's SQL uses an index; checked with `EXPLAIN` in the suite | A sequential scan in a statement plan. |
-| `fireweed-interface` depends on no storage crate | A storage crate enters its tree. |
+| Statements read about as many index entries as they return; the suite checks a claim on a mostly sleeping queue and selects over thousands of items | A sequential scan or a whole-index walk. |
+| `fireweed-dsl` depends on no storage crate | A storage crate enters its tree. |
 | Every backend passes the suite for what it declares | A backend released without it. |
 | Snorri runs with no tables of its own and no unbounded in-memory state | Snorri adds a table or cache to work around a gap. |
 | Cayce's UI uses declared reads only | Cayce reads an engine table. |

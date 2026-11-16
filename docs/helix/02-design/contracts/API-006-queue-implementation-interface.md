@@ -105,8 +105,9 @@ reads:
 ### Queues
 
 A queue holds work items. Every item has these system columns, which
-programs can read but only queue statements (`claim`, `complete`, `fail`,
-`retry`, `release`, `renew`) change:
+programs can read. Only `claim`, `settle` and `renew` change the lease
+columns; an `update` may also set `priority`, `due_at` and `state` on items
+that aren't leased:
 
 | Column | Meaning |
 |--------|---------|
@@ -127,15 +128,13 @@ field (a GIN index for a `text_set`).
 The executor creates for each queue:
 - the table;
 - a unique index on `key`;
-- two claim indexes over pending and leased items, `(due_at, priority, id)`
-  and `(priority, due_at, id)`, so the planner can serve a claim in index
-  order whether most items are due or most are sleeping;
+- the claim index `(due_at, priority, id) WHERE state IN ('pending', 'leased')`,
+  which leads with due time (ADR-025 D39) and is the claim order;
 - an index on `finished_at` for retention;
-- one index per indexed field.
+- one index per indexed field: `(field, id)` for a btree, so stepping
+  through a field's matches is a range scan.
 
-ADR-025 D39 asked for a claim index that leads with due time. A queue
-where every item is due needs the second index, which matches the claim
-order, or the claim scans and sorts the whole queue (question 40).
+A queue table is created with `fillfactor = 80`.
 
 `max_attempts: unlimited` turns off the store's redelivery bound
 (ADR-025 D30).
@@ -168,9 +167,12 @@ a new version is a new entry.
 `apply_schema` takes a schema and the version the caller expects to
 replace (none for a new space). Changes may only add (ADR-025 D22). They
 can add:
-- queues, tables and fields;
-- `index: true` on a field;
+- queues and tables, with any indexes;
+- unindexed fields on existing queues and tables;
 - reads and new read versions.
+
+An existing field never changes, and a field added to a live object can't
+be indexed: building an index blocks the object's writes.
 
 They can also raise `request_retention` and a queue's `retention`. Anything
 else is refused. A schema identical to the stored one is accepted
@@ -185,8 +187,9 @@ params:
   inst: 41
   token: "6f1c…"
 statements:
-  - complete:
+  - settle:
       queue: instances
+      outcome: complete
       items: [{id: {param: inst}, token: {param: token}}]
       set: {step: 3}
       body:
@@ -232,22 +235,31 @@ refused when the program is checked.
 A comparison with a null is false, as in SQL.
 
 **Index rule.** A `where` in `select`, `update`, `delete` and `assert` must
-contain, directly or inside a top-level `and`, a comparison, `in` or
-`contains` on an indexed column:
-- `id`, or `key` on a queue;
-- `due_at` on a queue;
+contain, directly or inside a top-level `and`, an **access term**: an
+`eq`, `in` or `contains` between an indexed column and a value (a literal,
+parameter or `now`). The indexed columns are:
+- `id`, and `key` on a queue;
 - the first key field of a table;
 - an `index: true` field.
 
-Selecting by `ids` or `keys` needs no `where`. A program that breaks the
-rule is refused.
+Ranges are not access terms, because a range alone can match the whole
+object. They can still narrow an access term, as in a stepped update. Nor
+is `due_at`, whose only index is the partial claim index. Selecting by
+`ids` or `keys` needs no `where`. A program that breaks the rule is
+refused.
+
+A `select` with `order_by` or `aggregate` reads at most 100,000 matching
+rows; past that it rejects with `limit_exceeded`. Without them, its `limit`
+bounds the rows read.
 
 ### Assignments (`set`)
 
 A map from declared field to a value: a literal, `null`, an operand, or
 `{add: [a, b]}`, `{sub: [a, b]}`, `{coalesce: [a, b]}`,
 `{set_add: [values]}`, `{set_remove: [values]}`. System columns can't be
-set.
+set, except that an `update` may set a queue item's `priority`, `due_at`
+and `state` (`pending`, `complete` or `failed`) when it doesn't preserve
+leases.
 
 ### Body patches (`body`, queues only)
 
@@ -278,10 +290,17 @@ insert:
   or `after` (a duration from now; default due now), `body`, and declared
   fields.
 - **Table rows** have declared fields, and must include the key fields.
+- **Keys.** A key may appear only once in one `insert`.
 - **Conflicts.** A row whose key exists is skipped and reported `exists`.
   With `reject`, the program rejects with `key_conflict`. With `update` on
-  a table, the row's given fields are set, under merge rules, and it is
-  reported `updated`.
+  a table, the row's given fields are set under merge rules, and it is
+  reported `updated`. Every row must give the same fields, and a
+  merge-rule break rejects with `merge_violation`.
+- **Expired rows.** A finished item past its queue's `retention`, or a table
+  row past `expires_at`, gives up its key. The new row replaces it.
+- **Sequenced tables.** An insert into a sequenced table holds the table's
+  counter row until commit. So it must come after every other write in its
+  program.
 
 Result: `[{id, key?, status: inserted | exists | updated}]` in row order.
 
@@ -291,8 +310,10 @@ Result: `[{id, key?, status: inserted | exists | updated}]` in row order.
 claim: {from: <queue>, limit: 10, lease: 30s, worker: w1, where: <pred>, eligible_at: <timestamp>}
 ```
 
-Leases up to `limit` claimable items in claim order: priority, then
-`due_at`, then `id`. Each one becomes `leased`, gets a new random lease
+Leases up to `limit` claimable items in claim order: `due_at`, then
+priority, then `id`. This is the claim index's order, so a claim reads about
+`limit` index entries whether most items are due or most are sleeping.
+Priority breaks ties among items due at the same instant (ADR-025 D42). Each one becomes `leased`, gets a new random lease
 token, `due_at` = now + `lease`, one more attempt, and a new version.
 Items that other transactions hold are skipped, not waited for. `where`
 filters further and needs no index. `eligible_at` replaces now only when
@@ -301,10 +322,10 @@ now. A paused queue returns no items.
 
 Result: `[{id, key, token, attempts, priority, version, body, <fields>}]`.
 
-### `complete`, `fail`, `retry`, `release`
+### `settle`
 
 ```yaml
-retry: {queue: <queue>, items: [{id, token}, …], after: 1m, set: {…}, body: […], require_all: false}
+settle: {queue: <queue>, outcome: retry, items: [{id, token}, …], after: 1m, set: {…}, body: […], require_all: false}
 ```
 
 Each item must be leased with that token and an unexpired lease;
@@ -312,7 +333,7 @@ otherwise it is reported `stale` and left alone (ADR-025 D6). With
 `require_all: true`, a stale item rejects the program with `stale_lease`.
 The lease ends and the item's version increases.
 
-| Statement | Result state |
+| `outcome` | Result state |
 |-----------|--------------|
 | `complete` | `complete`, `finished_at` = now |
 | `fail` | `failed`, `finished_at` = now |
@@ -341,10 +362,8 @@ update:
   set: {…}
   body: […]                     # queues only
   leased: skip                  # queues: skip (default), preserve, or break
-  token: <token>                # queues: only the item leased with this token
   limit: 1000                   # default 1000
   on_limit: reject              # reject (default) or step
-  after: <id>                   # with step: continue after this id
   expect: {min: 1, max: 1}      # optional
   override_merge: false
 ```
@@ -359,8 +378,12 @@ On queues, leased items with unexpired leases are:
 If more than `limit` rows match:
 - `reject` rejects with `limit_exceeded`;
 - `step` changes the first `limit` rows and returns `more: true` and
-  `last`, the last id it changed. The caller sends the next step with
-  `after: last`, as a new program.
+  `last`, the last id it changed. The caller sends the next step as a new
+  program, adding `{gt: [id, last]}` to its `where`.
+
+The whole update is one SQL statement. It locks up to `limit + 1` matching
+rows in id order, counts them, and updates the first `limit` only if the
+count passes `limit` and `expect`.
 
 `expect` bounds the number of matched rows; outside it, the program rejects
 with `expect_unmet`. This gives compare-and-set (`where: {eq: [version,
@@ -421,11 +444,15 @@ A paused queue's claims return nothing. Result: `{}`.
 ## Transactions and request ids
 
 A program runs in one database transaction:
-- **Isolation.** Programs that contain an `assert`, or an `expect` on an
-  `update` or `delete`, run at `SERIALIZABLE`, so the guard can't be
-  defeated by a concurrent write. They retry up to 5 times on a
-  serialization failure, then fail with `contention`. Other programs run
-  at `READ COMMITTED`.
+- **Isolation.** Programs run at `READ COMMITTED`.
+  - Guards lock what they count: `update` and `delete` lock their matched
+    rows `FOR UPDATE`, and `assert` locks them `FOR KEY SHARE`. So no
+    count changes before commit.
+  - An `assert` that expects no row has nothing to lock, so a concurrent
+    insert of that key can commit beside it. The two order as if the
+    guard ran first.
+  - A program retries a deadlock up to 5 times, then fails with
+    `contention`.
 - **Request records.** A program with a `request_id` is recorded with a
   fingerprint (SHA-256 of the program's canonical JSON) and its response.
   - A program whose id has a record returns the recorded response, if its
@@ -499,6 +526,7 @@ engine's levels.
 | `update` and `delete` limit | 10,000 |
 | `select` limit | 10,000 |
 | Program size | 8 MiB |
+| Rows read by a sorted or aggregating `select` | 100,000 |
 | Statement timeout | 5 s |
 
 ## The PostgreSQL executor
@@ -528,20 +556,23 @@ database.
 1. Read the space's schema document (one row by primary key).
 2. Check the program against it in Rust.
 3. Write the request record.
-4. Run each statement as one or two SQL statements inside a savepoint.
+4. Run each statement as one SQL statement inside a savepoint.
 5. Write the response, and commit.
+
+Queries are sent unprepared, with every parameter typed `text`, so each
+is one round trip and nothing is cached per connection.
 
 Each statement's SQL:
 
 | Statement | SQL |
 |-----------|-----|
-| `insert` | `INSERT … SELECT … FROM jsonb_to_recordset($rows) … ON CONFLICT DO NOTHING / DO UPDATE … RETURNING` |
-| `claim` | `UPDATE q SET … FROM (SELECT id FROM q WHERE <claimable> AND <where> ORDER BY priority, due_at, id LIMIT $n FOR UPDATE SKIP LOCKED) c WHERE q.id = c.id RETURNING …` |
-| settle, `renew` | `UPDATE q SET … FROM jsonb_to_recordset($items) i WHERE q.id = i.id AND q.lease_token = i.token AND <unexpired> RETURNING q.id` |
-| `update` | `SELECT id … ORDER BY id LIMIT $limit + 1 FOR UPDATE`, then `UPDATE … FROM (old values) … RETURNING <merge checks>` |
-| `delete` | `DELETE … WHERE id IN (SELECT … FOR UPDATE)` |
-| `assert` | `SELECT count(*) FROM (SELECT 1 … LIMIT $max + 1)` |
-| `select`, `read` | `SELECT jsonb_build_object(…) FROM … WHERE … GROUP BY … ORDER BY … LIMIT $n` |
+| `insert` | `INSERT … SELECT … FROM jsonb_to_recordset($rows) … ON CONFLICT … DO NOTHING / DO UPDATE … WHERE <expired or merge rules hold> RETURNING`, joined back to the input rows |
+| `claim` | `UPDATE q SET … FROM (SELECT id FROM q WHERE <claimable> AND <where> ORDER BY due_at, priority, id LIMIT $n FOR UPDATE SKIP LOCKED) c WHERE q.id = c.id RETURNING …` |
+| `settle`, `renew` | `UPDATE q SET … FROM jsonb_to_recordset($items) i WHERE q.id = i.id AND q.lease_token = i.token AND <unexpired> RETURNING q.id` |
+| `update` | `WITH m AS (SELECT id, <old merge fields> … ORDER BY id LIMIT $limit + 1 FOR UPDATE), total AS (…), u AS (UPDATE … FROM <first $limit of m> WHERE <count passes> RETURNING <merge checks>) SELECT …` |
+| `delete` | The same shape with `DELETE … USING` |
+| `assert` | `SELECT count(*) FROM (SELECT 1 … LIMIT $max + 1 FOR KEY SHARE)` |
+| `select`, `read` | `SELECT jsonb_build_object(…) FROM … WHERE … LIMIT $n`; with `order_by` or `aggregate`, over a CTE capped at 100,001 rows |
 
 Literals and parameters are always bound, never spliced into SQL text.
 Names in SQL are validated object and field names, and quoted.
@@ -552,13 +583,13 @@ Names in SQL are validated object and field names, and quoted.
 
 | # | State | In the DSL |
 |---|-------|-----------|
-| 1 | Instance body | Item in an `instances` queue with a `json` body. A transition is one program: `complete` or `release` of the head item with `body` patches and `set`. |
-| 2 | Consumed inputs | Items in an `inputs` queue, `complete`d in the transition's program. |
+| 1 | Instance body | Item in an `instances` queue with a `json` body. A transition is one program: a `settle` of the head item with `body` patches and `set`. |
+| 2 | Consumed inputs | Items in an `inputs` queue, settled `complete` in the transition's program. |
 | 3 | Waits and routing | `awaits: text_set, index: true`; changed with `set_add` and `set_remove`; routed by a read with `contains`. |
 | 4 | Effects | Items in an `effects` queue, inserted in the transition's program, which uses `durability: durable`. |
 | 5 | Handler idempotency | Table keyed by idempotency key, with `expire_after_write`. |
 | 6 | External events, 31-day dedupe | Items keyed by provider event id in a queue with `retention: 31d`; `insert` with `on_conflict: skip`. |
-| 7 | Timeline | A sequenced table, inserted in each transition's program. Full history goes to Niflheim. |
+| 7 | Timeline | A sequenced table, inserted last in each transition's program. Full history goes to Niflheim. |
 | 8 | Definitions (up to 256 KiB, D31) | Table row keyed by digest, with a `text` field. |
 | 9 | Admission chunk | Table row keyed by run and shard: `insert` with `on_conflict: reject`, then `update` by keys with `where: {eq: [version, v]}` and `expect: {min: 1, max: 1}`. |
 | 10 | Send-rate counters | Table keyed by slot and hour with `expire_after_write`: `insert` with `on_conflict: skip`, then `update` with `where: {lt: [count, cap]}`, `set: {count: {add: [{field: count}, 1]}}`, `expect: {min: 1, max: 1}`. |
@@ -602,4 +633,6 @@ the resulting rows. They cover:
 - lease expiry, reclaim and attempt exhaustion under a fixed `fireweed.now`;
 - merge rules, expectations and stepping;
 - that claims, indexed selects and keyed updates over 5,000 items add
-  nothing to PostgreSQL's sequential-scan count for the table.
+  nothing to PostgreSQL's sequential-scan count for the table;
+- that a claim on a queue of 5,000 sleeping items and 3 due ones reads
+  fewer than 50 index entries.

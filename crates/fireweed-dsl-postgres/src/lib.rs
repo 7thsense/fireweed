@@ -7,7 +7,8 @@
 //!
 //! These are functions over a connection. They keep nothing in the process
 //! between calls: each call reads the space's schema from the database,
-//! checks the program against it, and runs it.
+//! checks the program against it, and runs it. Queries are sent unprepared
+//! with text parameters (`query_typed`), so each costs one round trip.
 
 mod ddl;
 mod lower;
@@ -15,12 +16,13 @@ mod run;
 
 use fireweed_dsl::check;
 use fireweed_dsl::{Applied, Durability, Error, Program, Response, Result, Schema, Status};
-use tokio_postgres::types::ToSql;
-use tokio_postgres::{Client, IsolationLevel, Transaction};
+use tokio_postgres::types::{ToSql, Type};
+use tokio_postgres::{Client, Row, Transaction};
 
 pub use ddl::CATALOG;
+use lower::{NOW, Q};
 
-/// How many times a guarded program retries a serialization failure.
+/// How many times a program retries a deadlock or serialization failure.
 const RETRIES: usize = 5;
 
 pub(crate) fn db(e: tokio_postgres::Error) -> Error {
@@ -38,8 +40,17 @@ fn retryable(e: &tokio_postgres::Error) -> bool {
         .is_some_and(|c| matches!(c.code(), "40001" | "40P01"))
 }
 
-pub(crate) fn refs(params: &[Option<String>]) -> Vec<&(dyn ToSql + Sync)> {
-    params.iter().map(|p| p as &(dyn ToSql + Sync)).collect()
+/// Runs `q` unprepared, every parameter typed `text`.
+pub(crate) async fn rows(
+    tx: &Transaction<'_>,
+    q: &Q,
+) -> std::result::Result<Vec<Row>, tokio_postgres::Error> {
+    let params: Vec<(&(dyn ToSql + Sync), Type)> = q
+        .params
+        .iter()
+        .map(|p| (p as &(dyn ToSql + Sync), Type::TEXT))
+        .collect();
+    tx.query_typed(&q.sql, &params).await
 }
 
 /// A space as stored in the catalog.
@@ -50,9 +61,9 @@ pub(crate) struct Space {
 
 async fn load(c: &Client, tenant: &str, space: &str) -> Result<Option<(i64, Schema)>> {
     let row = c
-        .query_opt(
+        .query_typed_opt(
             "SELECT id, schema_doc::text FROM fireweed.spaces WHERE tenant = $1 AND space = $2",
-            &[&tenant, &space],
+            &[(&tenant, Type::TEXT), (&space, Type::TEXT)],
         )
         .await;
     let row = match row {
@@ -100,10 +111,11 @@ pub async fn apply_schema(
         .map_err(db)?;
     tx.batch_execute(CATALOG).await.map_err(db)?;
     let doc = serde_json::to_string(schema).expect("schemas serialize");
+    let version = schema.version.to_string();
     let row = tx
-        .query_opt(
+        .query_typed_opt(
             "SELECT id, schema_doc::text FROM fireweed.spaces WHERE tenant = $1 AND space = $2 FOR UPDATE",
-            &[&tenant, &space],
+            &[(&tenant, Type::TEXT), (&space, Type::TEXT)],
         )
         .await
         .map_err(db)?;
@@ -113,9 +125,9 @@ pub async fn apply_schema(
                 return Err(Error::SchemaConflict { current: None });
             }
             let id: i64 = tx
-                .query_one(
-                    "INSERT INTO fireweed.spaces (tenant, space, version, schema_doc) VALUES ($1, $2, $3, $4::text::jsonb) RETURNING id",
-                    &[&tenant, &space, &schema.version, &doc],
+                .query_typed_one(
+                    "INSERT INTO fireweed.spaces (tenant, space, version, schema_doc) VALUES ($1, $2, $3::bigint, $4::jsonb) RETURNING id",
+                    &[(&tenant, Type::TEXT), (&space, Type::TEXT), (&version, Type::TEXT), (&doc, Type::TEXT)],
                 )
                 .await
                 .map_err(db)?
@@ -147,9 +159,10 @@ pub async fn apply_schema(
             tx.batch_execute(&ddl::change(&ddl::schema_name(id), &old, schema))
                 .await
                 .map_err(db)?;
-            tx.execute(
-                "UPDATE fireweed.spaces SET version = $2, schema_doc = $3::text::jsonb WHERE id = $1",
-                &[&id, &schema.version, &doc],
+            let id = id.to_string();
+            tx.execute_typed(
+                "UPDATE fireweed.spaces SET version = $2::bigint, schema_doc = $3::jsonb WHERE id = $1::bigint",
+                &[(&id, Type::TEXT), (&version, Type::TEXT), (&doc, Type::TEXT)],
             )
             .await
             .map_err(db)?;
@@ -202,50 +215,47 @@ impl From<Error> for Attempt {
     }
 }
 
+/// One try at a program. Round trips: BEGIN, the request record (with an
+/// id), settings and savepoint, one per statement, the response, COMMIT.
 async fn attempt(
     c: &mut Client,
     sp: &Space,
     p: &Program,
     r: &check::Resolved,
 ) -> std::result::Result<Response, Attempt> {
-    let level = if r.guarded {
-        IsolationLevel::Serializable
-    } else {
-        IsolationLevel::ReadCommitted
-    };
-    let tx = c.build_transaction().isolation_level(level).start().await?;
+    let tx = c.transaction().await?;
     let durability = match p.durability {
         Some(Durability::FireAndForget) => Durability::FireAndForget,
         _ => Durability::Durable,
     };
+    let requests = format!("\"{}\".fw_requests", sp.schema_name);
+    if let Some(rid) = &p.request_id {
+        // Record the request, or take over a record past retention. A live
+        // record (or a concurrent first run, once it commits) means replay.
+        let mut q = Q::default();
+        let (id, fp) = (
+            q.bind(Some(rid.clone())),
+            q.bind(Some(r.fingerprint.clone())),
+        );
+        let retention = q.duration(sp.schema.request_retention.0);
+        q.sql = format!(
+            "INSERT INTO {requests} AS t (request_id, fingerprint, response, recorded_at) VALUES ({id}, {fp}, NULL, {NOW})
+             ON CONFLICT (request_id) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, response = NULL, recorded_at = EXCLUDED.recorded_at
+             WHERE t.recorded_at <= {NOW} - {retention}
+             RETURNING 1"
+        );
+        if rows(&tx, &q).await?.is_empty() {
+            return replay(tx, &requests, rid, &r.fingerprint).await;
+        }
+    }
     let mut setup = String::from("SET LOCAL TimeZone = 'UTC'; SET LOCAL statement_timeout = '5s';");
     if durability == Durability::FireAndForget {
         setup.push_str(" SET LOCAL synchronous_commit = off;");
     }
-    tx.batch_execute(&setup).await?;
-    let requests = format!("\"{}\".fw_requests", sp.schema_name);
-    if let Some(rid) = &p.request_id {
-        let retention = sp.schema.request_retention.0.to_string();
-        tx.execute(
-            &format!(
-                "DELETE FROM {requests} WHERE request_id = $1 AND recorded_at <= fireweed.now() - $2::text::bigint * interval '1 millisecond'"
-            ),
-            &[rid, &retention],
-        )
-        .await?;
-        let fresh = tx
-            .execute(
-                &format!(
-                    "INSERT INTO {requests} (request_id, fingerprint, recorded_at) VALUES ($1, $2, fireweed.now()) ON CONFLICT (request_id) DO NOTHING"
-                ),
-                &[rid, &r.fingerprint],
-            )
-            .await?;
-        if fresh == 0 {
-            return replay(tx, &requests, rid, &r.fingerprint).await;
-        }
+    if p.request_id.is_some() {
+        setup.push_str(" SAVEPOINT program;");
     }
-    tx.batch_execute("SAVEPOINT program").await?;
+    tx.batch_execute(&setup).await?;
     let mut results = vec![];
     let mut rejected = None;
     for (i, st) in r.statements.iter().enumerate() {
@@ -260,30 +270,40 @@ async fn attempt(
             }
         }
     }
-    if rejected.is_some() {
-        tx.batch_execute("ROLLBACK TO SAVEPOINT program").await?;
-        results.clear();
-    }
+    let is_rejected = rejected.is_some();
     let resp = Response {
         request_id: p.request_id.clone(),
-        status: if rejected.is_some() {
+        status: if is_rejected {
             Status::Rejected
         } else {
             Status::Committed
         },
         rejected,
-        results,
+        results: if is_rejected { vec![] } else { results },
         durability,
         replayed: false,
     };
-    if let Some(rid) = &p.request_id {
-        let doc = serde_json::to_string(&resp).expect("responses serialize");
-        tx.execute(
-            &format!("UPDATE {requests} SET response = $2::text::jsonb WHERE request_id = $1"),
-            &[rid, &doc],
-        )
-        .await?;
+    let Some(rid) = &p.request_id else {
+        // No record to keep: a rejection just rolls back.
+        if resp.rejected.is_some() {
+            tx.rollback().await?;
+        } else {
+            tx.commit().await?;
+        }
+        return Ok(resp);
+    };
+    if resp.rejected.is_some() {
+        tx.batch_execute("ROLLBACK TO SAVEPOINT program").await?;
     }
+    let mut q = Q::default();
+    let (id, doc) = (
+        q.bind(Some(rid.clone())),
+        q.bind(Some(
+            serde_json::to_string(&resp).expect("responses serialize"),
+        )),
+    );
+    q.sql = format!("UPDATE {requests} SET response = {doc}::jsonb WHERE request_id = {id}");
+    rows(&tx, &q).await?;
     tx.commit().await?;
     Ok(resp)
 }
@@ -295,9 +315,9 @@ async fn replay(
     fingerprint: &str,
 ) -> std::result::Result<Response, Attempt> {
     let row = tx
-        .query_one(
+        .query_typed_one(
             &format!("SELECT fingerprint, response::text FROM {requests} WHERE request_id = $1"),
-            &[&rid],
+            &[(&rid, Type::TEXT)],
         )
         .await?;
     let stored: &str = row.get(0);
@@ -322,7 +342,8 @@ pub struct Swept {
 }
 
 /// Writes back time-driven state and deletes what retention has expired,
-/// at most `batch` rows per object (API-006 §Time).
+/// at most `batch` rows per object (API-006 §Time). Rows other
+/// transactions hold are skipped.
 pub async fn sweep(c: &mut Client, tenant: &str, space: &str, batch: u32) -> Result<Swept> {
     let (id, schema) = load(c, tenant, space).await?.ok_or(Error::SpaceNotFound)?;
     let sp = Space {
@@ -330,7 +351,7 @@ pub async fn sweep(c: &mut Client, tenant: &str, space: &str, batch: u32) -> Res
         schema,
     };
     let tx = c.transaction().await.map_err(db)?;
-    let out = run::sweep(&tx, &sp, batch as i64).await?;
+    let out = run::sweep(&tx, &sp, batch as i64).await.map_err(db)?;
     tx.commit().await.map_err(db)?;
     Ok(out)
 }

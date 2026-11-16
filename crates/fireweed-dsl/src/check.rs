@@ -18,6 +18,8 @@ pub const MAX_UPDATE: u32 = 10_000;
 pub const MAX_SELECT: u32 = 10_000;
 pub const DEFAULT_UPDATE_LIMIT: u32 = 1_000;
 pub const MAX_PROGRAM_BYTES: usize = 8 << 20;
+/// Rows a sorted or aggregating `select` may read (API-006 §Limits).
+pub const MAX_SCAN: u32 = 100_000;
 
 // ------------------------------------------------------------------ names
 
@@ -198,11 +200,18 @@ fn kept_fields(
     old: &BTreeMap<String, FieldDecl>,
     new: &BTreeMap<String, FieldDecl>,
 ) -> Result<()> {
+    // An index on a live object would block its writes while it builds, so
+    // indexes come only with new objects.
     for (n, o) in old {
         match new.get(n) {
-            Some(f) if f.ty == o.ty && f.merge == o.merge && (f.index || !o.index) => {}
-            _ => return invalid(format!("{obj}.{n}: fields can only gain an index")),
+            Some(f) if f == o => {}
+            _ => return invalid(format!("{obj}.{n}: an existing field can't change")),
         }
+    }
+    if let Some(n) = new.keys().find(|n| !old.contains_key(*n) && new[*n].index) {
+        return invalid(format!(
+            "{obj}.{n}: a new field on an existing object can't be indexed"
+        ));
     }
     Ok(())
 }
@@ -344,13 +353,7 @@ pub struct QueueRow {
     pub fields: BTreeMap<String, Value>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Outcome {
-    Complete,
-    Fail,
-    Retry,
-    Release,
-}
+pub use crate::Outcome;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RStatement {
@@ -393,10 +396,8 @@ pub enum RStatement {
         set: Vec<(Column, Expr)>,
         body: Vec<RPatch>,
         leased: LeasedPolicy,
-        token: Option<String>,
         limit: u32,
         on_limit: OnLimit,
-        after: Option<i64>,
         expect: Option<Expect>,
         override_merge: bool,
     },
@@ -424,8 +425,6 @@ pub struct Resolved {
     pub statements: Vec<RStatement>,
     /// True if any statement writes.
     pub writes: bool,
-    /// True if a guard needs `SERIALIZABLE` (API-006 §Transactions).
-    pub guarded: bool,
     /// SHA-256 of the program's canonical JSON, hex.
     pub fingerprint: String,
 }
@@ -446,24 +445,22 @@ pub fn resolve(s: &Schema, p: &Program) -> Result<Resolved> {
         return invalid("a program that writes needs a request_id");
     }
     let mut statements = vec![];
-    let mut guarded = false;
+    let mut sequenced = false;
     for (i, st) in p.statements.iter().enumerate() {
         let r = statement(s, st, &p.params).map_err(|e| match e {
             Error::Invalid(m) => Error::Invalid(format!("statement {i}: {m}")),
             other => other,
         })?;
-        guarded |= matches!(
-            &r,
-            RStatement::Assert { .. }
-                | RStatement::Update {
-                    expect: Some(_),
-                    ..
-                }
-                | RStatement::Delete {
-                    expect: Some(_),
-                    ..
-                }
-        );
+        // A sequenced insert holds its table's counter row until commit, so it
+        // comes after every other write (API-006 §Tables).
+        let is_seq =
+            matches!(&r, RStatement::InsertTable { obj, .. } if s.tables[&obj.name].sequenced);
+        if sequenced && st.writes() && !is_seq {
+            return invalid(format!(
+                "statement {i}: writes after an insert into a sequenced table"
+            ));
+        }
+        sequenced |= is_seq;
         statements.push(r);
     }
     use sha2::Digest;
@@ -472,7 +469,6 @@ pub fn resolve(s: &Schema, p: &Program) -> Result<Resolved> {
     Ok(Resolved {
         statements,
         writes,
-        guarded,
         fingerprint,
     })
 }
@@ -553,7 +549,7 @@ impl Ctx<'_> {
     fn indexed(&self, c: &Column) -> bool {
         match self.obj.kind {
             Kind::Queue => {
-                (c.system && matches!(c.name.as_str(), "id" | "key" | "due_at"))
+                (c.system && matches!(c.name.as_str(), "id" | "key"))
                     || (!c.system && self.declared().get(&c.name).is_some_and(|f| f.index))
             }
             Kind::Table => {
@@ -736,12 +732,35 @@ impl Ctx<'_> {
     }
 
     /// `set` assignments to declared fields.
-    fn assignments(&self, set: &BTreeMap<String, Value>) -> Result<Vec<(Column, Expr)>> {
+    /// `set` assignments. `schedule` lets an `update` on unleased queue items
+    /// set `priority`, `due_at` and `state` (API-006 §update).
+    fn assignments(
+        &self,
+        set: &BTreeMap<String, Value>,
+        schedule: bool,
+    ) -> Result<Vec<(Column, Expr)>> {
         let mut out = vec![];
         for (name, v) in set {
             let c = self.column(name)?;
             if c.system {
-                return invalid(format!("{name} is a system column"));
+                let ok = schedule && matches!(name.as_str(), "priority" | "due_at" | "state");
+                if !ok {
+                    return invalid(format!("{name} is a system column"));
+                }
+                if name == "state" {
+                    let st = match self.operand(v, FieldType::Text)? {
+                        Operand::Literal(Value::String(st), _) => st,
+                        _ => return invalid("state is set to a literal"),
+                    };
+                    if !matches!(st.as_str(), "pending" | "complete" | "failed") {
+                        return invalid("state is set to pending, complete or failed");
+                    }
+                    out.push((
+                        c,
+                        Expr::Operand(Operand::Literal(Value::String(st), FieldType::Text)),
+                    ));
+                    continue;
+                }
             }
             let t = c.ty;
             let e = match v {
@@ -901,13 +920,17 @@ impl Ctx<'_> {
         Ok(sel)
     }
 
+    /// True if `p` has an access term: equality, `in` or `contains` between
+    /// an indexed column and a value (API-006 §Index rule). Ranges don't
+    /// count: a range alone can match the whole object.
     fn has_access(&self, p: &RPred) -> bool {
         let on_index = |o: &Operand| matches!(o, Operand::Column(c) if self.indexed(c));
+        let value = |o: &Operand| !matches!(o, Operand::Column(_) | Operand::Path(..));
         match p {
             RPred::And(ps) => ps.iter().any(|p| self.has_access(p)),
-            RPred::Cmp(CmpOp::Ne, ..) => false,
-            RPred::Cmp(_, a, b) => on_index(a) || on_index(b),
-            RPred::In(a, _) | RPred::Contains(a, _) => on_index(a),
+            RPred::Cmp(CmpOp::Eq, a, b) => (on_index(a) && value(b)) || (on_index(b) && value(a)),
+            RPred::In(a, vs) => on_index(a) && vs.iter().all(value),
+            RPred::Contains(a, v) => on_index(a) && value(v),
             _ => false,
         }
     }
@@ -979,11 +1002,19 @@ fn statement(s: &Schema, st: &Statement, params: &Params) -> Result<RStatement> 
                     if i.on_conflict == OnConflict::Update {
                         return invalid("on_conflict: update is for tables");
                     }
-                    let rows = i
+                    let rows: Vec<QueueRow> = i
                         .rows
                         .iter()
                         .map(|r| queue_row(&c, r))
                         .collect::<Result<_>>()?;
+                    let mut seen = BTreeSet::new();
+                    if rows
+                        .iter()
+                        .filter_map(|r| r.key.as_ref())
+                        .any(|k| !seen.insert(k))
+                    {
+                        return invalid("a key appears twice in one insert");
+                    }
                     RStatement::InsertQueue {
                         obj: c.obj,
                         rows,
@@ -1020,6 +1051,22 @@ fn statement(s: &Schema, st: &Statement, params: &Params) -> Result<RStatement> 
                     if t.sequenced && i.on_conflict != OnConflict::Skip {
                         return invalid("a sequenced table has no conflicts");
                     }
+                    let rows: Vec<BTreeMap<String, Value>> = rows;
+                    let mut seen = BTreeSet::new();
+                    if !t.sequenced
+                        && rows.iter().any(|r| {
+                            !seen.insert(t.key.iter().map(|k| r[k].to_string()).collect::<Vec<_>>())
+                        })
+                    {
+                        return invalid("a key appears twice in one insert");
+                    }
+                    if i.on_conflict == OnConflict::Update
+                        && rows.windows(2).any(|w| !w[0].keys().eq(w[1].keys()))
+                    {
+                        return invalid(
+                            "with on_conflict: update, every row gives the same fields",
+                        );
+                    }
                     RStatement::InsertTable {
                         obj: c.obj,
                         rows,
@@ -1048,28 +1095,19 @@ fn statement(s: &Schema, st: &Statement, params: &Params) -> Result<RStatement> 
                 obj: c.obj,
             }
         }
-        Statement::Complete(x)
-        | Statement::Fail(x)
-        | Statement::Retry(x)
-        | Statement::Release(x) => {
-            let outcome = match st {
-                Statement::Complete(_) => Outcome::Complete,
-                Statement::Fail(_) => Outcome::Fail,
-                Statement::Retry(_) => Outcome::Retry,
-                _ => Outcome::Release,
-            };
+        Statement::Settle(x) => {
             let c = ctx(s, &x.queue, params)?;
             c.queue()?;
-            if x.after.is_some() && !matches!(outcome, Outcome::Retry | Outcome::Release) {
+            if x.after.is_some() && !matches!(x.outcome, Outcome::Retry | Outcome::Release) {
                 return invalid("after is for retry and release");
             }
             RStatement::Settle {
                 items: c.items(&x.items)?,
                 after_ms: x.after.map_or(0, |d| d.0),
-                set: c.assignments(&x.set)?,
+                set: c.assignments(&x.set, false)?,
                 body: c.patches(&x.body)?,
                 require_all: x.require_all,
-                outcome,
+                outcome: x.outcome,
                 obj: c.obj,
             }
         }
@@ -1091,8 +1129,8 @@ fn statement(s: &Schema, st: &Statement, params: &Params) -> Result<RStatement> 
             if c.table.is_some_and(|t| t.sequenced) {
                 return invalid("rows of a sequenced table are never updated");
             }
-            if c.obj.kind == Kind::Table && (u.token.is_some() || u.leased != LeasedPolicy::Skip) {
-                return invalid("leased and token are for queues");
+            if c.obj.kind == Kind::Table && u.leased != LeasedPolicy::Skip {
+                return invalid("leased is for queues");
             }
             if u.set.is_empty() && u.body.is_empty() {
                 return invalid("an update sets fields or patches the body");
@@ -1100,25 +1138,14 @@ fn statement(s: &Schema, st: &Statement, params: &Params) -> Result<RStatement> 
             if u.on_limit == OnLimit::Step && u.expect.is_some() {
                 return invalid("a stepped update has no expect");
             }
-            if u.after.is_some() && u.on_limit != OnLimit::Step {
-                return invalid("after is for on_limit: step");
-            }
-            let token = match &u.token {
-                None => None,
-                Some(v) => match c.operand(v, FieldType::Text)? {
-                    Operand::Literal(Value::String(s), _) => Some(s),
-                    _ => return invalid("a token is a literal or a param"),
-                },
-            };
+            let schedule = c.obj.kind == Kind::Queue && u.leased != LeasedPolicy::Preserve;
             RStatement::Update {
                 sel: c.selection(&u.filter, &u.ids, &u.keys)?,
-                set: c.assignments(&u.set)?,
+                set: c.assignments(&u.set, schedule)?,
                 body: c.patches(&u.body)?,
                 leased: u.leased,
-                token,
                 limit: limit(u.limit, DEFAULT_UPDATE_LIMIT, MAX_UPDATE)?,
                 on_limit: u.on_limit,
-                after: u.after,
                 expect: u.expect,
                 override_merge: u.override_merge,
                 obj: c.obj,

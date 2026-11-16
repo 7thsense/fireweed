@@ -29,19 +29,11 @@ BEGIN
   END LOOP;
   RETURN jsonb_set(j, p, v, true);
 END $$;
-CREATE OR REPLACE FUNCTION fireweed.json_append(j jsonb, p text[], v jsonb, keep int) RETURNS jsonb LANGUAGE plpgsql IMMUTABLE AS $$
-DECLARE a jsonb;
-BEGIN
-  a := coalesce(j, '{}'::jsonb) #> p;
-  IF a IS NULL OR jsonb_typeof(a) <> 'array' THEN a := '[]'::jsonb; END IF;
-  a := a || jsonb_build_array(v);
-  IF keep IS NOT NULL AND jsonb_array_length(a) > keep THEN
-    a := (SELECT coalesce(jsonb_agg(e ORDER BY n), '[]'::jsonb)
-          FROM jsonb_array_elements(a) WITH ORDINALITY AS t(e, n)
-          WHERE n > jsonb_array_length(a) - keep);
-  END IF;
-  RETURN fireweed.json_set(j, p, a);
-END $$;
+CREATE OR REPLACE FUNCTION fireweed.json_append(j jsonb, p text[], v jsonb, keep int) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+  SELECT fireweed.json_set(j, p, CASE WHEN keep IS NULL THEN a
+    ELSE jsonb_path_query_array(a, '$[$from to last]', jsonb_build_object('from', greatest(jsonb_array_length(a) - keep, 0))) END)
+  FROM (SELECT CASE WHEN jsonb_typeof(j #> p) = 'array' THEN j #> p ELSE '[]'::jsonb END || jsonb_build_array(v) AS a) x
+$$;
 "#;
 
 pub fn schema_name(space_id: i64) -> String {
@@ -68,13 +60,14 @@ pub fn column_type(t: FieldType) -> &'static str {
     }
 }
 
+/// A field's index. A btree index carries `id`, so a selection on the field
+/// steps through it in id order (API-006 §update).
 fn index(table: &str, field: &str, f: &FieldDecl) -> String {
-    let using = if f.ty == FieldType::TextSet {
-        " USING gin"
+    if f.ty == FieldType::TextSet {
+        format!("CREATE INDEX ON {table} USING gin (\"f_{field}\");\n")
     } else {
-        ""
-    };
-    format!("CREATE INDEX ON {table}{using} (\"f_{field}\");\n")
+        format!("CREATE INDEX ON {table} (\"f_{field}\", id);\n")
+    }
 }
 
 fn queue(schema: &str, name: &str, q: &QueueDecl) -> String {
@@ -102,10 +95,10 @@ fn queue(schema: &str, name: &str, q: &QueueDecl) -> String {
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
   finished_at timestamptz,
-  body jsonb{cols});
+  body jsonb{cols})
+  WITH (fillfactor = 80);
 CREATE UNIQUE INDEX ON {t} (key);
-CREATE INDEX ON {t} (due_at, priority, id) WHERE state IN ('pending', 'leased');
-CREATE INDEX ON {t} (priority{desc}, due_at, id) WHERE state IN ('pending', 'leased');
+CREATE INDEX ON {t} (due_at, priority{desc}, id) WHERE state IN ('pending', 'leased');
 CREATE INDEX ON {t} (finished_at) WHERE finished_at IS NOT NULL;
 "
     );
@@ -184,18 +177,13 @@ pub fn change(schema: &str, old: &Schema, new: &Schema) -> String {
     for (n, q) in &new.queues {
         match old.queues.get(n) {
             None => sql.push_str(&queue(schema, n, q)),
-            Some(o) => sql.push_str(&fields(&queue_table(schema, n), &o.fields, &q.fields, None)),
+            Some(o) => sql.push_str(&fields(&queue_table(schema, n), &o.fields, &q.fields)),
         }
     }
     for (n, t) in &new.tables {
         match old.tables.get(n) {
             None => sql.push_str(&table(schema, n, t)),
-            Some(o) => sql.push_str(&fields(
-                &table_table(schema, n),
-                &o.fields,
-                &t.fields,
-                t.key.first(),
-            )),
+            Some(o) => sql.push_str(&fields(&table_table(schema, n), &o.fields, &t.fields)),
         }
     }
     sql
@@ -205,20 +193,16 @@ fn fields(
     t: &str,
     old: &std::collections::BTreeMap<String, FieldDecl>,
     new: &std::collections::BTreeMap<String, FieldDecl>,
-    first_key: Option<&String>,
 ) -> String {
-    let mut sql = String::new();
-    for (f, d) in new {
-        let had = old.get(f);
-        if had.is_none() {
-            sql.push_str(&format!(
+    // New fields on an existing object are unindexed (checked), so adding one
+    // is a catalog-only ALTER that doesn't rewrite or scan the table.
+    new.iter()
+        .filter(|(f, _)| !old.contains_key(*f))
+        .map(|(f, d)| {
+            format!(
                 "ALTER TABLE {t} ADD COLUMN \"f_{f}\" {};\n",
                 column_type(d.ty)
-            ));
-        }
-        if d.index && !had.is_some_and(|h| h.index) && first_key != Some(f) {
-            sql.push_str(&index(t, f, d));
-        }
-    }
-    sql
+            )
+        })
+        .collect()
 }

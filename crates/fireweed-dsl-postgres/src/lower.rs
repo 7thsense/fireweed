@@ -3,7 +3,7 @@
 //! SQL; names are validated DSL names.
 
 use fireweed_dsl::check::{CmpOp, Column, Expr, Kind, Operand, RPatch, RPred};
-use fireweed_dsl::{FieldType, MaxAttempts};
+use fireweed_dsl::{FieldType, MaxAttempts, MergeRule};
 use serde_json::Value;
 
 /// A statement being built: SQL text and its parameters.
@@ -53,6 +53,15 @@ impl Q {
         format!("ARRAY[{}]::text[]", parts.join(", "))
     }
 
+    /// Integers bound as one `bigint[]` parameter.
+    pub fn bind_ids(&mut self, ids: &[i64]) -> String {
+        let list: Vec<String> = ids.iter().map(i64::to_string).collect();
+        format!(
+            "{}::bigint[]",
+            self.bind(Some(format!("{{{}}}", list.join(","))))
+        )
+    }
+
     pub fn duration(&mut self, ms: i64) -> String {
         format!("({} * interval '1 millisecond')", self.bind_i64(ms))
     }
@@ -81,6 +90,14 @@ pub struct Obj {
 }
 
 pub const NOW: &str = "fireweed.now()";
+
+/// True when `new` keeps a field's merge rule against `old` (ADR-025 D20).
+pub fn merge_ok(rule: MergeRule, old: &str, new: &str) -> String {
+    match rule {
+        MergeRule::AddOnly => format!("({old} IS NULL OR coalesce({new} @> {old}, false))"),
+        MergeRule::NonDecreasing => format!("({old} IS NULL OR coalesce({new} >= {old}, false))"),
+    }
+}
 
 impl Obj {
     /// The SQL name of a column, unqualified.

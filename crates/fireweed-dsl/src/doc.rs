@@ -219,10 +219,7 @@ pub enum Durability {
 pub enum Statement {
     Insert(Insert),
     Claim(Claim),
-    Complete(Settle),
-    Fail(Settle),
-    Retry(Settle),
-    Release(Settle),
+    Settle(Settle),
     Renew(Renew),
     Update(Update),
     Delete(Delete),
@@ -283,11 +280,26 @@ pub struct ItemRef {
     pub token: Value,
 }
 
-/// `complete`, `fail`, `retry` and `release`.
+/// How a `settle` ends a lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// Done: `complete`.
+    Complete,
+    /// Given up: `failed`.
+    Fail,
+    /// Back to pending after `after`; failed if attempts are used up.
+    Retry,
+    /// Back to pending after `after`, with the claim's attempt given back.
+    Release,
+}
+
+/// Ends leases: `complete`, `fail`, `retry` or `release`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settle {
     pub queue: String,
+    pub outcome: Outcome,
     pub items: Vec<ItemRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<Duration>,
@@ -358,13 +370,9 @@ pub struct Update {
     #[serde(default)]
     pub leased: LeasedPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
     #[serde(default)]
     pub on_limit: OnLimit,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect: Option<Expect>,
     #[serde(default)]
