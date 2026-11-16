@@ -211,7 +211,7 @@ needs Cayce's confirmation.
 | D32 | "Yes, per run-shard": Snorri's spaces are one per (run, shard). | Owner, 2026-11-16 | Adopted (§3). Narrows D13: a space never spans workflows or campaigns, and a campaign may be split over several spaces. Resolves question 29. Events correlated to instances in several runs are written once per run space, deduplicated per space; cancelling a run is one commit per shard; on the local engine each space and each family space needs its own writer grant from the control plane, which may cover several of one holder's spaces. |
 | D33 | "We are trying to define a DSL that allows for the claim, bulk change, and query flexibility we need without the limitations of a fixed function calling api. It may not need to be sql, and it might be typed, but it's going to need to compile down to sql. Fireweed *is* effectively a compiler from 'some typed ir' to 'some database backend (turso, sqlite, postgres)'." The IR: "Own IR, weft style". The shape: "Fireweed is effectively becomming a similar system to truss + weft: fireweed-compiler + fireweed-engine[turso,postgres,sqlite,memory]". | Owner, 2026-11-16 | Draft in revision 8 (§2, §4, §11, §12). Amends D12: the fixed verbs become statements; consumers still write no SQL. |
 | D34 | "We should leverage umf for the typesystem, underlying schemas, ddl, etc" | Owner, 2026-11-16 | Draft in revision 8 (§6). |
-| D35 | "If there is a machinery we can share with weft, we shuold do so. I own weft and can make channges to it." | Owner, 2026-11-16 | Draft in revision 8 (§2). Fireweed's IR stays its own (D33); the machinery under it is shared with weft where weft has it. |
+| D35 | "If there is a machinery we can share with weft, we shuold do so. I own weft and can make channges to it." On types: "the missing types are obvious additions to weft". | Owner, 2026-11-16 | Draft in revision 8 (§2). Fireweed's IR stays its own (D33); the machinery under it is shared with weft where weft has it. |
 
 ## Decision
 
@@ -262,7 +262,9 @@ from weft's `weft-core` and `weft-postgresql`:
   result decoders;
 - canonical JSON encoding, golden plan fixtures and the conformance runner.
 
-Fireweed adds what weft has no reason to hold: queue statements and their
+Types weft lacks today, such as nullable fields, timestamps and floats, are
+added to weft (D35). Fireweed adds what weft has no reason to hold: queue
+statements and their
 semantics, leases, time, durability, request records, and execution.
 SQLite and Turso emission are new for both projects. Question 36 sets the
 order of extraction.
@@ -873,9 +875,10 @@ Snorri's TD-012 revision 7 (uncommitted there; sent to this session on
     resolution and typing; exact values; the expression and predicate
     core; the backend boundary; PostgreSQL emission. Each moves into a
     crate in the weft repository with its own version, and weft's
-    dialect slices depend on it as Fireweed does. Weft also needs nullable
-    fields, timestamps and floats in those shared parts, which its v0.1
-    language refuses. Which crates, and in what order?
+    dialect slices depend on it as Fireweed does. Which crates, and in
+    what order? The types weft's v0.1 language refuses (nullable fields,
+    timestamps, floats) are weft additions, not Fireweed extensions:
+    "the missing types are obvious additions to weft" (owner, 2026-11-16).
 
 ## Risks
 
