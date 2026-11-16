@@ -2005,7 +2005,7 @@ assert on final state through `get` and `read`.
 | `fireweed-local`, Turso with S3 shipping (reported) | 142 | 0 | 7 |
 
 The `fireweed-local` rows are the Turso-queue session's results on its
-branch `claude/fireweed-sqlite-s3-logs-37f26c` (commit b2bfdc25), with
+branch `claude/fireweed-sqlite-s3-logs-37f26c` (commit e14d2d2e), with
 this suite merged at 62206865; they were not rerun here. It supplies every
 control: `crash_and_reopen` and `open_competing` on all three arms, and
 `hold_replication`, `lose_local_storage` and `take_over` with shipping. Its
