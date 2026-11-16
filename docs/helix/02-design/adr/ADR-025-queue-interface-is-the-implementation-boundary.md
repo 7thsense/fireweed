@@ -169,6 +169,7 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D43 | "Full UMF documents"; "there is no reason I can see that fireweed schemas shouldn't be UMF schemas"; "if we need umf improvements we should get them." | Owner, 2026-11-16 | Accepted, in progress (question 39). A space schema becomes a UMF core 0.10 document. Its physical tables are `umf.tables` (UMF CONTRACT-081), and the queue semantics go in a Fireweed extension. |
 | D44 | "We should be targetting postgres 18." "The additional types and additions to umf tables should go straight to core." Asked whether the extension must live in UMF: it may live in Fireweed, registered through `umf-core`'s registry. | Owner, 2026-11-16 | Adopted. PostgreSQL 18 is the target, matching `umf.tables`' `postgresql18/0.1` profile, and the executor's tests run on PostgreSQL 18.7. The JSON value, string sets, `jsonb` and array columns, GIN, and partial and descending indexes go into UMF core and `umf.tables` (DocumentDrivenDX/umf#172, rewritten). |
 | D45 | "We need the counters in dragonfly because they need to be cross run, campaign, list, and everything else. They are universal per tenant." "just check dragonfly in real time, it's stupidly fast and selected for this purpose because of that property." | Owner, 2026-11-16 | Adopted. Send caps and rate counters stay in Dragonfly, checked in real time, and Fireweed holds no copy. This resolves question 5 and the counter half of question 25. A cap check and a send's commit stay separate steps, as today. |
+| D46 | "Dragonfly is part of the dataplane. That said, we should think about how to integrate it properly in the snorri model. It probably should be 'hidden' behind an effect handler." | Owner, 2026-11-16 | Direction for Snorri. The send effect handler checks and takes the Dragonfly slot. Snorri core and the workflow DSL don't see caps. This replaces TD-011's core `RateLimiter` port (its D9). The handler needs a way to answer "not now, retry at T" without failing the effect. Snorri's design to follow. |
 
 ## Decision
 
@@ -179,11 +180,15 @@ of change: work items, workflow state, per-recipient state, admission
 chunk state, operational events and timelines. Large payloads are
 not stored (D16); a field holds a reference.
 
-Outside Fireweed:
+The data plane is Fireweed and Dragonfly. Dragonfly holds the counters
+that are universal per tenant across runs, campaigns and lists (send caps
+and rate limits). They are checked in real time and never copied into
+Fireweed (D45). In Snorri the check sits behind the send effect handler,
+so workflows never see it (D46).
+
+Outside the data plane:
 - the control plane (tenants, campaign definitions, configuration), in its
   own PostgreSQL;
-- send caps and rate counters, which are universal per tenant across runs,
-  campaigns and lists, in Dragonfly, checked in real time (D45);
 - exhaust (logs, traces, full history, analytics across data sets), in
   Niflheim. Fireweed's analytics
 cover live data: counts by state, lag and rate windows.
@@ -373,8 +378,8 @@ A Snorri transition is one program:
 - insert effect items;
 - insert its timeline row last.
 
-The send-cap check runs against Dragonfly before the effect is sent, as it
-does today (D45).
+The send-cap check against Dragonfly happens inside the send effect
+handler when the effect is dispatched, not in the transition (D45, D46).
 
 ### 6. Durability
 

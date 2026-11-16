@@ -605,7 +605,7 @@ Names in SQL are validated object and field names, and quoted.
 | 7 | Timeline | A sequenced table, inserted last in each transition's program. Full history goes to Niflheim. |
 | 8 | Definitions (up to 256 KiB, D31) | Table row keyed by digest, with a `text` field. |
 | 9 | Admission chunk | Table row keyed by run and shard: `insert` with `on_conflict: reject`, then `update` by keys with `where: {eq: [version, v]}` and `expect: {min: 1, max: 1}`. |
-| 10 | Send-rate counters | Not in Fireweed: they stay in Dragonfly, universal per tenant and checked in real time before a send (ADR-025 D45). |
+| 10 | Send-rate counters | In Dragonfly, the data plane's per-tenant counter store, checked in real time by the send effect handler; not in Fireweed (ADR-025 D45, D46). |
 | 11 | Re-entry across runs (D29) | Table in a family space keyed by (family, subject), with `non_decreasing` timestamps, updated with `expect`. |
 
 Snorri's queues declare `max_attempts: unlimited` (D30).
@@ -616,7 +616,7 @@ Snorri's queues declare `max_attempts: unlimited` (D30).
 |-------|-----------|
 | Per-recipient lifecycle | Queue items with indexed fields (campaign, step, domain, status) |
 | Suppression | Table with `reasons: text_set, merge: add_only`. A send's program first runs `assert` on the address with `expect: {max: 0}` (question 25 for spaces). |
-| Caps and rate windows | Dragonfly, checked in real time (ADR-025 D45) |
+| Caps and rate windows | Dragonfly, checked in real time by the send effect handler (ADR-025 D45, D46) |
 | Delivery and engagement events | Queue items keyed by provider id; a sequenced table for timelines |
 | UI counts and lists | Declared reads |
 
