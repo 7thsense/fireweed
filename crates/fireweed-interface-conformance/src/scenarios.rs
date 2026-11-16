@@ -1099,7 +1099,7 @@ fn dsl_schedule_tick(fx: &Fixture) -> T {
     ensure!(committed(&r1), "fire: {r1:?}");
     let r1b = fire(&c, "tick-1");
     ensure!(
-        matches!((&r1, &r1b), (Ok(a), Ok(b)) if a == b),
+        matches!((&r1, &r1b), (Ok(a), Ok(b)) if same_replay(a, b)),
         "replayed tick differs"
     );
     // Three periods pass unobserved: one tick, then the next due time.
