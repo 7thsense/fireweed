@@ -23,7 +23,7 @@ ddx:
 
 | Date | Status | Deciders | Related | Confidence |
 |------|--------|----------|---------|------------|
-| 2026-11-13, revised 2026-11-15 | Proposed | Project owner | API-001, API-002, API-003, API-004, API-005, API-006, ADR-007, ADR-008, ADR-009, ADR-010, ADR-011, ADR-012, ADR-013, ADR-014, ADR-018, ADR-022, ADR-024, TD-002, TD-003, TD-006, TD-007, TD-008 | Medium |
+| 2026-11-13, revised 2026-11-16 | Proposed | Project owner | API-001, API-002, API-003, API-004, API-005, API-006, ADR-007, ADR-008, ADR-009, ADR-010, ADR-011, ADR-012, ADR-013, ADR-014, ADR-018, ADR-022, ADR-024, TD-002, TD-003, TD-006, TD-007, TD-008 | Medium |
 
 Revision 3 (2026-11-15) widens the boundary from a priority-queue interface
 to the data-plane storage interface for Snorri and Cayce. It follows owner
@@ -76,6 +76,19 @@ table. Definitions larger than one value were question 30, settled the
 same day by capping their size (D31). The owner also accepted Snorri's
 space granularity, one space per (run, shard) (D32), which closes
 question 29.
+
+Revision 8 (2026-11-16, draft for review) recasts Fireweed as a compiler
+and an engine, in the pattern of weft and truss (D33, D34).
+`fireweed-compiler` checks a typed request IR against a space schema
+written in UMF and lowers it to SQL for one backend. `fireweed-engine` owns
+storage layout and runs the compiled SQL under Fireweed's rules for time,
+leases, durability and request records, on Turso, PostgreSQL, SQLite or in
+memory. Claims, bulk changes and queries become statements of one IR
+instead of fixed verbs beside a request model. Sections 2, 4, 6, 8, 11 and
+12 change, as do the alternatives, consequences and migration order; the
+rest of revision 7 stands. Where weft already has the machinery, Fireweed
+shares it, and weft changes to make that possible (D35). Questions 31 to 36
+are new.
 
 ## Context
 
@@ -175,7 +188,7 @@ needs Cayce's confirmation.
 | D9 | The Postgres implementation is first-class, not only an oracle. A local engine (Turso MVCC on NVMe, S3 in the commit path; SQLite as comparison arm) follows and passes the same suite. Speed gates B1 to B4 apply to the local engine only. Durable Objects stay possible, not scheduled. | Owner via Cayce, 2026-11-15 | Adopted (§11). |
 | D10 | Cayce reads queue data only through versioned, named, declared reads, never engine tables. | Owner via Cayce, 2026-11-15 | Adopted (§6). |
 | D11 | All high-volume, fast-changing durable workflow data goes through Fireweed. The control plane is separate. Exhaust goes to Niflheim. | Owner via Cayce, 2026-11-15 | Adopted (§1). |
-| D12 | Requests are typed data with a selector, an action and a limit; a group commit is a list of them. Claim, bulk enqueue and complete stay fixed verbs. No SQL. Small expression language. Every write capped. Durability reported per commit. v1 covers what the Cayce UI and the recipient-lifecycle bulk operations need. Fireweed also provides ancillary storage shapes. | Owner via Cayce, 2026-11-15 | Adopted (§3 to §6, §10). |
+| D12 | Requests are typed data with a selector, an action and a limit; a group commit is a list of them. Claim, bulk enqueue and complete stay fixed verbs. No SQL. Small expression language. Every write capped. Durability reported per commit. v1 covers what the Cayce UI and the recipient-lifecycle bulk operations need. Fireweed also provides ancillary storage shapes. | Owner via Cayce, 2026-11-15 | Adopted (§3 to §6, §10); the fixed verbs are amended by D33. |
 | D13 | "atomic writes should be per workflow or per campaign." | Owner, 2026-11-15 | A space never spans workflows or campaigns (§3); D32 splits Snorri's runs by shard. Account-scoped records are open question 25. |
 | D14 | Durability is chosen per request with Niflheim's write modes: "we need to be able to control the level of durability required and wait accordingly. niflheim has a spec for this, we should try to use the same if possible - durable, tracked, fire and forget". For PostgreSQL: "Just assume postgres is fully replicated and design the protocol to ensure transactions are used to achieve that assuming perfect server durability." | Owner via the Turso-queue session, and owner, 2026-11-15 | Adopted (§7). Resolves questions 13, 14 and 19. |
 | D15 | "fencing should happen by the control plane. we'll have to have some sort of recheck interval to force readers to switch to the new node." Via the Turso-queue session: "the same applies to stopping old writers. the lease can be managed by the control plane via the embedder." | Owner, 2026-11-15 | Adopted (§11). Resolves question 16. |
@@ -196,6 +209,9 @@ needs Cayce's confirmation.
 | D30 | "accept Snorri's max_attempts opt-out". | Owner, 2026-11-16 | Adopted (§9). Amends D17: the store's bound is the default, and a queue may opt out. |
 | D31 | "Yes, cap at 256 KiB": Snorri caps workflow definitions at 256 KiB, one table value, and keeps transition output at 1 MiB inside the 2 MiB body. | Owner, 2026-11-16 | Adopted. Resolves question 30. No interface change. Cayce measured its shipped templates at 939 to 2,428 bytes in Snorri form, but enforces no size limit; a chain of about 245 send steps crosses 256 KiB. A cap rejects, it does not chunk: Cayce or Snorri's compiler rejects an oversized definition with a typed error when it is created, and Fireweed's `ValueTooLarge` is the backstop. |
 | D32 | "Yes, per run-shard": Snorri's spaces are one per (run, shard). | Owner, 2026-11-16 | Adopted (§3). Narrows D13: a space never spans workflows or campaigns, and a campaign may be split over several spaces. Resolves question 29. Events correlated to instances in several runs are written once per run space, deduplicated per space; cancelling a run is one commit per shard; on the local engine each space and each family space needs its own writer grant from the control plane, which may cover several of one holder's spaces. |
+| D33 | "We are trying to define a DSL that allows for the claim, bulk change, and query flexibility we need without the limitations of a fixed function calling api. It may not need to be sql, and it might be typed, but it's going to need to compile down to sql. Fireweed *is* effectively a compiler from 'some typed ir' to 'some database backend (turso, sqlite, postgres)'." The IR: "Own IR, weft style". The shape: "Fireweed is effectively becomming a similar system to truss + weft: fireweed-compiler + fireweed-engine[turso,postgres,sqlite,memory]". | Owner, 2026-11-16 | Draft in revision 8 (§2, §4, §11, §12). Amends D12: the fixed verbs become statements; consumers still write no SQL. |
+| D34 | "We should leverage umf for the typesystem, underlying schemas, ddl, etc" | Owner, 2026-11-16 | Draft in revision 8 (§6). |
+| D35 | "If there is a machinery we can share with weft, we shuold do so. I own weft and can make channges to it." | Owner, 2026-11-16 | Draft in revision 8 (§2). Fireweed's IR stays its own (D33); the machinery under it is shared with weft where weft has it. |
 
 ## Decision
 
@@ -218,19 +234,50 @@ Outside Fireweed:
 Fireweed's analytics cover live data only: counts by state, lag, and rate
 windows.
 
-### 2. The boundary is one interface crate
+### 2. A compiler and an engine
 
-API-006 defines the interface as Rust types and traits in one crate,
-`fireweed-interface` (working name). It depends on `fireweed-core` id types
-and general-purpose crates only. No public item exposes an implementation's
-internal mechanism: command log, command position, projection, apply
-frontier, ownership epoch, storage cell.
+Fireweed has the shape of weft and truss (D33). Weft compiles a query over
+UMF models into SQL for a registered backend and never runs it; truss owns
+a storage layout on PostgreSQL. Fireweed has three parts:
 
-An implementation is a crate that implements the interface with whatever
-internal design suits it. It depends on no other implementation crate.
-Consumers (`Fireweed` facade, Snorri, Cayce, `fireweed-resp`,
-`fireweed-conformance`) depend on the interface, not on implementations.
-`fireweed-server` and the embedding application are composition roots.
+| Crate | Role |
+|-------|------|
+| `fireweed-interface` | The IR types, the space schema types, the result and error types, and the `DataPlane` trait. Depends on `fireweed-core` id types, `umf-core` and general-purpose crates only. |
+| `fireweed-compiler` | Resolves and type-checks a program against the space schema, builds a logical plan, and lowers it to one backend's SQL with bound parameters and result decoders, or refuses. Pure: no I/O, no clock, no storage crate. |
+| `fireweed-engine` | Owns each backend's storage layout and DDL, and runs compiled plans: transactions, request time, leases, durability, request records, replay, fencing and sweeps. Backends: Turso, PostgreSQL, SQLite and memory. |
+
+Fireweed shares weft's machinery wherever weft has it (D35), moved into
+crates both projects depend on, with weft changed as needed. Candidates,
+from weft's `weft-core` and `weft-postgresql`:
+
+- UMF model loading, name resolution to UMF identities, and typing by UMF
+  type families and facets;
+- exact literals, exact arithmetic and exact instants;
+- the typed expression and predicate core (field references, literals,
+  comparisons, boolean operators, arithmetic) and weft's selection format
+  for bulk updates (weft CONTRACT-009);
+- the backend boundary: capability manifests, binding validation, assess,
+  lower and emit, and refusal diagnostics (weft CONTRACT-002);
+- PostgreSQL emission: quoting, parameter slots, typed casts, collation and
+  result decoders;
+- canonical JSON encoding, golden plan fixtures and the conformance runner.
+
+Fireweed adds what weft has no reason to hold: queue statements and their
+semantics, leases, time, durability, request records, and execution.
+SQLite and Turso emission are new for both projects. Question 36 sets the
+order of extraction.
+
+The memory backend interprets the logical plan directly, without SQL. It is
+the reference interpreter: consumers test against it, and the differential
+test compares every SQL backend with it. Today's
+`fireweed-interface-engine`, the request logic that the in-memory and
+PostgreSQL implementations share, becomes that interpreter.
+
+No public item exposes a backend's internal mechanism: log, log position,
+ownership epoch or physical table name. Consumers (`Fireweed` facade,
+Snorri, Cayce, `fireweed-conformance`) depend on `fireweed-interface`.
+`fireweed-server` and the embedding application are composition roots that
+choose a backend.
 
 ### 3. Spaces and shapes
 
@@ -274,26 +321,68 @@ the same subject at once serialize on the record, so only one wins. A
 crash between the two writes spends an enrolment without admitting the
 subject; replaying the admission with the same request ids repairs it.
 
-### 4. Requests are typed data
+### 4. Requests are programs in a typed IR
 
-Every request is a Rust value, serializable as JSON. Together the requests
-and expressions are Fireweed's request DSL, which replaces RESP as the way
-consumers drive Fireweed (D25). Protobuf is dropped unless the DSL needs it.
-There is no method per operation and no SQL or SQL subset.
+A consumer sends a **program**: typed data, serialized as JSON, never SQL
+text (D12). Together the IR and its expressions are Fireweed's request DSL,
+which replaces RESP as the way consumers drive Fireweed (D25). A program is
+a list of statements run in one space as one commit (§5). Draft statement
+set (question 32):
 
-- **Hot-path verbs** stay fixed and hand-tuned: `enqueue` (bulk push),
-  `claim`, `claim_by_item_ids`, `renew`, `finalize` (complete, fail, retry,
-  release, rearm).
-- **Writes** are operations: `Enqueue`, `Finalize`, `Renew`, `Reassign`,
-  `SetGates`, `SetQueueState`, `PutRows`, `Assert`, and `Mutate`. A `Mutate`
-  has a target object, a selection (keys, or a predicate over declared
-  fields), an action (set or increment fields, patch a JSON body by path,
-  reschedule, transition, change item gates, retire), a limit, and an
-  optional expectation on the number of matches. An unmet expectation
-  rejects the group, which gives compare-and-swap and conditional
-  increment. `Assert` is the same selection and expectation with no action:
-  a guard that never writes and never changes a version (D20).
-- **Reads** are point gets by id or key, and declared reads (§6).
+- `Insert`: enqueue items or put table rows, with a key-conflict policy.
+- `Claim`: a selection over a queue, a claim order, a limit and a lease
+  duration; returns the leased items with their tokens.
+- `Settle`: complete, fail, retry, release or rearm items by id and token.
+  `Renew` and `Reassign` change a lease.
+- `Mutate`: a target object, a selection (keys, or a
+  predicate over declared fields), actions (set or increment fields, patch a
+  JSON body by path, reschedule, transition, change item gates, retire), a
+  lease policy, a limit, and an optional expectation on the number of
+  matches. An unmet expectation rejects the program, which gives
+  compare-and-swap and conditional increment.
+- `Assert`: a selection and an expectation with no action; a guard that
+  never writes and never changes a version (D20).
+- `Query`: a selection, a projection or aggregate with group by, an order
+  and a row cap. A declared read (§6) is a named, versioned `Query` stored
+  in the schema.
+- `SetGates` and `SetQueueState`.
+
+The `enqueue`, `claim`, `renew` and `finalize` calls of revisions 3 to 7
+become one-statement programs, and the facade keeps helpers that build
+them (§13).
+
+Compilation follows weft's layers (D33):
+
+1. **Resolve and type.** Names resolve to the space schema's UMF
+   identities, and every expression gets a UMF type (§6). There are no
+   implicit casts. An unknown, ambiguous or unsupported construct is
+   refused, never guessed.
+2. **Logical plan.** A typed tree with no table names, column names or
+   backend SQL. Queue semantics are expanded here. The compiler adds the
+   eligibility predicate to every claim, adds lease-token checks to settle,
+   renew and reassign, and adds attempt charges and version bumps. Only
+   `Claim`, `Settle`, `Renew` and `Reassign` may write an item's system
+   fields (state, lease token, lease expiry, attempt count, item version);
+   a `Mutate` that names one is refused. So D6, D17 and D18 hold without
+   fixed functions.
+3. **Lowering.** A backend lowers the plan to its SQL dialect with bound
+   parameters, result decoders and obligations, or refuses. Each backend
+   publishes a capability manifest; a missing capability is a refusal,
+   never a fallback to another strategy.
+4. **Execution.** The engine runs the SQL in one transaction, passes
+   request time as a bound parameter, and writes the request record in the
+   same transaction.
+
+A `Claim` on PostgreSQL lowers to one statement of the form `UPDATE items
+SET <lease, attempt, version> FROM (SELECT id FROM items WHERE <eligible>
+AND <filter> ORDER BY <claim order> LIMIT $n FOR UPDATE SKIP LOCKED) …
+RETURNING …`. SQLite and Turso use the same statement without `SKIP
+LOCKED`, since one writer owns a space. The engine caches compiled plans by
+schema version and statement shape, so the hot statements are compiled and
+prepared once; that cache replaces the hand-written verbs of revision 7.
+
+The JSON IR is the wire format. A text syntax is a later frontend that
+compiles to the IR, in weft's style (question 32).
 
 The expression language has literals, declared-field and JSON-path access,
 parameters, `now()`, comparison and boolean operators, `in`, arithmetic,
@@ -325,7 +414,17 @@ The standalone verbs keep API-001's per-item outcomes: a stale lease in a
 `finalize` call affects that entry only. Inside a group the same staleness
 rejects the group.
 
-### 6. Declared schema and declared reads
+### 6. The schema is UMF
+
+A space's schema is a UMF document (D34). UMF core types are the IR's type
+system. A published UMF extension, `umf.fireweed`, declares what UMF core
+does not: queues and their system fields, priority, leases, gates,
+cohorts, recurrence, merge rules, sequenced keys, row expiry, key retention
+and declared reads (question 33). A UMF physical binding document per
+backend (UMF CONTRACT-042) holds layout and index choices. The engine
+generates each backend's DDL from the schema and its binding, the way UMF's
+DDD-to-PostgreSQL projection does (UMF CONTRACT-043). Fireweed reads UMF
+through the Rust crate `umf-core`, as weft does.
 
 Each space has a versioned schema: its objects, their typed fields, index
 hints, retention, and its declared reads. Only declared fields can appear in
@@ -334,7 +433,8 @@ values, such as an instance's await keys) and indexed per value. The
 implementation turns declarations into indexes. A field becomes usable once
 its index is ready, and `get_schema` reports index state. Schema changes
 are additive only (D22): spaces have finite lives, and a consumer that needs
-a different shape starts a new space.
+a different shape starts a new space. UMF's core-evolution check (UMF
+CONTRACT-083) decides whether a new schema version only adds.
 
 A table field may declare a **merge rule** (D20): `AddOnly` for a set (a
 write may add values, never remove them) or `NonDecreasing` for an integer,
@@ -393,7 +493,11 @@ committed before its linearization point, whatever its durability level.
 **Observable state is a function of committed operations and time.** Lease
 expiry, `not_before` and backoff, cohort deadlines and retention take effect
 at their due instant. An implementation may sweep, evaluate lazily, or both.
-No caller drives a tick. API-006 fixes the processing order for transitions
+No caller drives a tick. Under compilation, time-driven state is derived:
+the compiler turns "lease expired", "due" and "past retention" into
+predicates that compare stored fields with the request-time parameter, so
+every statement sees due transitions. The engine writes a derived
+transition back when a statement touches the record or a sweep passes. API-006 fixes the processing order for transitions
 due at the same instant.
 
 **One time authority per space.** Each request uses one request time for
@@ -407,7 +511,7 @@ group, and after taking its locks in a `READ COMMITTED` verb (API-006
 §PostgreSQL rule 3). The first increment keeps request time on the space's
 row, which every write locks.
 
-`claim` and `claim_by_item_ids` take an optional `eligibility_time`. It
+A `Claim` (and `claim_by_item_ids`) takes an optional `eligibility_time`. It
 replaces the authority only when deciding whether `not_before` and backoff
 have passed for that claim. Lease expiry, attempt timestamps, cohort
 deadlines, retention and `now()` in expressions always use the authority.
@@ -474,17 +578,20 @@ key). A chunked `Mutate` must be the only operation in its commit. A step
 that reaches a cohort it cannot take whole skips that cohort and counts it,
 so every step makes progress.
 
-### 11. Implementations
+### 11. Engine backends
 
 | Implementation | Status | Durability | Sharing |
 |----------------|--------|------------|---------|
-| PostgreSQL (`fireweed-interface-postgres`) | First-class and production-supported. Defines correct semantics for the differential test. Snorri and Cayce build against it now. | `FireAndForget`; `Durable` by default | `MultiProcess` |
-| Local engine: Turso MVCC on NVMe, S3 log; SQLite as comparison arm | Later, in the Turso-queue session's phases L0 to L4. Passes the same suite and the differential test. Speed gates B1 to B4 (Turso-queue plan §3.8) apply here only. | All three; `Tracked` by default | `SingleProcess` per space |
-| In-memory (`fireweed-interface-memory`) | For consumers' tests, so that nobody re-implements Fireweed in memory. | `FireAndForget` | `SingleProcess` |
+| PostgreSQL | First-class and production-supported. Snorri and Cayce build against it first. Real tables generated from each space schema (layout: question 31). | `FireAndForget`; `Durable` by default | `MultiProcess` |
+| Turso: MVCC on NVMe, S3 log | The local engine, in the Turso-queue session's phases L0 to L4. Speed gates B1 to B4 (Turso-queue plan §3.8) apply here only. One database per space. | All three; `Tracked` by default | `SingleProcess` per space |
+| SQLite | The local engine's comparison arm and a single-process backend. One database per space. | `FireAndForget`, `Tracked` | `SingleProcess` per space |
+| Memory | The reference interpreter (§2), for consumers' tests and the differential test. | `FireAndForget` | `SingleProcess` |
 | Object log × Turso (current runtime) | Deprecated once the local engine's S3 log passes (D24). Not wrapped. | — | — |
 | Durable Objects | Possible: every request is one atomic step. Not scheduled. | — | — |
 
-The Postgres implementation keeps TD-002's queue tables, indexes, `SKIP
+The PostgreSQL backend replaces the revision 6 increment
+(`fireweed-interface-postgres`), which loads whole queues and tables and
+runs the shared request logic in Rust. It keeps TD-002's indexes, `SKIP
 LOCKED` claim and group and cohort locking, and drops the command log,
 `LeaseExpired` commands, `assignment_epoch` fencing and epoch-fenced
 sweepers. Group commits and chunk steps run at `SERIALIZABLE` where they
@@ -521,16 +628,21 @@ The conformance suite tests through the interface only. It reads
 atomicity, caps and chunking, declared reads, the expression semantics, the
 time rules under a manual clock, concurrent claims, and crash and reopen in
 a killed child process. Each rule is pinned by a named test (API-006
-§Rule-pinning tests) that every implementation runs. A test-only crate runs
-a differential test against the Postgres implementation, including
-generated expressions and aggregates. The suite starts as
+§Rule-pinning tests) that every backend runs. As weft requires of its
+backends, the suite is one corpus of programs, expected results and
+expected refusals that every backend must pass before it claims a
+capability. A test-only crate runs a differential test of every SQL backend
+against the memory backend's interpreter, including generated expressions,
+aggregates and programs; the compiler's logical plans are checked against
+golden fixtures. The suite starts as
 `fireweed-interface-conformance` beside the existing `fireweed-conformance`,
 which keeps testing the current runtime until migration step 6.
 
 ### 13. The facade and RESP
 
 `Fireweed` (API-005) becomes a concrete wrapper over `Arc<dyn DataPlane>`,
-with convenience helpers over the verbs and request types. It names no
+with helpers that build the common programs (enqueue, claim, settle,
+renew). It names no
 implementation. RESP is deprecated for now in favour of the request DSL
 (D25): `fireweed-resp` stays frozen on the current runtime and is not
 ported.
@@ -555,7 +667,12 @@ not on the interface or on `Fireweed`.
 | Postgres as test oracle only | Less to support | Snorri and Cayce cannot build until the local engine exists | Rejected (D9) |
 | A separate store per shape | Each store tuned to its shape | No atomic commit across shapes; consumers coordinate stores themselves | Rejected |
 | Caller-supplied lease time, or a two-reading `Clock` (Turso queue plan §1.4 options A and C) | Matches CONTRACT-005 directly | Two time sources for lease fencing | Rejected for lease time; eligibility time adopted |
-| **One data-plane interface: spaces, queues and tables, typed requests, group commit, declared reads, Postgres first** | Matches the intent; one abstraction for all workflow data | Large interface to specify and test | **Proposed** |
+| Interpret requests in Rust over records loaded from storage (revisions 5 to 7) | One code path for every implementation | Loads whole objects; cannot use indexes or `SKIP LOCKED`; every database is a store, not an engine | Rejected (D33); kept as the memory backend's reference interpreter |
+| Fixed verbs beside a request model (revisions 3 to 7) | Hand-tuned hot paths | Each new claim or bulk need is a new verb | Rejected (D33); the plan cache keeps hot statements fast |
+| Extend weft with queue statements | One language across truss, ashlar and Fireweed | Weft has no writes beyond a bulk `UPDATE` and no nulls, timestamps or floats; queue semantics would enter a read-and-transform compiler | Rejected for the IR (D33) |
+| Share weft's machinery under Fireweed's own IR | One implementation of UMF resolution, typing, exactness, backend manifests and PostgreSQL emission; fixes land in both | Weft's code is sliced by dialect version and feature-gated, so shared parts must first move into stable crates | Adopted (D35) |
+| Fireweed's own schema language and type system | No dependency | Duplicates UMF's types, evolution check and DDL generation | Rejected (D34) |
+| **One data-plane IR over spaces, queues and tables, typed by UMF, compiled to SQL per backend, with group commit and declared reads; PostgreSQL first** | Matches the intent; one abstraction for all workflow data; claims, bulk changes and queries in one language | A compiler and four backends to specify and test | **Proposed** |
 
 ## Consequences
 
@@ -569,7 +686,11 @@ not on the interface or on `Fireweed`.
 | Negative | Records scoped to an account cannot be checked atomically with a campaign's effects (open question 25). |
 | Negative | With one space per (run, shard) (D32), an event for instances in several runs is one commit per run space, deduplicated per space only, and cancelling a run is one commit per shard. |
 | Positive | Expression, aggregate, group-commit and time rules are pinned by named conformance tests that both engines run. |
-| Positive | Correctness is defined by observable behaviour and checked against Postgres. |
+| Positive | Correctness is defined by observable behaviour and checked against the reference interpreter on every backend. |
+| Positive | New claim shapes, bulk changes and queries need no new API: they are programs the compiler checks and lowers. |
+| Positive | Schemas, types and DDL come from UMF, so the Cayce UI, generated types and Niflheim exports can read the same schema. |
+| Negative | Fireweed takes on a compiler: name resolution, typing, plan building and lowering for three SQL dialects, with golden fixtures for each. |
+| Negative | Fireweed depends on UMF's Rust crates and on UMF types it needs that are not in core yet (question 33). |
 | Negative | The interface is much larger than a queue API. The expression language must behave identically on every implementation. |
 | Negative | Snorri migrates its side records, fences and in-memory idempotency to Fireweed shapes, and to token-addressed finalize. |
 | Negative | Every selector and read needs an index-backed conjunct, which constrains ad-hoc queries. |
@@ -612,16 +733,18 @@ object-log, RESP and TD-003 changes land at step 6.
 2. Write `fireweed-interface-conformance` against it, and the in-memory
    implementation `fireweed-interface-memory` alongside, so the suite has a
    first target. (Started in revision 5.)
-3. Build the Postgres implementation: queues and verbs, then group commit,
-   tables, declared reads and sequenced tables. Add the differential test;
-   Postgres becomes the reference once it passes the suite. (Started in
-   revision 6: queues, tables, group commit, request records, claims,
-   selector writes and declared reads, with a per-space lock and whole-object
-   loads; indexed loading and the concurrent protocol come next.)
+3. Build `fireweed-compiler` and `fireweed-engine` (revision 8): the space
+   schema as UMF with the `umf.fireweed` extension; the IR and logical plan;
+   the memory backend as the reference interpreter, from today's
+   `fireweed-interface-engine`; then the PostgreSQL backend as SQL lowering,
+   with DDL generated from UMF. Add the differential test. Revision 6's
+   PostgreSQL increment, which interprets requests over loaded records, is
+   superseded and kept only until the PostgreSQL backend passes the
+   suite.
 4. Cut `Fireweed` over to the interface. Snorri and Cayce adopt it on
    Postgres. The old facade and runtime stay frozen until this step lands.
-5. Build the local engine and run it through the suite, the differential
-   test and gates B1 to B4.
+5. Build the SQLite and Turso backends and run them through the suite, the
+   differential test and, for Turso, gates B1 to B4.
 6. Deprecate object-log once the local engine's S3 log passes (D24), and
    RESP (D25). Retire
    `StorageConfig`, `RETIRED_STORAGE_CELL` and whatever the decisions remove.
@@ -722,12 +845,44 @@ Snorri's TD-012 revision 7 (uncommitted there; sent to this session on
     the DSL scenarios use it (DSL-2 shows both). Is declaring instance
     queues recurring acceptable, or should any queue get a non-charging
     reschedule? Draft: use `Rearm`; no new outcome. (Turso-queue session.)
+31. **PostgreSQL layout.** With real tables per space schema, does each
+    space get its own PostgreSQL schema (namespace), or do spaces with the
+    same schema version share tables with the space id leading every key
+    and index? At 1,024 or more Snorri spaces, the first means thousands
+    of tables; the second keeps the table count at the number of schema
+    versions. Draft: shared tables per schema version.
+32. **Statement set and surface.** Which revision 7 features become v1
+    statements: `claim_by_item_ids`, cohorts, group batching and
+    recurrence? Is a text syntax in v1 or later, and does it reuse weft's
+    grammar where it can? Draft: the §4 list, JSON IR only in v1.
+33. **The `umf.fireweed` extension.** Is it published in the UMF
+    repository, as UMF expects of target-shaped meaning, or kept in
+    Fireweed? UMF's temporal facets are a candidate core ideal, not yet
+    admitted (UMF CONTRACT-047), so Fireweed's `Timestamp` (UTC,
+    milliseconds) needs a stated meaning in the extension until they are.
+    The same holds for `TextSet` and the JSON body.
+34. **UMF declarative actions.** UMF specifies mutation contracts
+    executed by a qualified executor (UMF CONTRACT-900, CONTRACT-901). Should
+    Fireweed's statements be UMF actions, with the engine as their
+    executor? Draft: not in v1; the IR stays Fireweed's own (D33) and is
+    revisited with weft alignment.
+35. **The engine trait.** Does `DataPlane` keep the verb methods, or narrow
+    to `apply_schema`, `execute(program)`, `read(query)`, `get_request`
+    and `get_schema`? Draft: narrow it; the facade builds programs.
+36. **What to extract from weft first.** Draft order: UMF model loading,
+    resolution and typing; exact values; the expression and predicate
+    core; the backend boundary; PostgreSQL emission. Each moves into a
+    crate in the weft repository with its own version, and weft's
+    dialect slices depend on it as Fireweed does. Weft also needs nullable
+    fields, timestamps and floats in those shared parts, which its v0.1
+    language refuses. Which crates, and in what order?
 
 ## Risks
 
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
 | Expression and aggregate results differ between Postgres and the local engine (collation, nulls, overflow, float rounding) | H | H | API-006 fixes evaluation order, faults, casts and aggregate precision; rule-pinning tests and the differential test check them. |
+| Compiled SQL diverges from the reference interpreter on one backend | H | H | Golden plan fixtures, the shared corpus with expected refusals, and generated programs in the differential test. A backend refuses what it cannot honour. |
 | Postgres group commits at `SERIALIZABLE` retry under contention | M | M | Bounded retries, then `Contention`; hot paths use the verbs at `READ COMMITTED` with explicit locks. The first increment serializes writes per space instead. |
 | The interface grows into a general database | M | H | No joins, capped requests, index-backed selectors, live data only; history to Niflheim. |
 | A hot table row (counter, rollup) serializes commits on Postgres | M | M | Open question 5; rate windows keyed by bucket spread the load. |

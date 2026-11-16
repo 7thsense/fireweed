@@ -14,7 +14,7 @@ ddx:
 # API-006: Fireweed data-plane interface
 
 **Type**: Rust trait and request-type contract (implementation boundary)
-**Version**: v0 (draft, revision 7)
+**Version**: v0 (draft, revision 8)
 **Status**: draft. Proposed by ADR-025. Not normative until ADR-025 is accepted.
 **Related**: API-001, API-002, API-003, API-004, API-005, ADR-025, TD-002, TD-006
 
@@ -57,6 +57,17 @@ and paging for `fw_gates`.
 
 Revision 7 (2026-11-15) applies the owner's rulings (ADR-025 D13 to D28;
 D29 to D32 were added on 2026-11-16).
+
+Revision 8 (2026-11-16, draft for review) follows ADR-025 D33 and D34:
+Fireweed becomes `fireweed-compiler` and `fireweed-engine`, in the pattern
+of weft and truss. §Compilation model states the new structure: requests
+are programs in a typed IR, space schemas are UMF documents, and each
+backend lowers the compiler's logical plan to SQL or refuses. The request,
+expression, time, durability and conformance rules below keep their
+meaning and become the IR's semantics. Sections that describe the
+revision 7 verbs, the `DataPlane` methods and §Implementation rules
+§PostgreSQL are restated by that section and are rewritten once the
+review accepts it.
 Durability levels are Niflheim's `FireAndForget`, `Tracked` and `Durable`,
 chosen per request; PostgreSQL commits are `Durable`. The Blob and
 EventLog shapes and queue history are removed; a table with
@@ -90,8 +101,9 @@ states every change; ADR-025 lists the API-001 amendments.
   configuration, storage layout, recovery, replication and maintenance API;
   authentication and authorization (the adapter in front of the interface).
 - Owning crate: `fireweed-interface` (working name).
-- Non-goals: SQL; joins; a storage-port SPI; large payloads (ADR-025 D16);
-  history and analytics beyond live data (Niflheim).
+- Non-goals: SQL as the consumer surface (Fireweed generates SQL; consumers
+  never send it); joins in v1; a storage-port SPI; large payloads (ADR-025
+  D16); history and analytics beyond live data (Niflheim).
 
 ## Terms
 
@@ -134,6 +146,94 @@ states every change; ADR-025 lists the API-001 amendments.
 
 A workspace test enforces rules 1, 4, 5 and 6 from `cargo metadata`, and a
 compile test checks rule 3.
+
+Under revision 8 (§Compilation model), rule 1 also allows `umf-core`, and
+rules 4 to 6 apply to `fireweed-engine` backends in place of implementation
+crates. `fireweed-compiler` depends on `fireweed-interface`, `umf-core` and
+the crates it shares with weft (ADR-025 D35), and on no I/O, clock or
+storage crate.
+
+## Compilation model (revision 8, draft)
+
+ADR-025 §2, §4 and §6 give the reasons; this section states the contract.
+
+### Parts
+
+| Part | Input | Output | May not |
+|------|-------|--------|---------|
+| Schema | A UMF document with the `umf.fireweed` extension, and one UMF physical binding document per backend (UMF CONTRACT-042) | A resolved, versioned space schema; DDL per backend | Change meaning per backend: a binding chooses layout and indexes only |
+| Compiler | A program (§Programs), the resolved schema, a backend's capability manifest | A typed logical plan, then that backend's target plan, or a refusal with diagnostics | Read storage or a clock; fall back to another plan; return a partial plan |
+| Engine | A target plan, request time, the requested durability level | The program's results and its request record, committed in one transaction | Reinterpret names or types; skip an obligation the plan lists |
+
+### Programs
+
+A program is a list of statements for one space, run in list order as one
+commit (§Request and response types, group commit rules). Draft statements:
+`Insert`, `Claim`, `Settle`, `Renew`, `Reassign`, `Mutate`, `Assert`,
+`Query`, `SetGates`, `SetQueueState` (ADR-025 §4, question 32). Each
+revision 7 verb maps to a one-statement program with the same outcomes:
+
+| Revision 7 | Revision 8 |
+|------------|------------|
+| `enqueue` | `Insert` into a queue |
+| `claim`, `claim_by_item_ids` | `Claim` with a selection, or with item ids |
+| `renew`, `finalize` | `Renew`; `Settle` with the outcome |
+| `commit` with `WriteOp`s | A program with several statements |
+| `get`, `read` | `Query`; a declared read is a stored `Query` |
+
+A standalone `Settle` keeps per-item outcomes (a stale lease affects that
+entry only); inside a program with other statements, staleness rejects the
+program, as group commit does today.
+
+### Types
+
+Every field and expression has a UMF type. The revision 7 `ScalarType`
+values map to UMF core types with facets; where UMF core has no admitted
+meaning (temporal facets, UMF CONTRACT-047; text sets; the JSON body), the
+`umf.fireweed` extension states it (ADR-025 question 33). `Timestamp` is a
+UTC instant in milliseconds. The rules in §Expressions (evaluation order,
+nulls, overflow, casts, collation, aggregate precision) become the typing
+and evaluation rules of the IR; there are no implicit casts.
+
+### Logical plan
+
+The plan is typed data with no table names, column names or SQL. The
+compiler expands queue semantics into it:
+
+1. Every `Claim` gets the eligibility predicate of §Time (due, not leased or
+   lease expired, gates open, not exhausted) and the queue's claim order.
+2. `Settle`, `Renew` and `Reassign` get a lease-token check; `Mutate` gets
+   its lease policy.
+3. Attempt charges, `item_version` bumps and `attempts-exhausted` failure on
+   expiry are plan nodes, not backend choices.
+4. An item's system fields (state, lease token, lease expiry, attempt count,
+   item version) are written only by `Claim`, `Settle`, `Renew` and
+   `Reassign`. A `Mutate` or `Insert` that names one is refused.
+5. Time-driven state is a predicate on stored fields and the request-time
+   parameter. The engine writes a derived transition back when a statement
+   touches the record or a sweep passes; the processing order of §Time
+   applies.
+6. Every selection keeps its access term (§Index rule) and every statement
+   its caps (§Work limits); the plan records the scan budget it may spend.
+
+### Backends
+
+A backend publishes a capability manifest: the statements, expression
+forms, types and isolation it supports, each with conformance evidence, as
+weft's backend manifests do. Lowering a plan that needs a missing
+capability is a refusal. Each lowered plan lists its SQL, bound
+parameters, result decoders and obligations (for example: run at
+`SERIALIZABLE`, or hold the space's writer lease).
+
+| Backend | Dialect | Layout | Claim lowering |
+|---------|---------|--------|----------------|
+| PostgreSQL | PostgreSQL 16+ | Real tables from each schema version (ADR-025 question 31) | `UPDATE … FROM (SELECT … ORDER BY … LIMIT $n FOR UPDATE SKIP LOCKED) … RETURNING` |
+| Turso | Turso SQL | One database per space | Same, without `SKIP LOCKED`; one writer per space |
+| SQLite | SQLite 3 | One database per space | As Turso |
+| Memory | None | In-memory records | Interprets the logical plan; the reference for the differential test |
+
+Compiled plans are cached by schema version, statement shape and backend,
+and prepared once per connection.
 
 ## Data model
 
@@ -1499,7 +1599,8 @@ A rejected group is a recorded outcome, not an error.
 
 ### PostgreSQL
 
-These rules describe the target concurrent protocol. The first increment,
+Revision 8: these rules become obligations of the PostgreSQL backend's
+lowered plans (§Compilation model). The first increment,
 `fireweed-interface-postgres`, does not follow rules 1, 3 and 4 yet: every
 write to a space takes a lock on that space's row, so writes to one space
 are serialized across all processes, and a request loads the whole queues
@@ -1908,9 +2009,10 @@ type, selector writes, chunk sequences, aggregates and clock moves.
 
 | Implementation | Durability (min / max) | Visibility | Sharing | Shapes |
 |----------------|------------------------|------------|---------|--------|
-| PostgreSQL (`fireweed-interface-postgres`) | `FireAndForget` / `Durable` (default `Durable`) | `Immediate` | `MultiProcess` | Queue, Table |
-| Local engine (Turso MVCC on NVMe, S3 log; SQLite comparison arm) | `FireAndForget` / `Durable` (default `Tracked`) | `Immediate` | `SingleProcess` per space | Queue, Table |
-| In-memory (`fireweed-interface-memory`) | `FireAndForget` / `FireAndForget` | `Immediate` | `SingleProcess` | Queue, Table |
+| `fireweed-engine` PostgreSQL backend (today `fireweed-interface-postgres`, an interpreter over loaded records) | `FireAndForget` / `Durable` (default `Durable`) | `Immediate` | `MultiProcess` | Queue, Table |
+| `fireweed-engine` Turso backend (MVCC on NVMe, S3 log) | `FireAndForget` / `Durable` (default `Tracked`) | `Immediate` | `SingleProcess` per space | Queue, Table |
+| `fireweed-engine` SQLite backend | `FireAndForget` / `Tracked` (default `Tracked`) | `Immediate` | `SingleProcess` per space | Queue, Table |
+| `fireweed-engine` memory backend (today `fireweed-interface-memory`) | `FireAndForget` / `FireAndForget` | `Immediate` | `SingleProcess` | Queue, Table |
 
 ## Facade binding (summary for API-005)
 
