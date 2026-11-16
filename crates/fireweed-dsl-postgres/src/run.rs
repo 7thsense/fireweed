@@ -7,7 +7,7 @@ use fireweed_dsl::check::{
     RStatement, Selection,
 };
 use fireweed_dsl::{
-    Expect, FieldType, LeasedPolicy, MaxAttempts, MergeRule, OnConflict, OnLimit,
+    Expect, FieldType, LeasedPolicy, MaxAttempts, MergeRule, OnConflict, OnLimit, OnUnmet,
     Outcome as Settle, RejectReason,
 };
 use serde_json::{Value, json};
@@ -48,6 +48,25 @@ async fn query(tx: &Transaction<'_>, q: &Q) -> std::result::Result<Vec<Row>, Att
 fn parse(text: &str) -> std::result::Result<Value, Attempt> {
     serde_json::from_str(text)
         .map_err(|e| Attempt::Failed(fireweed_dsl::Error::Unavailable(e.to_string())))
+}
+
+/// The outcome of an unmet `expect`, if it is unmet: a rejection, or with
+/// `on_unmet: report` a result saying so. A guarded write's SQL already
+/// skipped its changes when the count missed.
+fn unmet(expect: &Option<Expect>, matched: i64) -> Option<Outcome> {
+    let e = expect.as_ref().filter(|e| !e.holds(matched as u64))?;
+    Some(match e.on_unmet {
+        OnUnmet::Reject => Outcome::Rejected(RejectReason::ExpectUnmet),
+        OnUnmet::Report => Outcome::Done(json!({"matched": matched, "met": false})),
+    })
+}
+
+/// Adds `met: true` to a result when the statement had an `expect`.
+fn with_met(mut out: Value, expect: &Option<Expect>) -> Value {
+    if expect.is_some() {
+        out["met"] = json!(true);
+    }
+    out
 }
 
 /// `min <= count <= max` in SQL, for a count expression.
@@ -228,10 +247,10 @@ pub async fn statement(tx: &Transaction<'_>, sp: &Space, st: &RStatement) -> R {
             if total > *limit as i64 {
                 return Ok(Outcome::Rejected(RejectReason::LimitExceeded));
             }
-            if expect.is_some_and(|e| !e.holds(total as u64)) {
-                return Ok(Outcome::Rejected(RejectReason::ExpectUnmet));
+            if let Some(unmet) = unmet(expect, total) {
+                return Ok(unmet);
             }
-            Ok(Outcome::Done(json!({"matched": total})))
+            Ok(Outcome::Done(with_met(json!({"matched": total}), expect)))
         }
         RStatement::Assert {
             obj: o,
@@ -250,10 +269,11 @@ pub async fn statement(tx: &Transaction<'_>, sp: &Space, st: &RStatement) -> R {
                 ob.table
             );
             let n: i64 = query(tx, &q).await?[0].get(0);
-            if !expect.holds(n as u64) {
-                return Ok(Outcome::Rejected(RejectReason::ExpectUnmet));
+            let expect = Some(*expect);
+            if let Some(unmet) = unmet(&expect, n) {
+                return Ok(unmet);
             }
-            Ok(Outcome::Done(json!({"matched": n})))
+            Ok(Outcome::Done(with_met(json!({"matched": n}), &expect)))
         }
         RStatement::Select(s) => select(tx, sp, s).await,
         RStatement::SetPaused { obj: o, paused } => {
@@ -479,13 +499,13 @@ async fn update(
     if over && on_limit == OnLimit::Reject {
         return Ok(Outcome::Rejected(RejectReason::LimitExceeded));
     }
-    if expect.is_some_and(|e| !e.holds(total as u64)) {
-        return Ok(Outcome::Rejected(RejectReason::ExpectUnmet));
+    if let Some(unmet) = unmet(expect, total) {
+        return Ok(unmet);
     }
     if !ok {
         return Ok(Outcome::Rejected(RejectReason::MergeViolation));
     }
-    let mut out = json!({"matched": total.min(limit as i64)});
+    let mut out = with_met(json!({"matched": total.min(limit as i64)}), expect);
     if on_limit == OnLimit::Step {
         out["last"] = json!(last);
         if over {

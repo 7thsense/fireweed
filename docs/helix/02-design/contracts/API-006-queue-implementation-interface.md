@@ -367,7 +367,7 @@ update:
   leased: skip                  # queues: skip (default), preserve, or break
   limit: 1000                   # default 1000
   on_limit: reject              # reject (default) or step
-  expect: {min: 1, max: 1}      # optional
+  expect: {min: 1, max: 1}      # optional; on_unmet: reject (default) or report
   override_merge: false
 ```
 
@@ -392,7 +392,14 @@ count passes `limit` and `expect`.
 with `expect_unmet`. This gives compare-and-set (`where: {eq: [version,
 7]}`, `expect: {min: 1, max: 1}`) and conditional increments.
 
-Result: `{matched, more?, last?}`.
+**`on_unmet`.** An `expect` may say `on_unmet: report`. When the count
+misses, that statement changes nothing and its result says `met: false`,
+and the rest of the program runs and commits. This gives a batch of
+guards in one program a result per guard. With the default `reject`, a
+miss rejects the whole program. `assert` and `delete` take it too. With
+an `expect`, a result carries `met: true` or `met: false`.
+
+Result: `{matched, met?, more?, last?}`.
 
 ### `delete`
 
@@ -400,7 +407,7 @@ Result: `{matched, more?, last?}`.
 delete: {target: …, where | ids | keys, limit, expect}
 ```
 
-Deletes matching rows (queue items in any state). Result: `{matched}`.
+Deletes matching rows (queue items in any state). Result: `{matched, met?}`.
 
 ### `assert`
 
@@ -408,8 +415,9 @@ Deletes matching rows (queue items in any state). Result: `{matched}`.
 assert: {target: …, where | ids | keys, expect: {min: 0, max: 0}}
 ```
 
-Counts matching rows and rejects with `expect_unmet` outside `expect`.
-Writes nothing (ADR-025 D20). Result: `{matched}`.
+Counts matching rows and rejects with `expect_unmet` outside `expect`,
+or reports `met: false` with `on_unmet: report`. Writes nothing (ADR-025
+D20). Result: `{matched, met}`.
 
 ### `select`
 

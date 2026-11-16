@@ -954,3 +954,42 @@ async fn replayed_claims_reread_their_items() {
         .get(0);
     assert!(!stored.contains("\"body\""), "{stored}");
 }
+
+/// `on_unmet: report`: an unmet expectation changes nothing for that
+/// statement and reports `met: false`; the rest of the program commits.
+#[tokio::test]
+async fn unmet_expectations_can_report_instead_of_rejecting() {
+    let Some((mut c, sp)) = setup("report").await else {
+        return;
+    };
+    let r = run(&mut c, &sp, r#"
+request_id: g1
+statements:
+  - insert: {into: slots, rows: [{contact: a, hour: "2030-01-01T10:00:00Z", count: 2}, {contact: b, hour: "2030-01-01T10:00:00Z", count: 0}]}
+  - update:
+      target: slots
+      keys: [{contact: a, hour: "2030-01-01T10:00:00Z"}]
+      where: {lt: [count, 2]}
+      set: {count: {add: [{field: count}, 1]}}
+      expect: {min: 1, max: 1, on_unmet: report}
+  - update:
+      target: slots
+      keys: [{contact: b, hour: "2030-01-01T10:00:00Z"}]
+      where: {lt: [count, 2]}
+      set: {count: {add: [{field: count}, 1]}}
+      expect: {min: 1, max: 1, on_unmet: report}
+  - assert: {target: supp, keys: [{address: nobody}], expect: {min: 1, on_unmet: report}}
+  - select: {from: slots, where: {in: [contact, [a, b]]}, fields: [contact, count], order_by: [{field: contact}], limit: 2}
+"#).await;
+    assert_eq!(r.status, Status::Committed);
+    assert_eq!(r.results[1], json!({"matched": 0, "met": false}));
+    assert_eq!(r.results[2], json!({"matched": 1, "met": true}));
+    assert_eq!(r.results[3], json!({"matched": 0, "met": false}));
+    assert_eq!(
+        rows(&r, 4),
+        vec![
+            json!({"contact": "a", "count": 2}),
+            json!({"contact": "b", "count": 1})
+        ]
+    );
+}

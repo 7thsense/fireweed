@@ -338,9 +338,22 @@ pub enum OnLimit {
     Step,
 }
 
+/// What an unmet `expect` does (API-006 §update).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnUnmet {
+    /// Reject the whole program with `expect_unmet`.
+    #[default]
+    Reject,
+    /// Change nothing for this statement, report `met: false`, and go on.
+    Report,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expect {
+    #[serde(default)]
+    pub on_unmet: OnUnmet,
     #[serde(default)]
     pub min: Option<u64>,
     #[serde(default)]
