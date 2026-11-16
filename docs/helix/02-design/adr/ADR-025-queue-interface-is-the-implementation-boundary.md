@@ -152,10 +152,10 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D26 | "no need to migrate spaces"; "we don't need a migration path". | Owner, 2026-11-15 | Kept. |
 | D27 | "we do need to ensure that the dsl can be fully implemented on this model". | Owner via the Turso-queue session, 2026-11-15 | Kept: API-006's Snorri inventory maps each construct to a statement. |
 | D28 | "crashes can be handled by the control plane via the embedder (snorri/cayce)". | Owner via the Turso-queue session, 2026-11-15 | Kept. |
-| D29 | "use the family space record" for re-entry across runs. | Owner, 2026-11-16 | Kept (§3). |
+| D29 | "use the family space record" for re-entry across runs. | Owner, 2026-11-16 | Kept (§3). With D50, a family within one workflow needs no separate space (question 41). |
 | D30 | "accept Snorri's max_attempts opt-out". | Owner, 2026-11-16 | Kept (§8). |
 | D31 | "Yes, cap at 256 KiB" for Snorri workflow definitions. | Owner, 2026-11-16 | Kept. No interface change. |
-| D32 | "Yes, per run-shard": Snorri's spaces are one per (run, shard). | Owner, 2026-11-16 | Kept (§3). |
+| D32 | "Yes, per run-shard": Snorri's spaces are one per (run, shard). | Owner, 2026-11-16 | Superseded by D50. |
 | D33 | "Fireweed *is* effectively a compiler from 'some typed ir' to 'some database backend (turso, sqlite, postgres)'." The IR: "Own IR, weft style". | Owner, 2026-11-16 | Kept: the DSL is the typed IR, checked against the schema and lowered to SQL (§2, §4). There is no logical plan, plan cache or interpreter. |
 | D34 | "We should leverage umf for the typesystem, underlying schemas, ddl, etc" | Owner, 2026-11-16 | Staged: v1 uses UMF's scalar types in Fireweed's own schema document; a UMF loader is question 39 (§2). |
 | D35 | "If there is a machinery we can share with weft, we shuold do so." The missing types are "obvious additions to weft". | Owner, 2026-11-16 | Kept. v1 needs none of weft's machinery: statements become SQL directly (§4). The shared crates serve a UMF loader (question 39). |
@@ -173,6 +173,7 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D47 | "Thats an additional 'tenant scope' portion of the dataplane. We should think about how to include it in the design -- I think hiding it behind a 'deliverability check' action of sorts makes the most sense. Make sure these spec changes and scope limits are completely captured across fireweed AND snorri AND cayce specs." | Owner via the Cayce session, 2026-11-16 | Snorri and Cayce design; outside Fireweed (D49). |
 | D48 | "I think we need control over fail open vs fail closed. Deliverability slotting should generally be fail open, isn't that how it is in 7thsense?" | Owner, 2026-11-16 | Cayce design; outside Fireweed (D49). |
 | D49 | "Slotting shouldn't be part of any fireweed specs though, or even snorri. Snorri provides a port that cayce can use to implement slotting. That's it." | Owner, 2026-11-16 | Adopted. Fireweed's specs only state that tenant-wide state isn't Fireweed's (§1). Slotting, its counters and its failure policy are Cayce's. The port Cayce implements them behind is Snorri's. |
+| D50 | Asked "Did you rule that Snorri has no shards, with one space per workflow?" (relayed from the Snorri session): "Yes, per workflow". | Owner, 2026-11-16 | Adopted; supersedes D32. A Snorri space is one workflow, holding every run. The run is an indexed field on items and rows, and there are no shards. D13 is unchanged: a space is still never wider than one workflow or one campaign. |
 
 ## Decision
 
@@ -224,7 +225,7 @@ statements:
   - insert:   {into: effects, rows: [{key: "r1-send-1", body: {template: welcome}}], on_conflict: reject}
   - update:
       target: chunks
-      keys: [{run: r1, shard: 3}]
+      keys: [{run: r1, chunk: 3}]
       where: {eq: [version, 7]}
       set: {cursor: 1200}
       expect: {min: 1, max: 1}
@@ -245,9 +246,10 @@ the same schema (question 39).
 ### 3. Spaces and shapes
 
 A **space** is one atomic domain owned by one tenant, never wider than one
-workflow or one campaign (D13). Snorri uses one space per (run, shard)
-(D32). A space holds named queues and tables, declared in its schema, and
-each becomes a real table:
+workflow or one campaign (D13). Snorri uses one space per workflow, holding
+all its runs, with no shards (D50). A run is an indexed `run` field on its
+items and rows. A space holds named queues and tables, declared in its
+schema, and each becomes a real table:
 
 | Shape | Columns | Covers |
 |-------|---------|--------|
@@ -283,7 +285,16 @@ A table field may declare a merge rule (D20): `add_only` for a set,
 rejects the program unless it explicitly overrides the rule.
 
 A rule that spans runs, such as Snorri's re-entry rules, is checked against
-one keyed row per (workflow family, subject) in a family space (D29).
+one keyed row per (workflow family, subject) (D29). With one space per
+workflow (D50), a family that stays inside one workflow keeps that row in
+the workflow's own space, so admission and the re-entry check are one
+transaction. A family spanning workflows still needs a family space
+(question 41).
+
+Work on one run is a selection on its `run` field:
+- cancelling a run is a stepped `update` over `{eq: [run, r]}`;
+- an event for instances in several runs is one program;
+- retiring a finished run deletes its items and rows (question 31).
 A field updated with `{add: …}` holds a count within a space.
 
 ### 4. The executor is plain SQL
@@ -463,7 +474,7 @@ timer that charges nothing is a `release` settle with `after` (D39).
 | Backend | Status | Sharing |
 |---------|--------|---------|
 | PostgreSQL 18 | First, and production-supported (D44). Snorri and Cayce build against it. | Many processes per space; row locks order writers. |
-| Turso on NVMe with an S3 log | The local engine (Turso-queue plan, phases L0 to L4). Gates B1 to B4 apply here. One database per space. | One writer per space. |
+| Turso on NVMe with an S3 log | The local engine (Turso-queue plan, phases L0 to L4). Gates B1 to B4 apply here, and need re-checking now that one writer serves a whole workflow (D50). One database per space. | One writer per space. |
 | SQLite | The local engine's comparison arm; in memory for consumers' tests. | One writer per space. |
 | Object log × Turso (current runtime) | Deprecated once the local engine's S3 log passes (D24). | — |
 
@@ -576,9 +587,19 @@ Fireweed's (D45, D49).
     Only (a) touches Fireweed.
 31. **PostgreSQL layout.** Each space gets its own tables, or spaces share
     tables with the space id leading every key and index. Both are being
-    measured (D36): claim and commit latency, index size and bloat, vacuum
-    load, the cost of creating and deleting a space, and catalog cost with
-    thousands of tables.
+    measured (D36):
+    - claim and commit latency;
+    - index size and bloat;
+    - vacuum load;
+    - the cost of creating and deleting a space;
+    - catalog cost.
+
+    With one space per workflow (D50), there are fewer, larger spaces. So
+    the main cost moves to retiring a finished run inside a workflow's
+    queue: a mass delete, with its bloat and vacuum. The measurement
+    compares that delete with PostgreSQL 18 partitioning of queue and
+    table by `run`, where a run is retired by detaching and dropping its
+    partition.
 37. **Cohorts.** API-001's cohorts (claim a group whole, fail it at a
     deadline) are in no Snorri or Cayce inventory item, and no
     implementation supports them. Draft: leave them out of v1.
@@ -604,6 +625,10 @@ Fireweed's (D45, D49).
     lease columns into a narrow table beside the item would keep lease
     churn off those indexes, at the cost of a join on reads. Draft: measure
     it in question 31's run before deciding.
+41. **Re-entry families that span workflows.** If a workflow family never
+    spans workflows, D29's family record lives in the workflow's space
+    (§3), and the separate family space goes away. Draft: keep the family
+    space only for families that span workflows, if Snorri has any.
 
 ## Risks
 

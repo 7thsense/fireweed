@@ -79,10 +79,10 @@ tables:
       reasons:   {type: text_set, merge: add_only}
       lifted_at: {type: timestamp}
   chunks:
-    key: [run, shard]
+    key: [run, chunk]
     fields:
       run:    {type: text}
-      shard:  {type: int}
+      chunk:  {type: int}
       cursor: {type: int, merge: non_decreasing}
   timeline:
     sequenced: true
@@ -204,7 +204,7 @@ statements:
       on_conflict: reject
   - update:
       target: chunks
-      keys: [{run: "r1", shard: 3}]
+      keys: [{run: "r1", chunk: 3}]
       where: {eq: [version, 7]}
       set: {cursor: 1200}
       expect: {min: 1, max: 1}
@@ -612,11 +612,14 @@ Names in SQL are validated object and field names, and quoted.
 | 6 | External events, 31-day dedupe | Items keyed by provider event id in a queue with `retention: 31d`; `insert` with `on_conflict: skip`. |
 | 7 | Timeline | A sequenced table, inserted last in each transition's program. Full history goes to Niflheim. |
 | 8 | Definitions (up to 256 KiB, D31) | Table row keyed by digest, with a `text` field. |
-| 9 | Admission chunk | Table row keyed by run and shard: `insert` with `on_conflict: reject`, then `update` by keys with `where: {eq: [version, v]}` and `expect: {min: 1, max: 1}`. |
+| 9 | Admission chunk | Table row keyed by run and chunk: `insert` with `on_conflict: reject`, then `update` by keys with `where: {eq: [version, v]}` and `expect: {min: 1, max: 1}`. |
 | 10 | Send-rate counters | Not Fireweed's (ADR-025 D49). |
 | 11 | Re-entry across runs (D29) | Table in a family space keyed by (family, subject), with `non_decreasing` timestamps, updated with `expect`. |
 
-Snorri's queues declare `max_attempts: unlimited` (D30).
+Snorri's queues declare `max_attempts: unlimited` (D30). A Snorri space is one
+workflow with all its runs (ADR-025 D50). Its queues and tables carry an
+indexed `run` field, so run-scoped selects, cancels and retirement meet the
+index rule and step through `(run, id)`.
 
 ### Cayce (draft)
 
