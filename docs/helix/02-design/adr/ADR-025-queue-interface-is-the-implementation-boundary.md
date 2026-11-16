@@ -175,6 +175,7 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D49 | "Slotting shouldn't be part of any fireweed specs though, or even snorri. Snorri provides a port that cayce can use to implement slotting. That's it." | Owner, 2026-11-16 | Adopted. Fireweed's specs only state that tenant-wide state isn't Fireweed's (§1). Slotting, its counters and its failure policy are Cayce's. The port Cayce implements them behind is Snorri's. |
 | D50 | Asked "Did you rule that Snorri has no shards, with one space per workflow?" (relayed from the Snorri session): "Yes, per workflow". | Owner, 2026-11-16 | Adopted; supersedes D32. A Snorri space is one workflow, holding every run. The run is an indexed field on items and rows, and there are no shards. D13 is unchanged: a space is still never wider than one workflow or one campaign. |
 | D51 | Asked "Can a Snorri re-entry family span more than one workflow?": "No, one workflow". | Owner, 2026-11-16 | Adopted. Resolves question 41. The re-entry record lives in the workflow's space, so admission and the re-entry check are one transaction, and there are no family spaces. |
+| D52 | "it's definitely not one space per run, shard. Snorri doesn't need to know about shards. Shards are only necessary from a tenant / workflow load balancing standpoint across nodes, which means they are a cayce level concern, not snorri (single workflow) and fireweed (single space)" | Owner via the Cayce session, 2026-11-16 | Adopted with D50. Fireweed sees one space at a time and Snorri one workflow; neither has shards. Placing workflows' spaces onto nodes is Cayce's load balancing, done through the control plane that grants a space's writer (D15). Rechecked against shards: D13 (atomicity per workflow or campaign), D29 (now D51), D30 and D31 assume none. |
 
 ## Decision
 
@@ -248,7 +249,7 @@ the same schema (question 39).
 
 A **space** is one atomic domain owned by one tenant, never wider than one
 workflow or one campaign (D13). Snorri uses one space per workflow, holding
-all its runs, with no shards (D50). A run is an indexed `run` field on its
+all its runs, with no shards (D50, D52). A run is an indexed `run` field on its
 items and rows. A space holds named queues and tables, declared in its
 schema, and each becomes a real table:
 
