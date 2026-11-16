@@ -531,6 +531,8 @@ engine's levels.
 
 ## The PostgreSQL executor
 
+The target is PostgreSQL 18 (ADR-025 D44).
+
 The executor is a set of functions over a PostgreSQL connection:
 - `apply_schema(tenant, space, schema, expected_version)`;
 - `get_schema(tenant, space)`;

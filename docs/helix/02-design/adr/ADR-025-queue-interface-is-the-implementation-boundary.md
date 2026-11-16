@@ -161,11 +161,13 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D35 | "If there is a machinery we can share with weft, we shuold do so." The missing types are "obvious additions to weft". | Owner, 2026-11-16 | Kept. v1 needs none of weft's machinery: statements become SQL directly (§4). The shared crates serve a UMF loader (question 39). |
 | D36 | "we need to measure. i'm worried deletes and indices will become problematic if we don't use indpendent tables" | Owner, 2026-11-16 | Open question 31. |
 | D37 | "yaml (json) syntax is ok for now." | Owner, 2026-11-16 | Kept (§4). |
-| D38 | The `umf.fireweed` extension "can live in umf". | Owner, 2026-11-16 | Kept: DocumentDrivenDX/umf#172. |
+| D38 | The `umf.fireweed` extension "can live in umf". | Owner, 2026-11-16 | Superseded by D44: Fireweed's extension lives in the Fireweed repository. |
 | D39 | No UMF declarative actions in v1; a narrow engine trait; claim indexes lead with due time; no combined-action statement; `Rearm` for non-charging waits. | Owner, 2026-11-16 | Kept: one claim index, `(due_at, priority, id)`, and claims in that order (D42). `Rearm` is a `release` settle with `after`. |
 | D40 | Extract shared crates from weft and evolve weft's tooling with them. | Owner, 2026-11-16 | Done: DocumentDrivenDX/weft#70, merged. |
 | D41 | "This really shouldn't be much more than some sql to manipulate groups of rows in the database. If there are a bunch of in memory stores, caches, memos, or full table scans, the design is broken." | Owner, 2026-11-16 | Adopted: revision 9. |
 | D42 | "Fix them all", on the review findings, with claims ordered by due time and priority breaking ties, as recommended. | Owner, 2026-11-16 | Adopted in revision 9 (§3, §4, §5, §9). |
+| D43 | "Full UMF documents"; "there is no reason I can see that fireweed schemas shouldn't be UMF schemas"; "if we need umf improvements we should get them." | Owner, 2026-11-16 | Accepted, in progress (question 39). A space schema becomes a UMF core 0.10 document. Its physical tables are `umf.tables` (UMF CONTRACT-081), and the queue semantics go in a Fireweed extension. |
+| D44 | "We should be targetting postgres 18." "The additional types and additions to umf tables should go straight to core." Asked whether the extension must live in UMF: it may live in Fireweed, registered through `umf-core`'s registry. | Owner, 2026-11-16 | Adopted. PostgreSQL 18 is the target, matching `umf.tables`' `postgresql18/0.1` profile, and the executor's tests run on PostgreSQL 18.7. The JSON value, string sets, `jsonb` and array columns, GIN, and partial and descending indexes go into UMF core and `umf.tables` (DocumentDrivenDX/umf#172, rewritten). |
 
 ## Decision
 
@@ -225,7 +227,7 @@ Then each statement lowers to a fixed SQL shape with bound parameters
 The schema's types (`text`, `int`, `float`, `bool`, `timestamp`, `json`,
 `text_set`) are a subset of UMF's scalar types. In v1 the schema is
 Fireweed's own small document. Reading UMF documents with the
-`umf.fireweed` extension (D34, D38) comes later, as a loader that produces
+Fireweed extension (D34, D43, D44) comes later, as a loader that produces
 the same schema (question 39).
 
 ### 3. Spaces and shapes
@@ -433,7 +435,7 @@ timer that charges nothing is a `release` settle with `after` (D39).
 
 | Backend | Status | Sharing |
 |---------|--------|---------|
-| PostgreSQL | First, and production-supported. Snorri and Cayce build against it. | Many processes per space; row locks order writers. |
+| PostgreSQL 18 | First, and production-supported (D44). Snorri and Cayce build against it. | Many processes per space; row locks order writers. |
 | Turso on NVMe with an S3 log | The local engine (Turso-queue plan, phases L0 to L4). Gates B1 to B4 apply here. One database per space. | One writer per space. |
 | SQLite | The local engine's comparison arm; in memory for consumers' tests. | One writer per space. |
 | Object log × Turso (current runtime) | Deprecated once the local engine's S3 log passes (D24). | — |
@@ -560,7 +562,7 @@ Questions 1 to 4, 6 to 24 and 26 to 36 were resolved in revisions 7 and 8
     fence leases.
 39. **UMF schema documents.** v1 schemas are Fireweed's own small document,
     with UMF's scalar types (§2). Draft: add a loader from a UMF document
-    with the `umf.fireweed` extension (D34, D38) once a consumer keeps its
+    with Fireweed's extension (D34, D43, D44) once a consumer keeps its
     schemas in UMF.
     - **Where index choices live.** UMF keeps them out of the logical field,
       in a physical binding (CONTRACT-042), and the loader takes them from
