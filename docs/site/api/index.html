@@ -27,7 +27,6 @@
         <a href="../get-started.html">Get started</a>
         <a href="../examples/index.html">Examples</a>
         <a href="index.html" aria-current="page">API</a>
-        <a href="../deploy/index.html">Deploy</a>
         <a href="../support.html">Support</a>
         </nav>
       </header>
@@ -36,31 +35,22 @@
         <div class="page-intro">
           <h2>API documentation</h2>
           <p>
-            Fireweed exposes two public faces over one queue model: the Rust
-            <code>fireweed</code> facade and the RESP worker surface.
+            Fireweed exposes one public API: <code>Queue</code> in the Rust
+            <code>fireweed</code> crate.
           </p>
         </div>
         <div class="grid-2">
           <article class="card card-body">
-            <h3>Rust facade</h3>
+            <h3>Rust API</h3>
             <p>
-              Concrete <code>Fireweed</code> handle, constructors, lifecycle verbs,
-              discovery, mutation, and hot projection queries.
+              The <code>Queue</code> handle: constructors and the ten operations.
             </p>
             <p><a href="rust.html">Rust API guide →</a></p>
           </article>
           <article class="card card-body">
-            <h3>RESP / Streams</h3>
-            <p>
-              Stock Redis Streams worker path plus Fireweed-native live reads.
-            </p>
-            <p><a href="resp.html">RESP API guide →</a></p>
-          </article>
-          <article class="card card-body">
             <h3>Types</h3>
             <p>
-              Public DTO export closure for embedders that depend only on
-              <code>fireweed</code>.
+              Request and result types re-exported through <code>fireweed::queue</code>.
             </p>
             <p><a href="types.html">Type catalog →</a></p>
           </article>
@@ -84,7 +74,7 @@
       <footer class="site-footer">
         <p>
           Fireweed Queue v0.30.0 · source release ·
-          crates.io and GHCR deferred ·
+          crates.io deferred ·
           issues welcome · code contributions not accepted ·
           MIT OR Apache-2.0.
         </p>

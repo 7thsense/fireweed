@@ -25,8 +25,8 @@
 //! ## Blocking caveat (same as the monolith)
 //!
 //! Every method makes a **blocking** postgres network call. The sync `postgres` client drives its own
-//! internal tokio runtime per call, so the composition MUST be driven off the reactor (the `fireweed-server`
-//! blocking wrapper delegates every port call to `spawn_blocking`). The composition's own port methods are
+//! internal tokio runtime per call, so the composition MUST be driven off the reactor (callers
+//! must delegate every port call to `spawn_blocking`). The composition's own port methods are
 //! sync-but-`ready`, so this LogStore's calls run on whatever thread drives the composition — in production,
 //! a Tokio blocking-pool thread, never a reactor worker.
 
@@ -42,7 +42,7 @@ use postgres::Client;
 
 use crate::connect::{PostgresConnectConfig, connect};
 
-const SCHEMA: &str = r#"
+pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS log_epochs (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     assignment_epoch BIGINT NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
@@ -193,7 +193,8 @@ impl PostgresLog {
     }
 
     fn from_client(mut client: Client) -> EngineResult<Self> {
-        st(client.batch_execute(SCHEMA))?;
+        crate::schema_version::open_blocking(&mut client, &[&crate::schema_version::COMPOSE_LOG])
+            .map_err(crate::schema_version::into_engine)?;
         Ok(Self {
             client: RefCell::new(Some(client)),
         })

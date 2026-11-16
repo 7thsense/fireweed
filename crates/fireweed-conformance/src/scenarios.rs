@@ -3394,7 +3394,7 @@ pub async fn high_water_advances_on_each_commit<B: ConformanceBackend>(make: imp
 /// open; the **transactional-authoritative relational backend (`postgres_native`, BQ-12) is the intended
 /// exemplar** — TD-001: "only a transactional-authoritative relational projection runs the
 /// reconnect-after-crash class." The sqlite smoke (BQ-10) only proves this scenario + the
-/// `relational_reconnect_suite!` macro compile and run.
+/// `durable_reconnect_suite!` macro compile and run.
 ///
 /// Only durable backends whose `make` reopens shared state belong to this class; an in-memory backend
 /// sees a fresh empty store on the second `make()` and is not in this class (it does not run this suite).

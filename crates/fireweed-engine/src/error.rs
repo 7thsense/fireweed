@@ -1,5 +1,4 @@
-//! Engine error model. The RESP adapter maps these to the canonical `-ERR fireweed ...` replies
-//! (TD-006 section 7; asserted verbatim by conformance).
+//! Engine error model.
 
 /// Stable stage of a durable-object integrity failure. Adapters carry this
 /// enum without parsing display text.
@@ -111,38 +110,6 @@ pub enum EngineError {
     /// Change-record delivery was requested for a Class B (memory-log) cell. Startup-only:
     /// must never escape a mutation or appear in a production commit outcome (TD-008).
     ChangeRecordsRequireDurableLog,
-}
-
-impl EngineError {
-    /// The canonical `-ERR fireweed ...` token a RESP adapter emits for this error, or `None` for
-    /// errors that have a non-`-ERR` mapping (e.g. `NotFound` to nil) handled by the adapter.
-    pub fn resp_token(&self) -> Option<&'static str> {
-        match self {
-            EngineError::Invalid(_) => Some("-ERR fireweed invalid"),
-            EngineError::Terminal => Some("-ERR fireweed terminal"),
-            EngineError::StaleLease => Some("-ERR fireweed stale_lease"),
-            EngineError::Superseded => Some("-ERR fireweed superseded"),
-            EngineError::Unavailable => Some("-ERR fireweed unavailable"),
-            EngineError::Conflict => Some("-ERR fireweed conflict"),
-            EngineError::BatchTooLarge => Some("-ERR fireweed batch_too_large"),
-            EngineError::RequestIdConflict => Some("-ERR fireweed request_id_conflict"),
-            EngineError::Paused { .. } => Some("-ERR fireweed paused"),
-            EngineError::RequestExpired => Some("-ERR fireweed request_expired"),
-            EngineError::EpochFenced => Some("-ERR fireweed epoch_stale"),
-            EngineError::EntitySchemaViolation(_) => Some("-ERR fireweed entity_schema_violation"),
-            EngineError::RequestTooLarge { .. } => Some("-ERR fireweed invalid"),
-            EngineError::Backpressure { .. } => Some("-ERR fireweed unavailable"),
-            EngineError::QueueDefinitionConflict => Some("-ERR fireweed queue_conflict"),
-            EngineError::ChangeRecordsRequireDurableLog => {
-                Some("-ERR fireweed change_records_require_durable_log")
-            }
-            // Forbidden -> `-NOPERM`, NotFound -> nil: non-`-ERR fireweed` mappings handled by the adapter.
-            EngineError::NotFound
-            | EngineError::Forbidden(_)
-            | EngineError::Storage(_)
-            | EngineError::DurableDataCorrupt { .. } => None,
-        }
-    }
 }
 
 impl std::fmt::Display for EngineError {
@@ -456,75 +423,5 @@ mod commit_rejection_tests {
                 resource: "bounded resource",
             }
         );
-    }
-
-    #[test]
-    fn resp_token_table_is_exhaustive_for_generic_tokens() {
-        let cases: &[(EngineError, Option<&str>)] = &[
-            (EngineError::Invalid("x"), Some("-ERR fireweed invalid")),
-            (EngineError::Terminal, Some("-ERR fireweed terminal")),
-            (EngineError::StaleLease, Some("-ERR fireweed stale_lease")),
-            (EngineError::Superseded, Some("-ERR fireweed superseded")),
-            (EngineError::Unavailable, Some("-ERR fireweed unavailable")),
-            (EngineError::Conflict, Some("-ERR fireweed conflict")),
-            (
-                EngineError::BatchTooLarge,
-                Some("-ERR fireweed batch_too_large"),
-            ),
-            (
-                EngineError::RequestIdConflict,
-                Some("-ERR fireweed request_id_conflict"),
-            ),
-            (
-                EngineError::Paused {
-                    drain_intake: false,
-                },
-                Some("-ERR fireweed paused"),
-            ),
-            (
-                EngineError::RequestExpired,
-                Some("-ERR fireweed request_expired"),
-            ),
-            (EngineError::EpochFenced, Some("-ERR fireweed epoch_stale")),
-            (
-                EngineError::EntitySchemaViolation("x".into()),
-                Some("-ERR fireweed entity_schema_violation"),
-            ),
-            (
-                EngineError::RequestTooLarge {
-                    requested: 1,
-                    limit: 0,
-                },
-                Some("-ERR fireweed invalid"),
-            ),
-            (
-                EngineError::Backpressure {
-                    resource: "buffered bytes",
-                },
-                Some("-ERR fireweed unavailable"),
-            ),
-            (
-                EngineError::QueueDefinitionConflict,
-                Some("-ERR fireweed queue_conflict"),
-            ),
-            (
-                EngineError::ChangeRecordsRequireDurableLog,
-                Some("-ERR fireweed change_records_require_durable_log"),
-            ),
-            (EngineError::NotFound, None),
-            (EngineError::Forbidden("x"), None),
-            (EngineError::Storage("x".into()), None),
-            (
-                EngineError::DurableDataCorrupt {
-                    stage: DurableIntegrityStage::Manifest,
-                    manifest_index: 0,
-                    locator: "x".into(),
-                },
-                None,
-            ),
-        ];
-        for (error, expected) in cases {
-            assert_eq!(error.resp_token(), *expected, "{error:?}");
-        }
     }
 }

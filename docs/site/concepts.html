@@ -27,7 +27,6 @@
         <a href="get-started.html">Get started</a>
         <a href="examples/index.html">Examples</a>
         <a href="api/index.html">API</a>
-        <a href="deploy/index.html">Deploy</a>
         <a href="support.html">Support</a>
         </nav>
       </header>
@@ -43,43 +42,36 @@
         <div class="prose">
           <h2>Work item lifecycle</h2>
           <p>
-            Items are accepted (push/upsert), ordered by the queue’s priority model,
-            claimed under a lease by a worker, then finalized:
-            <strong>complete</strong>, <strong>retry</strong> / <strong>retry_after</strong>,
-            <strong>release</strong>, or <strong>fail</strong>. Convenience verbs are
-            batch-shaped aliases over the native finalize surface.
+            Items are inserted, ordered by priority, claimed under a lease by a worker, then
+            settled in one atomic <code>commit</code> with a <code>Disposition</code>:
+            <strong>Complete</strong>, <strong>Fail</strong>, <strong>Release</strong>,
+            <strong>RetryAt</strong>, <strong>Retain</strong> or <strong>Delete</strong>.
+            A commit can also change state records and insert new work in the same step.
           </p>
           <p><a href="examples/basic-lifecycle.html">Example: basic lifecycle</a> ·
-             <a href="api/rust.html">Rust lifecycle methods</a></p>
+             <a href="api/rust.html">Rust API</a></p>
 
           <h2>Priority vs eligibility</h2>
           <p>
             <strong>Priority</strong> ranks eligible work. <strong>Eligibility</strong>
-            decides whether an item may be claimed at all—gates, <code>not_before</code>,
-            active leases, and retry backoff. Ineligible items must not starve forever
-            under the queue’s progress bound.
+            decides whether an item may be claimed at all: <code>available_at</code>,
+            active leases, and retry times.
           </p>
-          <p><a href="examples/scheduled-delivery.html">Example: scheduled delivery</a> ·
-             <a href="examples/priority-retry.html">Example: priority + retry</a></p>
+          <p><a href="examples/scheduled-delivery.html">Example: scheduled delivery and retry</a></p>
 
           <h2>Leases and recovery</h2>
           <p>
-            A claim grants temporary exclusive execution authority. Workers may renew
-            leases without charging a new delivery. Expired leases reclaim to pending
-            so another worker can continue. Fail marks a terminal dead-letter state;
-            rearm can requeue with reset attempts when the product path allows it.
+            A claim grants temporary exclusive execution authority. A lease that expires
+            returns the item to pending so another worker can continue; a commit with a
+            stale lease is rejected.
           </p>
-          <p><a href="examples/lease-ops.html">Example: lease operations</a></p>
 
-          <h2>Groups, cohorts, and discovery</h2>
+          <h2>Filters, indexes and state</h2>
           <p>
-            Queues may group items so claims form downstream-compatible batches
-            (account, connector, job, campaign). Schedulers discover active scopes,
-            optionally disperse workers with a stateless selector, then claim—sometimes
-            across queues with explicit non-atomic fan-in.
+            A queue schema declares typed fields and indexes. Claims, queries and stats
+            select by filter over those fields; state collections hold per-key records that
+            commit atomically with work.
           </p>
-          <p><a href="examples/scheduler-boundary.html">Example: scheduler boundary</a> ·
-             <a href="examples/dispersion.html">Example: dispersion</a></p>
 
           <h2>External transaction contract</h2>
           <p>
@@ -91,10 +83,9 @@
 
           <h2>Architecture</h2>
           <p>
-            Two driving faces (Rust facade and RESP) sit on a shared engine.
-            Durable profiles compose a <strong>command log</strong> with a
-            <strong>projection</strong>. Log and projection are independent axes;
-            unsupported pairings fail at startup instead of silently substituting.
+            <code>Queue</code> sits on a shared engine. The production backend composes an
+            S3 <strong>command log</strong>, a disposable local Turso
+            <strong>projection</strong> and PostgreSQL queue leases.
           </p>
 
           <h2>Out of scope</h2>
@@ -108,7 +99,7 @@
             Normative contracts:
             <a href="../helix/02-design/contracts/API-001-native-client-interface.md">API-001</a>,
             <a href="../helix/02-design/contracts/API-004-hot-projection-query-surface.md">API-004</a>,
-            <a href="../helix/02-design/contracts/API-005-fireweed-rust-facade.md">API-005</a>.
+            <a href="../helix/02-design/contracts/API-007-queue-claim-commit-contract.md">API-007</a>.
           </p>
         </div>
 
@@ -116,7 +107,7 @@
       <footer class="site-footer">
         <p>
           Fireweed Queue v0.30.0 · source release ·
-          crates.io and GHCR deferred ·
+          crates.io deferred ·
           issues welcome · code contributions not accepted ·
           MIT OR Apache-2.0.
         </p>

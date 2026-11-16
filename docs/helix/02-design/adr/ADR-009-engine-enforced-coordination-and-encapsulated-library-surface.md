@@ -36,7 +36,7 @@ plane), TD-003 (sharding & ownership), TD-006 (RESP `route`), TD-007 (durability
 ## Context
 
 ADR-007 ships two driving interfaces over one engine — the in-process Rust library (`fireweed` crate,
-`Fireweed<B>`) and the RESP wire front (`fireweed-resp`) — as **co-equal driving adapters over the engine
+`Fireweed<B>`) and the RESP wire front (the retired RESP crate) — as **co-equal driving adapters over the engine
 ports**. ADR-008 makes the **queue** the unit of single-writer ownership with a control-plane lease and
 an epoch fence (the Single Authoritative Fencing Rule). Reviewing the realized code against those
 decisions surfaced three gaps that are individually small and collectively let an embedder silently
@@ -46,7 +46,7 @@ violate the ownership model:
    `{ backend, clock, ids }`, has **no owner identity**, and **never** calls `resolve_queue_owner` /
    `acquire_and_fence`. Every method delegates straight to `backend.push/claim/finalize`. Its bound
    (`LibBackend`) already *requires* `ControlPlaneStore` — the capability is present and unused. Only the
-   RESP `route` decision (`fireweed-resp/src/routing.rs`) assembles `authorize → resolve → serve/redirect`.
+   RESP `route` decision (the retired RESP crate) assembles `authorize → resolve → serve/redirect`.
 
 2. **The data plane never self-fences.** The real `PushPort`/`ClaimPort`/`FinalizePort` write paths
    **self-stamp the queue's current epoch** as `expected_epoch` (`ownership.rs:14-21`, `port.rs:33-34`,
@@ -73,7 +73,7 @@ it locates its enforcement and seals the surface.
    independent of transport. They live in `fireweed-engine` (consistent with ADR-007: "the engine owns …
    fencing … validation") and are **invoked identically by every driving adapter**. Because the fence is
    enforced *below* the ports, neither adapter can skip it. This **refines ADR-007** (it names the engine,
-   not either adapter, as the coordination locus) and does **not** make `fireweed-resp` depend on the
+   not either adapter, as the coordination locus) and does **not** make the retired RESP crate depend on the
    `fireweed` crate; both adapters consume the same engine session.
 
 2. **The published library is the only external surface to the engine.** A downstream crate reaches the

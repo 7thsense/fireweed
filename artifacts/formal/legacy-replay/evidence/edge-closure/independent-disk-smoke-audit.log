@@ -1,0 +1,145 @@
+{
+  "action_counts": {
+    "Claim:0": 47,
+    "Claim:1": 30,
+    "ConcurrentClaims": 10,
+    "ConcurrentMixedFence": 5,
+    "DrainApply": 22,
+    "Handoff": 54,
+    "LoseResponse:0": 16,
+    "LoseResponse:1": 12,
+    "Reaffirm": 8,
+    "Reopen": 53,
+    "Replay:0": 15,
+    "Replay:1": 10,
+    "StaleClaim:0": 10,
+    "StaleClaim:1": 4
+  },
+  "artifacts": {
+    "ci_workflow_wiring": {
+      "execution_claim": "source wiring reviewed; remote CI was not executed by this audit",
+      "path": "/tmp/fireweed-all-edge-worktree/.github/workflows/ci.yml",
+      "sha256": "22e9fc59b37d91749f92d7fd150ce0edf108fb52fabbff06829d89a3afc3f34a"
+    },
+    "corpus": {
+      "path": "/tmp/fireweed-edge-closure-results/smoke-disk-corpus.json",
+      "sha256": "7f0bf4a5ad92b3e742b8126ae9831bbafe0a3f84e1243332f1b66b9448c9d930"
+    },
+    "log": {
+      "path": "/tmp/fireweed-edge-closure-results/smoke-disk.log",
+      "sha256": "031047acdde833384406fad7a37d7be059862eca4fccc497dafb311eaddb780e"
+    },
+    "native_cas": {
+      "path": "/tmp/fireweed-edge-closure-results/smoke-disk-s3-cas.json",
+      "sha256": "5d7196f63bf7da9e96d3d8f2fd9cd39268e2efe4d3ad8f00d2ccf51ed2e60406"
+    },
+    "observations": {
+      "path": "/tmp/fireweed-edge-closure-results/smoke-disk-observations.json",
+      "sha256": "29bfa763dd1c1084d4ef0778ac0f2d49ba69cbe19386fc8063b10291f5f1919d"
+    },
+    "progress": {
+      "path": "/tmp/fireweed-edge-closure-results/smoke-disk-progress.jsonl",
+      "sha256": "ba77eb6d2e95950e715632ef06d5f6402fdfec958ec4470daa785dbf5ed8b633"
+    },
+    "report": {
+      "path": "/tmp/fireweed-edge-closure-results/smoke-disk.json",
+      "sha256": "5ffcdd7aee20e91dc8d3bfda7954eaea01e630236db2d34d6298e002e54d7743"
+    }
+  },
+  "audit_script_sha256": "852a601918d2716b34d8e15e8db6561d924d81c6c22edf5b3ad665c28a16e327",
+  "backend_overlap_witnesses": 10,
+  "canonical_graph": {
+    "complete": true,
+    "edges": 20913,
+    "states": 6386
+  },
+  "case_elapsed_ms": {
+    "max": 1720,
+    "median": 1074.5,
+    "min": 589
+  },
+  "cases": 96,
+  "concurrent_claim_item_orders": {
+    "[0, 1]": 5,
+    "[1, 0]": 5
+  },
+  "coverage": {
+    "graph_edge_exhaustive": false,
+    "intended": 83,
+    "intended_unwitnessed": 0,
+    "matched": 128
+  },
+  "current_source_files_verified": 399,
+  "disposition": "APPROVE within declared bounded backend replay scope",
+  "exact_rust_tests_verified": [
+    "generated_replay_claim_tail_guard_rejects_unproven_suffixes",
+    "generated_replay_decoder_rejects_malformed_empty_and_stale_corpora",
+    "generated_replay_oracle_rejects_corrupted_observations_and_branch_switching",
+    "generated_replay_schedule_rejects_sequential_or_wrong_order_claims",
+    "generated_replay_storage_generation_scan_is_world_scoped",
+    "generated_s3_turso_model_traces_match_every_observation"
+  ],
+  "fixture_storage": {
+    "capacity_budget": {
+      "bytes": 140509184,
+      "expected_cases": 96,
+      "inodes": 14336
+    },
+    "cleanup_confirmed": true,
+    "device": 2431,
+    "filesystem_after_cleanup": {
+      "bytes_available": 6935523237888,
+      "device": 2431,
+      "inode_available": 779877772,
+      "inode_free": 779877772,
+      "inode_total": 781352128
+    },
+    "filesystem_after_execution": {
+      "bytes_available": 6935513190400,
+      "device": 2431,
+      "inode_available": 779874661,
+      "inode_free": 779874661,
+      "inode_total": 781352128
+    },
+    "filesystem_before": {
+      "bytes_available": 6939380719616,
+      "device": 2431,
+      "inode_available": 779885383,
+      "inode_free": 779885383,
+      "inode_total": 781352128
+    },
+    "net_inodes_consumed_during_execution": 10722,
+    "net_inodes_recovered_during_cleanup": 3111,
+    "parent": "/mnt/scratch/Projects/fireweed/target/formal-fixtures"
+  },
+  "forward_edges": 119,
+  "independent_overlap_negative_controls": 5,
+  "limits": [
+    "one-process ephemeral control plane",
+    "real local RustFS and Turso, not production-cloud S3",
+    "backend-level composition, not facade routing or API-007 queue pipeline",
+    "graceful reopen, not process-kill recovery",
+    "simulated client nonreceipt",
+    "scheduled bounded graph edge coverage, not universal refinement or numerical production deadlines"
+  ],
+  "profile": "schedule-smoke",
+  "progress_events_reconciled": 96,
+  "reopen_counts": {
+    "retained_state": 38,
+    "tail_repaired": 15
+  },
+  "reverse_additional_edges": 9,
+  "rust_test_elapsed_seconds": 13.01,
+  "rustfs_binary_sha256": "222eedc3d9baabf6516702d9fbf230270c3ca49b50f562d3461c96e2cc6ae6ad",
+  "rustfs_binary_verified": true,
+  "schedule_case_counts": {
+    "request-0-first": 91,
+    "request-1-first": 5
+  },
+  "schema": "fireweed-independent-scheduled-audit-v1",
+  "source_head": "0e098f9515ba930729c4275022a7f87d6e4c594a",
+  "status": "PASS",
+  "steps": 296,
+  "unchanged_model_sha256": "980ecc848792ead1da674a2334ace465966fe90169bed5b2f98c0574e0beeb82",
+  "workers": 8
+}

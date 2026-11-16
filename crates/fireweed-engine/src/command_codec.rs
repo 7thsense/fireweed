@@ -61,23 +61,15 @@ struct NativeLogBatchRef<'a> {
     commands: &'a [CommandEnvelope],
 }
 
-/// Decode a produce payload. `FWB1` is native; anything else is legacy JSON
-/// `BatchFrame` (`{backend_epoch, commands}`) so existing object-log history
-/// still rebuilds.
+/// Decode a produce payload. Only the native `FWB1` frame is accepted.
 pub fn decode_log_batch(bytes: &[u8]) -> EngineResult<(u64, Vec<CommandEnvelope>)> {
-    if bytes.starts_with(NATIVE_BATCH_MAGIC) {
-        let body = &bytes[NATIVE_BATCH_MAGIC.len()..];
-        let batch: NativeLogBatch = postcard::from_bytes(body)
-            .map_err(|e| EngineError::Storage(format!("native log-batch decode failed: {e}")))?;
-        return Ok((batch.backend_epoch, batch.commands));
-    }
-    #[derive(serde::Deserialize)]
-    struct LegacyJsonBatch {
-        backend_epoch: u64,
-        commands: Vec<CommandEnvelope>,
-    }
-    let batch: LegacyJsonBatch = serde_json::from_slice(bytes)
-        .map_err(|e| EngineError::Storage(format!("legacy json log-batch decode failed: {e}")))?;
+    let Some(body) = bytes.strip_prefix(NATIVE_BATCH_MAGIC) else {
+        return Err(EngineError::Storage(
+            "log batch is not FWB1 (JSON log batches are not supported)".into(),
+        ));
+    };
+    let batch: NativeLogBatch = postcard::from_bytes(body)
+        .map_err(|e| EngineError::Storage(format!("native log-batch decode failed: {e}")))?;
     Ok((batch.backend_epoch, batch.commands))
 }
 
@@ -351,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn log_batch_native_round_trips_and_legacy_json_still_decodes() {
+    fn log_batch_native_round_trips_and_json_is_rejected() {
         let commands = vec![claim_env(2), finalize_env(2)];
         let native = encode_log_batch(7, &commands).unwrap();
         assert!(native.starts_with(NATIVE_BATCH_MAGIC));
@@ -364,14 +356,6 @@ mod tests {
             "commands": commands,
         });
         let json_bytes = serde_json::to_vec(&json).unwrap();
-        let (epoch, back) = decode_log_batch(&json_bytes).unwrap();
-        assert_eq!(epoch, 3);
-        assert_eq!(back.len(), 2);
-        assert!(
-            native.len() < json_bytes.len(),
-            "native batch {} should beat json {}",
-            native.len(),
-            json_bytes.len()
-        );
+        assert!(decode_log_batch(&json_bytes).is_err());
     }
 }

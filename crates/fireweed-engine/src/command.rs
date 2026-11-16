@@ -268,9 +268,8 @@ pub struct ResolvedItemValues {
     pub fields: BTreeMap<String, Bytes>,
     pub metadata: Metadata,
     pub gate_keys: Vec<String>,
-    #[serde(default)]
     pub index_fields: BTreeMap<String, TypedValue>,
-    #[serde(default, with = "crate::entity_wire::option_entity")]
+    #[serde(with = "crate::entity_wire::option_entity")]
     pub entity_document: Option<serde_json::Value>,
     pub invalidate_lease: bool,
 }
@@ -374,12 +373,42 @@ pub fn unique_index_keys_for_push_item(
     definition: &QueueDefinition,
     item: &PushItem,
 ) -> EngineResult<Vec<(String, Vec<u8>)>> {
+    unique_index_keys(
+        definition,
+        &item.fields,
+        &item.index_fields,
+        item.entity_document.as_ref(),
+    )
+}
+
+/// Unique secondary/typed index keys a push spec would occupy.
+///
+/// Same keys as [`unique_index_keys_for_push_item`], for admission paths that validate before
+/// item ids are allocated.
+pub fn unique_index_keys_for_push_spec(
+    definition: &QueueDefinition,
+    spec: &crate::PushSpec,
+) -> EngineResult<Vec<(String, Vec<u8>)>> {
+    unique_index_keys(
+        definition,
+        &spec.fields,
+        &spec.index_fields,
+        spec.entity.as_ref(),
+    )
+}
+
+fn unique_index_keys(
+    definition: &QueueDefinition,
+    fields: &BTreeMap<String, Bytes>,
+    index_fields: &BTreeMap<String, TypedValue>,
+    entity: Option<&serde_json::Value>,
+) -> EngineResult<Vec<(String, Vec<u8>)>> {
     let mut out = Vec::new();
     for spec in definition.secondary_indexes.iter().filter(|s| s.unique) {
         let mut field_bytes: Vec<&[u8]> = Vec::with_capacity(spec.fields.len());
         let mut complete = true;
         for field_name in &spec.fields {
-            match item.fields.get(field_name) {
+            match fields.get(field_name) {
                 Some(v) => field_bytes.push(v.as_ref()),
                 None => {
                     complete = false;
@@ -402,8 +431,8 @@ pub fn unique_index_keys_for_push_item(
         .collect();
     out.extend(crate::index_fields::typed_index_keys_for_item(
         &unique_typed,
-        &item.index_fields,
-        item.entity_document.as_ref(),
+        index_fields,
+        entity,
     )?);
     Ok(out)
 }
@@ -511,13 +540,10 @@ pub struct PushItem {
     pub max_attempts: u32,
     #[serde(with = "crate::wire_bytes::option_bytes")]
     pub payload: Option<Bytes>,
-    /// Structured hot-storage fields for compound work records. Defaulted for backwards-compatible log
-    /// replay of commands written before structured fields existed.
-    #[serde(default, with = "crate::wire_bytes::btreemap_bytes")]
+    /// Structured hot-storage fields for compound work records.
+    #[serde(with = "crate::wire_bytes::btreemap_bytes")]
     pub fields: BTreeMap<String, Bytes>,
-    /// Caller-owned metadata for compatibility predicates and claim responses. Defaulted for log replay of
-    /// commands written before metadata existed.
-    #[serde(default)]
+    /// Caller-owned metadata for compatibility predicates and claim responses.
     pub metadata: Metadata,
     /// Declared cohort size (BQ-14c, TD-002 cohort formation): when set together with `group_key`, this
     /// item is a member of a cohort of `cohort_size` total members (the cohort key IS the `group_key`). The
@@ -525,7 +551,6 @@ pub struct PushItem {
     /// admissible once the cohort is complete (`member_count == cohort_size`). `None` = not a cohort member
     /// (the common case; the in-memory family does not form cohorts and ignores this field). A divergent
     /// `cohort_size` for the same `group_key` is a conflict (TD-002 §cohort).
-    #[serde(default)]
     pub cohort_size: Option<u64>,
     /// Gate keys this item carries (BQ-14d, TD-002 §gate / API-001 g2). When ANY of these keys is in a
     /// `blocked` state for the queue (set via the `SetGates` command), the item is INELIGIBLE — the
@@ -537,7 +562,6 @@ pub struct PushItem {
     /// so carrying gate keys on a log-replay-backed queue is silently non-enforcing. Enforcing this at the
     /// port (rejecting gate use on a non-gate-capable backend) is the operator-facing follow-up tracked by
     /// the BQ-14d fresh-eyes review.
-    #[serde(default)]
     pub gate_keys: Vec<String>,
     /// Native values for client-declared typed index fields (ADR-011).
     ///
@@ -546,12 +570,11 @@ pub struct PushItem {
     /// ground for client-controllable indices — **not** a JSON entity document.
     /// Materialized at admission ([`crate::index_fields::materialize_index_fields`]);
     /// projection encodes axon keys from these values at apply.
-    #[serde(default)]
     pub index_fields: BTreeMap<String, TypedValue>,
     /// Optional full entity document for schema validation / claim round-trip.
     /// **Not** used for index keying when [`Self::index_fields`] is populated.
     /// Prefer leaving this `None` on new writes once indexes are native.
-    #[serde(default, with = "crate::entity_wire::option_entity")]
+    #[serde(with = "crate::entity_wire::option_entity")]
     pub entity_document: Option<serde_json::Value>,
 }
 
@@ -561,12 +584,10 @@ pub struct ClaimCommand {
     pub lease_token: LeaseToken,
     pub lease_expires_at: UtcTimestamp,
     /// Caller-supplied observability label; never an authorization principal.
-    #[serde(default)]
     pub worker_id: Option<WorkerId>,
     /// When true, apply requires every named row to move from Pending before token/bearer
-    /// effects. Absent/false on historical and Class-S outbox envelopes retains recovery
-    /// semantics (already-this-token is a no-op; partial movement does not poison).
-    #[serde(default)]
+    /// effects. When false, already-this-token is a no-op and partial movement does not
+    /// poison (grouped and cohort claims shape their own commands).
     pub authority_first: bool,
 }
 
@@ -629,7 +650,6 @@ pub struct FinalizeCommand {
 pub struct CohortFinalizeCommand {
     pub cohort_id: CohortId,
     pub kind: FinalizeKind,
-    #[serde(default)]
     pub not_before: Option<UtcTimestamp>,
 }
 
@@ -639,12 +659,9 @@ pub struct FinalizeOutcome {
     pub kind: FinalizeKind,
     /// The item state produced by applying this finalize outcome. Filled by the commit path so the
     /// durable command envelope can later synthesize the same history shape without re-reading state.
-    #[serde(default)]
     pub applied_state: Option<ItemState>,
     /// Queue-native retry backoff: when `kind == Retry` and the item returns to Pending, it is ineligible
     /// until this timestamp. `None` = immediately re-eligible (the default). Ignored for non-Retry kinds.
-    /// `#[serde(default)]` keeps logs written before retry backoff existed replay-compatible.
-    #[serde(default)]
     pub not_before: Option<UtcTimestamp>,
 }
 
@@ -700,39 +717,31 @@ pub struct UpdateFieldsCommand {
     /// Reschedule the item's priority (BQ pqueue-7a96f929). `Keep` leaves it; `Set(Some(p))` re-prices the
     /// item (which re-keys it in the eligibility order) and `Set(None)` clears the priority. Legal while the
     /// item is Pending or Leased. Defaults to `Keep` (a bare field/payload update is unchanged).
-    #[serde(default)]
     pub set_priority: ScheduleUpdate<PriorityValue>,
     /// Reschedule the item's `not_before` (BQ pqueue-7a96f929). `Keep` leaves it; `Set(Some(t))` defers the
     /// item until `t` (re-eligible at that time); `Set(None)` clears it (immediately eligible). Defaults to
     /// `Keep`.
-    #[serde(default)]
     pub set_not_before: ScheduleUpdate<UtcTimestamp>,
     /// Replace the item's entity document (ADR-011). `None` leaves it unchanged; `Some(doc)` replaces
-    /// it and triggers schema validation if the queue has a compiled schema. `#[serde(default)]` keeps
-    /// log-replay compatible with pre-ADR-011 commands (absent field → `None`).
+    /// it and triggers schema validation if the queue has a compiled schema.
     /// Native FWC1: opaque JSON blob (same as [`PushItem::entity_document`]).
-    #[serde(default, with = "crate::entity_wire::option_entity")]
+    #[serde(with = "crate::entity_wire::option_entity")]
     pub set_entity_document: Option<serde_json::Value>,
     /// API-001 `BatchUpdate` uses full replacement for the hot field map. `None` preserves the legacy
     /// FAC-1 delta behavior; `Some` replaces the complete map before any (normally empty) `field_ops`.
-    #[serde(default, with = "crate::wire_bytes::option_btreemap_bytes")]
+    #[serde(with = "crate::wire_bytes::option_btreemap_bytes")]
     pub set_fields: Option<BTreeMap<String, Bytes>>,
     /// API-001 full metadata replacement. Kept on the durable command so projection rebuild is exact.
-    #[serde(default)]
     pub set_metadata: Option<Metadata>,
     /// API-001 full gate-membership replacement. `Some(vec![])` clears all memberships.
-    #[serde(default)]
     pub set_gate_keys: Option<Vec<String>>,
     /// Selects API-001 BatchUpdate semantics (pending-only validation and preserved `eligible_since`) from
     /// the older FAC-1/reschedule command behavior while retaining one replay-compatible command variant.
-    #[serde(default)]
     pub api001_batch: bool,
     /// Present when the producer addressed the row by key and `item_id` is unresolved (`0`).
-    /// Absent on historical envelopes; apply then uses `item_id` only.
-    #[serde(default)]
+    /// `None` when the producer addressed the row by `item_id`.
     pub client_item_key: Option<ClientItemKey>,
     /// Copied from the request when the producer could not peek the row. Apply skips on mismatch.
-    #[serde(default)]
     pub expected_item_version: Option<u64>,
 }
 
@@ -807,9 +816,9 @@ pub struct PurgeItemsCommand {
 /// record carries no lifecycle, lease, priority, or eligibility.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SideRecord {
-    #[serde(default, with = "crate::wire_bytes::vec_u8")]
+    #[serde(with = "crate::wire_bytes::vec_u8")]
     pub key: Vec<u8>,
-    #[serde(default, with = "crate::wire_bytes::bytes_val")]
+    #[serde(with = "crate::wire_bytes::bytes_val")]
     pub payload: Bytes,
 }
 
@@ -817,7 +826,6 @@ pub struct SideRecord {
 /// (insert-or-overwrite by key) and touches nothing in the work-item / eligibility projection.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct WriteSideRecordsCommand {
-    #[serde(default)]
     pub records: Vec<SideRecord>,
 }
 
@@ -825,11 +833,9 @@ pub struct WriteSideRecordsCommand {
 /// Validated pre-commit, so apply is infallible (overwrite the stored fence for `instance_key` with `next`).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct AdvanceInstanceFenceCommand {
-    #[serde(default, with = "crate::wire_bytes::vec_u8")]
+    #[serde(with = "crate::wire_bytes::vec_u8")]
     pub instance_key: Vec<u8>,
-    #[serde(default)]
     pub expected: u64,
-    #[serde(default)]
     pub next: u64,
 }
 
@@ -980,13 +986,10 @@ pub struct ChangeRecord {
     pub item_id: Option<ItemId>,
     pub position: ChangeRecordPosition,
     pub command_kind: ChangeRecordKind,
-    #[serde(default)]
     pub new_state: Option<ChangeRecordState>,
     pub item_version: Option<u64>,
     pub terminal_at: Option<UtcTimestamp>,
-    #[serde(default)]
     pub emitted_at: Option<UtcTimestamp>,
-    #[serde(default)]
     pub source_owner_id: Option<OwnerId>,
     pub source_epoch: u64,
 }
@@ -1464,12 +1467,10 @@ pub struct CommandEnvelope {
     /// rebuild replay-response idempotency from committed envelopes even when the SQLite projection
     /// has not yet applied the request-id row. `None` is allowed for legacy log entries and for
     /// commands with no `request_id`.
-    #[serde(default)]
     pub request_fingerprint: Option<u64>,
     /// Replayable response material for the request-id-bearing command. The first supported family is push:
     /// after an unknown outcome, a retry must return the originally assigned item ids without appending a
     /// second push.
-    #[serde(default)]
     pub request_outcome: Option<RequestOutcome>,
     pub item_ids: Vec<ItemId>,
     pub command: QueueCommand,
@@ -1497,7 +1498,6 @@ pub enum RequestOutcome {
     BatchClaim {
         item_ids: Vec<ItemId>,
         lease_token: LeaseToken,
-        #[serde(default)]
         worker_id: Option<WorkerId>,
     },
     /// Durable replay payload for API-004 ClaimByQuery. The clear lease token is part of the response and
@@ -1505,7 +1505,6 @@ pub enum RequestOutcome {
     ClaimByQuery {
         item_ids: Vec<ItemId>,
         lease_token: LeaseToken,
-        #[serde(default)]
         worker_id: Option<WorkerId>,
     },
     /// Durable replay payload for API-001 BatchClaimByItemIds. Same lease-token replay rules as
@@ -1514,7 +1513,6 @@ pub enum RequestOutcome {
         claimed_item_ids: Vec<ItemId>,
         lease_token: LeaseToken,
         outcomes: Vec<fireweed_core::ClaimByItemIdsOutcome>,
-        #[serde(default)]
         worker_id: Option<WorkerId>,
     },
     /// The full per-entry outcome of a `commit_transition` (committed AND rejected entries), recorded on a
@@ -1536,19 +1534,15 @@ pub enum RequestOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommitOutcomeEntry {
     pub consumed_input_id: ItemId,
-    #[serde(default)]
     pub additional_consumed_input_ids: Vec<ItemId>,
-    #[serde(default, with = "crate::wire_bytes::option_instance")]
+    #[serde(with = "crate::wire_bytes::option_instance")]
     pub instance: Option<(Vec<u8>, u64)>,
-    /// Always empty on write (fireweed-bf03cbf5); `#[serde(default)]` keeps old logs/rows that still carry
-    /// real keys replay-compatible. See [`crate::port::EntryRecovery::side_record_keys`] for why this is no
+    /// Always empty on write (fireweed-bf03cbf5). See [`crate::port::EntryRecovery::side_record_keys`] for why this is no
     /// longer populated.
-    #[serde(default, with = "crate::wire_bytes::vec_vec_u8")]
+    #[serde(with = "crate::wire_bytes::vec_vec_u8")]
     pub side_record_keys: Vec<Vec<u8>>,
-    #[serde(default)]
     pub lifecycle_item_ids: Vec<ItemId>,
     /// `None` = committed; `Some` = rejected, carrying the structured rejection.
-    #[serde(default)]
     pub rejection: Option<crate::error::CommitRejection>,
 }
 
@@ -1730,25 +1724,6 @@ mod serde_tests {
             let reencoded = serde_json::to_string(&decoded).expect("re-serialize");
             assert_eq!(json, reencoded, "round-trip mismatch for {json}");
         }
-    }
-
-    #[test]
-    fn claim_command_authority_first_defaults_false_for_legacy_outbox() {
-        let command = ClaimCommand::new(
-            vec![iid("a")],
-            LeaseToken::new("lease").unwrap(),
-            ts(100),
-            None,
-        )
-        .with_authority_first();
-        let mut value = serde_json::to_value(&command).expect("serialize");
-        value
-            .as_object_mut()
-            .expect("object")
-            .remove("authority_first");
-        let decoded: ClaimCommand = serde_json::from_value(value).expect("legacy default");
-        assert!(!decoded.authority_first);
-        assert!(command.authority_first);
     }
 
     #[test]
@@ -1991,8 +1966,8 @@ mod serde_tests {
     }
 
     #[test]
-    fn legacy_integer_array_side_record_still_replays() {
-        // Minimal envelope body with legacy integer-array key/payload.
+    fn integer_array_side_record_bytes_are_rejected() {
+        // Byte fields are base64 strings; integer arrays are not accepted.
         let json = r#"{
             "command_id":"c1",
             "request_id":null,
@@ -2004,27 +1979,7 @@ mod serde_tests {
             "checksum":0,
             "created_at":{"seconds":1,"nanoseconds":0}
         }"#;
-        let decoded: CommandEnvelope = serde_json::from_str(json).unwrap();
-        let QueueCommand::WriteSideRecords(w) = decoded.command else {
-            panic!("expected WriteSideRecords");
-        };
-        assert_eq!(w.records[0].key, b"state");
-        assert_eq!(&w.records[0].payload[..], b"opaque");
-    }
-
-    #[test]
-    fn legacy_envelope_defaults_request_replay_metadata() {
-        let json = r#"{
-            "command_id":"c1",
-            "request_id":"r1",
-            "item_ids":[],
-            "command":{"PauseQueue":null},
-            "checksum":42,
-            "created_at":{"seconds":1,"nanoseconds":0}
-        }"#;
-        let decoded: CommandEnvelope = serde_json::from_str(json).unwrap();
-        assert_eq!(decoded.request_fingerprint, None);
-        assert_eq!(decoded.request_outcome, None);
+        assert!(serde_json::from_str::<CommandEnvelope>(json).is_err());
     }
 
     #[test]

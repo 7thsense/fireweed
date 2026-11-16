@@ -457,21 +457,6 @@
       "removal_condition": "Retain for as long as the hard-cutover residue gate protects the Fireweed namespace."
     },
     {
-      "id": "public-api-negative-compile-tests",
-      "class": "negative-test",
-      "paths": [
-        "scripts/verify-public-crate-boundary.sh",
-        "scripts/ci/fixtures/public-crate-boundary/Cargo.toml",
-        "scripts/ci/fixtures/public-crate-boundary/src/rejected_retired_embedded_facade.rs",
-        "scripts/ci/fixtures/public-crate-boundary/src/rejected_retired_generic_facade.rs",
-        "scripts/ci/fixtures/public-crate-boundary/src/rejected_retired_generic_constructor.rs"
-      ],
-      "match_pattern": "(?:[A-Za-z0-9_]*Pqueue[A-Za-z0-9_]*|PQUEUE(?:_[A-Z0-9]+)*|[A-Za-z0-9_]*pqueue[A-Za-z0-9_-]*|(?i:queueyard(?:[-_][A-Za-z0-9]+)*)|PQ\\.[A-Za-z][A-Za-z0-9_.-]*|[\\\"'`]pq\\.[A-Za-z][A-Za-z0-9_.-]*)",
-      "reason": "These exact compile-fail fixtures and their runner name retired Rust symbols only to prove that downstream code cannot use them.",
-      "owner_surface": "Public Rust API negative tests",
-      "removal_condition": "Retain while compile-fail coverage guards against reintroducing the retired facade."
-    },
-    {
       "id": "historical-release-note-v0.29.0",
       "class": "historical/audit",
       "paths": [

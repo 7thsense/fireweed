@@ -402,6 +402,12 @@ where
                 }
                 inner
             }
+            error @ PackedAppendError::HeadRejected { .. } => {
+                if let (Some(coordinator), Some(reservation)) = (coordinator, reservation) {
+                    coordinator.cancel(reservation).await;
+                }
+                error.into_engine()
+            }
             PackedAppendError::PostPositionAmbiguous { shard, reason } => {
                 if let Some(coordinator) = coordinator {
                     coordinator
@@ -1117,7 +1123,7 @@ where
         #[cfg(test)]
         let injected_failure = inner
             .injected_apply_failures
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
                 remaining.checked_sub(1)
             })
             .is_ok();

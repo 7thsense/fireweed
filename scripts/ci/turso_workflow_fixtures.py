@@ -60,7 +60,7 @@ def validate(workflow: str) -> None:
     mask_arguments = '"$pg_password" "$pg_url" "$FIREWEED_S3_TEST_ACCESS_KEY" "$FIREWEED_S3_TEST_SECRET_KEY"'
     require("::add-mask::" in provision and mask_arguments in provision and '>> "$GITHUB_ENV"' in provision, "credential masking/export missing")
     require(provision.index("::add-mask::") < provision.index('>> "$GITHUB_ENV"'), "mask credentials before exporting test environment")
-    require(workflow.index("Provision matrix PostgreSQL/S3 fixtures") < workflow.index("- name: Fireweed 12-cell Turso route tests"), "fixtures must precede the full matrix")
+    require(workflow.index("Provision matrix PostgreSQL/S3 fixtures") < workflow.index("- name: Queue S3/Turso pipeline and recovery tests"), "fixtures must precede the Queue tests")
     cleanup = step(workflow, "Tear down matrix S3 fixture")
     require(secret_setting in cleanup, "cleanup must use the same step-level temporary storage")
     require(workflow.count(secret_setting.strip()) == 2, "runner context must appear only in the two fixture steps")

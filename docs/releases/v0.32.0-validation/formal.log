@@ -1,0 +1,94 @@
+.........................................................................................................................................................................................................
+----------------------------------------------------------------------
+Ran 201 tests in 128.887s
+
+OK
+{"models":6,"negative_controls":8,"status":"PASS"}
+{"error": "injected unavailable dependency", "schema": "fireweed-api007-conditions-formal-v1", "status": "FAIL"}
+{"models":6,"negative_controls":8,"status":"PASS"}
+{"error": "invalid syntax (condition_gate.py, line 1)", "schema": "fireweed-api007-conditions-formal-v1", "status": "FAIL"}
+{"models":6,"negative_controls":8,"status":"PASS"}
+{"error": "injected unavailable dependency", "schema": "fireweed-api007-conditions-formal-v1", "status": "FAIL"}
+{"models":6,"negative_controls":8,"status":"PASS"}
+{"error": "invalid syntax (check_api007.py, line 1)", "schema": "fireweed-api007-conditions-formal-v1", "status": "FAIL"}
+{"models":6,"negative_controls":8,"status":"PASS"}
+{"error": "injected unavailable dependency", "schema": "fireweed-api007-conditions-formal-v1", "status": "FAIL"}
+{"models":6,"negative_controls":8,"status":"PASS"}
+{"error": "invalid syntax (condition_models.py, line 1)", "schema": "fireweed-api007-conditions-formal-v1", "status": "FAIL"}
+{"error":"loaded executable source differs from provenance: /mnt/scratch/fw-release/src/scripts/formal/coordinator_models.py","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error": "injected coordinator missing", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "invalid syntax (coordinator_models.py, line 1)", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected coordinator runtime", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error":"loaded executable source differs from provenance: /mnt/scratch/fw-release/src/scripts/formal/coordinator_gate.py","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error": "injected coordinator missing", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "invalid syntax (coordinator_gate.py, line 1)", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected coordinator runtime", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error":"missing completed witness: ['ChooseCoordinator-ambiguous_absence_new_actual_acquire']","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"models":1,"negative_controls":18,"status":"PASS"}
+{"error": "injected unavailable dependency", "schema": "fireweed-api007-pack_preparation-formal-v1", "status": "FAIL"}
+{"models":1,"negative_controls":18,"status":"PASS"}
+{"error": "invalid syntax (pack_preparation_gate.py, line 1)", "schema": "fireweed-api007-pack_preparation-formal-v1", "status": "FAIL"}
+{"models":1,"negative_controls":18,"status":"PASS"}
+{"error": "injected unavailable dependency", "schema": "fireweed-api007-pack_preparation-formal-v1", "status": "FAIL"}
+{"models":1,"negative_controls":18,"status":"PASS"}
+{"error": "invalid syntax (check_api007.py, line 1)", "schema": "fireweed-api007-pack_preparation-formal-v1", "status": "FAIL"}
+{"models":1,"negative_controls":18,"status":"PASS"}
+{"error": "injected unavailable dependency", "schema": "fireweed-api007-pack_preparation-formal-v1", "status": "FAIL"}
+{"models":1,"negative_controls":18,"status":"PASS"}
+{"error": "invalid syntax (pack_preparation_models.py, line 1)", "schema": "fireweed-api007-pack_preparation-formal-v1", "status": "FAIL"}
+{"models":1,"negative_controls":13,"status":"PASS"}
+{"error": "injected unavailable dependency", "schema": "fireweed-api007-pack_publication-formal-v1", "status": "FAIL"}
+{"models":1,"negative_controls":13,"status":"PASS"}
+{"error": "invalid syntax (pack_publication_gate.py, line 1)", "schema": "fireweed-api007-pack_publication-formal-v1", "status": "FAIL"}
+{"models":1,"negative_controls":13,"status":"PASS"}
+{"error": "injected unavailable dependency", "schema": "fireweed-api007-pack_publication-formal-v1", "status": "FAIL"}
+{"models":1,"negative_controls":13,"status":"PASS"}
+{"error": "invalid syntax (check_api007.py, line 1)", "schema": "fireweed-api007-pack_publication-formal-v1", "status": "FAIL"}
+{"models":1,"negative_controls":13,"status":"PASS"}
+{"error": "injected unavailable dependency", "schema": "fireweed-api007-pack_publication-formal-v1", "status": "FAIL"}
+{"models":1,"negative_controls":13,"status":"PASS"}
+{"error": "invalid syntax (pack_publication_models.py, line 1)", "schema": "fireweed-api007-pack_publication-formal-v1", "status": "FAIL"}
+{"error":"loaded executable source differs from provenance: /mnt/scratch/fw-release/src/scripts/formal/source_batch_models.py","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error":"loaded executable source differs from provenance: /mnt/scratch/fw-release/src/scripts/formal/source_batch_gate.py","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error":"missing completed witness: ['SelectBatch-nonmonotonic_full_run']","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error":"eight exact source campaign identities required","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error": "injected batch missing", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "invalid syntax (source_batch_models.py, line 1)", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected batch runtime", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected batch missing", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "invalid syntax (source_batch_gate.py, line 1)", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected batch runtime", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error":"loaded executable source differs from provenance: /mnt/scratch/fw-release/src/scripts/formal/source_body_models.py","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error": "injected body missing", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "invalid syntax (source_body_models.py, line 1)", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected body runtime", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error":"loaded executable source differs from provenance: /mnt/scratch/fw-release/src/scripts/formal/source_body_gate.py","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error": "injected body missing", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "invalid syntax (source_body_gate.py, line 1)", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected body runtime", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error":"loaded executable source differs from provenance: /mnt/scratch/fw-release/src/scripts/formal/source_original_models.py","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error":"loaded executable source differs from provenance: /mnt/scratch/fw-release/src/scripts/formal/source_original_gate.py","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error": "injected original missing", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "invalid syntax (source_original_models.py, line 1)", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected original runtime", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected original missing", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "invalid syntax (source_original_gate.py, line 1)", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected original runtime", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error":"missing completed witness: ['SelectOriginal-absence']","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error":"api007-source-original-resolution: incomplete search at 1 states","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error": "injected original exploration runtime", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error":"loaded executable source differs from provenance: /mnt/scratch/fw-release/src/scripts/formal/source_original_batch_models.py","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error":"loaded executable source differs from provenance: /mnt/scratch/fw-release/src/scripts/formal/source_original_batch_gate.py","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error":"eight exact source campaign identities required","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error":"missing completed witness: ['ChooseOriginalBatch-cancel_second']","schema":"fireweed-api007-source-group-formal-v1","status":"FAIL"}
+{"error": "injected original batch missing", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "invalid syntax (source_original_batch_models.py, line 1)", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected original batch runtime", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected original batch missing", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "invalid syntax (source_original_batch_gate.py, line 1)", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected original batch runtime", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected missing source_selection_models.py", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected missing source_selection_gate.py", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected missing source_state_read_models.py", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": "injected missing source_state_read_gate.py", "schema": "fireweed-api007-source-group-formal-v1", "status": "FAIL"}
+{"error": null, "models": 13, "negative_controls": 30, "states": 266965, "status": "PASS"}

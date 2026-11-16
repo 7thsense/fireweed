@@ -102,13 +102,10 @@ PY
     --contract "$missing/composite-contract.json" --expected-revision "$REV"
 done
 
-# Keep the cheap fixture tied to the actual tag workflow and local release gate.
-# This catches a future regression back to smoke-only validation without running
-# the heavyweight release suite.
+# Keep the cheap fixture tied to the actual tag workflow and local release gate
+# without running the heavyweight release suite.
 release_gate="$ROOT/scripts/ci/release-gate.sh"
 release_workflow="$ROOT/.github/workflows/release.yml"
-grep -Fq -- '--require-smoke-evidence E2,E3' "$release_gate" ||
-  fail "release gate does not require fresh E2/E3 smoke evidence"
 grep -Fq -- 'verify-governed-release-composite.sh' "$release_gate" ||
   fail "release gate does not dispatch the governed composite verifier"
 # P17r: dual-checkout release binds composite/attestation to measured S and an

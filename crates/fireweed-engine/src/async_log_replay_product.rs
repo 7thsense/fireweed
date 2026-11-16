@@ -298,7 +298,7 @@ where
             let guard = cache.lock().expect("push idempotency mutex poisoned");
             Ok(guard
                 .get(&shard)
-                .map(|c| c.check(&request_id, fingerprint.legacy_body_hash, now))
+                .map(|c| c.check(&request_id, fingerprint.body_hash(), now))
                 .unwrap_or(IdempotencyDecision::Proceed))
         })
     }

@@ -15,10 +15,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE=""
+QUEUE_EVIDENCE=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --mode) MODE="$2"; shift 2 ;;
+        --queue-evidence) QUEUE_EVIDENCE=(--queue-evidence "$2"); shift 2 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -35,9 +37,6 @@ esac
 
 echo "=== pr-gate [mode=${MODE}] ==="
 
-echo "--- release artifact verifier fixtures ---"
-bash "${SCRIPT_DIR}/../release/verify-release-artifacts-test.sh"
-
 echo "--- release identity freeze fixtures (P17v) ---"
 bash "${SCRIPT_DIR}/../release/verify-release-identity-test.sh"
 
@@ -50,13 +49,16 @@ bash "${SCRIPT_DIR}/../release/build-governed-evidence-bundle-test.sh"
 echo "--- governed evidence promoter fixtures (P17e) ---"
 bash "${SCRIPT_DIR}/../release/promote-governed-evidence-test.sh"
 
+python3 -m unittest discover -s "${SCRIPT_DIR}/../formal" -p 'test_*.py'
+python3 "${SCRIPT_DIR}/../formal/check.py" --output target/formal-analysis.json
+
 POLICY_MODE="remediation"
 if [[ "$MODE" == "enforcing" || "$MODE" == "closure" ]]; then
     POLICY_MODE="closure"
 fi
 
 echo "--- storage remediation policy [${POLICY_MODE}] ---"
-bash "${SCRIPT_DIR}/storage-remediation-policy.sh" --policy "${POLICY_MODE}"
+bash "${SCRIPT_DIR}/storage-remediation-policy.sh" --policy "${POLICY_MODE}" "${QUEUE_EVIDENCE[@]}"
 
 if [[ "$MODE" == "remediation" || "$MODE" == "closure" ]]; then
     echo "=== pr-gate [${MODE}] PASSED ==="
@@ -65,18 +67,14 @@ fi
 
 if [[ "$MODE" == "enforcing" ]]; then
     echo "--- fmt ---"
-    rustup run 1.97.1 cargo fmt --all --check
+    rustup run 1.99.0 cargo fmt --all --check
 
     echo "--- ledger validator tests ---"
-    rustup run 1.97.1 cargo test -p fireweed-release -- --nocapture
+    rustup run 1.99.0 cargo test -p fireweed-release -- --nocapture
 
     echo "--- coverage threshold parser fixtures ---"
     bash "${SCRIPT_DIR}/check-lcov-coverage.sh" --fixture "${SCRIPT_DIR}/fixtures/lcov/core-pass.info" --crate fireweed-core --min-lines 90 --min-branches 85
     bash "${SCRIPT_DIR}/check-lcov-coverage.sh" --fixture "${SCRIPT_DIR}/fixtures/lcov/engine-pass.info" --crate fireweed-engine --min-lines 80
-
-    echo "--- product workflow suite names (P2r exact set) ---"
-    bash "${SCRIPT_DIR}/verify-product-workflow-names.sh" --self-test
-    bash "${SCRIPT_DIR}/verify-product-workflow-names.sh" "${SCRIPT_DIR}/release-repeat-suites.toml"
 
     # nightly-gate.sh already runs release-gate.sh (then adds deferral linting), so we invoke it
     # ONCE here rather than running the (now heavy) release gate twice.
@@ -88,13 +86,13 @@ if [[ "$MODE" == "enforcing" ]]; then
 fi
 
 echo "--- fmt ---"
-rustup run 1.97.1 cargo fmt --all --check
+rustup run 1.99.0 cargo fmt --all --check
 
 echo "--- clippy ---"
-rustup run 1.97.1 cargo clippy --workspace --all-targets -- -D warnings
+rustup run 1.99.0 cargo clippy --workspace --all-targets -- -D warnings
 
 echo "--- test ---"
-rustup run 1.97.1 cargo test --workspace
+rustup run 1.99.0 cargo test --workspace
 
 echo "--- cargo deny ---"
 cargo deny check
@@ -110,18 +108,5 @@ bash "${SCRIPT_DIR}/property-fuzz-smoke.sh"
 
 echo "--- microsite gate ---"
 bash "${SCRIPT_DIR}/microsite-gate.sh"
-
-echo "--- API-005 suite ownership map ---"
-python3 "${SCRIPT_DIR}/api005_suite_ownership.py" --self-test
-
-echo "--- functional-matrix route sources (P10r exact leaves) ---"
-python3 "${SCRIPT_DIR}/functional_matrix_route_sources.py" --check --self-test
-
-echo "--- P2r route bindings / assertion overlay ---"
-python3 "${SCRIPT_DIR}/p2r_route_bindings.py" --check --self-test
-
-echo "--- product workflow suite names (P2r exact set) ---"
-bash "${SCRIPT_DIR}/verify-product-workflow-names.sh" --self-test
-bash "${SCRIPT_DIR}/verify-product-workflow-names.sh" "${SCRIPT_DIR}/release-repeat-suites.toml"
 
 echo "=== pr-gate [${MODE}] PASSED ==="

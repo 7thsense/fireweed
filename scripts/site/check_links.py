@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate local href targets for the product microsite and operator shim."""
+"""Validate local href targets for the product microsite."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from urllib.parse import unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[2]
 SITE = ROOT / "docs/site"
-OPERATOR = ROOT / "docs/operator/index.html"
 
 
 class LinkParser(HTMLParser):
@@ -63,8 +62,6 @@ def check_html(path: Path) -> list[str]:
 
 def main() -> int:
     pages = sorted(SITE.rglob("*.html"))
-    if OPERATOR.is_file():
-        pages.append(OPERATOR)
     if not pages:
         print("no HTML pages found", file=sys.stderr)
         return 1

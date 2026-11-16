@@ -183,3 +183,11 @@ async stores await their drivers inside the owned task.
   `Fireweed` type; process-wide blocking dispatch is not the product model.
 - `crates/fireweed-engine/src/async_store.rs`
 - `crates/fireweed-engine/src/commit.rs`
+
+## Formal analysis obligations
+
+[CONTRACT-006](../contracts/CONTRACT-006-formal-queue-semantics.md) defines
+formal safety and progress vocabulary; [TP-006](../../03-test/TP-006-formal-analysis.md)
+defines bounded model and independent implementation evidence requirements.
+The current public-cell and PRD requirements retain authority. Conditional
+eventual progress does not discharge the numeric queue-global progress bound.

@@ -8,21 +8,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use crate::tx::TursoRel;
 use bytes::Bytes;
 use fireweed_core::{
     ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, QueueDefinition, QueueId, RequestId,
     TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    BatchUpdateSnapshotItem, Claimed, ClaimedItem, CommandPosition, EngineError, EngineResult,
+    BatchUpdateSnapshotItem, ClaimedItem, CommandPosition, EngineError, EngineResult,
     IdempotencyDecision, ItemView, LeaseView, LiveItemView, MutationDriverSnapshot, PendingPage,
     PushFingerprint, QueueKey, QueueMetrics,
 };
 use fireweed_relational::{
-    ClaimOutboxRow, ClassSClaimResult, OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA,
-    async_projection as sql, delete_claim_outbox, entity_from_json, fields_from_json,
-    metadata_from_json, nanos_ts, parse_priority, select_claim_outbox, ts_nanos,
+    OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA, async_projection as sql, entity_from_json,
+    fields_from_json, metadata_from_json, nanos_ts, parse_priority, ts_nanos,
 };
 use tokio::sync::{Mutex, Semaphore};
 use turso::{Builder, Connection, Database, Value, transaction::TransactionBehavior};
@@ -596,7 +594,7 @@ impl TursoRelational {
         let database = builder.build().await?;
         let mut writer = database.connect()?;
         configure_connection(&writer, &config).await?;
-        migrate_connection(&mut writer).await?;
+        create_schema(&mut writer).await?;
         verify_connection_settings(&writer, &config).await?;
         verify_schema(&writer).await?;
         let reader = database.connect()?;
@@ -749,8 +747,53 @@ impl TursoRelational {
         exclude: &[ItemId],
         gate_policy: Option<fireweed_core::GateKeyPolicy>,
     ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
+        self.item_claim_microbatch_on_serving_reader_with_gate_policy_and_coverage(
+            shard,
+            members,
+            exclude,
+            gate_policy,
+            None,
+        )
+        .await
+    }
+
+    /// On the deferred-claim exclusion path, ensure this serving connection
+    /// covers the cursor from which the authoritative suffix was validated.
+    pub async fn item_claim_microbatch_on_serving_reader_with_gate_policy_and_coverage(
+        &self,
+        shard: &QueueKey,
+        members: &[(UtcTimestamp, usize, LeaseToken, UtcTimestamp)],
+        exclude: &[ItemId],
+        gate_policy: Option<fireweed_core::GateKeyPolicy>,
+        minimum: Option<&CommandPosition>,
+    ) -> EngineResult<Vec<(Vec<ItemId>, Vec<ClaimedItem>)>> {
         let fifo = self.claim_scan_is_fifo(shard);
         let mut connection = self.reader.lock().await;
+        if let Some(minimum) = minimum {
+            if &minimum.queue != shard {
+                return Err(EngineError::Invalid("claim coverage queue mismatch"));
+            }
+            let rows = collect_rows(
+                &connection,
+                sql::SELECT_CURSOR,
+                vec![
+                    shard.tenant_id.as_str().to_owned().into(),
+                    shard.queue_id.as_str().to_owned().into(),
+                ],
+            )
+            .await
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+            let covered = rows.first().is_some_and(|row| {
+                matches!((row.values[0].as_integer(), row.values[1].as_integer()),
+                    (Some(next),Some(epoch)) if *next > 0 && *epoch >= 0
+                    && (*next as u64) > minimum.sequence && (*epoch as u64) >= minimum.backend_epoch)
+            });
+            if !covered {
+                return Err(EngineError::Backpressure {
+                    resource: "claim serving projection coverage",
+                });
+            }
+        }
         let rowid_floor = if fifo {
             Some(self.claim_scan_hint(shard).unwrap_or(1).max(1))
         } else {
@@ -1088,70 +1131,6 @@ impl TursoRelational {
         .await
     }
 
-    /// Startup-only detection of receipts written by the old admitted-item hash path.
-    pub async fn has_legacy_push_fingerprints(&self, shard: &QueueKey) -> EngineResult<bool> {
-        let rows = self
-            .query(
-                "SELECT 1 FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
-             AND operation='push' AND length(request_fingerprint)=32 LIMIT 1",
-                vec![
-                    shard.tenant_id.as_str().to_string().into(),
-                    shard.queue_id.as_str().to_string().into(),
-                ],
-            )
-            .await
-            .map_err(|error| EngineError::Storage(error.to_string()))?;
-        Ok(!rows.is_empty())
-    }
-
-    /// Repair only the receipt for this exact logged request incarnation. A reused
-    /// request ID must never be overwritten by an older envelope during replay.
-    pub async fn repair_legacy_push_fingerprints(
-        &self,
-        entries: &[(CommandPosition, fireweed_engine::CommandEnvelope)],
-    ) -> EngineResult<u64> {
-        let mut statements = Vec::new();
-        for (position, envelope) in entries {
-            if !matches!(&envelope.command, fireweed_engine::QueueCommand::Push(_)) {
-                continue;
-            }
-            let (
-                Some(request_id),
-                Some(fingerprint),
-                Some(fireweed_engine::RequestOutcome::Push { .. }),
-            ) = (
-                &envelope.request_id,
-                envelope.request_fingerprint,
-                &envelope.request_outcome,
-            )
-            else {
-                continue;
-            };
-            let positions =
-                serde_json::to_string(&vec![(position.backend_epoch, position.sequence)])
-                    .map_err(|error| EngineError::Storage(error.to_string()))?;
-            statements.push(RelationalStatement::new(
-                "UPDATE fireweed_request_idempotency SET request_fingerprint=?1 \
-                 WHERE tenant_id=?2 AND queue_id=?3 AND operation='push' AND request_id=?4 \
-                 AND command_positions=?5 AND length(request_fingerprint)=32",
-                vec![
-                    fingerprint.to_be_bytes().to_vec().into(),
-                    position.queue.tenant_id.as_str().to_string().into(),
-                    position.queue.queue_id.as_str().to_string().into(),
-                    request_id.as_str().to_string().into(),
-                    positions.into(),
-                ],
-            ));
-        }
-        if statements.is_empty() {
-            return Ok(0);
-        }
-        self.execute_immediate(&statements)
-            .await
-            .map(|counts| counts.into_iter().sum())
-            .map_err(|error| EngineError::Storage(error.to_string()))
-    }
-
     pub async fn push_idempotency_committed(
         &self,
         shard: &QueueKey,
@@ -1343,10 +1322,10 @@ impl TursoRelational {
         Ok(connection)
     }
 
-    /// Reapply idempotent migrations and verify the resulting schema.
-    pub async fn migrate(&self) -> Result<SchemaReport> {
+    /// Re-run the idempotent schema statements and verify the resulting schema.
+    pub async fn ensure_schema(&self) -> Result<SchemaReport> {
         let mut connection = self.writer.lock().await;
-        migrate_connection(&mut connection).await?;
+        create_schema(&mut connection).await?;
         verify_schema(&connection).await
     }
 
@@ -1536,42 +1515,6 @@ impl TursoRelational {
         Ok(cohorts)
     }
 
-    /// Delete one recovered Claim outbox row after the envelope is on the log.
-    /// New serving writes no outbox rows; this remains for the migration window.
-    pub async fn delete_claim_outbox_row(
-        &self,
-        tenant_id: &str,
-        queue_id: &str,
-        outbox_id: &str,
-    ) -> EngineResult<()> {
-        let mut writer = self.writer.lock().await;
-        let tx = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .map_err(|e| EngineError::Storage(e.to_string()))?;
-        let result = delete_claim_outbox(&TursoRel(&tx), tenant_id, queue_id, outbox_id);
-        match result {
-            Ok(()) => tx
-                .commit()
-                .await
-                .map_err(|e| EngineError::Storage(e.to_string())),
-            Err(error) => {
-                let _ = tx.rollback().await;
-                Err(error)
-            }
-        }
-    }
-
-    /// Load durable pre-upgrade Claim envelopes still waiting to publish.
-    pub async fn pending_claim_outbox(
-        &self,
-        tenant_id: &str,
-        queue_id: &str,
-    ) -> EngineResult<Vec<ClaimOutboxRow>> {
-        let writer = self.writer.lock().await;
-        select_claim_outbox(&TursoRel(&writer), tenant_id, queue_id)
-    }
-
     pub async fn remembered_claim_targets(
         &self,
         shard: &QueueKey,
@@ -1651,92 +1594,23 @@ mod class_s_tests {
         format!(
             "INSERT INTO fireweed_items(\
              tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority_sort,\
-             eligible_since,payload,fields,metadata,retry_count,item_version,\
+             eligible_since,fields,metadata,retry_count,item_version,\
              last_command_sequence,created_at,updated_at,fenced,superseded,max_attempts,created_seq) \
-             VALUES('t','q','{item_id}','key-{item_id}','Pending',X'00',1,X'CAFE','{{}}','{{}}',0,1,1,1,1,0,0,3,{created_seq})"
+             VALUES('t','q','{item_id}','key-{item_id}','Pending',X'00',1,'{{}}','{{}}',0,1,1,1,1,0,0,3,{created_seq})"
         )
     }
 
-    /// Exercise the retained relational helper without the retired serving packer.
-    async fn relational_class_s_claim(
-        store: &TursoRelational,
-        now_nanos: i64,
-        limit: i64,
-        lease_token: &LeaseToken,
-        lease_expires_at: i64,
-        outbox_id: &str,
-    ) -> fireweed_relational::ClassSClaimResult {
-        use fireweed_relational::{ClassSClaimRequest, class_s_claim};
-
-        let mut writer = store.writer.lock().await;
-        let tx = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .await
-            .expect("begin");
-        let hop = tx.clone();
-        let token = lease_token.clone();
-        let outbox = outbox_id.to_string();
-        let result = crate::tx::run_reltx_blocking(move || {
-            class_s_claim(
-                &TursoRel(&hop),
-                &ClassSClaimRequest {
-                    tenant_id: "t",
-                    queue_id: "q",
-                    now_nanos,
-                    limit,
-                    lease_token: &token,
-                    lease_expires_at,
-                    outbox_id: &outbox,
-                    request_id: None,
-                    request_fingerprint: None,
-                    worker_id: Some("w"),
-                    claim_unit: "item",
-                    cohort_id: None,
-                },
+    #[tokio::test]
+    async fn claim_preserves_fields_metadata_and_entity() {
+        let store = TursoRelational::in_memory().await.expect("open");
+        store
+            .execute(
+                "INSERT INTO queues(tenant,queue,definition,paused,pause_drain_intake) \
+                 VALUES('t','q','{}',0,0)",
+                vec![],
             )
-        })
-        .await;
-        match result {
-            Ok(value) => {
-                tx.commit().await.expect("commit");
-                value
-            }
-            Err(error) => {
-                let _ = tx.rollback().await;
-                panic!("class_s_claim helper: {error}");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn class_s_sequential_claims_are_disjoint() {
-        let store = TursoRelational::in_memory().await.expect("open");
-        let ids: Vec<String> = (1..=5)
-            .map(|seq| ItemId::mint(1, 0, seq as u32).to_string())
-            .collect();
-        for (seq, item_id) in ids.iter().enumerate() {
-            store
-                .execute(insert_pending(item_id, (seq as i64) + 1), vec![])
-                .await
-                .expect("insert");
-        }
-        let token_a = LeaseToken::new("token-a").expect("token");
-        let token_b = LeaseToken::new("token-b").expect("token");
-        let first = relational_class_s_claim(&store, 10, 2, &token_a, 1_000, "out-1").await;
-        let second = relational_class_s_claim(&store, 10, 2, &token_b, 1_000, "out-2").await;
-        let first_ids: Vec<_> = first.items.iter().map(|i| i.item_id.as_str()).collect();
-        let second_ids: Vec<_> = second.items.iter().map(|i| i.item_id.as_str()).collect();
-        assert_eq!(first_ids, [ids[0].as_str(), ids[1].as_str()]);
-        assert_eq!(second_ids, [ids[2].as_str(), ids[3].as_str()]);
-        assert!(first_ids.iter().all(|id| !second_ids.contains(id)));
-        let claimed = claimed_from_class_s(&token_a, first).expect("map");
-        assert_eq!(claimed.items.len(), 2);
-        assert_eq!(claimed.items[0].payload.as_deref(), Some(&[0xCA, 0xFE][..]));
-    }
-
-    #[tokio::test]
-    async fn class_s_claim_preserves_fields_metadata_and_entity() {
-        let store = TursoRelational::in_memory().await.expect("open");
+            .await
+            .expect("queue");
         let stored_id = ItemId::mint(1, 0, 1);
         let compact_id = ItemId::mint(1, 0, 2);
         let index_fields = BTreeMap::from([
@@ -1752,9 +1626,9 @@ mod class_s_tests {
                 .expect("nonempty index fields");
         let insert = "INSERT INTO fireweed_items(\
              tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-             not_before,eligible_since,group_key,payload,fields,metadata,entity_document,index_fields,\
+             not_before,eligible_since,group_key,fields,metadata,entity_document,index_fields,\
              retry_count,item_version,last_command_sequence,created_at,updated_at,fenced,superseded,\
-             max_attempts,created_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+             max_attempts,created_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
         for (id, entity, native_indexes, created_seq) in [
             (
                 stored_id,
@@ -1785,7 +1659,6 @@ mod class_s_tests {
                         Value::Integer(7),
                         Value::Integer(1),
                         Value::Text("group-a".to_string()),
-                        Value::Blob(vec![0xCA, 0xFE]),
                         Value::Text(r#"{"blob":[1,2,3]}"#.to_string()),
                         Value::Text(r#"{"attempt":7,"source":"class-s"}"#.to_string()),
                         entity,
@@ -1803,6 +1676,14 @@ mod class_s_tests {
                 )
                 .await
                 .expect("insert complete serving row");
+            store
+                .execute(
+                    "INSERT INTO fireweed_item_payloads(tenant_id,queue_id,item_id,payload) \
+                     VALUES('t','q',?1,X'CAFE')",
+                    vec![Value::Text(id.to_string())],
+                )
+                .await
+                .expect("insert payload");
         }
         // Gate-state rows contain only currently blocked keys. This membership therefore describes
         // a satisfied gate and must be echoed even though the optimized SELECT omits its anti-join.
@@ -1816,12 +1697,22 @@ mod class_s_tests {
             .expect("insert satisfied gate membership");
 
         let token = LeaseToken::new("token-fidelity").expect("token");
-        let relational =
-            relational_class_s_claim(&store, 10, 2, &token, 1_000, "out-fidelity").await;
-        let claimed = claimed_from_class_s(&token, relational).expect("render public claim");
-        assert_eq!(claimed.items.len(), 2);
+        let shard = QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap());
+        let now = UtcTimestamp::new(10, 0).unwrap();
+        let expires = UtcTimestamp::new(100, 0).unwrap();
+        let mut reader = store.reader.lock().await;
+        let assigned = TursoRelational::item_claim_microbatch_on_connection(
+            &mut reader,
+            &shard,
+            &[(now, 2, token.clone(), expires)],
+            &[],
+        )
+        .await
+        .expect("claim");
+        let claimed_items = &assigned[0].1;
+        assert_eq!(claimed_items.len(), 2);
 
-        let stored = &claimed.items[0];
+        let stored = &claimed_items[0];
         assert_eq!(stored.item_id, stored_id);
         assert_eq!(stored.payload.as_deref(), Some(&[0xCA, 0xFE][..]));
         assert_eq!(
@@ -1850,7 +1741,7 @@ mod class_s_tests {
         assert_eq!(stored.attempt_count, 3);
         assert_eq!(stored.max_attempts, 9);
 
-        let compact = &claimed.items[1];
+        let compact = &claimed_items[1];
         assert_eq!(compact.item_id, compact_id);
         assert_eq!(
             compact.entity,
@@ -2100,7 +1991,10 @@ mod committed_reader_tests {
         Ok(())
     }
 
-    async fn optional_scalar_i64(connection: &Connection, sql: &str) -> Result<Option<i64>> {
+    pub(super) async fn optional_scalar_i64(
+        connection: &Connection,
+        sql: &str,
+    ) -> Result<Option<i64>> {
         let rows = collect_rows(connection, sql, vec![]).await?;
         match rows.first().and_then(|row| row.values.first()) {
             None => Ok(None),
@@ -2175,7 +2069,7 @@ mod committed_reader_tests {
     }
 
     #[tokio::test]
-    async fn records_v03121_read_uncommitted_keyword_disposition() {
+    async fn records_stock_turso_pragma_disposition() {
         let root = tempfile::tempdir().expect("diagnostic tempdir");
         let path = root.path().join("reader-pragma-disposition.db");
         let database = Builder::new_local(path.to_str().expect("diagnostic path is UTF-8"))
@@ -2216,13 +2110,14 @@ mod committed_reader_tests {
         );
         assert!(update.expect("set historical keyword form").is_empty());
         assert_eq!(readback, None);
-        assert_eq!(
+        // Stock Turso accepts this compatibility PRAGMA without exposing a
+        // configurable checkpoint policy. It must not be claimed as disabled.
+        assert!(
             wal_autocheckpoint_update
-                .expect("set wal_autocheckpoint")
-                .len(),
-            1
+                .expect("compatibility PRAGMA")
+                .is_empty()
         );
-        assert_eq!(wal_autocheckpoint_readback, Some(0));
+        assert_eq!(wal_autocheckpoint_readback, None);
         assert!(cache_spill_update.expect("set cache_spill").is_empty());
         assert_eq!(cache_spill_readback, Some(1));
         assert_query_only_rejection(query_only_write).expect("query_only rejection");
@@ -2954,7 +2849,7 @@ mod committed_pool_tests {
         eprintln!(
             "wal_freeze readers={} elapsed_us={} wal_before={} wal_after_writes={} \
              wal_after_reads={} checkpoint_invocations={} \
-             wal_autocheckpoint_readback=verified_in_reader_configuration",
+             checkpoint_policy=upstream_native",
             observed.len(),
             elapsed.as_micros(),
             wal_before,
@@ -3162,17 +3057,6 @@ mod committed_pool_tests {
     }
 }
 
-pub fn claimed_from_class_s(
-    lease_token: &LeaseToken,
-    result: ClassSClaimResult,
-) -> EngineResult<Claimed> {
-    Ok(Claimed {
-        items: render_class_s_claimed_items(lease_token, result.items)?,
-        cohort_lease_token: None,
-        cohort_id: None,
-    })
-}
-
 /// Render complete public Claim items from relational Class-S rows in one reusable bulk helper.
 /// Native index fields stay inside the relational carrier and are used only to echo a compacted
 /// entity document when the durable row omitted the equivalent JSON.
@@ -3351,8 +3235,8 @@ pub(crate) async fn configure_committed_reader(
     connection
         .pragma_update("cache_size", settings.cache_size_kib.to_string())
         .await?;
-    // The pinned checkpoint-control backport makes this effective and queryable.
-    connection.pragma_update("wal_autocheckpoint", "0").await?;
+    // Stock Turso owns automatic checkpoint policy. Query-only readers do
+    // not publish writes; do not configure an unsupported checkpoint pragma.
     connection.busy_timeout(settings.busy_timeout)?;
     // Read-only connections never checkpoint or own projection durability.
     connection.pragma_update("synchronous", "OFF").await?;
@@ -3370,7 +3254,6 @@ pub(crate) async fn verify_committed_reader_settings(
     let cache_size_kib = scalar_i64(connection, "PRAGMA cache_size").await?;
     let busy_timeout_ms = scalar_i64(connection, "PRAGMA busy_timeout").await?;
     let query_only = scalar_i64(connection, "PRAGMA query_only").await?;
-    let checkpoint_frames = scalar_i64(connection, "PRAGMA wal_autocheckpoint").await?;
     let expected_timeout_ms = i64::try_from(expected.busy_timeout.as_millis()).map_err(|_| {
         TursoRelationalError::Configuration(
             "committed-reader busy timeout exceeds i64 milliseconds".to_string(),
@@ -3381,28 +3264,16 @@ pub(crate) async fn verify_committed_reader_settings(
         || cache_size_kib != expected.cache_size_kib
         || busy_timeout_ms != expected_timeout_ms
         || query_only != 1
-        || checkpoint_frames != 0
     {
         return Err(TursoRelationalError::Configuration(format!(
             "committed reader settings read back as journal_mode={journal_mode:?}, \
              synchronous={synchronous}, cache_size={cache_size_kib}, \
-             busy_timeout={busy_timeout_ms}, query_only={query_only}, wal_autocheckpoint={checkpoint_frames}; expected \
-             wal, 0, {}, {}, 1, 0",
+             busy_timeout={busy_timeout_ms}, query_only={query_only}; expected \
+             wal, 0, {}, {}, 1",
             expected.cache_size_kib, expected_timeout_ms
         )));
     }
     Ok(())
-}
-
-async fn checkpoint_frames(connection: &Connection, config: &TursoConfig) -> Result<i64> {
-    let _ = connection;
-    if !config.rebuildable_io {
-        return Ok(1_000);
-    }
-    // Log-backed projections recover from the object-log after a crash. Do not
-    // auto-checkpoint under load (that stampeded 64 stores during campaigns).
-    // Idle/close and a process-wide Passive cap bound the WAL instead.
-    Ok(0)
 }
 
 async fn configure_connection(connection: &Connection, config: &TursoConfig) -> Result<()> {
@@ -3415,9 +3286,9 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
     connection
         .pragma_update("journal_mode", config.journal_mode.pragma_value())
         .await?;
-    // NORMAL still lets an explicit Passive checkpoint publish backfill.
-    // Automatic checkpoints are disabled on log-backed writers (`0` below).
-    // The log-backed I/O adapter omits physical sync; the object-log is durable.
+    // NORMAL lets explicit Passive checkpoints publish backfill alongside
+    // stock Turso's automatic policy. The public I/O adapter omits physical
+    // sync only for disposable projections backed by the durable object log.
     connection
         .pragma_update(
             "synchronous",
@@ -3435,56 +3306,14 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
         // Avoid creating a filesystem temp database for every bounded batch.
         connection.pragma_update("temp_store", "MEMORY").await?;
     }
-    // Coalesce repeated page versions before writing the rebuildable main DB.
-    // Preserve the upstream 1,000-frame policy for standalone projections.
-    let checkpoint_frames = checkpoint_frames(connection, config).await?;
-    connection
-        .pragma_update("wal_autocheckpoint", checkpoint_frames)
-        .await?;
+    // Automatic checkpoint scheduling remains upstream-owned. Fireweed's
+    // idle/close checkpoints use the supported wal_checkpoint interface.
     connection.busy_timeout(config.busy_timeout)?;
     Ok(())
 }
 
-async fn migrate_connection(connection: &mut Connection) -> Result<()> {
+async fn create_schema(connection: &mut Connection) -> Result<()> {
     connection.execute_batch(RELATIONAL_SCHEMA).await?;
-    crate::metrics::migrate(connection).await?;
-    if let Err(error) = connection
-        .execute(
-            "ALTER TABLE queues ADD COLUMN pause_drain_intake INTEGER NOT NULL DEFAULT 0",
-            (),
-        )
-        .await
-        && !error
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("duplicate column")
-    {
-        return Err(error.into());
-    }
-    if let Err(error) = connection
-        .execute(
-            "ALTER TABLE fireweed_group_summary ADD COLUMN rep_created_seq INTEGER",
-            (),
-        )
-        .await
-        && !error
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("duplicate column")
-    {
-        return Err(error.into());
-    }
-    connection
-        .execute(
-            "UPDATE fireweed_group_summary SET rep_created_seq=(\
-               SELECT created_seq FROM fireweed_items i \
-               WHERE i.tenant_id=fireweed_group_summary.tenant_id \
-                 AND i.queue_id=fireweed_group_summary.queue_id \
-                 AND i.item_id=fireweed_group_summary.rep_item_id) \
-             WHERE rep_created_seq IS NULL AND rep_item_id IS NOT NULL",
-            (),
-        )
-        .await?;
     Ok(())
 }
 
@@ -3504,17 +3333,10 @@ async fn verify_connection_settings(connection: &Connection, config: &TursoConfi
             settings.synchronous
         )));
     }
-    let expected_checkpoint_frames = checkpoint_frames(connection, config).await?;
     if config.rebuildable_io && scalar_i64(connection, "PRAGMA temp_store").await? != 2 {
         return Err(TursoRelationalError::Configuration(
             "log-backed SQL scratch must use memory temp storage".into(),
         ));
-    }
-    let checkpoint_frames = scalar_i64(connection, "PRAGMA wal_autocheckpoint").await?;
-    if checkpoint_frames != expected_checkpoint_frames {
-        return Err(TursoRelationalError::Configuration(format!(
-            "wal_autocheckpoint read back as {checkpoint_frames}, expected {expected_checkpoint_frames}"
-        )));
     }
     let expected_timeout = i64::try_from(config.busy_timeout.as_millis()).map_err(|_| {
         TursoRelationalError::Configuration("busy timeout exceeds i64 milliseconds".to_string())
@@ -3792,7 +3614,7 @@ async fn collect_rows(
     while let Some(row) = rows.next().await? {
         collected.push(OwnedRow {
             columns: columns.clone(),
-            values: row.into_values().collect(),
+            values: crate::row_values(&row, rows.column_count())?.collect(),
         });
     }
     crate::projection::trace_sql(sql, bind_count, collected.len(), started.elapsed());
@@ -3821,6 +3643,7 @@ async fn scalar_i64(connection: &Connection, sql: &str) -> Result<i64> {
 
 #[cfg(test)]
 mod projection_checkpoint_config_tests {
+    use super::committed_reader_tests::optional_scalar_i64;
     use super::*;
 
     #[tokio::test]
@@ -3873,10 +3696,10 @@ mod projection_checkpoint_config_tests {
         assert_eq!(new.wal_truncate_min_bytes, 4096 * 1024);
         assert_eq!(new.connection_settings().await.unwrap().synchronous, 1);
         assert_eq!(
-            scalar_i64(&*new.writer.lock().await, "PRAGMA wal_autocheckpoint")
+            optional_scalar_i64(&*new.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            0
+            None
         );
         drop(new);
         let reopened =
@@ -3884,10 +3707,10 @@ mod projection_checkpoint_config_tests {
                 .await
                 .unwrap();
         assert_eq!(
-            scalar_i64(&*reopened.writer.lock().await, "PRAGMA wal_autocheckpoint")
+            optional_scalar_i64(&*reopened.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            0
+            None
         );
         for page_size in [2048, 4096] {
             let path = root.path().join(format!("existing-{page_size}.db"));
@@ -3913,27 +3736,27 @@ mod projection_checkpoint_config_tests {
             assert_eq!(existing.wal_truncate_min_bytes, page_size as u64 * 1024);
             assert_eq!(existing.connection_settings().await.unwrap().synchronous, 1);
             assert_eq!(
-                scalar_i64(&*existing.writer.lock().await, "PRAGMA wal_autocheckpoint")
+                optional_scalar_i64(&*existing.writer.lock().await, "PRAGMA wal_autocheckpoint")
                     .await
                     .unwrap(),
-                0
+                None
             );
         }
         let standalone = TursoRelational::in_memory().await.unwrap();
         assert_eq!(standalone.wal_truncate_min_bytes, 4096 * 1024);
         assert_eq!(
-            scalar_i64(
+            optional_scalar_i64(
                 &*standalone.writer.lock().await,
                 "PRAGMA wal_autocheckpoint"
             )
             .await
             .unwrap(),
-            1_000
+            None
         );
     }
 
     #[tokio::test]
-    async fn log_backed_idle_compact_materializes_without_autocheckpoint() {
+    async fn log_backed_idle_compact_materializes_and_preserves_reopen() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("idle-compact.db");
         let store = TursoRelational::open(TursoConfig::local(&path).with_log_backed_projection())
@@ -3968,14 +3791,46 @@ mod projection_checkpoint_config_tests {
         let main_before = path.metadata().unwrap().len();
         store.compact_idle_wal().await;
         assert_eq!(
-            scalar_i64(&*store.writer.lock().await, "PRAGMA wal_autocheckpoint")
+            optional_scalar_i64(&*store.writer.lock().await, "PRAGMA wal_autocheckpoint")
                 .await
                 .unwrap(),
-            0
+            None
         );
         assert!(
             path.metadata().unwrap().len() >= main_before,
             "idle compact may publish WAL frames into the main file"
+        );
+        assert_eq!(
+            scalar_i64(
+                &*store.writer.lock().await,
+                "SELECT length(body) FROM compact_probe WHERE id=1"
+            )
+            .await
+            .unwrap(),
+            65536
+        );
+        drop(store);
+        let reopened =
+            TursoRelational::open(TursoConfig::local(&path).with_log_backed_projection())
+                .await
+                .unwrap();
+        assert_eq!(
+            scalar_i64(
+                &*reopened.writer.lock().await,
+                "SELECT count(*) FROM compact_probe"
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            scalar_i64(
+                &*reopened.writer.lock().await,
+                "SELECT length(body) FROM compact_probe WHERE id=1"
+            )
+            .await
+            .unwrap(),
+            65536
         );
     }
 }
@@ -3997,4 +3852,78 @@ pub struct MetricsMembershipSnapshot {
     pub metrics: QueueMetrics,
     pub position: Option<CommandPosition>,
     pub rows: std::collections::HashMap<ItemId, MetricsMembershipRow>,
+}
+
+#[cfg(test)]
+mod item_index_lookup_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Capture(std::cell::RefCell<Option<(String, Vec<fireweed_relational::RelValue>)>>);
+    impl fireweed_relational::RelTx for Capture {
+        fn prefer_point_updates(&self) -> bool {
+            true
+        }
+        fn execute(
+            &self,
+            sql: &str,
+            params: &[fireweed_relational::RelValue],
+        ) -> fireweed_engine::EngineResult<usize> {
+            *self.0.borrow_mut() = Some((sql.to_owned(), params.to_vec()));
+            Ok(0)
+        }
+        fn query(
+            &self,
+            _: &str,
+            _: &[fireweed_relational::RelValue],
+        ) -> fireweed_engine::EngineResult<Vec<fireweed_relational::RelRow>> {
+            panic!("cleanup must not fetch the queue")
+        }
+    }
+
+    #[tokio::test]
+    async fn item_index_cleanup_seeks_addressed_ids() {
+        {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("projection.db");
+            let store = TursoRelational::open(TursoConfig::local(&path))
+                .await
+                .unwrap();
+            let capture = Capture::default();
+            fireweed_relational::delete_typed_index_rows(
+                &capture,
+                "tenant",
+                "queue",
+                &["1".into(), "2".into()],
+            )
+            .unwrap();
+            let (sql, params) = capture.0.into_inner().unwrap();
+            let params: Vec<Value> = params
+                .into_iter()
+                .map(|value| match value {
+                    fireweed_relational::RelValue::Text(value) => Value::Text(value),
+                    _ => panic!("unexpected cleanup parameter"),
+                })
+                .collect();
+            let writer = store.writer.lock().await;
+            let mut rows = writer
+                .query(format!("EXPLAIN QUERY PLAN {sql}"), params)
+                .await
+                .unwrap();
+            let mut details = Vec::new();
+            while let Some(row) = rows.next().await.unwrap() {
+                details.push(row.get::<String>(3).unwrap());
+            }
+            assert!(
+                details.iter().any(|detail| detail.contains("item_id=?")),
+                "{details:?}"
+            );
+            assert!(
+                !details
+                    .iter()
+                    .any(|detail| detail.contains("SCAN fireweed_item_index")),
+                "{details:?}"
+            );
+        }
+    }
 }

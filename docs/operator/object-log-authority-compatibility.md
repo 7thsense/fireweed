@@ -83,4 +83,3 @@ and claim_by_item_ids prepare) must not admit commands that apply rejects.
 
 - [object-log storage generation](object-log-storage-generation.md) — FWSG vs LogEngine layout  
 - [API-005](../helix/02-design/contracts/API-005-fireweed-rust-facade.md) — `ObjectLogAuthority::NativeConditionalWrite`  
-- [operator guide](../deployment/operator-guide.md) — S3 log + control plane  

@@ -110,7 +110,7 @@ struct SnapshotMetaDoc {
     ref_id: String,
 }
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Default)]
 struct CatalogDoc {
     definitions: Vec<QueueDefinition>,
 }
@@ -197,6 +197,8 @@ pub enum PackedAppendError {
     /// `engine.produce` or later `advance_high_water`→`put_json` failed or timed out.
     /// Positions must not be reused; the shard is poisoned.
     PostPositionAmbiguous { shard: QueueKey, reason: String },
+    /// Native conditional append was definitely not indexed at the expected head.
+    HeadRejected { expected: i64, current: i64 },
 }
 
 impl PackedAppendError {
@@ -209,6 +211,9 @@ impl PackedAppendError {
     pub fn into_engine(self) -> EngineError {
         match self {
             Self::BeforePosition(error) => error,
+            Self::HeadRejected { .. } => EngineError::Backpressure {
+                resource: "api007-log-head-moved",
+            },
             Self::PostPositionAmbiguous { shard, reason } => EngineError::Storage(format!(
                 "object-log post-position ambiguous: {reason}; shard={shard:?}"
             )),
@@ -409,6 +414,7 @@ fn valid_snapshot_ref_id(ref_id: &str) -> bool {
 pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     engine: Arc<LogEngine<S>>,
     blob: Arc<dyn BlobStore>,
+    raw_io_qualified: bool,
     /// In-process epoch cache (also written to blob for reopen).
     epochs: Arc<EpochCache>,
     high_water: Arc<HighWaterCache>,
@@ -425,6 +431,8 @@ pub struct ObjectLogEngineStore<S: Sequencer = ManifestSequencer> {
     post_position_timeout_ms: AtomicU64,
     fail_high_water_puts: AtomicU32,
     pre_position_stall_ms: AtomicU64,
+    #[cfg(test)]
+    timeout_phase_observer: Mutex<Option<tokio::sync::mpsc::UnboundedSender<u8>>>,
     /// Physical store join id for opt-in traces and post-position timeout errors.
     store_tag: String,
 }
@@ -504,6 +512,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         let store = Self {
             engine,
             blob,
+            raw_io_qualified: true,
             epochs,
             high_water,
             high_water_appends: Mutex::new(HashMap::new()),
@@ -521,6 +530,8 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             ),
             fail_high_water_puts: AtomicU32::new(0),
             pre_position_stall_ms: AtomicU64::new(0),
+            #[cfg(test)]
+            timeout_phase_observer: Mutex::new(None),
             store_tag,
         };
         store.load_meta().await?;
@@ -589,6 +600,10 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             |blob| blob,
         )
         .await
+        .map(|mut store| {
+            store.raw_io_qualified = true;
+            store
+        })
     }
 
     /// [`open_s3_with_prefixes`](Self::open_s3_with_prefixes) with the log's blob store wrapped
@@ -710,6 +725,7 @@ impl ObjectLogEngineStore<ManifestSequencer> {
         let store = Self {
             engine,
             blob,
+            raw_io_qualified: false,
             epochs: Arc::new(Mutex::new(HashMap::new())),
             high_water: Arc::new(Mutex::new(HashMap::new())),
             high_water_appends: Mutex::new(HashMap::new()),
@@ -727,6 +743,8 @@ impl ObjectLogEngineStore<ManifestSequencer> {
             ),
             fail_high_water_puts: AtomicU32::new(0),
             pre_position_stall_ms: AtomicU64::new(0),
+            #[cfg(test)]
+            timeout_phase_observer: Mutex::new(None),
             store_tag,
         };
         store.load_meta().await?;
@@ -897,10 +915,6 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         )
     }
 
-    fn catalog_key(&self) -> String {
-        format!("{}catalog.json", self.meta_prefix)
-    }
-
     fn definition_prefix(&self) -> String {
         format!("{}queue_definitions/", self.meta_prefix)
     }
@@ -934,18 +948,8 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
     }
 
     async fn load_meta(&self) -> EngineResult<()> {
-        // Read the retired aggregate catalog for backward-compatible reopen, then merge every
-        // per-queue authority record. New writes never update catalog.json: independent queues
+        // Every per-queue authority record is the definition source. Independent queues
         // therefore cannot erase one another through a stale read/modify/write cycle.
-        if let Some(bytes) = self
-            .blob
-            .get(&self.catalog_key())
-            .await
-            .map_err(store_err)?
-        {
-            let doc: CatalogDoc = serde_json::from_slice(&bytes).map_err(store_err)?;
-            *self.catalog.lock().expect("catalog mutex") = doc;
-        }
         let mut keys = self
             .blob
             .list(&self.definition_prefix())
@@ -1014,6 +1018,73 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             .await
     }
 
+    async fn publish_immutable_bytes(&self, key: &str, bytes: Vec<u8>) -> EngineResult<bool> {
+        self.publish_immutable_bytes_owned(key, bytes, None).await
+    }
+    async fn publish_immutable_bytes_owned(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        charge: Option<fireweed_engine::queue_admission::OwnedQueueBufferCharge>,
+    ) -> EngineResult<bool> {
+        struct Payload {
+            bytes: Vec<u8>,
+            _charge: Option<fireweed_engine::queue_admission::OwnedQueueBufferCharge>,
+        }
+        let payload = Payload {
+            bytes,
+            _charge: charge,
+        };
+        Ok(match &self.definition_authority {
+            DefinitionAuthority::Local { root } => {
+                struct Worker {
+                    root: std::path::PathBuf,
+                    key: String,
+                    payload: Payload,
+                }
+                let worker = Worker {
+                    root: root.clone(),
+                    key: key.to_owned(),
+                    payload,
+                };
+                tokio::task::spawn_blocking(move || {
+                    let worker = worker;
+                    publish_local_definition(&worker.root, &worker.key, &worker.payload.bytes)
+                })
+                .await
+                .map_err(|error| {
+                    EngineError::Storage(format!(
+                        "local definition publication worker failed: {error}"
+                    ))
+                })??
+            }
+            DefinitionAuthority::ProcessLocal => {
+                let _permit = self.definition_permit.lock().await;
+                if self.blob.get(key).await.map_err(store_err)?.is_some() {
+                    false
+                } else {
+                    self.blob
+                        .put(key, Bytes::from(payload.bytes))
+                        .await
+                        .map_err(store_err)?;
+                    true
+                }
+            }
+            DefinitionAuthority::S3CreateOnly { put } => {
+                put.put_if_absent(key, Bytes::from(payload.bytes)).await?
+            }
+            DefinitionAuthority::ConditionalCreateUnavailable => {
+                return Err(EngineError::Storage(
+                    "NativeConditionalWrite queue-definition authority is unavailable: the \
+                     configured BlobStore exposes overwrite-only put and cannot prove create-only \
+                     publication; use the local filesystem adapter or the S3 open path (which \
+                     issues If-None-Match: * PutObject for definitions)"
+                        .into(),
+                ));
+            }
+        })
+    }
+
     /// Atomically publish or read the durable first-writer definition for one queue.
     ///
     /// The returned winner is cached even when the caller later rejects it as incompatible.
@@ -1026,60 +1097,8 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
     ) -> EngineResult<CreateQueueOutcome> {
         let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         let key = self.definition_key(&shard);
-        // A definition found only in the retired aggregate catalog is still an existing durable
-        // winner. Publish that exact value into the immutable per-queue layout before considering
-        // the caller's candidate; migration must never let a later create rewrite legacy truth.
-        let legacy_winner = self
-            .catalog
-            .lock()
-            .expect("catalog")
-            .definitions
-            .iter()
-            .find(|existing| {
-                existing.tenant_id == definition.tenant_id
-                    && existing.queue_id == definition.queue_id
-            })
-            .cloned();
-        let publication = legacy_winner.clone().unwrap_or_else(|| definition.clone());
-        let bytes = serde_json::to_vec(&publication).map_err(store_err)?;
-        let physically_created = match &self.definition_authority {
-            DefinitionAuthority::Local { root } => {
-                let root = root.clone();
-                let key = key.clone();
-                tokio::task::spawn_blocking(move || publish_local_definition(&root, &key, &bytes))
-                    .await
-                    .map_err(|error| {
-                        EngineError::Storage(format!(
-                            "local definition publication worker failed: {error}"
-                        ))
-                    })??
-            }
-            DefinitionAuthority::ProcessLocal => {
-                let _permit = self.definition_permit.lock().await;
-                if self.blob.get(&key).await.map_err(store_err)?.is_some() {
-                    false
-                } else {
-                    self.blob
-                        .put(&key, Bytes::from(bytes))
-                        .await
-                        .map_err(store_err)?;
-                    true
-                }
-            }
-            DefinitionAuthority::S3CreateOnly { put } => {
-                put.put_if_absent(&key, Bytes::from(bytes)).await?
-            }
-            DefinitionAuthority::ConditionalCreateUnavailable => {
-                return Err(EngineError::Storage(
-                    "NativeConditionalWrite queue-definition authority is unavailable: the \
-                     configured BlobStore exposes overwrite-only put and cannot prove create-only \
-                     publication; use the local filesystem adapter or the S3 open path (which \
-                     issues If-None-Match: * PutObject for definitions)"
-                        .into(),
-                ));
-            }
-        };
-        let created = physically_created && legacy_winner.is_none();
+        let bytes = serde_json::to_vec(&definition).map_err(store_err)?;
+        let created = self.publish_immutable_bytes(&key, bytes).await?;
         let winner_bytes = self
             .blob
             .get(&key)
@@ -1102,6 +1121,17 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
     }
 }
 
+#[cfg(test)]
+type PublicationHook = Arc<dyn Fn(&Path, bool, bool) + Send + Sync>;
+#[cfg(test)]
+static PUBLICATION_HOOK: Mutex<Option<PublicationHook>> = Mutex::new(None);
+#[cfg(test)]
+fn publication_hook(path: &Path, created: bool, synced: bool) {
+    let hook = PUBLICATION_HOOK.lock().unwrap().clone();
+    if let Some(hook) = hook {
+        hook(path, created, synced);
+    }
+}
 fn publish_local_definition(root: &Path, key: &str, bytes: &[u8]) -> EngineResult<bool> {
     let final_path = root.join(key);
     let parent = final_path
@@ -1122,12 +1152,7 @@ fn publish_local_definition(root: &Path, key: &str, bytes: &[u8]) -> EngineResul
 
     let publish = std::fs::hard_link(&temp_path, &final_path);
     let created = match publish {
-        Ok(()) => {
-            std::fs::File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(store_err)?;
-            true
-        }
+        Ok(()) => true,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
         Err(error) => {
             let _ = std::fs::remove_file(&temp_path);
@@ -1136,7 +1161,22 @@ fn publish_local_definition(root: &Path, key: &str, bytes: &[u8]) -> EngineResul
             )));
         }
     };
+    #[cfg(test)]
+    publication_hook(&final_path, created, false);
     std::fs::remove_file(&temp_path).map_err(store_err)?;
+    // An EEXIST observer can otherwise outrun the winner's directory fsync.
+    // Sync every ancestor so freshly created directory links are durable too.
+    let mut directory = Some(parent);
+    while let Some(path) = directory {
+        std::fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(store_err)?;
+        #[cfg(test)]
+        if path == parent {
+            publication_hook(&final_path, created, true);
+        }
+        directory = path.parent();
+    }
     Ok(created)
 }
 
@@ -1238,39 +1278,14 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         self.fail_high_water_puts.store(count, Ordering::SeqCst);
     }
 
-    /// Group-commit path for ports that do not hold the per-queue admit permit
-    /// (BatchUpdate / upsert). Concurrent callers share one object PUT when
-    /// they overlap the engine linger.
+    /// Append one caller-owned command vector. Physical engine seals may contain
+    /// several callers, but each caller retains its own apply batch and debt.
+    /// The engine controls physical sealing through its flush configuration.
     pub async fn packed_append(
         &self,
         shard: QueueKey,
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
-    ) -> Result<PackedAppendOutcome, PackedAppendError> {
-        self.packed_append_owned(shard, commands, expected_epoch, None, false)
-            .await
-    }
-
-    /// Force-seal only this shard/epoch/lane group, charging exact envelope bytes.
-    pub async fn packed_append_force_seal(
-        &self,
-        shard: QueueKey,
-        commands: Vec<CommandEnvelope>,
-        expected_epoch: u64,
-        reservation_id: Option<u64>,
-    ) -> Result<PackedAppendOutcome, PackedAppendError> {
-        self.packed_append_owned(shard, commands, expected_epoch, reservation_id, true)
-            .await
-    }
-
-    /// Packed append that carries a reservation id so co-sealed followers transfer to the leader.
-    pub async fn packed_append_owned(
-        &self,
-        shard: QueueKey,
-        commands: Vec<CommandEnvelope>,
-        expected_epoch: u64,
-        reservation_id: Option<u64>,
-        force_seal: bool,
     ) -> Result<PackedAppendOutcome, PackedAppendError> {
         if commands.is_empty() {
             return Ok(PackedAppendOutcome {
@@ -1279,14 +1294,9 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 apply_published: ApplyPublish::already_done(),
             });
         }
-        let epoch = self
-            .load_epoch(&shard)
-            .await
-            .map_err(PackedAppendError::BeforePosition)?;
-        if epoch != expected_epoch {
-            return Err(PackedAppendError::BeforePosition(EngineError::EpochFenced));
-        }
-        let _ = (reservation_id, force_seal);
+        // produce_immediate validates the epoch under the metadata permit and
+        // the pre-position deadline. An eager load here would duplicate that
+        // I/O outside the budget and could hang before the timed path starts.
         let positions = self
             .produce_immediate(&shard, &commands, expected_epoch)
             .await?;
@@ -1310,6 +1320,29 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         if commands.is_empty() {
             return Ok(Vec::new());
         }
+        self.produce_payload_immediate(shard, expected_epoch, || {
+            let payload = Bytes::from(
+                fireweed_engine::command_codec::encode_log_batch(expected_epoch, commands)
+                    .map_err(|error| PackedAppendError::BeforePosition(store_err(error)))?,
+            );
+            let record_count = i32::try_from(commands.len()).map_err(|_| {
+                PackedAppendError::BeforePosition(EngineError::Invalid(
+                    "batch too large for object-log record_count",
+                ))
+            })?;
+            Ok((payload, record_count))
+        })
+        .await
+    }
+
+    // Encoding remains under the epoch-checked metadata permit. All payload
+    // formats share the same durable append and outcome classification.
+    async fn produce_payload_immediate(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+        encode: impl FnOnce() -> Result<(Bytes, i32), PackedAppendError>,
+    ) -> Result<Vec<CommandPosition>, PackedAppendError> {
         let trace_started = Instant::now();
         let pre_budget =
             Duration::from_millis(self.pre_position_timeout_ms.load(Ordering::Relaxed));
@@ -1320,11 +1353,15 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         let pre = async {
             let stall_ms = self.pre_position_stall_ms.load(Ordering::Relaxed);
             if stall_ms > 0 {
+                #[cfg(test)]
+                if let Some(observer) = self.timeout_phase_observer.lock().unwrap().as_ref() {
+                    let _ = observer.send(0); // Actual preparation future has been polled.
+                }
                 tokio::time::sleep(Duration::from_millis(stall_ms)).await;
             }
-            // Epoch is checked under the queue permit. The permit is dropped
-            // before the object PUT so another produce can join the engine seal.
-            // Independent queues already have their own permits.
+            // Legacy epoch validation is serialized under the queue permit.
+            // Native epoch/head validation occurs in sequencer publication.
+            // Drop the permit before object PUT so produces can join a seal.
             let wait_started = Instant::now();
             let metadata = permit.lock().await;
             self.lock_wait.record_append(wait_started.elapsed());
@@ -1335,19 +1372,17 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
             if epoch != expected_epoch {
                 return Err(PackedAppendError::BeforePosition(EngineError::EpochFenced));
             }
-            let payload = Bytes::from(
-                fireweed_engine::command_codec::encode_log_batch(expected_epoch, commands)
-                    .map_err(|error| PackedAppendError::BeforePosition(store_err(error)))?,
-            );
-            let record_count = i32::try_from(commands.len()).map_err(|_| {
-                PackedAppendError::BeforePosition(EngineError::Invalid(
-                    "batch too large for object-log record_count",
-                ))
-            })?;
+            let (payload, record_count) = encode()?;
+            if record_count <= 0 {
+                return Err(PackedAppendError::BeforePosition(EngineError::Invalid(
+                    "object-log record_count must be positive",
+                )));
+            }
             Ok((metadata, payload, record_count))
         };
         let remaining = pre_deadline.saturating_duration_since(Instant::now());
-        let (payload, record_count) = match tokio::time::timeout(remaining, pre).await {
+        let mut pre = Box::pin(pre);
+        let (payload, record_count) = match tokio::time::timeout(remaining, &mut pre).await {
             Ok(Ok((metadata, payload, record_count))) => {
                 // Drop the queue permit before the object PUT so another produce
                 // on this queue can join the engine's open seal.
@@ -1355,8 +1390,15 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 (payload, record_count)
             }
             Ok(Err(error)) => return Err(error),
-            Err(_) => return Err(PackedAppendError::before_timeout()),
+            Err(_) => {
+                #[cfg(test)]
+                if let Some(observer) = self.timeout_phase_observer.lock().unwrap().as_ref() {
+                    let _ = observer.send(1);
+                }
+                return Err(PackedAppendError::before_timeout());
+            }
         };
+        drop(pre);
         let _s3_produce_permit = if self.store_tag == "s3" {
             Some(
                 s3_concurrent_produce_limit()
@@ -1370,7 +1412,7 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
         let pre_us = trace_started.elapsed().as_micros();
         let bytes = payload.len();
         let started_unix_us = diagnostic_unix_us();
-        let mut post_phase = "produce";
+        let post_metadata_started = std::sync::atomic::AtomicBool::new(false);
         let produced = async {
             let produce_started = Instant::now();
             let outcome = self
@@ -1385,21 +1427,37 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                 )
                 .await
                 .map_err(|error| match error {
-                    // The partition's fence moved past this epoch; nothing was committed.
-                    object_log::ObjectLogError::Fenced { .. } => EngineError::EpochFenced,
-                    other => store_err(other),
+                    object_log::ObjectLogError::Fenced { .. } => {
+                        PackedAppendError::BeforePosition(EngineError::EpochFenced)
+                    }
+                    object_log::ObjectLogError::HeadRejected { expected, current } => {
+                        PackedAppendError::HeadRejected { expected, current }
+                    }
+                    other => PackedAppendError::PostPositionAmbiguous {
+                        shard: shard.clone(),
+                        reason: format!("{}; store={}", store_err(other), self.store_tag),
+                    },
                 })?;
             let produce_us = produce_started.elapsed().as_micros();
-            post_phase = "high-water metadata";
+            post_metadata_started.store(true, Ordering::Relaxed);
             let metadata_started = Instant::now();
-            let base = outcome.base_offset.ok_or_else(|| {
-                EngineError::Storage("sequenced produce missing base_offset".into())
-            })? as u64;
-            let positions: Vec<CommandPosition> = (0..commands.len() as u64)
+            let base =
+                outcome
+                    .base_offset
+                    .ok_or_else(|| PackedAppendError::PostPositionAmbiguous {
+                        shard: shard.clone(),
+                        reason: "sequenced produce missing base_offset".into(),
+                    })? as u64;
+            let positions: Vec<CommandPosition> = (0..record_count as u64)
                 .map(|i| CommandPosition::new(shard.clone(), expected_epoch, base + i))
                 .collect();
             if let Some(last) = positions.last() {
-                self.advance_high_water_held(shard, last).await?;
+                self.advance_high_water_held(shard, last)
+                    .await
+                    .map_err(|error| PackedAppendError::PostPositionAmbiguous {
+                        shard: shard.clone(),
+                        reason: format!("{error}; store={}", self.store_tag),
+                    })?;
             }
             if log_trace_enabled() {
                 eprintln!(
@@ -1408,20 +1466,25 @@ impl<S: Sequencer<Meta = ()> + 'static> ObjectLogEngineStore<S> {
                     self.store_tag,
                 );
             }
-            EngineResult::Ok(positions)
+            Ok::<_, PackedAppendError>(positions)
         };
-        match tokio::time::timeout(post_timeout, produced).await {
+        let mut produced = Box::pin(produced);
+        match tokio::time::timeout(post_timeout, &mut produced).await {
             Ok(Ok(positions)) => Ok(positions),
-            // A fenced commit assigned no offset, so the outcome is definite and the shard is
-            // not poisoned.
-            Ok(Err(EngineError::EpochFenced)) => {
-                Err(PackedAppendError::BeforePosition(EngineError::EpochFenced))
-            }
-            Ok(Err(error)) => Err(PackedAppendError::PostPositionAmbiguous {
-                shard: shard.clone(),
-                reason: format!("{error}; store={}", self.store_tag),
-            }),
+            Ok(Err(error)) => Err(error),
             Err(_) => {
+                let post_phase = if post_metadata_started.load(Ordering::Relaxed) {
+                    "high-water metadata"
+                } else {
+                    "produce"
+                };
+                #[cfg(test)]
+                if let Some(observer) = self.timeout_phase_observer.lock().unwrap().as_ref() {
+                    let _ = observer.send(if post_phase == "produce" { 2 } else { 3 });
+                }
+
+                drop(produced);
+
                 if log_trace_enabled() {
                     let post_us = trace_started.elapsed().as_micros().saturating_sub(pre_us);
                     eprintln!(
@@ -1845,7 +1908,7 @@ mod tests {
     use crate::async_projection_apply::AsyncProjectionApplyCoordinator;
     use object_log::FlushConfig;
 
-    fn temp_root(tag: &str) -> std::path::PathBuf {
+    pub(super) fn temp_root(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
             "fireweed-olog-{tag}-{}-{}",
             std::process::id(),
@@ -1860,7 +1923,7 @@ mod tests {
         }
     }
 
-    fn qdef() -> QueueDefinition {
+    pub(super) fn qdef() -> QueueDefinition {
         QueueDefinition {
             tenant_id: TenantId::new("t").unwrap(),
             queue_id: QueueId::new("q").unwrap(),
@@ -2094,30 +2157,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_catalog_definition_migrates_without_candidate_overwrite() {
-        let root = temp_root("legacy-catalog-migration");
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("fwmeta")).unwrap();
-        let durable = qdef();
-        std::fs::write(
-            root.join("fwmeta/catalog.json"),
-            serde_json::to_vec(&super::CatalogDoc {
-                definitions: vec![durable.clone()],
-            })
-            .unwrap(),
-        )
-        .unwrap();
-        let store = ObjectLogEngineStore::open_local(&root, zero_linger())
+    async fn shared_payload_append_preserves_fence_count_and_cold_replay() {
+        let root = temp_root("shared-payload");
+        let log = ObjectLogEngineStore::open_local(&root, zero_linger())
             .await
             .unwrap();
-        let mut candidate = durable.clone();
-        candidate.request_id_retention_ms += 1;
-
-        let outcome = store.create_or_read_definition(candidate).await.unwrap();
-        assert!(!outcome.created);
-        assert_eq!(outcome.definition, durable);
-
-        let _ = std::fs::remove_dir_all(&root);
+        let def = qdef();
+        let shard = QueueKey::new(def.tenant_id, def.queue_id);
+        log.ensure_shard(shard.clone()).await.unwrap();
+        let epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+        let encoded = std::sync::atomic::AtomicBool::new(false);
+        assert!(matches!(
+            log.produce_payload_immediate(&shard, epoch + 1, || {
+                encoded.store(true, Ordering::SeqCst);
+                Ok((bytes::Bytes::from_static(b"wrong epoch"), 1))
+            })
+            .await,
+            Err(PackedAppendError::BeforePosition(EngineError::EpochFenced))
+        ));
+        assert!(!encoded.load(Ordering::SeqCst));
+        assert!(matches!(
+            log.produce_payload_immediate(&shard, epoch, || Ok((bytes::Bytes::new(), 0)))
+                .await,
+            Err(PackedAppendError::BeforePosition(EngineError::Invalid(_)))
+        ));
+        let positions = log
+            .produce_payload_immediate(&shard, epoch, || {
+                Ok((bytes::Bytes::from_static(b"opaque resolved record"), 1))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            positions,
+            vec![CommandPosition::new(shard.clone(), epoch, 0)]
+        );
+        let next = log
+            .produce_payload_immediate(&shard, epoch, || {
+                Ok((bytes::Bytes::from_static(b"second payload"), 2))
+            })
+            .await
+            .unwrap();
+        assert_eq!(next.len(), 2);
+        assert_eq!(next[0].sequence, 1);
+        assert_eq!(next[1].sequence, 2);
+        drop(log);
+        let reopened = ObjectLogEngineStore::open_local(&root, zero_linger())
+            .await
+            .unwrap();
+        let plan = reopened
+            .engine
+            .plan_fetch(&super::partition_key(&shard), 0, 8, 65536, 4096)
+            .unwrap();
+        assert_eq!(plan.entries().len(), 2);
+        let first = reopened
+            .engine
+            .read_planned_batch(&plan, 0, 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.payload,
+            bytes::Bytes::from_static(b"opaque resolved record")
+        );
+        assert_eq!(plan.entries()[0].record_count, 1);
+        assert_eq!(plan.entries()[1].record_count, 2);
+        let raw = reopened
+            .blob
+            .get(&reopened.high_water_key(&shard))
+            .await
+            .unwrap()
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        // Persisted hints deliberately lag; actual durable EOF is authoritative.
+        assert_eq!(metadata["sequence"], 0);
+        let eof = reopened
+            .engine
+            .plan_fetch(&super::partition_key(&shard), 3, 8, 65536, 4096)
+            .unwrap();
+        assert!(eof.entries().is_empty());
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2280,8 +2398,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// fireweed-481d3e43: reopen must not overwrite sealed data objects (object-log v0.3.1).
-    /// Large multi-command frames (~20KiB) are the snorri transition-commit shape.
+    #[tokio::test]
+    async fn local_loser_syncs_directory_while_winner_is_paused_after_link() {
+        let root = temp_root("loser-fsync");
+        let key = "new/ancestors/identity.bin";
+        let expected_path = root.join(key);
+        let (linked_tx, linked_rx) = std::sync::mpsc::channel();
+        let (synced_tx, synced_rx) = std::sync::mpsc::channel();
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let gate = Arc::clone(&release);
+        *super::PUBLICATION_HOOK.lock().unwrap() = Some(Arc::new(move |path, created, synced| {
+            if path != expected_path {
+                return;
+            }
+            if created && !synced {
+                linked_tx.send(()).unwrap();
+                let (lock, cv) = &*gate;
+                let mut ready = lock.lock().unwrap();
+                while !*ready {
+                    ready = cv.wait(ready).unwrap();
+                }
+            }
+            if !created && synced {
+                synced_tx.send(()).unwrap();
+            }
+        }));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                *super::PUBLICATION_HOOK.lock().unwrap() = None;
+            }
+        }
+        let _reset = Reset;
+        let winner_root = root.clone();
+        let winner = tokio::task::spawn_blocking(move || {
+            super::publish_local_definition(&winner_root, key, b"winner")
+        });
+        let linked = linked_rx.recv_timeout(Duration::from_secs(5));
+        let loser_root = root.clone();
+        let loser =
+            std::thread::spawn(move || super::publish_local_definition(&loser_root, key, b"loser"));
+        let synced = synced_rx.recv_timeout(Duration::from_secs(5));
+        let (lock, cv) = &*release;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+        assert!(winner.await.unwrap().unwrap());
+        assert!(!loser.join().unwrap().unwrap());
+        linked.unwrap();
+        synced.unwrap();
+        assert_eq!(std::fs::read(root.join(key)).unwrap(), b"winner");
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn local_log_reopen_preserves_large_batches_across_process_boundary() {
         let root = std::env::temp_dir().join(format!(
@@ -2590,7 +2757,7 @@ mod tests {
         }
     }
 
-    fn pause_env(id: &str) -> CommandEnvelope {
+    pub(super) fn pause_env(id: &str) -> CommandEnvelope {
         CommandEnvelope {
             command_id: CommandId::new(id),
             request_id: None,
@@ -2743,18 +2910,31 @@ mod tests {
                 .unwrap(),
         );
         let mut queues = Vec::new();
-        let mut tasks = Vec::new();
+        let mut tasks = tokio::task::JoinSet::new();
+        let start = Arc::new(tokio::sync::Barrier::new(17));
+        let (progress, mut completed) = tokio::sync::mpsc::unbounded_channel();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         for queue in 0..4 {
             let definition = qdef_named(&format!("parallel-{queue}"));
             let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             log.create_or_read_definition(definition).await.unwrap();
             let epoch = log.acquire_epoch(shard.clone()).await.unwrap();
-            queues.push((shard.clone(), epoch));
+            queues.push((shard, epoch));
+        }
+        for (queue, (shard, epoch)) in queues.iter().enumerate() {
+            let epoch = *epoch;
             for worker in 0..4 {
                 let log = log.clone();
                 let shard = shard.clone();
-                tasks.push(tokio::spawn(async move {
+                let start = start.clone();
+                let progress = progress.clone();
+                let stop = stop.clone();
+                tasks.spawn(async move {
+                    start.wait().await;
                     for generation in 0..16 {
+                        if stop.load(Ordering::SeqCst) {
+                            break;
+                        }
                         let commands = (0..3)
                             .map(|entry| {
                                 pause_env(&format!("q{queue}-w{worker}-g{generation}-e{entry}"))
@@ -2776,17 +2956,63 @@ mod tests {
                                 .windows(2)
                                 .all(|pair| pair[0].sequence + 1 == pair[1].sequence)
                         );
+                        progress
+                            .send(((queue, worker, generation), tokio::time::Instant::now()))
+                            .unwrap();
                     }
-                }));
+                });
             }
         }
-        tokio::time::timeout(Duration::from_secs(30), async {
-            for task in tasks {
-                task.await.unwrap();
+        drop(progress);
+        start.wait().await;
+        // Correctness watchdog: reset only after a checked durable append.
+        // The former whole-workload stopwatch was an undeclared host throughput gate.
+        let mut deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let mut last = None;
+        let mut progress_open = true;
+        let mut failure = None;
+        while !tasks.is_empty() {
+            tokio::select! {
+                result = tasks.join_next() => {
+                    if let Some(Err(error)) = result {
+                        failure = Some(format!("concurrent append task failed: {error}"));
+                        break;
+                    }
+                }
+                progress = completed.recv(), if progress_open => {
+                    if let Some((position, finished_at)) = progress {
+                        last = Some(position);
+                        deadline = deadline.max(finished_at + Duration::from_secs(30));
+                    } else { progress_open = false; }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    // A completion and expiry can become ready in the same poll.
+                    while let Ok((position, finished_at)) = completed.try_recv() {
+                        last = Some(position);
+                        deadline = deadline.max(finished_at + Duration::from_secs(30));
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        failure = Some(format!("no durable append progress for 30s; last={last:?}"));
+                        break;
+                    }
+                }
             }
-        })
-        .await
-        .expect("concurrent append paths must make progress");
+        }
+        // Stop new generations and join started calls. This is not an SDK
+        // physical-drain proof or bounded termination of permanently stuck IO.
+        stop.store(true, Ordering::SeqCst);
+        if let Some(failure) = &failure {
+            eprintln!("{failure}; joining started calls before engine teardown");
+        }
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result {
+                failure.get_or_insert_with(|| format!("concurrent append task failed: {error}"));
+            }
+        }
+        if let Some(failure) = failure {
+            drop(log); // Finish engine teardown before reporting the test failure.
+            panic!("{failure}");
+        }
         for (shard, epoch) in &queues {
             let page = log.read_from(shard.clone(), None, 1000).await.unwrap();
             assert_eq!(page.entries.len(), 192);
@@ -2878,7 +3104,7 @@ mod tests {
         assert_eq!(
             production.matches(".produce_immediate(").count(),
             3,
-            "append, append_exclusive, and packed_append_owned must share produce_immediate"
+            "append, append_exclusive, and packed_append must share produce_immediate"
         );
         assert_eq!(
             production
@@ -3127,6 +3353,7 @@ mod tests {
             .unwrap(),
         );
         let coordinator = test_coordinator().await;
+        coordinator.pause();
         let own = qdef_named("own");
         let other = qdef_named("other");
         let own_shard = QueueKey::new(own.tenant_id.clone(), own.queue_id.clone());
@@ -3140,6 +3367,8 @@ mod tests {
 
         let follower_cmds = vec![pause_env("follower")];
         let driver_cmds = vec![pause_env("driver-a"), pause_env("driver-b")];
+        let expected_debt = super::exact_envelope_bytes(&follower_cmds).unwrap()
+            + super::exact_envelope_bytes(&driver_cmds).unwrap();
         let follower_res = coordinator
             .reserve(own_shard.clone(), &follower_cmds)
             .await
@@ -3148,7 +3377,7 @@ mod tests {
             .reserve(own_shard.clone(), &driver_cmds)
             .await
             .unwrap();
-        let other_res = coordinator
+        let _other_res = coordinator
             .reserve(other_shard.clone(), &[pause_env("other")])
             .await
             .unwrap();
@@ -3156,39 +3385,21 @@ mod tests {
         let other_log = Arc::clone(&log);
         let other_handle = tokio::spawn(async move {
             other_log
-                .packed_append_owned(
-                    other_shard,
-                    vec![pause_env("other")],
-                    other_epoch,
-                    Some(other_res.id()),
-                    false,
-                )
+                .packed_append(other_shard, vec![pause_env("other")], other_epoch)
                 .await
         });
         let follower_log = Arc::clone(&log);
         let follower_shard = own_shard.clone();
-        let follower_id = follower_res.id();
         let follower_handle = tokio::spawn(async move {
             follower_log
-                .packed_append_owned(
-                    follower_shard,
-                    follower_cmds,
-                    own_epoch,
-                    Some(follower_id),
-                    false,
-                )
+                .packed_append(follower_shard, follower_cmds, own_epoch)
                 .await
         });
         tokio::time::sleep(Duration::from_millis(5)).await;
 
         let started = Instant::now();
         let driver_outcome = log
-            .packed_append_force_seal(
-                own_shard.clone(),
-                driver_cmds,
-                own_epoch,
-                Some(driver_res.id()),
-            )
+            .packed_append(own_shard.clone(), driver_cmds, own_epoch)
             .await
             .unwrap();
         assert!(
@@ -3210,6 +3421,36 @@ mod tests {
             .apply_batch
             .expect("follower publishes its commands");
         assert_eq!(follower_batch.commands.len(), 1);
+        assert!(driver_batch.transferred_reservation_ids.is_empty());
+        assert!(follower_batch.transferred_reservation_ids.is_empty());
+        assert_eq!(driver_batch.positions, driver_outcome.positions);
+        assert_eq!(follower_batch.positions, follower_outcome.positions);
+        assert!(driver_batch.positions.iter().all(|p| p.queue == own_shard));
+        assert!(
+            follower_batch
+                .positions
+                .iter()
+                .all(|p| p.queue == own_shard)
+        );
+        assert!(
+            driver_batch
+                .positions
+                .iter()
+                .all(|p| !follower_batch.positions.contains(p))
+        );
+        // Publishing one caller must never release another caller's apply wait.
+        driver_outcome.apply_published.notify();
+        driver_outcome.apply_published.wait().await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                follower_outcome.apply_published.wait(),
+            )
+            .await
+            .is_err()
+        );
+        follower_outcome.apply_published.notify();
+        follower_outcome.apply_published.wait().await;
         assert_eq!(other_outcome.positions.len(), 1);
         coordinator
             .enqueue_reserved(driver_res, driver_batch.positions, driver_batch.commands)
@@ -3226,6 +3467,78 @@ mod tests {
         let snap = coordinator.snapshot(&own_shard).await;
         assert_eq!(snap.apply_queue_depth, 2);
         assert_eq!(snap.apply_lag_commands, 3);
+        assert_eq!(snap.apply_debt_bytes, expected_debt);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn before_position_rejection_releases_debt_and_allows_retry() {
+        let log = ObjectLogEngineStore::open_memory(zero_linger())
+            .await
+            .unwrap();
+        let coordinator = test_coordinator().await;
+        coordinator.pause();
+        let definition = qdef_named("pre-position-retry");
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        log.create_or_read_definition(definition).await.unwrap();
+        log.ensure_shard(shard.clone()).await.unwrap();
+        let stale_epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+        let epoch = log.acquire_epoch(shard.clone()).await.unwrap();
+        let commands = vec![pause_env("retry-a"), pause_env("retry-b")];
+        let expected_debt = super::exact_envelope_bytes(&commands).unwrap();
+        let reservation = coordinator.reserve(shard.clone(), &commands).await.unwrap();
+        let error = log
+            .packed_append(shard.clone(), commands.clone(), stale_epoch)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            PackedAppendError::BeforePosition(EngineError::EpochFenced)
+        );
+        assert_eq!(
+            AsyncProjectionApplyCoordinator::dispose_packed_append_error(
+                Some(&coordinator),
+                Some(reservation),
+                error,
+            )
+            .await,
+            EngineError::EpochFenced,
+        );
+        let snapshot = coordinator.snapshot(&shard).await;
+        assert_eq!(snapshot.apply_lag_commands, 0);
+        assert_eq!(snapshot.apply_debt_bytes, 0);
+        assert_eq!(snapshot.apply_queue_depth, 0);
+        assert!(snapshot.poison_reason.is_none());
+        assert!(
+            log.read_from(shard.clone(), None, 16)
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+
+        let reservation = coordinator.reserve(shard.clone(), &commands).await.unwrap();
+        let outcome = log
+            .packed_append(shard.clone(), commands, epoch)
+            .await
+            .unwrap();
+        let batch = outcome.apply_batch.unwrap();
+        assert_eq!(batch.positions, outcome.positions);
+        assert_eq!(batch.positions.len(), 2);
+        assert_eq!(batch.positions[1].sequence, batch.positions[0].sequence + 1);
+        assert!(batch.transferred_reservation_ids.is_empty());
+        coordinator
+            .enqueue_reserved(reservation, batch.positions, batch.commands)
+            .await
+            .unwrap();
+        let snapshot = coordinator.snapshot(&shard).await;
+        assert_eq!(snapshot.apply_lag_commands, 2);
+        assert_eq!(snapshot.apply_debt_bytes, expected_debt);
+        assert_eq!(snapshot.apply_queue_depth, 1);
+        assert!(snapshot.poison_reason.is_none());
+        assert_eq!(
+            log.read_from(shard, None, 16).await.unwrap().entries.len(),
+            2
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3248,7 +3561,7 @@ mod tests {
         let reservation = coordinator.reserve(shard.clone(), &commands).await.unwrap();
         log.fail_high_water_puts.store(1, Ordering::SeqCst);
         let error = log
-            .packed_append_force_seal(shard.clone(), commands, epoch, Some(reservation.id()))
+            .packed_append(shard.clone(), commands, epoch)
             .await
             .expect_err("high-water put_json failure is post-position");
         assert!(
@@ -3263,10 +3576,14 @@ mod tests {
             coordinator.reservation_outstanding(&reservation).await,
             "post-position failure must not cancel the reservation"
         );
-        coordinator
-            .latch_poison(shard.clone(), "high-water put_json failure".into())
-            .await;
+        AsyncProjectionApplyCoordinator::dispose_packed_append_error(
+            Some(&coordinator),
+            Some(reservation),
+            error,
+        )
+        .await;
         assert!(coordinator.snapshot(&shard).await.poison_reason.is_some());
+        assert_eq!(coordinator.snapshot(&shard).await.apply_lag_commands, 1);
         assert!(
             coordinator
                 .reserve(shard.clone(), &[pause_env("next")])
@@ -3324,8 +3641,7 @@ mod tests {
                 let shard = shard.clone();
                 let env = pause_env(&format!("{tag}-{i}"));
                 handles.push(tokio::spawn(async move {
-                    log.packed_append_owned(shard, vec![env], epoch, None, false)
-                        .await
+                    log.packed_append(shard, vec![env], epoch).await
                 }));
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -3334,8 +3650,7 @@ mod tests {
                 let shard = shard.clone();
                 let env = pause_env(&format!("{tag}-leader"));
                 handles.push(tokio::spawn(async move {
-                    log.packed_append_owned(shard, vec![env], epoch, None, true)
-                        .await
+                    log.packed_append(shard, vec![env], epoch).await
                 }));
             }
             let mut errors = Vec::new();
@@ -3351,14 +3666,8 @@ mod tests {
             let log = Arc::clone(&log);
             let shard = shard.clone();
             handles.push(tokio::spawn(async move {
-                log.packed_append_owned(
-                    shard,
-                    vec![pause_env(&format!("post-{i}"))],
-                    epoch,
-                    None,
-                    i == 2,
-                )
-                .await
+                log.packed_append(shard, vec![pause_env(&format!("post-{i}"))], epoch)
+                    .await
             }));
         }
         let mut post_errors = 0;

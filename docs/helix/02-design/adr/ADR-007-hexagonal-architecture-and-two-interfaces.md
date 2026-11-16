@@ -22,7 +22,7 @@ ddx:
 **ADR ID**: ADR-007
 **Title**: Hexagonal architecture and two interfaces (RESP + Rust library)
 **Status**: accepted (status updated 2026-07-05 — the migration this ADR specifies is built:
-service/client/kafka deleted; `fireweed-resp`, the `fireweed` facade, and `fireweed-server` shipped).
+service/client/kafka deleted; the retired RESP crate, the `fireweed` facade, and the retired server crate shipped).
 Partial supersessions: the "one shared projection" consequence was retracted by ADR-008 and the
 projection framing further refined by ADR-012 (composition axes) and ADR-013 (log single source of
 truth).
@@ -66,11 +66,11 @@ Structure:
   (auth/idempotency/fencing/pause/validation), and the `ReclaimDriver`.
 - **Driven adapters** (`fireweed-memory`, `-sqlite`, `-postgres`, `-objectlog`) implement the storage
   ports; classified by durability class (TD-007).
-- **Driving adapters** (`fireweed-resp`, `fireweed` library) and the **composition root**
-  (`fireweed-server`) are the only places that name concrete types.
+- **Driving adapters** (the retired RESP crate, `fireweed` library) and the **composition root**
+  (the retired server crate) are the only places that name concrete types.
 - A dependency-direction test forbids any domain→adapter edge.
 
-The migration is a **clean cutover**: `fireweed-service`, `fireweed-client`, and `fireweed-kafka` are
+The migration is a **clean cutover**: the retired service, `fireweed-client`, and `fireweed-kafka` are
 deleted; no stubs, legacy fallbacks, or compatibility shims survive (see the migration plan).
 
 ## Consequences

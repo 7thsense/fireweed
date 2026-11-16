@@ -3,10 +3,13 @@ ddx:
   id: storage-matrix-conformance-classes
   depends_on:
     - orthogonal-storage-matrix-brief
-    - storage-matrix-composition-inventory
+    - build-simple-queue-postgres-refactor
     - td-storage-architecture-backend-contracts
   status: accepted
 ---
+
+> Legacy qualification definition only. API-007, ADR-026, Architecture and the current queue refactor plan take precedence over every storage/interface/status statement below. PostgreSQL's API-007 public path exists; S3/Turso assembly, the single Snorri adapter cutover and full qualification remain pending. This retained legacy definition supports existing CI/release consumers; it is not current product qualification. The queue integration maintainer owns migration/removal of those consumers before deleting this fixture.
+
 
 # Storage matrix conformance by durability class (A / B)
 
@@ -17,7 +20,7 @@ may make, and the **CI job shapes** that produce evidence.
 **Normative sources**:
 [orthogonal-storage-matrix-brief](../02-design/orthogonal-storage-matrix-brief.md)
 §2.2–2.4, [TD-001](../02-design/technical-designs/TD-001-storage-architecture-backend-contracts.md)
-conformance classes, [composition inventory](storage-matrix-composition-inventory.md).
+conformance classes, [composition inventory](simple-queue-postgres-refactor-plan.md).
 
 This is Phase-3 **evidence orientation** for the matrix program: which suite
 obligations bind which cells, and what CI must exercise. It does **not** replace
@@ -50,8 +53,7 @@ cell remains `LogStore × ProjectionStore` with append → apply → acknowledge
 ## 2. Conformance capability claims (by class)
 
 Shared harness: `crates/fireweed-conformance` (`core_suite!`, `log_replay_suite!`,
-`durable_reconnect_suite!` / `relational_reconnect_suite!`,
-`eventual_apply_suite!`). Adapters compose the macros that match their cell.
+`durable_reconnect_suite!`, `eventual_apply_suite!`). Adapters compose the macros that match their cell.
 
 ### 2.1 Claim vocabulary
 
@@ -169,7 +171,7 @@ cargo test -p fireweed-objectlog -- --ignored   # only if suite documents S3-gat
 ### 3.3 Operator / release notes
 
 - Public support claims name **cells** with evidence on the release revision
-  (see `DEPLOYMENT-READINESS.md` and `public-preview-boundary.md`).
+  (see `public-preview-boundary.md`).
 - Class B cells in release notes carry an explicit durability disclaimer.
 - Class A claims require durable_log_replay (or documented relational-reconnect
   + log class where both apply) evidence for that cell — not “memory suite green”

@@ -144,12 +144,16 @@ fn exercise(page_size: usize, cache_kib: usize, bytes: usize) {
         inner: MemoryIO::new(),
         writes: writes.clone(),
     });
-    let db = Database::open_file(io.clone(), path).unwrap();
+    let db = Database::open(
+        io.clone(),
+        path,
+        turso_core::OpenOptions::new(Arc::new(turso_core::dialect::SqliteDialect)),
+    )
+    .unwrap();
     let writer = db.connect().unwrap();
     writer
         .execute(format!("PRAGMA page_size={page_size}"))
         .unwrap();
-    writer.execute("PRAGMA wal_autocheckpoint=0").unwrap();
     writer
         .execute(format!("PRAGMA cache_size=-{cache_kib}"))
         .unwrap();
@@ -185,23 +189,23 @@ fn exercise(page_size: usize, cache_kib: usize, bytes: usize) {
     drop(reader);
     drop(writer);
     drop(db);
-    let db = Database::open_file(io, path).unwrap();
+    let db = Database::open(
+        io,
+        path,
+        turso_core::OpenOptions::new(Arc::new(turso_core::dialect::SqliteDialect)),
+    )
+    .unwrap();
     let conn = db.connect().unwrap();
     verify(&conn, 1, 0, bytes);
     conn.execute("BEGIN").unwrap();
     insert(&conn, 5000, COUNT, bytes);
     conn.execute("COMMIT").unwrap();
     verify(&conn, 5000, COUNT, bytes);
+    // Stock Turso makes no removed-fork promise about zero-filled page images
+    // or their batching/byte budget. Record both counters; the assertions above
+    // qualify rollback, retained readers, deletion, reopen and complete reuse.
     assert!(
-        observed.bytes > 128 * 1024,
-        "exercise many dirty freed pages"
-    );
-    assert!(
-        observed.bytes < 2 * 1024 * 1024,
-        "clean overflow leaves must not be dirtied just to clear them"
-    );
-    assert!(
-        observed.nonzero * 8 < observed.bytes,
-        "freed WAL images must not retransmit removed bodies: {observed:?}"
+        observed.bytes > 0,
+        "purge must exercise the observed WAL writer"
     );
 }

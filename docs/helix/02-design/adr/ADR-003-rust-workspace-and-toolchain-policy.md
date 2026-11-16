@@ -42,7 +42,7 @@ Rust toolchain, pinned in `rust-toolchain.toml`.
 
 The workspace crates (as amended by ADR-007's hexagonal cutover, ADR-009's
 encapsulated surface, and ADR-012's composition; the original table named
-`fireweed-storage`/`fireweed-service`/`fireweed-client`, all since dissolved or
+`fireweed-storage`/the retired service/`fireweed-client`, all since dissolved or
 deleted) are:
 
 | Crate | Purpose |
@@ -52,16 +52,16 @@ deleted) are:
 | `fireweed-projection` | Shared in-memory projection state machine (`ProjectionData`). |
 | `fireweed-conformance` | Backend-parameterized conformance harness (the behavioral contract). |
 | `fireweed-memory` / `fireweed-sqlite` / `fireweed-postgres` / `fireweed-objectlog` | Driven adapters per backend substrate. |
-| `fireweed-resp` | RESP wire driving adapter (TD-006). |
+| the retired RESP crate | RESP wire driving adapter (TD-006). |
 | `fireweed` | The library facade — the only published crate (ADR-009). |
-| `fireweed-server` | Composition root binary (DI, ReclaimDriver ticker, ownership renewal, health probe). |
+| the retired server crate | Composition root binary (DI, ReclaimDriver ticker, ownership renewal, health probe). |
 
 The crate graph must flow inward (adapters → projection → engine → core;
 enforced by a dependency-direction test):
 
 ```text
-fireweed-server  -> all adapters, fireweed, fireweed-engine, fireweed-core
-fireweed / fireweed-resp -> fireweed-engine, fireweed-core (+ feature-gated adapters for fireweed)
+the retired server crate  -> all adapters, fireweed, fireweed-engine, fireweed-core
+fireweed / the retired RESP crate -> fireweed-engine, fireweed-core (+ feature-gated adapters for fireweed)
 adapters (memory/sqlite/postgres/objectlog) -> fireweed-projection, fireweed-engine, fireweed-core
 fireweed-projection -> fireweed-engine, fireweed-core
 fireweed-engine   -> fireweed-core

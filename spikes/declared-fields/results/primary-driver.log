@@ -1,0 +1,17 @@
+== ingest primary-a: layout=a n_queues=3 rows_per_queue=200000 ==
+== ingest primary-a done ==
+== bench primary-a: layout=a touch_queue=1 ==
+== bench primary-a done ==
+== ingest primary-b: layout=b n_queues=3 rows_per_queue=200000 ==
+== ingest primary-b done ==
+== bench primary-b: layout=b touch_queue=1 ==
+== bench primary-b done ==
+== ingest primary-c: layout=c n_queues=3 rows_per_queue=200000 ==
+== ingest primary-c done ==
+== bench primary-c: layout=c touch_queue=1 ==
+== bench primary-c done ==
+== ingest primary-d: layout=d n_queues=3 rows_per_queue=200000 ==
+== ingest primary-d done ==
+== bench primary-d: layout=d touch_queue=1 ==
+== bench primary-d done ==
+done

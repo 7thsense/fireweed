@@ -38,8 +38,6 @@ const ADAPTERS: &[&str] = &[
     "fireweed-postgres",
     "fireweed-objectlog",
     "fireweed-turso",
-    "fireweed-resp",
-    "fireweed-server",
     "fireweed", // the library facade (a driving adapter)
 ];
 

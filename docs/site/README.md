@@ -22,11 +22,10 @@ xdg-open docs/site/index.html   # or open / start as appropriate
 | `index.html` | Product home |
 | `why.html` | Fireweed vs stream |
 | `concepts.html` | Technical specification |
-| `get-started.html` | Embed + RESP paths |
+| `get-started.html` | Embed path |
 | `examples/` | Gallery + per-example pages |
 | `examples/src/*.rs` | Provenance-tracked excerpts |
-| `api/` | Rust / RESP / types |
-| `deploy/` | Operator console |
+| `api/` | Rust / types |
 | `support.html` | Support matrix |
 | `contribute.html` | Issues-only policy |
 | `_meta/` | site version + example manifest |
@@ -44,11 +43,6 @@ python3 scripts/site/check_links.py
 Committed HTML is the source of truth for browsing offline. Re-run the
 scripts after editing content in `scripts/site/render_site.py` or the example
 manifest.
-
-## CI
-
-`scripts/ci/deployment-release-gate.sh` invokes the link and provenance checks
-as part of `validate_docs_microsite`.
 
 ## GitHub Pages deployment
 

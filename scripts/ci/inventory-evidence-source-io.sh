@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 mode="${1:---check}"
-baseline="${repo_root}/docs/helix/04-build/evidence-source-io-baseline.json"
+baseline="${repo_root}/scripts/ci/manifests/evidence-source-io-baseline.json"
 
 case "${mode}" in
     --check|--self-test|--write) ;;
@@ -50,7 +50,7 @@ def read_text(relative: str) -> str:
 tracked = set(git_files())
 identity_path = "scripts/public-identity-allowlist.json"
 generator_path = "scripts/ci/inventory-evidence-source-io.sh"
-baseline_path = "docs/helix/04-build/evidence-source-io-baseline.json"
+baseline_path = "scripts/ci/manifests/evidence-source-io-baseline.json"
 identity = json.loads(read_text(identity_path))
 historical = sorted((
     entry
@@ -188,8 +188,6 @@ def groups_for(path: str, body: str) -> list[str]:
         groups.add("e3")
     if "matrix" in lower_path or marker_patterns["matrix"].search(body):
         groups.add("matrix")
-    if path.startswith("crates/fireweed-server/"):
-        groups.add("server")
     if "public-identity" in lower_path or "public_identity" in lower_path:
         groups.add("identity")
     if path.startswith("crates/fireweed-conformance/"):
@@ -425,7 +423,7 @@ def validate() -> None:
         <= operations,
         f"missing source-I/O classes: {sorted({'reader', 'writer', 'deleter', 'constant', 'source_guard', 'public_identity'} - operations)}",
     )
-    for group in ("release", "e3", "matrix", "server", "identity"):
+    for group in ("release", "e3", "matrix", "identity"):
         require(
             any(group in surface["groups"] and "reader" in surface["operations"] for surface in surfaces),
             f"missing {group} reader inventory",
@@ -436,12 +434,7 @@ def validate() -> None:
         f"epoch-zero evidence writers remain: {[(row['path'], row['symbol']) for row in epoch_zero_writers]}",
     )
 
-    required_direct_writers = {"write_evidence", "atomic_write_evidence"}
     call_symbols = {row["symbol"] for row in evidence_call_graph}
-    require(
-        required_direct_writers <= call_symbols,
-        f"missing typed evidence writer call graph: {sorted(required_direct_writers - call_symbols)}",
-    )
     require(
         "evidence_dir" not in call_symbols,
         "legacy untyped evidence_dir helper remains in the evidence call graph",

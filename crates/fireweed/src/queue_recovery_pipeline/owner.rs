@@ -1,0 +1,1328 @@
+//! One loop per queue; every operation, read or write, goes through it.
+//!
+//! The loop owns the queue's position, its storage fence, its lease deadline
+//! and its own local projection database, and keeps `P = fold(log[0, p))`.
+//! A healthy iteration makes no object-store read. Its mutations are planned
+//! one after another against one open projection transaction, each staging its
+//! entry into it, so a later request sees the earlier ones. The iteration then
+//! makes one conditional publish of one record carrying every entry, commits the
+//! transaction, and answers each request from the projection. Reads are served
+//! from the projection. Exit is the only failure path: it rolls the transaction
+//! back. Entry always rebuilds from the log under a strictly newer fence.
+use super::*;
+use fireweed_core::OwnerId;
+use fireweed_engine::{
+    AcquireOutcome, AsyncQueueControlPlane, Clock, LeaseState, QueueKey,
+    queue_log_record::{
+        OwnedQueueEntry, OwnedQueueLogRecord, QueueLogPayload, QueueLogRecordView,
+        checked_entries_record_len, encode_checked_entries_record, encode_checked_retention,
+    },
+};
+use fireweed_objectlog::queue_native_log::{
+    QueueNativeNamespace, QueueNativeNamespaceIdentity, QueueNativeSubmit, QueueNativeWriter,
+};
+use fireweed_turso::queue_projection::{QueueBatch, QueueProjection};
+use futures::future::BoxFuture;
+use projection_files::TenureProjection;
+use std::{collections::VecDeque, time::Duration};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+
+/// An operation whose own execution leaves owner state this many times fails.
+const MAX_ATTEMPTS: u32 = 3;
+/// Most records one read run asks for during entry. A run also ends at a leaf
+/// of the log's index, so this is a ceiling, not the usual run.
+const ENTRY_RUN_RECORDS: u64 = 256;
+/// Payload bytes one read run takes during entry, unless one record is larger.
+const ENTRY_RUN_BYTES: u64 = 8 << 20;
+
+/// Everything a pipeline needs to own queues by lease. Every store has one.
+#[derive(Clone)]
+pub struct QueueOwnership {
+    control: Arc<dyn AsyncQueueControlPlane>,
+    owner: OwnerId,
+    clock: Arc<dyn Clock>,
+    lease_clock: Arc<dyn LeaseClock>,
+    ttl: Duration,
+    skew: Duration,
+}
+impl QueueOwnership {
+    /// `clock` stamps control-plane calls. `lease_clock` measures deadlines and
+    /// must count all elapsed time. `ttl` is the control plane's lease duration;
+    /// the skew allowance is `ttl / 5`. The control-plane owner is `owner` plus a
+    /// random suffix, unique per handle: the control plane re-affirms a live lease
+    /// for the same owner at once, which would let a restarted process skip the
+    /// wait while the old one still believes its deadline.
+    pub fn new(
+        control: Arc<dyn AsyncQueueControlPlane>,
+        owner: OwnerId,
+        clock: Arc<dyn Clock>,
+        lease_clock: Arc<dyn LeaseClock>,
+        ttl: Duration,
+    ) -> QueueResult<Self> {
+        let skew = ttl / 5;
+        if skew.is_zero() {
+            return Err(QueueError::Invalid("lease ttl is too short".into()));
+        }
+        let suffix = fireweed_engine::generate_query_lease_token()
+            .map_err(|error| unknown(&error.to_string()))?;
+        let owner = OwnerId::new(format!("{}-{}", owner.as_str(), suffix.as_str()))
+            .map_err(|error| QueueError::Invalid(error.to_string()))?;
+        Ok(Self {
+            control,
+            owner,
+            clock,
+            lease_clock,
+            ttl,
+            skew,
+        })
+    }
+    /// Replace the skew allowance. Zero is for ownership that cannot be skewed
+    /// against another process: tests that drive a manual lease clock, and a
+    /// handle whose control plane lives in its own process.
+    #[cfg(any(test, feature = "s3-turso"))]
+    pub(crate) fn with_skew(mut self, skew: Duration) -> Self {
+        self.skew = skew;
+        self
+    }
+    fn stamp(&self) -> fireweed_core::UtcTimestamp {
+        self.clock.now()
+    }
+}
+
+/// Stall points tests use to advance their manual lease clock.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Stage {
+    BatchTaken,
+    BeforeAppend,
+    AfterRead,
+    /// One run of the rebuild has been applied.
+    RebuildRun,
+}
+
+/// Leave owner state: drop the projection, forget the position and fence, and
+/// run every unacknowledged operation again after re-entry.
+pub(super) struct Exit;
+
+/// Map a store or projection error that cannot be classified to `Exit`;
+/// everything else is a result for the caller.
+pub(super) fn settle<T>(result: QueueResult<T>) -> Result<QueueResult<T>, Exit> {
+    match result {
+        Err(QueueError::OutcomeUnknown(_)) => Err(Exit),
+        other => Ok(other),
+    }
+}
+
+pub(super) struct Genesis {
+    pub epoch: u64,
+    pub definition: Vec<u8>,
+    pub cursor_secret: [u8; 32],
+}
+/// Position, fence and genesis authority of one owned queue.
+pub(super) struct Tenure {
+    lease_epoch: u64,
+    /// The queue's namespace, once it exists. Bound to each operation with no I/O.
+    identity: Option<QueueNativeNamespaceIdentity>,
+    /// The storage fence taken at entry or at provisioning. It holds no charge
+    /// of any operation, so it lives as long as the tenure.
+    writer: Option<QueueNativeWriter>,
+    /// Writer epoch: the storage fence taken at entry.
+    pub epoch: u64,
+    pub next_offset: u64,
+    pub insertion_sequence: u64,
+    pub historical_epoch: u64,
+    pub genesis: Option<Genesis>,
+    deadline: Duration,
+    renew_at: Duration,
+    /// This queue's projection database. Ending the tenure closes it and deletes
+    /// its files.
+    projection: TenureProjection,
+    /// Store time at which the next cleanup pass is offered, `i64::MIN` until
+    /// the first operation of the tenure fixes it.
+    retention_due_at: i64,
+}
+impl Tenure {
+    pub(super) fn projection(&self) -> &Arc<QueueProjection> {
+        self.projection.get()
+    }
+    pub(super) fn namespace(
+        &self,
+        p: &QueueRecoveryPipeline,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<QueueNativeNamespace> {
+        let identity = self
+            .identity
+            .as_ref()
+            .ok_or_else(|| unknown("queue namespace is not bound"))?;
+        p.log.rebind(identity, job)
+    }
+    /// Take the fence that provisioning acquired.
+    pub(super) fn install(
+        &mut self,
+        identity: QueueNativeNamespaceIdentity,
+        writer: QueueNativeWriter,
+    ) {
+        self.epoch = writer.epoch();
+        self.identity = Some(identity);
+        self.writer = Some(writer);
+    }
+    pub(super) fn has_writer(&self) -> bool {
+        self.writer.is_some()
+    }
+
+    pub(super) fn point(&self) -> (u64, u64, u64) {
+        (
+            self.next_offset,
+            self.insertion_sequence,
+            self.historical_epoch,
+        )
+    }
+    pub(super) fn genesis_record(
+        &self,
+        p: &QueueRecoveryPipeline,
+        address: &QueueAddress,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<fireweed_engine::queue_log_record::OwnedQueueLogRecord> {
+        let genesis = self.genesis.as_ref().ok_or(QueueError::QueueNotFound)?;
+        let definition = AdmittedQueueDefinition::from_raw(&genesis.definition, job)?;
+        encode_checked_genesis(
+            genesis.epoch,
+            address,
+            &definition,
+            &genesis.cursor_secret,
+            p.hard_record_bytes,
+            job,
+        )
+    }
+    /// Advance the position past one record that is already in the projection.
+    fn observe(&mut self, view: &QueueLogRecordView<'_>, offset: u64) -> QueueResult<()> {
+        if offset != self.next_offset {
+            return Err(unknown("record offset differs from owned position"));
+        }
+        match view.payload() {
+            QueueLogPayload::Genesis(genesis) => {
+                if offset != 0 {
+                    return Err(unknown("genesis is not the first record"));
+                }
+                self.genesis = Some(Genesis {
+                    epoch: view.epoch(),
+                    definition: genesis.definition_bytes().to_vec(),
+                    cursor_secret: *genesis.cursor_secret(),
+                });
+                self.insertion_sequence = 0;
+            }
+            QueueLogPayload::Entries(entries) => {
+                self.insertion_sequence = entries.last().frame().summary().final_sequence;
+            }
+            // A cleanup pass moves no insertion sequence.
+            QueueLogPayload::Retention(_) => {}
+            // The native pipeline writes and reads only genesis, entry lists and
+            // retention.
+            QueueLogPayload::Publication(_) | QueueLogPayload::Claim(_) => {
+                return Err(unknown("record is not an entry list"));
+            }
+        }
+        self.historical_epoch = view.epoch();
+        self.next_offset = offset.checked_add(1).ok_or(QueueError::TooLarge)?;
+        Ok(())
+    }
+    /// Publish the genesis conditionally on the fence and the exact expected
+    /// offset, then apply the same bytes to the projection. Genesis is alone in
+    /// its record, so it does not go through a batch. Anything but `Stored` is
+    /// `Exit`.
+    pub(super) async fn publish(
+        &mut self,
+        p: &QueueRecoveryPipeline,
+        record: OwnedQueueLogRecord,
+        expected_head: u64,
+        job: &Arc<QueueReservation>,
+    ) -> Result<u64, Exit> {
+        let frozen = OwnedQueueLogRecord::from_admitted_bytes(
+            bytes::Bytes::copy_from_slice(record.bytes()),
+            job.owned_buffer((record.bytes().len() as u64) * 4 + 4096)
+                .map_err(|_| Exit)?,
+            job,
+        )
+        .map_err(|_| Exit)?;
+        self.append(p, &record, expected_head, job).await?;
+        drop(record);
+        self.apply(p, frozen, expected_head, job)
+            .await
+            .map_err(|_| Exit)
+    }
+    /// Offer the queue one cleanup pass at store time `at`: one logged
+    /// `Retention` record, alone in its record, applied to the projection once it
+    /// is durable. Returns the rows it removed. Anything but a stored record is
+    /// `Exit`, as for any other publish.
+    async fn retire(
+        &mut self,
+        p: &QueueRecoveryPipeline,
+        address: &QueueAddress,
+        at: i64,
+        job: &Arc<QueueReservation>,
+    ) -> Result<u64, Exit> {
+        let genesis = self.genesis.as_ref().ok_or(Exit)?;
+        let definition =
+            AdmittedQueueDefinition::from_raw(&genesis.definition, job).map_err(|_| Exit)?;
+        let record = encode_checked_retention(
+            self.epoch,
+            address,
+            &definition,
+            at,
+            u64::from(fireweed_engine::queue_retention::RETENTION_BUDGET_ROWS),
+            p.hard_record_bytes,
+            job,
+        )
+        .map_err(|_| Exit)?;
+        let offset = self.next_offset;
+        self.publish(p, record, offset, job).await
+    }
+    /// Publish one record of staged entries, then make the staged transaction
+    /// the projection. The projection changes only after the record is durable:
+    /// any failure rolls it back and is `Exit`.
+    pub(super) async fn publish_batch(
+        &mut self,
+        p: &QueueRecoveryPipeline,
+        staging: Batch,
+    ) -> Result<(), Exit> {
+        let Batch {
+            projection,
+            entries,
+            first_job,
+            ..
+        } = staging;
+        let (Some(projection), Some(job)) = (projection, first_job) else {
+            return Err(Exit);
+        };
+        let offset = self.next_offset;
+        let published = async {
+            let record =
+                encode_checked_entries_record(self.epoch, &entries, p.hard_record_bytes, &job)
+                    .map_err(|_| Exit)?;
+            self.append(p, &record, offset, &job).await?;
+            self.check(&record, offset).map_err(|_| Exit)
+        }
+        .await;
+        match published {
+            Ok(()) => projection
+                .commit(offset, self.epoch, &p.workers)
+                .await
+                .map_err(|_| Exit),
+            Err(exit) => {
+                projection.rollback(&p.workers).await;
+                Err(exit)
+            }
+        }
+    }
+    /// Append the record conditionally on the fence and the exact expected
+    /// offset. Only a stored direct successor is success.
+    async fn append(
+        &mut self,
+        p: &QueueRecoveryPipeline,
+        record: &OwnedQueueLogRecord,
+        expected_head: u64,
+        job: &Arc<QueueReservation>,
+    ) -> Result<(), Exit> {
+        if expected_head != self.next_offset {
+            return Err(Exit);
+        }
+        let epoch = record.view().map_err(|_| Exit)?.epoch();
+        if epoch != self.epoch {
+            return Err(Exit);
+        }
+        let namespace = self.namespace(p, job).map_err(|_| Exit)?;
+        let writer = self.writer.as_mut().ok_or(Exit)?;
+        if writer.epoch() != epoch || writer.next_offset() != expected_head {
+            return Err(Exit);
+        }
+        #[cfg(test)]
+        p.stage(Stage::BeforeAppend);
+        let publication = writer
+            .prepare_record(&p.log, &namespace, record, job)
+            .await
+            .map_err(|_| Exit)?;
+        let submitted = p.log.submit(&publication).await;
+        #[cfg(test)]
+        let submitted = if p
+            .lose_append_reply
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            assert!(matches!(submitted, Ok(QueueNativeSubmit::Stored(_))));
+            // The real publish completed; suppress only its returned classification.
+            Err(unknown("injected lost durable append reply"))
+        } else {
+            submitted
+        };
+        #[cfg(test)]
+        p.published
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Only a stored direct successor is success. A conflict, an error or any
+        // other head leaves owner state.
+        let Ok(QueueNativeSubmit::Stored(stored)) = submitted else {
+            return Err(Exit);
+        };
+        if stored.epoch() != epoch || stored.bounds().1 != expected_head + 1 {
+            return Err(Exit);
+        }
+        let advanced = p
+            .log
+            .advance(writer, &publication)
+            .await
+            .map_err(|_| Exit)?;
+        if advanced != stored {
+            return Err(Exit);
+        }
+        Ok(())
+    }
+    pub(super) async fn apply(
+        &mut self,
+        p: &QueueRecoveryPipeline,
+        record: fireweed_engine::queue_log_record::OwnedQueueLogRecord,
+        offset: u64,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<u64> {
+        self.check(&record, offset)?;
+        let applied = self
+            .projection()
+            .apply(record, offset, job, &p.workers)
+            .await?;
+        Ok(applied.removed)
+    }
+    /// Verify the record and advance the position past it.
+    pub(super) fn check(
+        &mut self,
+        record: &fireweed_engine::queue_log_record::OwnedQueueLogRecord,
+        offset: u64,
+    ) -> QueueResult<()> {
+        let checked = record.checked()?;
+        let view = checked.view();
+        if view.epoch() > self.epoch {
+            return Err(unknown("record epoch mismatch"));
+        }
+        self.observe(view, offset)
+    }
+}
+
+/// What staging one mutation into an iteration's batch came to.
+pub(super) enum Staged {
+    /// Its entries, if any, are staged. Answer it from the projection after the
+    /// batch commits.
+    Pending,
+    /// A definite rejection. Nothing was staged for it and it is answered now.
+    Rejected(QueueError),
+    /// The record has no room for its next entry. It, and every operation after
+    /// it, stays queued. `progressed` says some of its entries are staged.
+    Full { progressed: bool },
+}
+/// What `Batch::stage` did with one planned entry.
+pub(super) enum StagedEntry {
+    Staged,
+    Full,
+    /// The entry cannot fit a record even alone.
+    TooLarge,
+}
+/// The mutations of one loop iteration, staged into one projection transaction
+/// and bound for one log record.
+pub(super) struct Batch {
+    projection: Option<QueueBatch>,
+    entries: Vec<OwnedQueueEntry>,
+    /// The insertion sequence after the staged entries.
+    sequence: Option<u64>,
+    first_job: Option<Arc<QueueReservation>>,
+}
+impl Batch {
+    fn new() -> Self {
+        Self {
+            projection: None,
+            entries: Vec::new(),
+            sequence: None,
+            first_job: None,
+        }
+    }
+    fn has_entries(&self) -> bool {
+        !self.entries.is_empty()
+    }
+    /// Where the projection stands for planning: the committed offset and epoch,
+    /// and the sequence after everything staged so far.
+    pub(super) fn point(&self, t: &Tenure) -> (u64, u64, u64) {
+        let (next, sequence, epoch) = t.point();
+        (next, self.sequence.unwrap_or(sequence), epoch)
+    }
+    /// The open projection transaction, begun on first use.
+    pub(super) async fn host(
+        &mut self,
+        p: &QueueRecoveryPipeline,
+        t: &Tenure,
+    ) -> Result<&mut QueueBatch, Exit> {
+        if self.projection.is_none() {
+            self.projection = Some(
+                t.projection()
+                    .begin_batch(&p.workers)
+                    .await
+                    .map_err(|_| Exit)?,
+            );
+        }
+        self.projection.as_mut().ok_or(Exit)
+    }
+    /// Stage an entry the planner produced from a record, unless the record
+    /// would then exceed the hard byte bound. Planning has no side effects, so
+    /// declining it needs no undo.
+    pub(super) async fn stage(
+        &mut self,
+        p: &QueueRecoveryPipeline,
+        t: &Tenure,
+        record: OwnedQueueLogRecord,
+        expected_head: u64,
+        job: &Arc<QueueReservation>,
+    ) -> Result<StagedEntry, Exit> {
+        if expected_head != t.next_offset {
+            return Err(Exit);
+        }
+        let entry = record.into_entry().map_err(|_| Exit)?;
+        let size = checked_entries_record_len(
+            self.entries
+                .iter()
+                .chain(std::iter::once(&entry))
+                .map(|entry| entry.bytes().len() as u64),
+        )
+        .map_err(|_| Exit)?;
+        if size > p.hard_record_bytes {
+            return Ok(if self.entries.is_empty() {
+                // Planners are bounded by `planner_bound`, so a planned record
+                // fits alone; this is a definite refusal, never reached.
+                #[cfg(test)]
+                p.lone_too_large
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                StagedEntry::TooLarge
+            } else {
+                StagedEntry::Full
+            });
+        }
+        let final_sequence = entry
+            .view()
+            .map_err(|_| Exit)?
+            .frame()
+            .summary()
+            .final_sequence;
+        let projection = self.projection.as_mut().ok_or(Exit)?;
+        projection
+            .stage(&entry, t.epoch, t.next_offset, job, &p.workers)
+            .await
+            .map_err(|_| Exit)?;
+        #[cfg(test)]
+        p.staged.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.sequence = Some(final_sequence);
+        self.first_job.get_or_insert_with(|| Arc::clone(job));
+        self.entries.push(entry);
+        Ok(StagedEntry::Staged)
+    }
+    /// Discard the open transaction, if any, and release the writer.
+    async fn rollback(self, p: &QueueRecoveryPipeline) {
+        if let Some(projection) = self.projection {
+            projection.rollback(&p.workers).await;
+        }
+    }
+}
+
+/// One operation as the loop sees it.
+pub(super) trait QueueOp: Send {
+    fn mutation(&self) -> bool;
+    /// Runs in an iteration of its own, never in a batch.
+    fn solo(&self) -> bool;
+    fn job(&self) -> &Arc<QueueReservation>;
+    fn clock(&self) -> &Arc<dyn Clock>;
+    fn attempts(&mut self) -> &mut u32;
+    /// Plan a mutation against the batch and stage its entries.
+    fn stage<'a>(
+        &'a mut self,
+        p: &'a QueueRecoveryPipeline,
+        t: &'a Tenure,
+        batch: &'a mut Batch,
+    ) -> BoxFuture<'a, Result<Staged, Exit>>;
+    /// Answer from the projection; for a mutation, once its batch committed.
+    fn run<'a>(
+        &'a mut self,
+        p: &'a QueueRecoveryPipeline,
+        t: &'a mut Tenure,
+    ) -> BoxFuture<'a, Result<(), Exit>>;
+    /// Deliver the stored result.
+    fn ack(self: Box<Self>);
+    fn fail(self: Box<Self>, error: QueueError);
+}
+
+/// The request-specific part of an operation.
+pub(super) trait Plan: Send + Sync + 'static {
+    type Output: Send + 'static;
+    const MUTATION: bool;
+    /// Provisioning writes the genesis, which is alone in its record.
+    const SOLO: bool = false;
+    fn address(&self) -> &QueueAddress;
+    /// Plan against the batch's staged state and stage the entries. A mutation
+    /// overrides this; nothing else stages.
+    fn stage<'a>(
+        &'a self,
+        _p: &'a QueueRecoveryPipeline,
+        _t: &'a Tenure,
+        _batch: &'a mut Batch,
+        _limits: QueueLimits,
+        _clock: &'a Arc<dyn Clock>,
+        _job: &'a Arc<QueueReservation>,
+    ) -> BoxFuture<'a, Result<Staged, Exit>> {
+        Box::pin(async { Ok(Staged::Pending) })
+    }
+    /// Answer from the projection. For a mutation this runs after its batch
+    /// committed; for a provision it also publishes.
+    fn run<'a>(
+        &'a self,
+        p: &'a QueueRecoveryPipeline,
+        t: &'a mut Tenure,
+        limits: QueueLimits,
+        clock: &'a Arc<dyn Clock>,
+        job: &'a Arc<QueueReservation>,
+    ) -> BoxFuture<'a, Result<QueueResult<Self::Output>, Exit>>;
+}
+struct Op<P: Plan> {
+    plan: P,
+    limits: QueueLimits,
+    clock: Arc<dyn Clock>,
+    job: Arc<QueueReservation>,
+    result: Option<QueueResult<P::Output>>,
+    reply: Option<tokio::sync::oneshot::Sender<QueueResult<P::Output>>>,
+    attempts: u32,
+    /// A mutation that ran may be durable, whatever happened after.
+    ran: bool,
+    _input: OwnedQueueBufferCharge,
+    // Release the operation slot before the final reservation owner can
+    // notify shutdown waiters.
+    _completion: OperationCompletion,
+}
+impl<P: Plan> QueueOp for Op<P> {
+    fn mutation(&self) -> bool {
+        P::MUTATION
+    }
+    fn solo(&self) -> bool {
+        P::SOLO
+    }
+    fn job(&self) -> &Arc<QueueReservation> {
+        &self.job
+    }
+    fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+    fn attempts(&mut self) -> &mut u32 {
+        &mut self.attempts
+    }
+    fn stage<'a>(
+        &'a mut self,
+        p: &'a QueueRecoveryPipeline,
+        t: &'a Tenure,
+        batch: &'a mut Batch,
+    ) -> BoxFuture<'a, Result<Staged, Exit>> {
+        Box::pin(async move {
+            self.result = None;
+            let ran = self.ran;
+            self.ran = true;
+            let staged = self
+                .plan
+                .stage(p, t, batch, self.limits, &self.clock, &self.job)
+                .await?;
+            match &staged {
+                Staged::Rejected(error) => self.result = Some(Err(error.clone())),
+                // Nothing of it ran, so a later failure may still say Busy.
+                Staged::Full { progressed: false } => self.ran = ran,
+                _ => {}
+            }
+            Ok(staged)
+        })
+    }
+    fn run<'a>(
+        &'a mut self,
+        p: &'a QueueRecoveryPipeline,
+        t: &'a mut Tenure,
+    ) -> BoxFuture<'a, Result<(), Exit>> {
+        Box::pin(async move {
+            self.result = None;
+            self.ran = true;
+            let result = self
+                .plan
+                .run(p, t, self.limits, &self.clock, &self.job)
+                .await?;
+            self.result = Some(result);
+            Ok(())
+        })
+    }
+    fn ack(mut self: Box<Self>) {
+        let result = self
+            .result
+            .take()
+            .unwrap_or_else(|| Err(unknown("operation acknowledged without a result")));
+        if let Some(reply) = self.reply.take() {
+            let _ = reply.send(result);
+        }
+    }
+    fn fail(mut self: Box<Self>, error: QueueError) {
+        self.result = None;
+        // Busy promises no effects; a mutation that ran cannot promise that.
+        let error = if P::MUTATION && self.ran && !matches!(error, QueueError::OutcomeUnknown(_)) {
+            unknown("mutation may be durable; resolve its request identity")
+        } else {
+            error
+        };
+        if let Some(reply) = self.reply.take() {
+            let _ = reply.send(Err(error));
+        }
+    }
+}
+
+struct QueueSlot {
+    sender: UnboundedSender<Box<dyn QueueOp>>,
+    task: tokio::task::JoinHandle<()>,
+}
+pub(super) struct QueueTable {
+    open: bool,
+    slots: std::collections::BTreeMap<QueueAddress, QueueSlot>,
+}
+impl QueueTable {
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.slots.len()
+    }
+}
+impl Default for QueueTable {
+    fn default() -> Self {
+        Self {
+            open: true,
+            slots: Default::default(),
+        }
+    }
+}
+
+impl QueueRecoveryPipeline {
+    /// Enqueue one operation on the queue's loop and wait for its acknowledgement.
+    pub(super) async fn submit<P: Plan>(
+        self: &Arc<Self>,
+        plan: P,
+        limits: QueueLimits,
+        clock: Arc<dyn Clock>,
+        job: Arc<QueueReservation>,
+        input: OwnedQueueBufferCharge,
+    ) -> QueueResult<P::Output> {
+        plan.address().validate()?;
+        let slot = Arc::clone(&self.operation_slots)
+            .try_acquire_owned()
+            .map_err(|_| QueueError::Busy)?;
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        let address = plan.address().clone();
+        let op: Box<dyn QueueOp> = Box::new(Op {
+            plan,
+            limits,
+            clock,
+            job: job.clone(),
+            result: None,
+            reply: Some(reply),
+            attempts: 0,
+            ran: false,
+            _input: input,
+            _completion: OperationCompletion {
+                _slot: slot,
+                _job: job,
+            },
+        });
+        self.enqueue(&address, op)?;
+        receiver
+            .await
+            .map_err(|_| unknown("queue loop dropped an operation"))?
+    }
+    /// Hand the operation to the queue's loop, starting one if none runs. The send
+    /// happens under the table lock, and a finishing loop removes its slot under
+    /// the same lock, so an operation cannot land on a loop that has ended.
+    fn enqueue(self: &Arc<Self>, address: &QueueAddress, op: Box<dyn QueueOp>) -> QueueResult<()> {
+        let mut table = self
+            .queues
+            .lock()
+            .map_err(|_| unknown("queue table poisoned"))?;
+        if !table.open {
+            return Err(QueueError::Busy);
+        }
+        if let Some(slot) = table.slots.get(address)
+            && !slot.task.is_finished()
+        {
+            return slot.sender.send(op).map_err(|_| QueueError::Busy);
+        }
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(
+            QueueLoop {
+                pipeline: Arc::downgrade(self),
+                address: address.clone(),
+                key: queue_key(address)?,
+                ownership: self.ownership.clone(),
+                receiver,
+                pending: VecDeque::new(),
+                tenure: None,
+                closing: false,
+            }
+            .run(),
+        );
+        let sent = sender.send(op).map_err(|_| QueueError::Busy);
+        table
+            .slots
+            .insert(address.clone(), QueueSlot { sender, task });
+        sent
+    }
+    /// Stop accepting operations, let every loop finish what it holds, and
+    /// release the leases. Each loop's tenure ends with it, which deletes its
+    /// projection file.
+    pub(super) async fn close_queues(&self) {
+        let slots = {
+            let mut table = match self.queues.lock() {
+                Ok(table) => table,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            table.open = false;
+            std::mem::take(&mut table.slots)
+        };
+        let mut tasks = Vec::new();
+        for (_, slot) in slots {
+            drop(slot.sender);
+            tasks.push(slot.task);
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn stage(&self, stage: Stage) {
+        // The lock is released before the hook runs: a hook that blocks one
+        // queue's loop must not block the other queues' loops at their stages.
+        let hook = self.on_stage.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook(stage);
+        }
+    }
+}
+
+pub(super) fn queue_key(address: &QueueAddress) -> QueueResult<QueueKey> {
+    use sha2::Digest;
+    let digest = Sha256::digest(fireweed_engine::queue_namespace::encode_address(address)?);
+    let mut name = String::from("q7-");
+    for byte in digest {
+        name.push_str(&format!("{byte:02x}"));
+    }
+    let id = |value: String, what: &str| -> QueueResult<String> {
+        if value.trim().is_empty() {
+            return Err(QueueError::Invalid(format!("empty {what}")));
+        }
+        Ok(value)
+    };
+    Ok(QueueKey::new(
+        fireweed_core::TenantId::new(id("api007".into(), "tenant")?)
+            .map_err(|e| QueueError::Invalid(e.to_string()))?,
+        fireweed_core::QueueId::new(id(name, "queue")?)
+            .map_err(|e| QueueError::Invalid(e.to_string()))?,
+    ))
+}
+
+struct QueueLoop {
+    pipeline: std::sync::Weak<QueueRecoveryPipeline>,
+    address: QueueAddress,
+    key: QueueKey,
+    /// The loop's own handle on the control plane, so it can renew and release
+    /// without keeping the pipeline alive.
+    ownership: QueueOwnership,
+    receiver: UnboundedReceiver<Box<dyn QueueOp>>,
+    pending: VecDeque<Box<dyn QueueOp>>,
+    tenure: Option<Tenure>,
+    closing: bool,
+}
+impl QueueLoop {
+    fn take_queued(&mut self) {
+        loop {
+            match self.receiver.try_recv() {
+                Ok(op) => self.pending.push_back(op),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.closing = true;
+                    return;
+                }
+            }
+        }
+    }
+    /// Wait for an operation, or for `renew_at` when we own the queue.
+    async fn wait(&mut self) {
+        loop {
+            self.take_queued();
+            if !self.pending.is_empty() || self.closing {
+                return;
+            }
+            let wait = match &self.tenure {
+                None => None,
+                Some(t) => {
+                    let now = self.ownership.lease_clock.now();
+                    if now >= t.renew_at {
+                        return;
+                    }
+                    Some((t.renew_at - now).min(Duration::from_millis(200)))
+                }
+            };
+            let received = match wait {
+                None => self.receiver.recv().await.map(Some),
+                Some(wait) => match tokio::time::timeout(wait, self.receiver.recv()).await {
+                    Ok(received) => received.map(Some),
+                    Err(_) => Some(None),
+                },
+            };
+            match received {
+                Some(Some(op)) => self.pending.push_back(op),
+                Some(None) => {}
+                None => self.closing = true,
+            }
+        }
+    }
+    async fn run(mut self) {
+        loop {
+            self.wait().await;
+            // Upgrade only after waiting: an idle loop must not keep the pipeline alive.
+            let Some(p) = self.pipeline.upgrade() else {
+                break;
+            };
+            if self.pending.is_empty() && self.closing {
+                break;
+            }
+            self.iterate(&p).await;
+            if self.tenure.is_none() && self.pending.is_empty() && self.finish(&p) {
+                break;
+            }
+        }
+        self.release().await;
+    }
+    /// A loop with no tenure and nothing pending removes its slot and ends. The
+    /// last look at the channel and the removal share the table lock with `enqueue`.
+    fn finish(&mut self, p: &QueueRecoveryPipeline) -> bool {
+        let Ok(mut table) = p.queues.lock() else {
+            return false;
+        };
+        self.take_queued();
+        if !self.pending.is_empty() {
+            return false;
+        }
+        table.slots.remove(&self.address);
+        true
+    }
+    async fn iterate(&mut self, p: &Arc<QueueRecoveryPipeline>) {
+        if self.tenure.is_none() {
+            if self.pending.is_empty() {
+                return;
+            }
+            let job = self.pending[0].job().clone();
+            match self.enter(p, &job).await {
+                Ok(tenure) => self.tenure = Some(tenure),
+                Err(error) => {
+                    for op in self.pending.drain(..) {
+                        op.fail(error.clone());
+                    }
+                    return;
+                }
+            }
+        }
+        // Mutations in order, then the batch's reads from the projection.
+        let (mut batch, reads): (Vec<_>, Vec<_>) =
+            self.pending.drain(..).partition(|op| op.mutation());
+        batch.extend(reads);
+        #[cfg(test)]
+        p.stage(Stage::BatchTaken);
+        let tenure = self.tenure.as_mut().expect("owner");
+        let mutations = batch.iter().take_while(|op| op.mutation()).count();
+        let mut staging = Batch::new();
+        let mut leave = false;
+        let mut started = 0;
+        // Mutations that staged, or found their request already stored, and are
+        // answered from the projection once the batch commits.
+        let mut answers = Vec::new();
+        let mut solo = false;
+        // One record per iteration: stage mutations in arrival order, until the
+        // lease needs renewing or the record is full.
+        while started < mutations {
+            // A batch longer than half a lease stops starting work and renews first.
+            if started > 0 && p.ownership.lease_clock.now() >= tenure.renew_at {
+                break;
+            }
+            if batch[started].solo() {
+                // Genesis is alone in its record: nothing else shares the iteration.
+                if started > 0 {
+                    break;
+                }
+                solo = true;
+                if batch[started].run(p, tenure).await.is_err() {
+                    *batch[started].attempts() += 1;
+                    leave = true;
+                    break;
+                }
+                started += 1;
+                break;
+            }
+            match batch[started].stage(p, tenure, &mut staging).await {
+                Err(Exit) => {
+                    *batch[started].attempts() += 1;
+                    leave = true;
+                    break;
+                }
+                Ok(Staged::Full { .. }) => break,
+                Ok(Staged::Rejected(_)) => {}
+                Ok(Staged::Pending) => answers.push(started),
+            }
+            started += 1;
+        }
+        // One conditional publish for everything staged, or none if nothing was.
+        if leave || !staging.has_entries() {
+            staging.rollback(p).await;
+        } else if tenure.publish_batch(p, staging).await.is_err() {
+            // The whole batch was in the record: every staged operation counts.
+            for &at in &answers {
+                *batch[at].attempts() += 1;
+            }
+            leave = true;
+        }
+        if !leave {
+            for &at in &answers {
+                if batch[at].run(p, tenure).await.is_err() {
+                    *batch[at].attempts() += 1;
+                    leave = true;
+                    break;
+                }
+            }
+        }
+        // Reads follow their batch's mutations, from the projection.
+        while !leave && !solo && started == mutations && started < batch.len() {
+            if started > 0 && p.ownership.lease_clock.now() >= tenure.renew_at {
+                break;
+            }
+            if batch[started].run(p, tenure).await.is_err() {
+                *batch[started].attempts() += 1;
+                leave = true;
+                break;
+            }
+            started += 1;
+        }
+        let mut unstarted = if leave {
+            Vec::new()
+        } else {
+            batch.split_off(started)
+        };
+        #[cfg(test)]
+        p.stage(Stage::AfterRead);
+        // Every result passes this check after it was read and before it is acknowledged.
+        if leave || p.ownership.lease_clock.now() >= tenure.deadline {
+            if !leave {
+                // An operation that outlasts every lease must not retry forever.
+                for op in batch.iter_mut() {
+                    *op.attempts() += 1;
+                }
+            }
+            self.exit();
+            batch.append(&mut unstarted);
+            self.requeue(batch);
+            return;
+        }
+        // The job and clock the pass borrows, taken before the batch is answered.
+        let pass = batch
+            .last()
+            .map(|op| (Arc::clone(op.job()), Arc::clone(op.clock())));
+        for op in batch {
+            op.ack();
+        }
+        if let Some((job, clock)) = pass {
+            self.retire(p, &job, clock.as_ref()).await;
+        }
+        // A queue that does not exist holds nothing.
+        if self.tenure.as_ref().is_some_and(|t| t.genesis.is_none()) {
+            self.release().await;
+        }
+        // Unstarted operations stay at the front, with no exit.
+        unstarted.extend(self.pending.drain(..));
+        self.pending = unstarted.into();
+        if self
+            .tenure
+            .as_ref()
+            .is_some_and(|t| p.ownership.lease_clock.now() >= t.renew_at)
+        {
+            self.renew(p).await;
+        }
+    }
+    /// Offer the queue a cleanup pass when its schedule says so, after the
+    /// iteration's operations are answered. Every operation is already answered,
+    /// so a pass that fails costs none of them: it only ends the tenure, and the
+    /// next operation enters again.
+    async fn retire(
+        &mut self,
+        p: &Arc<QueueRecoveryPipeline>,
+        job: &Arc<QueueReservation>,
+        clock: &dyn Clock,
+    ) {
+        use fireweed_engine::queue_retention::{RETENTION_BUDGET_ROWS, RETENTION_INTERVAL_NANOS};
+        let Some(t) = self.tenure.as_mut() else {
+            return;
+        };
+        let Ok(now) = fireweed_core::queue_contract::timestamp_nanos(clock.now()) else {
+            return;
+        };
+        if t.genesis.is_none() {
+            return;
+        }
+        if t.retention_due_at == i64::MIN {
+            t.retention_due_at = now.saturating_add(RETENTION_INTERVAL_NANOS);
+            return;
+        }
+        if now < t.retention_due_at {
+            return;
+        }
+        t.retention_due_at = now.saturating_add(RETENTION_INTERVAL_NANOS);
+        match t.retire(p, &self.address, now, job).await {
+            // A full budget means more is waiting: offer the next pass as soon
+            // as the clock moves, not a schedule interval later.
+            Ok(removed) if removed >= u64::from(RETENTION_BUDGET_ROWS) => {
+                t.retention_due_at = now.saturating_add(1);
+            }
+            Ok(_) => {}
+            Err(Exit) => self.exit(),
+        }
+    }
+    fn requeue(&mut self, batch: Vec<Box<dyn QueueOp>>) {
+        // Unacknowledged operations run again first, ahead of anything queued since.
+        let mut again: VecDeque<Box<dyn QueueOp>> = VecDeque::new();
+        for mut op in batch {
+            if *op.attempts() > MAX_ATTEMPTS {
+                op.fail(unknown("operation left owner state repeatedly"));
+            } else {
+                again.push_back(op);
+            }
+        }
+        again.append(&mut self.pending);
+        self.pending = again;
+    }
+    /// Renew between iterations. Rejected leaves owner state; a failed or
+    /// unknown renewal leaves the deadline alone, so the owner stops at it.
+    async fn renew(&mut self, p: &Arc<QueueRecoveryPipeline>) {
+        let own = &p.ownership;
+        let Some(t) = self.tenure.as_mut() else {
+            return;
+        };
+        let started = own.lease_clock.now();
+        let renewed = own
+            .control
+            .renew_queue_lease(&self.key, &own.owner, t.lease_epoch, own.stamp())
+            .await;
+        match renewed {
+            Ok(_) => {
+                t.deadline = started + own.ttl;
+                // A renewal that took longer than half a lease is not retried at once.
+                t.renew_at = (started + own.ttl / 2).max(own.lease_clock.now() + own.ttl / 10);
+            }
+            Err(fireweed_engine::EngineError::EpochFenced) => {
+                self.tenure = None;
+            }
+            Err(_) => {
+                t.renew_at = own.lease_clock.now() + own.ttl / 10;
+            }
+        }
+    }
+    /// Leave owner state. The tenure's projection is closed and its file deleted.
+    fn exit(&mut self) {
+        self.tenure = None;
+    }
+    async fn release(&mut self) {
+        if let Some(t) = self.tenure.take() {
+            let own = &self.ownership;
+            let _ = own
+                .control
+                .release_queue_lease(&self.key, &own.owner, t.lease_epoch, own.stamp())
+                .await;
+        }
+    }
+    async fn wait_lease_clock(p: &QueueRecoveryPipeline, until: Duration) {
+        loop {
+            let now = p.ownership.lease_clock.now();
+            if now >= until {
+                return;
+            }
+            tokio::time::sleep((until - now).min(Duration::from_millis(20))).await;
+        }
+    }
+    /// Acquire the lease, wait out the skew allowance, take a strictly newer
+    /// fence and rebuild the projection from the log.
+    async fn enter(
+        &mut self,
+        p: &Arc<QueueRecoveryPipeline>,
+        job: &Arc<QueueReservation>,
+    ) -> QueueResult<Tenure> {
+        let mut span = p.diagnostics.begin();
+        let mut acquired = None;
+        let result = self.enter_scanned(p, job, &mut span, &mut acquired).await;
+        span.finish(result.is_ok());
+        if let (Err(_), Some(epoch)) = (&result, acquired) {
+            // Nothing was served under this lease: give it back, best effort, once.
+            let own = &p.ownership;
+            let _ = own
+                .control
+                .release_queue_lease(&self.key, &own.owner, epoch, own.stamp())
+                .await;
+        }
+        result
+    }
+    async fn enter_scanned(
+        &mut self,
+        p: &Arc<QueueRecoveryPipeline>,
+        job: &Arc<QueueReservation>,
+        span: &mut diagnostics::RecoverySpan,
+        acquired: &mut Option<u64>,
+    ) -> QueueResult<Tenure> {
+        let own = &p.ownership;
+        let busy = |_: fireweed_engine::EngineError| QueueError::Busy;
+        let mut requested = own.lease_clock.now();
+        own.control
+            .register_owner(&own.owner, own.stamp())
+            .await
+            .map_err(busy)?;
+        let lease = match own
+            .control
+            .acquire_queue_lease(&self.key, &own.owner, own.stamp())
+            .await
+            .map_err(busy)?
+        {
+            AcquireOutcome::Acquired(lease) => lease,
+            AcquireOutcome::Rejected(_) => return Err(QueueError::Busy),
+        };
+        *acquired = Some(lease.assignment_epoch);
+        // Always wait, with no check of whether there was a previous owner.
+        Self::wait_lease_clock(p, own.lease_clock.now() + own.skew).await;
+        // The tenure's own database, empty, before anything is rebuilt into it. If
+        // entry fails below, dropping the tenure deletes the file.
+        let projection = TenureProjection::open(
+            &p.projection_directory,
+            &p.directory_lock,
+            self.key.queue_id.as_str(),
+            job,
+            &p.workers,
+        )
+        .await?;
+        let mut tenure = Tenure {
+            lease_epoch: lease.assignment_epoch,
+            identity: None,
+            writer: None,
+            epoch: 0,
+            next_offset: 0,
+            insertion_sequence: 0,
+            historical_epoch: 0,
+            genesis: None,
+            deadline: Duration::ZERO,
+            renew_at: Duration::ZERO,
+            projection,
+            retention_due_at: i64::MIN,
+        };
+        // With no namespace there is nothing to fence or read; provisioning fences.
+        // An existing namespace is always fenced. An empty head means nothing to
+        // rebuild: the tenure keeps the writer for provisioning.
+        if let Some(namespace) = p.log.open(&self.address, job).await? {
+            p.diagnostics.head_read();
+            p.diagnostics.fence_acquire();
+            let (writer, source) = p.log.acquire_bundle(namespace, job).await?.into_parts();
+            let (log_start, target) = source.head().bounds();
+            if log_start != 0 {
+                return Err(unknown("complete genesis history unavailable"));
+            }
+            tenure.epoch = writer.epoch();
+            tenure.identity = Some(source.identity());
+            tenure.writer = Some(writer);
+            if lease.state == LeaseState::PendingFence {
+                own.control
+                    .confirm_queue_lease_fence(
+                        &self.key,
+                        &own.owner,
+                        lease.assignment_epoch,
+                        own.stamp(),
+                    )
+                    .await
+                    .map_err(busy)?;
+            }
+            let mut renewed_at = requested;
+            while tenure.next_offset < target {
+                span.phase(diagnostics::RecoveryPhase::PlannedRead);
+                let offset = tenure.next_offset;
+                let remaining = target - offset;
+                let run = source
+                    .read_run(
+                        &p.log,
+                        offset,
+                        usize::try_from(remaining.min(ENTRY_RUN_RECORDS))
+                            .map_err(|_| unknown("invalid read run"))?,
+                        ENTRY_RUN_BYTES,
+                        p.hard_record_bytes,
+                        job,
+                    )
+                    .await?;
+                if run.is_empty() {
+                    return Err(unknown("early EOF before acquired target"));
+                }
+                if run.len() as u64 > remaining {
+                    return Err(unknown("read run passes acquired target"));
+                }
+                for (at, record) in (offset..).zip(run) {
+                    span.record(record.bytes().len());
+                    span.phase(diagnostics::RecoveryPhase::CheckedFold);
+                    tenure.check(&record, at)?;
+                    span.phase(diagnostics::RecoveryPhase::NativeApply);
+                    tenure
+                        .projection()
+                        .apply(record, at, job, &p.workers)
+                        .await?;
+                }
+                #[cfg(test)]
+                p.stage(Stage::RebuildRun);
+                if own.lease_clock.now() >= renewed_at + own.ttl / 2 {
+                    // A long rebuild keeps the lease it is building under.
+                    let started = own.lease_clock.now();
+                    match own
+                        .control
+                        .renew_queue_lease(
+                            &self.key,
+                            &own.owner,
+                            lease.assignment_epoch,
+                            own.stamp(),
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            requested = started;
+                            renewed_at = started;
+                        }
+                        // The lease is gone: building under it is pointless.
+                        Err(fireweed_engine::EngineError::EpochFenced) => {
+                            return Err(QueueError::Busy);
+                        }
+                        // Other failures keep going; the deadline check at the end stands.
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+        if lease.state == LeaseState::PendingFence && tenure.epoch == 0 {
+            // Absent queue: the lease row is confirmed with nothing to fence.
+            own.control
+                .confirm_queue_lease_fence(
+                    &self.key,
+                    &own.owner,
+                    lease.assignment_epoch,
+                    own.stamp(),
+                )
+                .await
+                .map_err(busy)?;
+        }
+        // The deadline is measured from before the latest request that extended
+        // the lease, on the lease clock.
+        tenure.deadline = requested + own.ttl;
+        tenure.renew_at = requested + own.ttl / 2;
+        if own.lease_clock.now() >= tenure.deadline {
+            return Err(QueueError::Busy);
+        }
+        Ok(tenure)
+    }
+}

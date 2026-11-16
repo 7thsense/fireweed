@@ -264,7 +264,7 @@ impl MetricsDelta {
             if delta == [0; 4] {
                 continue;
             }
-            let changed = tx.execute("UPDATE queues SET resident_pending=resident_pending+?3,resident_leased=resident_leased+?4,resident_complete=resident_complete+?5,resident_failed=resident_failed+?6,resident_counts_version=1 WHERE tenant=?1 AND queue=?2", &[
+            let changed = tx.execute("UPDATE queues SET resident_pending=resident_pending+?3,resident_leased=resident_leased+?4,resident_complete=resident_complete+?5,resident_failed=resident_failed+?6 WHERE tenant=?1 AND queue=?2", &[
                 queue.tenant_id.as_str().into(), queue.queue_id.as_str().into(), delta[0].into(), delta[1].into(), delta[2].into(), delta[3].into(),
             ])?;
             if changed != 1 {
@@ -321,43 +321,6 @@ fn addressed_counts_sql(count: usize) -> String {
     format!(
         "WITH targets(item_id) AS (VALUES {values}) SELECT {AGGREGATES} FROM targets t CROSS JOIN fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 ON i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id=t.item_id WHERE i.superseded=0"
     )
-}
-
-pub(crate) async fn migrate(connection: &turso::Connection) -> crate::Result<()> {
-    for column in [
-        "resident_pending",
-        "resident_leased",
-        "resident_complete",
-        "resident_failed",
-    ] {
-        let sql = format!(
-            "ALTER TABLE queues ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0 CHECK(typeof({column})='integer' AND {column}>=0)"
-        );
-        if let Err(error) = connection.execute(&sql, ()).await
-            && !error
-                .to_string()
-                .to_ascii_lowercase()
-                .contains("duplicate column")
-        {
-            return Err(error.into());
-        }
-    }
-    if let Err(error) = connection
-        .execute(
-            "ALTER TABLE queues ADD COLUMN resident_counts_version INTEGER NOT NULL DEFAULT 0",
-            (),
-        )
-        .await
-        && !error
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("duplicate column")
-    {
-        return Err(error.into());
-    }
-    // One atomic backfill; a failed/interrupted migration is retried on open.
-    connection.execute("UPDATE queues SET (resident_pending,resident_leased,resident_complete,resident_failed)=(SELECT COALESCE(SUM(lifecycle_state='Pending'),0),COALESCE(SUM(lifecycle_state='Leased'),0),COALESCE(SUM(lifecycle_state='Complete'),0),COALESCE(SUM(lifecycle_state='Failed'),0) FROM fireweed_items i WHERE i.tenant_id=queues.tenant AND i.queue_id=queues.queue AND i.superseded=0),resident_counts_version=1 WHERE resident_counts_version=0", ()).await?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -455,7 +418,7 @@ mod tests {
         let queue = QueueKey::new(TenantId::new("t").unwrap(), QueueId::new("q").unwrap());
         let metrics = store.server_metrics(&queue).await.unwrap();
         assert_eq!((metrics.pending, metrics.leased), (0, 1));
-        store.migrate().await.unwrap();
+        store.ensure_schema().await.unwrap();
         let reopened = store.server_metrics(&queue).await.unwrap();
         assert_eq!(reopened.leased, 1);
     }

@@ -1,0 +1,30 @@
+
+running 25 tests
+test cluster_bootstrap_over_the_wire ... ok
+test crash_recovery_rebuilds_durable_state_over_the_wire ... ok
+test drain_and_reconcile_with_offtheshelf_client ... ok
+test fenced_lease_xack_is_stale_over_the_wire ... ok
+test fireweed_live_hash_reads_return_structured_fields_until_ack ... ok
+test malformed_bulk_terminator_closes_after_valid_prefix_without_running_suffix ... ok
+test real_cluster_client_bootstraps_and_routes ... ok
+test reserved_names_rejected_on_write_paths ... ok
+test resident_terminal_count_published_in_metrics ... ok
+test resp_named_consumer_groups_are_wire_fiction_not_persisted ... ok
+test resp_oracle_does_not_use_backend_echo ... ok
+test resp_wire_carries_updated_field_a_and_field_c ... ok
+test thousand_prebuffered_xadds_preserve_ordered_independent_scalar_semantics ... ok
+test two_consumers_in_a_group_never_get_the_same_item ... ok
+test two_servers_on_one_backend_assign_distinct_xadd_ids ... ok
+test upsert_and_claim_race_stays_consistent ... ok
+test xack_of_superseded_id_is_superseded_over_the_wire ... ok
+test xadd_collision_with_leased_then_terminal_is_an_error ... ok
+test xadd_on_client_item_key_upserts_not_appends ... ok
+test xautoclaim_paginates_the_pel_cursor ... ok
+test xautoclaim_redelivers_expired_leases ... ok
+test xclaim_first_delivery_pending_ids_without_xreadgroup ... ok
+test xclaim_self_renews_no_charge_cross_consumer_reclaims_with_attempt_bump ... ok
+test xlen_xdel_xinfo_over_offtheshelf_client ... ok
+test xpending_lists_leased_then_shrinks_on_ack ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+

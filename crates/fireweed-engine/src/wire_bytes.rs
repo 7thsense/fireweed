@@ -1,17 +1,8 @@
 //! Compact wire encoding for opaque byte fields in durable command envelopes.
 //!
-//! Historical JSON encoding used serde's default for `Vec<u8>` / `Bytes`: a JSON
-//! **array of decimal integers** (`[115,110,...]`). Measured expansion is ~4.28×
-//! raw size and dominated durable log volume (fireweed-659490cc).
-//!
-//! **Current write format:** standard Base64 strings (~1.33× raw; ≤1.4× gate).
-//!
-//! **Read compatibility:** deserializers accept either:
-//! 1. Base64 strings (current), or
-//! 2. JSON sequences of `u8` (legacy integer-array encoding).
-//!
-//! Existing logs therefore still replay. New appends use only the Base64 form.
-//! Binary formats that call `serialize_bytes` / `visit_bytes` keep working.
+//! JSON uses standard Base64 strings (~1.33× raw; ≤1.4× gate). JSON integer
+//! arrays are not accepted. Binary formats that call `serialize_bytes` /
+//! `visit_bytes` carry raw bytes.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -33,7 +24,7 @@ fn serialize_raw_bytes<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::
     }
 }
 
-/// Decode Base64 string **or** legacy JSON integer array into raw bytes.
+/// Decode a Base64 string (JSON) or raw bytes (binary codecs) into raw bytes.
 ///
 /// Binary codecs (postcard) call `deserialize_bytes` — never `deserialize_any`
 /// (postcard rejects `deserialize_any`).
@@ -44,7 +35,7 @@ fn deserialize_raw_bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<V
         type Value = Vec<u8>;
 
         fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("raw bytes, base64 string, or integer byte array")
+            f.write_str("raw bytes or base64 string")
         }
 
         fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
@@ -62,14 +53,6 @@ fn deserialize_raw_bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<V
 
         fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
             Ok(v)
-        }
-
-        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(4096));
-            while let Some(b) = seq.next_element::<u8>()? {
-                out.push(b);
-            }
-            Ok(out)
         }
     }
 
@@ -144,7 +127,7 @@ pub mod option_bytes {
             type Value = Option<Bytes>;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("null, raw bytes, base64 string, or integer byte array")
+                f.write_str("null, raw bytes, or base64 string")
             }
 
             fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
@@ -175,12 +158,6 @@ pub mod option_bytes {
             fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Self::Value, E> {
                 Ok(Some(Bytes::from(v)))
             }
-
-            fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
-                // Legacy: Option was encoded as the array itself when Some.
-                deserialize_raw_bytes(de::value::SeqAccessDeserializer::new(seq))
-                    .map(|b| Some(Bytes::from(b)))
-            }
         }
 
         if deserializer.is_human_readable() {
@@ -191,7 +168,7 @@ pub mod option_bytes {
     }
 }
 
-/// `BTreeMap<String, Bytes>` — each value is Base64 (or legacy int array).
+/// `BTreeMap<String, Bytes>` — each value is Base64 (JSON) or raw bytes (binary).
 pub mod btreemap_bytes {
     use super::*;
 
@@ -223,7 +200,7 @@ pub mod btreemap_bytes {
             type Value = BTreeMap<String, Bytes>;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("map of string to base64 or integer byte arrays")
+                f.write_str("map of string to base64 or raw bytes")
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
@@ -281,7 +258,7 @@ pub mod btreemap_option_bytes {
             type Value = BTreeMap<String, Option<Bytes>>;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("map of string to null | base64 | integer byte array")
+                f.write_str("map of string to null | base64 | raw bytes")
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
@@ -344,7 +321,7 @@ pub mod option_btreemap_bytes {
             type Value = Option<BTreeMap<String, Bytes>>;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("null or map of string to base64/int-array bytes")
+                f.write_str("null or map of string to base64 or raw bytes")
             }
 
             fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
@@ -360,7 +337,7 @@ pub mod option_btreemap_bytes {
             }
 
             fn visit_map<A: MapAccess<'de>>(self, access: A) -> Result<Self::Value, A::Error> {
-                // Present map without Option wrapper (legacy).
+                // JSON writes `Some(map)` as the bare map (no Option wrapper).
                 btreemap_bytes::deserialize(de::value::MapAccessDeserializer::new(access)).map(Some)
             }
         }
@@ -401,7 +378,7 @@ pub mod vec_vec_u8 {
             type Value = Vec<Vec<u8>>;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("array of base64 strings or integer byte arrays")
+                f.write_str("array of base64 strings or raw bytes")
             }
 
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
@@ -431,14 +408,7 @@ pub mod vec_vec_u8 {
 pub mod option_instance {
     use super::*;
 
-    #[derive(Deserialize)]
-    struct WireOwned {
-        #[serde(deserialize_with = "deserialize_raw_bytes")]
-        key: Vec<u8>,
-        fence: u64,
-    }
-
-    /// Legacy tuple form: `[key_bytes_or_b64, fence]` or object form.
+    /// Tuple form: `[key_b64, fence]` in JSON; `(raw_key, fence)` in binary.
     pub fn serialize<S: Serializer>(
         value: &Option<(Vec<u8>, u64)>,
         serializer: S,
@@ -447,8 +417,7 @@ pub mod option_instance {
             None => serializer.serialize_none(),
             Some((key, fence)) => {
                 if serializer.is_human_readable() {
-                    // Preserve historical tuple shape `[key, fence]` for structure,
-                    // with key as base64 string.
+                    // Tuple shape `[key, fence]` with key as base64 string.
                     use serde::ser::SerializeTuple;
                     let mut t = serializer.serialize_tuple(2)?;
                     t.serialize_element(&B64.encode(key))?;
@@ -474,15 +443,13 @@ pub mod option_instance {
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Option<(Vec<u8>, u64)>, D::Error> {
-        struct V {
-            human: bool,
-        }
+        struct V;
 
         impl<'de> Visitor<'de> for V {
             type Value = Option<(Vec<u8>, u64)>;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("null, [key, fence] tuple, or {key, fence} object")
+                f.write_str("null or [key, fence] tuple")
             }
 
             fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
@@ -499,23 +466,8 @@ pub mod option_instance {
                     #[serde(deserialize_with = "deserialize_raw_bytes")] Vec<u8>,
                     u64,
                 );
-                if !self.human {
-                    // Native binary is always the tuple layout; untagged fallback would
-                    // buffer through `deserialize_any`, which postcard rejects.
-                    let WireTuple(k, f) = WireTuple::deserialize(d)?;
-                    return Ok(Some((k, f)));
-                }
-                // Prefer tuple; fall back to object.
-                #[derive(Deserialize)]
-                #[serde(untagged)]
-                enum Forms {
-                    Tuple(WireTuple),
-                    Object(WireOwned),
-                }
-                match Forms::deserialize(d)? {
-                    Forms::Tuple(WireTuple(k, f)) => Ok(Some((k, f))),
-                    Forms::Object(WireOwned { key, fence }) => Ok(Some((key, fence))),
-                }
+                let WireTuple(k, f) = WireTuple::deserialize(d)?;
+                Ok(Some((k, f)))
             }
 
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
@@ -525,7 +477,6 @@ pub mod option_instance {
                 let fence = seq
                     .next_element::<u64>()?
                     .ok_or_else(|| de::Error::invalid_length(1, &self))?;
-                // Consume optional trailing nothing.
                 Ok(Some((key, fence)))
             }
         }
@@ -539,9 +490,9 @@ pub mod option_instance {
         }
 
         if deserializer.is_human_readable() {
-            deserializer.deserialize_any(V { human: true })
+            deserializer.deserialize_any(V)
         } else {
-            deserializer.deserialize_option(V { human: false })
+            deserializer.deserialize_option(V)
         }
     }
 }
@@ -600,16 +551,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_integer_array_still_deserializes() {
-        let legacy = r#"{
-            "key": [115,116,97,116,101,47,114,117,110,45,49],
-            "payload": [111,112,97,113,117,101],
-            "optional": [122]
-        }"#;
-        let s: Sample = serde_json::from_str(legacy).unwrap();
-        assert_eq!(s.key, b"state/run-1");
-        assert_eq!(&s.payload[..], b"opaque");
-        assert_eq!(s.optional.as_deref(), Some(&b"z"[..]));
+    fn integer_arrays_are_rejected() {
+        for body in [
+            r#"{"key":[115],"payload":"b3BhcXVl","optional":null}"#,
+            r#"{"key":"c3RhdGU=","payload":[111],"optional":null}"#,
+            r#"{"key":"c3RhdGU=","payload":"b3BhcXVl","optional":[122]}"#,
+        ] {
+            assert!(serde_json::from_str::<Sample>(body).is_err(), "{body}");
+        }
     }
 
     #[test]

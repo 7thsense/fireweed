@@ -1,10 +1,34 @@
 name: ci
 
+# Documentation-only changes do not start the Rust jobs. The ignore list holds only paths
+# that no job here reads by name. docs/helix (formal checks, topology gate),
+# docs/site and docs/operator (microsite sources), docs/releases
+# (release-identity checks), README.md and CONTRIBUTING.md (cargo host-safeguard
+# check, crate readme) still trigger CI. The public-identity scan in the
+# functional job walks every tracked file, so residue in an ignored path is
+# reported by the next run that does trigger.
+# The large-scale test tier runs in nightly.yml, not here.
 on:
   pull_request:
+    paths-ignore:
+      - docs/evidence/**
+      - docs/legal/**
+      - docs/perf/**
+      - SECURITY.md
+      - SUPPORT.md
+      - CODE_OF_CONDUCT.md
+      - AGENTS.md
   push:
     branches:
       - main
+    paths-ignore:
+      - docs/evidence/**
+      - docs/legal/**
+      - docs/perf/**
+      - SECURITY.md
+      - SUPPORT.md
+      - CODE_OF_CONDUCT.md
+      - AGENTS.md
 
 permissions:
   contents: read
@@ -16,29 +40,52 @@ concurrency:
 jobs:
   functional:
     runs-on: ubuntu-latest
-    # Run 35280488084 exhausted the former 3-minute cap while compiling
-    # dependencies for the final RESP test. Keep a bounded cold-build budget.
-    timeout-minutes: 10
+    # Bound the full serial release gate.
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       RUST_TEST_THREADS: "1"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+
+      - name: Bounded formal analysis and checker controls
+        run: |
+          python3 -m unittest discover -s scripts/formal -p 'test_*.py'
+          python3 scripts/formal/check.py --output target/formal-analysis.json
+          python3 scripts/formal/check_source_group.py --output target/api007-formal/source-group.json
+
+      - name: Retain bounded formal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: formal-analysis
+          path: |
+            target/formal-analysis.json
+            target/api007-formal/source-group.json
+          if-no-files-found: error
 
       - name: Install repository check prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install --yes ripgrep
 
-      - name: Install Rust 1.97.1
-        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt
+      - name: Install Rust 1.99.0
+        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt
 
       - name: Reuse Cargo build state
         uses: Swatinem/rust-cache@v2
         with:
+          # One entry shared with nightly.yml `large` (same toolchain
+          # components, env and fireweed default-feature lib tests); only
+          # main and the nightly schedule write it.
+          shared-key: fireweed-lib
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
+
+      - name: Enforce queue module boundaries and negative controls
+        run: python3 scripts/ci/check_queue_boundaries.py --controls
 
       - name: Verify workflow policy
         run: bash scripts/ci/verify-github-actions-policy.sh
@@ -54,5 +101,44 @@ jobs:
             --manifest scripts/ci/public-release-gates-ci.json \
             --evidence target/public-release-gate.json
 
+
+  api007-postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUST_TEST_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install PostgreSQL 16 and check prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-16 ripgrep
+          /usr/lib/postgresql/16/bin/postgres --version
+      - name: Install Rust 1.99.0
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Reuse Cargo build state
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: api007-postgres
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Qualification runner cancellation controls
+        run: python3 scripts/ci/queue_pg_controls.py --pg-bin /usr/lib/postgresql/16/bin
+      - name: Execute exact PostgreSQL correctness routes
+        run: |
+          python3 scripts/ci/queue-pg-execution.py \
+            --pg-bin /usr/lib/postgresql/16/bin \
+            --fixture-parent "$RUNNER_TEMP" \
+            --output target/queue-pg-execution-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Storage remediation policy
-        run: bash scripts/ci/storage-remediation-policy.sh --mode-file scripts/ci/storage-remediation-policy.mode
+        run: bash scripts/ci/storage-remediation-policy.sh --mode-file scripts/ci/storage-remediation-policy.mode --queue-evidence target/queue-pg-execution-${{ github.run_id }}-${{ github.run_attempt }}/report.json
+      - name: Retain PostgreSQL correctness execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api007-postgres-execution
+          path: target/queue-pg-execution-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error

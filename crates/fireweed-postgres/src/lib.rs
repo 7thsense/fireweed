@@ -20,16 +20,15 @@
 //! invoked from within an ambient tokio runtime — doing so PANICS ("cannot start a runtime from within a
 //! runtime"), it does not merely starve. The conformance/durability tests therefore drive the backend
 //! with a NON-tokio executor (`futures::executor::block_on`), each scenario on its own connection. For a
-//! PRODUCTION `fireweed-server` (whose RESP loop + reclaim driver run under tokio), this backend MUST be
-//! driven off the runtime. That is now done: `fireweed-server`'s `PostgresNativeBackend` wrapper (behind its
-//! `postgres` cargo feature) delegates every engine-port call — and the initial `connect` and the final
-//! `Client` drop — to `tokio::task::spawn_blocking` / a non-reactor OS thread, so no sync postgres call
+//! PRODUCTION tokio host, this backend MUST be
+//! driven off the runtime: every engine-port call — and the initial `connect` and the final
+//! `Client` drop — must go through `tokio::task::spawn_blocking` / a non-reactor OS thread, so no sync postgres call
 //! ever runs on a tokio worker. The launch posture remains a single-node durable-log + in-memory projection
 //! with guarantees identical to sqlite. Multi-writer scale-out for the **relational** backend is
 //! available via [`PostgresRelationalBackend::connect_with_claim_pool`] (fireweed-66d64e91): extra claim
 //! connections + `FOR UPDATE SKIP LOCKED`. The log-replay [`PostgresBackend`] remains single-connection
-//! under its process Mutex; production multi-queue scale-out for that posture is the server's fixed
-//! queue-affine pool. This is NOT a silent sqlite copy — the caveat is the reason the single-connection
+//! under its process Mutex; multi-queue scale-out for that posture needs a queue-affine pool at the
+//! composition root. This is NOT a silent sqlite copy — the caveat is the reason the single-connection
 //! backend must only be reached through that blocking boundary.
 //!
 //! ## Serialization caveat for the future pooling work (recorded from the Chunk-4 fresh-eyes review)
@@ -70,22 +69,22 @@ use fireweed_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
 use postgres::Client;
 use sha2::{Digest, Sha256};
 
+mod async_control_plane;
 mod async_log;
 mod async_log_replay;
-mod async_objectlog_postgres;
 mod async_projection;
 mod compose_log;
 mod connect;
 mod control_plane;
+pub use async_control_plane::AsyncPostgresControlPlane;
 mod credential;
 mod relational;
 mod runtime_safe;
+mod schema_version;
 pub use async_log::{AsyncPostgresLog, DEFAULT_ASYNC_LOG_MAILBOX_CAPACITY};
 pub use async_log_replay::{
-    async_composed_postgres_backend, async_composed_postgres_backend_in_schema,
-    async_composed_postgres_backend_with_config, from_postgres_log,
+    async_composed_postgres_backend, async_composed_postgres_backend_in_schema, from_postgres_log,
 };
-pub use async_objectlog_postgres::AsyncObjectLogPostgresBackend;
 pub use async_projection::{
     AsyncPostgresRelationalControlPlane, AsyncPostgresRelationalProjection,
     DEFAULT_ASYNC_CONTROL_PLANE_MAILBOX_CAPACITY, DEFAULT_ASYNC_PROJECTION_MAILBOX_CAPACITY,
@@ -101,14 +100,10 @@ pub use credential::{
     DatabricksCredentialProvider, RefreshingCredentialProvider, databricks_fetcher_with_runner,
     parse_databricks_credential_response,
 };
-#[allow(deprecated)]
-pub use relational::{
-    ComposedPostgresRelationalBackend, MetricsMigrationProgress, PostgresRelational,
-    PostgresRelationalBackend, composed_postgres_relational_in_schema,
-};
+pub use relational::{PostgresRelational, PostgresRelationalBackend};
 pub use runtime_safe::{DEFAULT_RUNTIME_SAFE_IN_FLIGHT, ProductBackend, RuntimeSafeBackend};
 
-const SCHEMA: &str = r#"
+pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS queues (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, definition TEXT NOT NULL,
     assignment_epoch BIGINT NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
@@ -544,25 +539,6 @@ pub fn composed_postgres_backend(
     async_composed_postgres_backend(url)
 }
 
-/// Assemble the composed postgres backend from a fully-built [`PostgresConnectConfig`] (the
-/// credential-provider-aware path the `fireweed-server` composition root uses for Lakebase), with
-/// recovery-on-open.
-pub fn composed_postgres_backend_with_config(
-    config: PostgresConnectConfig,
-) -> EngineResult<AsyncLogReplayBackend<PostgresLog, fireweed_projection::InMemoryProjection>> {
-    async_composed_postgres_backend_with_config(config)
-}
-
-/// Assemble and recover one member of a fixed server pool. Partition affinity is applied at the
-/// composition-root pool layer; each open still recovers the durable catalog fully for now.
-pub fn composed_postgres_backend_for_worker_with_config(
-    config: PostgresConnectConfig,
-    _index: usize,
-    _partitions: usize,
-) -> EngineResult<AsyncLogReplayBackend<PostgresLog, fireweed_projection::InMemoryProjection>> {
-    async_composed_postgres_backend_with_config(config)
-}
-
 /// Assemble the composed postgres backend isolated in `schema` (`CREATE SCHEMA IF NOT EXISTS` + `SET
 /// search_path`), with recovery-on-open. Reconnecting with the SAME `schema` reopens the same durable log
 /// (the postgres analogue of reopening a sqlite file) — used by the conformance + reopen/recovery suites.
@@ -589,8 +565,7 @@ impl PostgresBackend {
         Self::connect_with_config(PostgresConnectConfig::new(url))
     }
 
-    /// Connect using a fully-built [`PostgresConnectConfig`] — the credential-provider-aware path the
-    /// `fireweed-server` composition root uses for Lakebase (a libpq/native-password DSN plus, optionally, a
+    /// Connect using a fully-built [`PostgresConnectConfig`] (a libpq/native-password DSN plus, optionally, a
     /// Databricks service-principal/PAT [`CredentialProvider`] that injects the user/password at connect).
     pub fn connect_with_config(config: PostgresConnectConfig) -> EngineResult<Self> {
         let client = connect(config)?;
@@ -616,7 +591,8 @@ impl PostgresBackend {
     }
 
     fn from_client(mut client: Client) -> EngineResult<Self> {
-        st(client.batch_execute(SCHEMA))?;
+        schema_version::open_blocking(&mut client, &[&schema_version::BACKEND])
+            .map_err(schema_version::into_engine)?;
         let mut inner = Inner {
             client,
             projections: HashMap::new(),
@@ -1978,3 +1954,7 @@ mod batching_structure_tests {
         assert!(!write.contains("COUNT(*)"));
     }
 }
+
+/// Native asynchronous API-007 adapter; qualification precedes activation.
+pub mod queue_store;
+pub use queue_store::PostgresQueueStore;

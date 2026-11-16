@@ -102,6 +102,13 @@ impl BlobStore for TracedBlobStore {
     ) -> Result<Option<Bytes>, ObjectLogError> {
         self.inner.get_range(key, range).await
     }
+    async fn get_range_exact(
+        &self,
+        key: &str,
+        range: Range<u64>,
+    ) -> Result<Option<Bytes>, ObjectLogError> {
+        self.inner.get_range_exact(key, range).await
+    }
     async fn list(&self, prefix: &str) -> Result<Vec<String>, ObjectLogError> {
         self.inner.list(prefix).await
     }
@@ -139,6 +146,13 @@ mod tests {
             range: Range<u64>,
         ) -> Result<Option<Bytes>, ObjectLogError> {
             self.inner.get_range(key, range).await
+        }
+        async fn get_range_exact(
+            &self,
+            key: &str,
+            range: Range<u64>,
+        ) -> Result<Option<Bytes>, ObjectLogError> {
+            self.inner.get_range_exact(key, range).await
         }
         async fn list(&self, prefix: &str) -> Result<Vec<String>, ObjectLogError> {
             self.inner.list(prefix).await
@@ -179,6 +193,15 @@ mod tests {
             Some(Bytes::from_static(b"bc"))
         );
         assert!(store.get_range("fwlog/test", 0..5).await.is_err());
+        let paused = crate::head_publish_pause::HeadPublishPause::new()
+            .wrap(Arc::new(store), "fwmeta/manifest/");
+        assert_eq!(
+            paused.get_range_exact("fwlog/test", 1..3).await.unwrap(),
+            Some(Bytes::from_static(b"bc"))
+        );
+        assert!(paused.get_range_exact("fwlog/test", 0..5).await.is_err());
+        let store = paused;
+
         assert_eq!(store.list("fwlog/").await.unwrap(), vec!["fwlog/test"]);
         assert_eq!(store.take_media_op_stats().unwrap().media_ops, 0);
         store.delete("fwlog/test").await.unwrap();

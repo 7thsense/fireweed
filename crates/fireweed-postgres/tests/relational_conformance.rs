@@ -37,62 +37,6 @@ fn fresh_schema() -> String {
     )
 }
 
-#[test]
-fn v0193_upgrade_backfills_item_id_high_water_before_counter_restore() {
-    let url = std::env::var("FIREWEED_PG_TEST_URL")
-        .expect("FIREWEED_PG_TEST_URL required (fail-closed live postgres; no LOUD skip)");
-    let schema = fresh_schema();
-    let shard = fireweed_conformance::shard();
-    let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
-    let first = futures::executor::block_on(async {
-        backend
-            .create_queue(fireweed_conformance::qdef())
-            .await
-            .unwrap();
-        backend
-            .push(
-                &shard,
-                vec![fireweed_engine::PushSpec {
-                    client_item_key: Some(ClientItemKey::new("legacy-item").unwrap()),
-                    ..Default::default()
-                }],
-                fireweed_conformance::ts(0),
-                None,
-            )
-            .await
-            .unwrap()[0]
-    });
-    drop(backend);
-
-    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
-    client
-        .batch_execute(&format!(
-            "SET search_path TO {schema}; \
-             DELETE FROM fireweed_id_high_water; \
-             DELETE FROM fireweed_schema_migrations WHERE migration_name='item_id_high_water_v2';"
-        ))
-        .unwrap();
-    drop(client);
-
-    let reopened = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
-    let second = futures::executor::block_on(async {
-        reopened
-            .push(
-                &shard,
-                vec![fireweed_engine::PushSpec {
-                    client_item_key: Some(ClientItemKey::new("post-upgrade-item").unwrap()),
-                    ..Default::default()
-                }],
-                fireweed_conformance::ts(1),
-                None,
-            )
-            .await
-            .unwrap()[0]
-    });
-    assert_eq!(second.epoch(), first.epoch());
-    assert!(second.counter() > first.counter());
-}
-
 /// One `#[test]` per scenario: env-gated + schema-isolated. A single schema is computed per scenario and
 /// reused across that scenario's `make()` calls (so the reconnect scenarios reopen the same DB). Driven by
 /// `futures::executor::block_on` (the sync postgres client panics under an ambient tokio runtime).

@@ -671,7 +671,8 @@ async fn native_query_claims_and_discovery_respect_time_gates_pause_and_cohort_b
         for (table, key) in [("ig", "item_id"), ("gs", "gate_key")] {
             assert!(
                 details.iter().any(|line| {
-                    line.starts_with(&format!("SEARCH {table} USING INDEX"))
+                    (line.starts_with(&format!("SEARCH {table} USING INDEX"))
+                        || line.starts_with(&format!("SEARCH {table} USING COVERING INDEX")))
                         && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))
                 }),
                 "query eligibility must seek each full gate key: {details:?}"
@@ -1692,91 +1693,6 @@ async fn native_bounded_mutation_existing_unique_collision_has_page_independent_
 }
 
 #[tokio::test]
-async fn native_numeric_tie_indexes_migrate_once_and_preserve_existing_keys() {
-    let directory = tempfile::tempdir().unwrap();
-    let config = crate::TursoConfig::local(directory.path().join("numeric-index-migration.db"));
-    let store = TursoRelational::open(config.clone()).await.unwrap();
-    let definition = definition();
-    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    AsyncProjectionStore::ensure_shard(&store, definition)
-        .await
-        .unwrap();
-    let items = vec![
-        recipient(10, "send", "same", Some(1), 0),
-        recipient(2, "send", "same", Some(1), 0),
-    ];
-    apply(
-        &store,
-        &shard,
-        &mut 0,
-        QueueCommand::Push(PushCommand { items }),
-        vec![ItemId::from_u64(10), ItemId::from_u64(2)],
-        1,
-    )
-    .await;
-    {
-        let writer = store.writer.lock().await;
-        writer.execute("CREATE INDEX fireweed_item_index_key_item_asc_idx ON fireweed_item_index(tenant_id,queue_id,index_name,index_key ASC,item_id ASC)", ()).await.unwrap();
-        writer.execute("CREATE INDEX fireweed_item_index_key_item_desc_idx ON fireweed_item_index(tenant_id,queue_id,index_name,index_key DESC,item_id ASC)", ()).await.unwrap();
-        writer
-            .execute("DROP INDEX fireweed_item_index_key_numeric_asc_idx", ())
-            .await
-            .unwrap();
-        writer
-            .execute("DROP INDEX fireweed_item_index_key_numeric_desc_idx", ())
-            .await
-            .unwrap();
-    }
-    drop(store);
-    let store = TursoRelational::open(config).await.unwrap();
-    let indexes = store.schema_report().await.unwrap().indexes;
-    assert!(
-        indexes
-            .iter()
-            .any(|name| name == "fireweed_item_index_key_numeric_asc_idx")
-    );
-    assert!(
-        indexes
-            .iter()
-            .any(|name| name == "fireweed_item_index_key_numeric_desc_idx")
-    );
-    assert!(
-        !indexes
-            .iter()
-            .any(|name| name == "fireweed_item_index_key_item_asc_idx"
-                || name == "fireweed_item_index_key_item_desc_idx")
-    );
-    let before = {
-        let connection = store.reader.lock().await;
-        rows_on(&connection, "PRAGMA schema_version", Vec::new())
-            .await
-            .unwrap()
-    };
-    store.migrate().await.unwrap();
-    let after = {
-        let connection = store.reader.lock().await;
-        rows_on(&connection, "PRAGMA schema_version", Vec::new())
-            .await
-            .unwrap()
-    };
-    assert_eq!(
-        before, after,
-        "repeat migration must not rebuild the physical indexes"
-    );
-    let found = store
-        .server_index_lookup(&shard, "by_label", &[b"same".to_vec()])
-        .await
-        .unwrap();
-    assert_eq!(
-        found
-            .iter()
-            .map(|hit| hit.item_id.as_u64())
-            .collect::<Vec<_>>(),
-        vec![2, 10]
-    );
-}
-
-#[tokio::test]
 async fn native_ordinary_claim_filters_gates_before_limit_and_unblocks_after_hint_reset() {
     let mut first = recipient(1, "send", "blocked-first", Some(1), 0);
     first.gate_keys = vec!["blocked".into(), "open".into()];
@@ -2099,4 +2015,125 @@ async fn native_compound_strings_stream_variable_length_headers_without_deep_exp
         .await
         .unwrap();
     assert_eq!(metrics.pending, 2);
+}
+
+#[tokio::test]
+async fn sparse_membership_uses_all_primary_key_components() {
+    let db = turso::Builder::new_local(":memory:").build().await.unwrap();
+    let connection = db.connect().unwrap();
+    connection.execute_batch("CREATE TABLE fireweed_items (tenant_id TEXT,queue_id TEXT,item_id TEXT,superseded INTEGER,index_fields BLOB,entity_document TEXT,lifecycle_state TEXT,PRIMARY KEY(tenant_id,queue_id,item_id));").await.unwrap();
+    for primary in [
+        "tenant_id,queue_id,index_name,item_id",
+        "tenant_id,queue_id,item_id,index_name",
+    ] {
+        connection.execute_batch(&format!("DROP TABLE IF EXISTS fireweed_item_index; CREATE TABLE fireweed_item_index (tenant_id TEXT,queue_id TEXT,index_name TEXT,index_key BLOB,item_id TEXT,PRIMARY KEY ({primary})); CREATE INDEX keys_asc ON fireweed_item_index(tenant_id,queue_id,index_name,index_key ASC,length(item_id),item_id); CREATE INDEX keys_desc ON fireweed_item_index(tenant_id,queue_id,index_name,index_key DESC,length(item_id),item_id);")).await.unwrap();
+        let mut rows = connection
+            .query(
+                &format!("EXPLAIN QUERY PLAN {SPARSE_FIELDS_SQL}"),
+                ["tenant", "queue", "status"],
+            )
+            .await
+            .unwrap();
+        let mut detail = String::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            let plan = row.get::<String>(3).unwrap();
+            if plan.starts_with("SEARCH idx ") {
+                detail.push_str(&plan);
+            }
+        }
+        for field in ["tenant_id=?", "queue_id=?", "index_name=?", "item_id=?"] {
+            assert!(detail.contains(field), "{detail}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn addressed_claim_queries_seek_ids_and_preserve_due_tenant_and_duplicate_semantics() {
+    let mut first = recipient(1, "send", "first", Some(1), 0);
+    first.gate_keys = vec!["gate-a".into(), "gate-b".into()];
+    let mut future = recipient(2, "send", "future", Some(1), 0);
+    future.not_before = Some(ts(20));
+    let (store, shard, _) = fixture(vec![first, future]).await;
+    let mut other = definition();
+    other.tenant_id = TenantId::new("other-tenant").unwrap();
+    let other_key = QueueKey::new(other.tenant_id.clone(), other.queue_id.clone());
+    AsyncProjectionStore::ensure_shard(&store, other)
+        .await
+        .unwrap();
+    let mut sequence = 0;
+    apply(
+        &store,
+        &other_key,
+        &mut sequence,
+        QueueCommand::Push(PushCommand {
+            items: vec![recipient(1, "send", "other", Some(1), 0)],
+        }),
+        vec![ItemId::from_u64(1)],
+        1,
+    )
+    .await;
+    let writer = store.writer.lock().await;
+    let sql = crate::projection::addressed_rows_sql(
+        "fireweed_items",
+        "item_id,client_item_key",
+        " AND cohort_size IS NULL AND eligible_since IS NOT NULL AND (not_before IS NULL OR not_before<=?3)",
+        4,
+        4,
+    );
+    let mut params = vec![
+        shard.tenant_id.as_str().to_string().into(),
+        shard.queue_id.as_str().to_string().into(),
+        Value::Integer(ts_nanos(ts(10))),
+        "1".into(),
+        "1".into(),
+        "2".into(),
+        "999".into(),
+    ];
+    let mut plan = writer
+        .query(&format!("EXPLAIN QUERY PLAN {sql}"), params.clone())
+        .await
+        .unwrap();
+    let mut details = String::new();
+    while let Some(row) = plan.next().await.unwrap() {
+        details.push_str(&row.get::<String>(3).unwrap());
+    }
+    assert!(details.contains("SEARCH fireweed_items USING INDEX sqlite_autoindex_fireweed_items_1 (tenant_id=? AND queue_id=? AND item_id=?)"),"{details}");
+    drop(plan);
+    let mut rows = writer.query(&sql, params.clone()).await.unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "1"
+    );
+    assert!(rows.next().await.unwrap().is_none());
+    drop(rows);
+    params[2] = Value::Integer(ts_nanos(ts(30)));
+    let mut rows = writer.query(&sql, params.clone()).await.unwrap();
+    let mut ids = std::collections::BTreeSet::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        ids.insert(row.get::<String>(0).unwrap());
+    }
+    assert_eq!(
+        ids,
+        std::collections::BTreeSet::from(["1".to_owned(), "2".to_owned()])
+    );
+    drop(rows);
+    let gates = crate::projection::addressed_rows_sql(
+        "fireweed_item_gates",
+        "item_id,gate_key",
+        " ORDER BY item_id,gate_key",
+        4,
+        4,
+    );
+    let mut rows = writer.query(&gates, params).await.unwrap();
+    let mut gate_keys = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        gate_keys.push(row.get::<String>(1).unwrap());
+    }
+    assert_eq!(gate_keys, vec!["gate-a", "gate-b"]);
+    drop(rows);
 }

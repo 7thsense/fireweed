@@ -23,7 +23,7 @@ python3 - "$REPO_ROOT" "$fixture" <<'PYFIXTURE'
 from pathlib import Path
 import shutil, sys, re
 source, root = map(Path, sys.argv[1:])
-files = ["README.md", "Cargo.toml", "Cargo.lock", "charts/fireweed-queue/Chart.yaml", "crates/fireweed-bench/Cargo.toml",
+files = ["README.md", "Cargo.toml", "Cargo.lock", "crates/fireweed-bench/Cargo.toml",
          "scripts/ci/public-release-gates.json", "scripts/ci/public-release-gates-ci.json",
          "scripts/release/verify-release-identity.sh", "scripts/release/list-public-version-sources.sh"]
 for relative in files:

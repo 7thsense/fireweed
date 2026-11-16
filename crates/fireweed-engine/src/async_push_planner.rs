@@ -62,7 +62,7 @@ where
 
     fn plan_push(
         &self,
-        request: AsyncPushRequest,
+        mut request: AsyncPushRequest,
         definition: QueueDefinition,
         fingerprint: Option<PushFingerprint>,
     ) -> OwnedTask<EngineResult<AsyncPushPlan>> {
@@ -87,25 +87,27 @@ where
             }
 
             projection.admit_mutation(request.shard.clone()).await?;
-            let (epoch, items, item_ids) = allocate_push_epoch_blob_and_counters(
+            let owned_items = std::mem::take(&mut request.items);
+            let (epoch, items, item_ids) = allocate_push_epoch_blob_and_counters_owned(
                 log.as_ref(),
                 counters.as_ref(),
                 &definition,
                 &request,
+                owned_items,
                 node_id,
             )
             .await?;
             validate_push_driver_snapshot(
                 projection.as_ref(),
                 request.shard.clone(),
-                items.clone(),
+                &items,
                 request.now,
             )
             .await?;
             let envelope = CommandEnvelope {
                 command_id: ids.next_command_id(),
                 request_id: request.request_id.clone(),
-                request_fingerprint: fingerprint.map(|hash| hash.legacy_body_hash.0),
+                request_fingerprint: fingerprint.map(|hash| hash.body_hash().0),
                 request_outcome: request.request_id.as_ref().map(|_| RequestOutcome::Push {
                     item_ids: item_ids.clone(),
                 }),
@@ -166,13 +168,32 @@ pub async fn allocate_push_epoch_blob_and_counters<L: AsyncLogStore>(
     request: &AsyncPushRequest,
     node_id: u8,
 ) -> EngineResult<(u64, Vec<PushItem>, Vec<ItemId>)> {
+    allocate_push_epoch_blob_and_counters_owned(
+        log,
+        counters,
+        definition,
+        request,
+        request.items.clone(),
+        node_id,
+    )
+    .await
+}
+
+async fn allocate_push_epoch_blob_and_counters_owned<L: AsyncLogStore>(
+    log: &L,
+    counters: &QueueCounters,
+    definition: &QueueDefinition,
+    request: &AsyncPushRequest,
+    owned_items: Vec<crate::PushSpec>,
+    node_id: u8,
+) -> EngineResult<(u64, Vec<PushItem>, Vec<ItemId>)> {
     let epoch = crate::resolve_write_epoch_async(request.expected_epoch, || {
         log.current_epoch(request.shard.clone())
     })
     .await?;
-    let base = counters.reserve(&request.shard, epoch, request.items.len() as u32);
+    let base = counters.reserve(&request.shard, epoch, owned_items.len() as u32);
     let (mut items, item_ids) = build_push_items(
-        request.items.clone(),
+        owned_items,
         epoch,
         node_id,
         base,
@@ -186,10 +207,17 @@ pub async fn allocate_push_epoch_blob_and_counters<L: AsyncLogStore>(
 async fn validate_push_driver_snapshot<P: AsyncProjectionStore>(
     projection: &P,
     shard: QueueKey,
-    items: Vec<PushItem>,
+    items: &[PushItem],
     now: UtcTimestamp,
 ) -> EngineResult<()> {
-    projection.validate_push(shard.clone(), items, now).await?;
+    match projection.validate_push_borrowed(&shard, items) {
+        Some(result) => result?,
+        None => {
+            projection
+                .validate_push(shard.clone(), items.to_vec(), now)
+                .await?
+        }
+    }
     if projection.pause_blocks_intake(shard).await? {
         return Err(EngineError::Paused { drain_intake: true });
     }
@@ -206,8 +234,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use fireweed_core::{
-        BodyHash, EligibilityPolicy, GateKeyPolicy, ItemId, ItemState, OrderingMode, PriorityModel,
-        QueueId, RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp,
+        BodyHash, EligibilityPolicy, ItemId, ItemState, OrderingMode, PriorityModel, QueueId,
+        RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp,
     };
 
     use super::*;
@@ -361,7 +389,7 @@ mod tests {
             self.enter_snapshot("push_idempotency");
             let decision = match self.replays.lock().unwrap().get(&request_id) {
                 None => IdempotencyDecision::Proceed,
-                Some((stored, ids)) if *stored == fingerprint.legacy_body_hash => {
+                Some((stored, ids)) if *stored == fingerprint.body_hash() => {
                     IdempotencyDecision::Replay(ids.clone())
                 }
                 Some(_) => IdempotencyDecision::Conflict,
@@ -571,68 +599,6 @@ mod tests {
             crate::AsyncPushError::BeforeCommit(EngineError::RequestIdConflict)
         );
         assert_eq!(commits.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn legacy_gate_order_fingerprint_replays_after_canonical_normalization() {
-        let request_id = RequestId::new("legacy-gate-order").unwrap();
-        let original = vec![PushSpec {
-            gate_keys: vec!["z".to_string(), "a".to_string()],
-            ..PushSpec::default()
-        }];
-        let legacy = crate::compose::push_body_hash(&original).unwrap();
-        let replayed_id = ItemId::mint(7, 1, 99);
-        let mut definition = definition();
-        definition.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
-        let axes = Arc::new(TestAxes {
-            definition,
-            epoch: 7,
-            next_command: AtomicU64::new(0),
-            replays: Mutex::new(HashMap::from([(
-                request_id.clone(),
-                (legacy, vec![replayed_id]),
-            )])),
-            validated: AtomicU64::new(0),
-            events: Mutex::new(Vec::new()),
-            snapshot_held: AtomicBool::new(false),
-            object_log_during_snapshot: AtomicBool::new(false),
-        });
-        let commits = Arc::new(AtomicU64::new(0));
-        let planner = ProjectionPushPlanner::from_shared(
-            axes.clone(),
-            axes.clone(),
-            axes.clone(),
-            axes.clone(),
-            Arc::new(QueueCounters::default()),
-            1,
-        );
-        let backend = AsyncComposedBackend::new_with_planners(
-            ApplyingStrategy {
-                axes: axes.clone(),
-                commits: commits.clone(),
-            },
-            InlineDispatcher::default(),
-            crate::NoAsyncClaimPlanner,
-            planner,
-            4,
-        );
-
-        let replay = futures::executor::block_on(backend.push(AsyncPushRequest {
-            shard: crate::QueueKey::new(
-                TenantId::new("tenant").unwrap(),
-                QueueId::new("queue").unwrap(),
-            ),
-            request_id: Some(request_id),
-            items: original,
-            now: UtcTimestamp::new(2, 0).unwrap(),
-            expected_epoch: Some(7),
-        }))
-        .unwrap();
-
-        assert!(replay.is_replayed());
-        assert_eq!(replay.item_ids, vec![replayed_id]);
-        assert_eq!(commits.load(Ordering::SeqCst), 0);
-        assert_eq!(axes.validated.load(Ordering::SeqCst), 0);
     }
 
     fn between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {

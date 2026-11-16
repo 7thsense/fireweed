@@ -5,14 +5,17 @@ ddx:
     - api-native-client-interface
     - api-hot-projection-query-surface
     - adr-concrete-fireweed-facade-and-optional-controls
-  status: accepted
+  status: retired
 ---
 
 # API-005: Fireweed Rust facade
 
+> **2026-10-10 precedence:** [ADR-026](../adr/ADR-026-postgres-baseline-queue-contract.md) and [API-007](../contracts/API-007-queue-claim-commit-contract.md) accept the simple claim/commit target with a PostgreSQL baseline and equal S3/Turso conformance. This document describes the existing implementation where not superseded; adoption remains outstanding.
+
+
 **Type**: Rust binding contract
 **Version**: v0.24
-**Status**: accepted
+**Status**: Retired. The facade this contract described was removed before v0.32.0; `fireweed::queue::Queue` ([API-007](API-007-queue-claim-commit-contract.md)) is the only public API. The text below is retained as history.
 **Related**: API-001, API-004, ADR-009, ADR-012, ADR-015, ADR-017, ADR-022,
 ADR-023, TP-004, orthogonal-storage-matrix-brief
 
@@ -137,7 +140,7 @@ Correctness and progress requirements for the facade execution path:
    Per-cell residual inventory (which matrix cells still wrap
    `BlockingLibBackend`, whether inner product poll would block a Tokio
    worker, and exit criteria): 
-   [async-runtime-blocking-matrix-inventory](../../04-build/async-runtime-blocking-matrix-inventory.md).
+   [async-runtime-blocking-matrix-inventory](../../04-build/simple-queue-postgres-refactor-plan.md).
 
 5. **Two-phase mutate and discover (required).** Mutating calls
    (`commit`, packed `complete` / `retry` / `release`, push, `upsert`) complete
@@ -146,9 +149,10 @@ Correctness and progress requirements for the facade execution path:
    rows. `claim` polls currently selectable applied rows. Empty `claim` is a
    normal poll, never `Conflict` for apply lag and never a command failure.
    Public reads (`side_record`, `live_item`, `metrics`) may wait projection
-   coverage. Ordinary item `claim` must not. The public cell reports
-   `DurabilityClass::EventualApply` with `atomic_transition_commit: true` and
-   still serves `upsert`. Inspect `commit_capabilities` rather than treating
+   coverage. Ordinary item `claim` must not. Ordinary writes retain eventual-apply behavior. Transition commits cover
+   their projection state before returning success, so `commit_capabilities`
+   reports `DurabilityClass::Atomic` with `atomic_transition_commit: true`.
+   The public cell still serves `upsert`. Inspect `commit_capabilities` rather than treating
    construction as a serving snapshot. `ResponseBarrier` has a single value,
    [`ResponseBarrier::AsyncProjection`]. The only public composition is
    `LogConfig::S3` × Turso (ADR-024). Batching and generation packing remain
@@ -258,9 +262,10 @@ barrier, or async spec (`unwrap_or` is not the contract).
 ##### Durability
 
 The public cell is Class A. Success is durable on the S3 object log. Turso
-rebuilds through `projection_control`. The cell reports
-`DurabilityClass::EventualApply` with `atomic_transition_commit: true` and
-still serves `upsert`. There is no public Class B cell and no `Strict` barrier.
+rebuilds through `projection_control`. Ordinary writes retain eventual-apply behavior. Transition commits cover their
+projection state before returning success, so `commit_capabilities` reports
+`DurabilityClass::Atomic` with `atomic_transition_commit: true`. The cell still
+serves `upsert`. There is no public Class B cell and no `Strict` barrier.
 
 ##### Environment variables
 

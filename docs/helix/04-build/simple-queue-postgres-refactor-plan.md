@@ -1,0 +1,238 @@
+---
+ddx:
+  id: build-simple-queue-postgres-refactor
+  depends_on:
+    - api-queue-claim-commit-contract
+    - adr-postgres-baseline-queue-contract
+  status: accepted
+---
+
+# Queue refactor and identical durable backends
+
+## Scope
+
+Governing artifacts: PRD, Architecture, ADR-026, API-007, Snorri integration,
+construction configuration, diagnostics and durable-record Contracts; TP-004,
+TP-005 and TP-006. Use HELIX v0.15.4 for concern propagation and authoring.
+
+Deliver one concrete facade, one Snorri adapter, native PostgreSQL and S3/Turso
+with identical mandatory behavior, shared business planning and comparable
+settled benchmarks. Implementation is authorized; Astra Ultra reviews the whole
+plan before code and every final iteration before committing/pushing main.
+Preserve DDx history without squash, rebase or rewritten closing pointers.
+
+## Shared Constraints
+
+Native storage filtering precedes claim; never broad-claim/client-filter.
+Claim-group commit includes atomic workflow/audit state, claimed updates, new
+work and immutable results. Original request identity survives rebatching,
+rejected replay and expired retention. Fresh successful reads/claims cover ACKed
+authority. Current lease validation uses a fresh independent operational clock.
+
+Core/planners own semantic policy once; adapters own SQL and durable publication.
+Field/body knowledge is not write intent. Preserve full unsigned versions,
+complete identities, JSON equality and original raw definition/secret. Keep
+stock Turso, log authority, conditional fencing, exact genesis and real durability
+checks. Runtime resource and internal frame limitations cannot weaken the common
+consumer domain or manufacture a known rejection after ambiguous publication.
+
+## Implementation Slices
+
+| Slice | Area | Depends on | Gate |
+|---|---|---|---|
+| Boundary adoption and document cleanup | core/api/testing | Current Architecture and Contracts | Real Cargo dependency/visibility checker, permitted/forbidden controls, link/graph/consumer checks |
+| Shared interface and planners | core/api | Boundary map | DTO/limit/fingerprint/outcome tests; complete/grouped/partial-knowledge invariants |
+| PostgreSQL baseline | data/testing | Shared semantics | Concrete-handle mandatory suite; native selection, state/new-work atomicity, physical loss/reopen and cancellation |
+| S3/Turso full interface | data/infra | Shared semantics and revised formal correspondence | All ten mandatory operations, native selection/hydration, conditional publication, fresh observations, replay and exact rebuild |
+| Bounded authoritative metadata | infra | Native object-log contracts | No full-manifest retained/rewrite growth outside admission; corruption/missing-authority/fencing tests; scale measurements |
+| Single Snorri adapter | api | Both complete constructors | Real worker/control/visibility/recovery tests, JSON/model pins, accumulated state, transitions and await consumption |
+| Diagnostics/configuration integration | api/infra | Exact Contracts | Validation/redaction/no-I/O controls; real OTel receiver and loss/retrieval tests; overhead measurements |
+| Formal correspondence | core/testing | Revised properties | Reachable positive witnesses, targeted replayable negative controls, bounds/assumptions and model/code/test maps |
+| Settled matched benchmarks | testing/infra | Identical qualified behavior | Same host/source/seed/limits/durability; 10M hot, 1000 cold+hot, density/numeric/drain/cost evidence |
+| Consumer cutover and legacy removal | api/data | All preceding gates | One adapter/facade, no legacy side-record or capability fallback; affected tests, examples and docs align |
+
+Boundary adoption is first. The actual command is
+`python3 scripts/ci/check_queue_boundaries.py --controls`, shared locally, in
+pre-commit configuration and CI. Precise legacy exceptions name source, target,
+owner and removal trigger. Do not enlarge a baseline to accept new violations.
+
+## Execution Contract
+
+For each iteration, implement its complete bounded unit, run meaningful checks,
+obtain Astra Ultra actual-source approval, then commit and push main. Review
+findings remain in scope until resolved. Do not request already-granted approval
+again. A passing internal primitive does not activate a complete backend or
+establish exceptional durability/performance. Do not stop at a partial slice.
+
+Keep chronological review transcripts, subprocess logs, benchmark snapshots and
+historical completion narratives out of active HELIX. Git preserves retired
+text; runner-owned target artifacts and CI uploads retain current evidence with
+source/config/tool identity and explicit retention/loss. Exact live test fixtures
+belong with tests, not among governed specifications. Keep current requirements,
+contracts, designs and this execution plan concise and maintained in place.
+
+## Native Owner Path Evidence
+
+Fixed phase totals partition elapsed owner-entry time into fresh authority,
+planned read/worker/transfer, checked record verification and native apply.
+Quiescent deltas reject saturation and inconsistent totals. Worker-side parsing
+is included in read time; elapsed buckets are not CPU or provider-request counts.
+Head reads, fence acquisitions and log records read are counted separately.
+
+Native writes publish to the immutable log and every read or query serves from
+the local projection, so healthy operation reads zero log records and makes no
+object-store read. Each queue has one owner at a time, by a control-plane lease,
+and one loop through which every operation passes; a second handle receives
+`Busy`. Entry acquires the lease, waits the skew allowance `S`, takes a strictly
+newer fence and rebuilds the projection from the log. One loop iteration makes
+one conditional publish, whatever number of writes it carries, and every request
+keeps its own outcome. The owner plans the queued writes in arrival order against
+one open projection transaction and stages each write's entry into it, so a
+later write sees the staged effects of the earlier ones. It ends the batch at
+the lease's `renew_at` or when the next entry would exceed the hard record
+bound; that entry and the rest stay queued. It then publishes one record
+carrying every entry, conditionally on epoch and exact offset, commits the
+transaction only once that record is stored, and replies to each request from the
+projection. A failed publish rolls the transaction back and leaves owner state.
+Genesis is alone in its record, so provisioning takes an iteration of its own,
+and a commit batch whose groups do not all fit continues in the next record.
+Rebuild applies each record's entries in order in one transaction, so
+`P = fold(log[0, p))` holds at every commit. It tracks a local
+lease deadline, measured on a clock that counts suspend from before each lease
+request was sent, and releases a read only if it is still before the deadline
+after the read. Any failed or unconfirmed publish, passed deadline, rejected
+renewal or projection error drops the queue's projection and leaves owner state;
+re-entry rebuilds under a newer fence, so an original that did publish is found
+by its identity. The projection lives exactly as long as its process: open
+deletes whatever an earlier process left. `check_owner.py` bounds this path with
+two handles, skewed wall clocks, a reply window, a stall, a lost renewal reply
+and a crash, and its faulty controls name each safety rule; its mapping is
+documentary.
+
+Native ordinary-pack preparation uses one exact per-key read union and an
+evolving shared-planner snapshot. Whole-batch original classification precedes
+current-state hydration; known predecessors and administration barriers preserve
+caller order. Unique probes retain loaded absence and speculative ownership.
+Accepted deltas, receipts and clock decisions survive splitting at the first
+physical size overflow; physical receipts sort canonically without reordering logical
+outputs. Reservation or authority errors cannot masquerade as a size split.
+Root publishes the actual accepted contiguous prefix once, then resolves the
+complete declared batch from the projection. Absent submitted originals are replanned only after the owner re-enters under a
+newer fence. Caller positions finalize from the projection, including
+single/administrative conflict or expiry classifications.
+`check_pack_preparation.py` bounds preparation; `check_pack_publication.py` bounds
+physical publication, contiguous remainder retries and source-confirmed receipts.
+Native final-transaction uniqueness checks seek the existing digest/range equality
+index and still compare full values across exact queue/collection/index domains.
+Pinned-runtime query-plan and bounded predicate-oracle controls guard that path.
+Neither finite family establishes provider durability or performance readiness;
+public activation and the matched release workloads remain separate gates.
+
+The concrete PostgreSQL facade and mandatory suite are implemented. The hidden
+native port assembles all ten operations from shared planners, native
+filtered selection, stock-Turso atomic projection and conditional log publication.
+Owned response handoff retains admission through delivery or abandoned reply
+cleanup. Shared shutdown drains admission and workers and serializes final
+resource teardown. These internal operations do not activate the public backend.
+
+Native mutation retries happen only after the owner re-enters under a strictly
+newer durable fence and rebuilds from the log. Insert, claim and commit then look
+up the original identity in the projection; immutable original replay precedes
+current-state validation.
+Originals, receipt lookups, addressed state reads, commit, preview and pack
+preparation read the trusted projection directly. They bind no per-operation
+source descriptors and compare no projection bytes with the log. Complete
+administrative hydration, state query paths, unique owners and selection indexes
+still require full cached integrity.
+Fresh catalog-known missing indexes and previously observed malformed authority
+fail closed across reopen, independent handles and later metadata deletion.
+Native S3 conditional writes classify typed conflicts and never retry a lost
+write reply inside the SDK.
+
+Local and real S3/Turso pass the same PostgreSQL conformance functions, including
+independent claimers, atomic state/new work, administration and cold rebuild.
+The public PostgreSQL baseline passes those same scenarios. Public native
+construction and production qualification remain pending. Constructor
+configuration must integrate provisioning capacity and validate before external
+resource access. Scratch roots are resolved once and shared by cloned handles.
+
+Complete stock SDK memory-peak correspondence, cached integrity and bounded
+index retention remain gates. In particular, native `typeof`/`length`
+can materialize overflow records before later per-key admission; opcode and
+corruption controls establish correctness, not a hard allocation bound. Settled
+release density, scale and cost workloads must qualify performance.
+
+The SDK provides required bounded metadata reads/conditional writes with exact
+provider/key/version tokens and source-buffer lifetime ownership. Its fixed-head
+reader/fencer is qualification-internal. The owner loop publishes through the native
+log (head CAS over a copy-on-write paged index), so a write rewrites no whole
+index. The source-committed semantic summary covering originals, tombstones,
+payload descriptors, complete selection indexes and aggregates stays off.
+Operations mint no per-operation proofs against that head; they serve from the
+projection. Rebuild from genesis remains in use, and the log is not truncated.
+
+The single Snorri adapter, diagnostics receiver integration, revised formal
+correspondence and matched settled release benchmarks remain required. Snorri
+binds stats as_of to signed Unix nanoseconds, including negative-epoch hourly
+flooring. No completion claim is permitted while any required gate is absent.
+
+## Validation Plan
+
+Run the identical public-handle scenarios on both stores without capability skips.
+Exercise exact filtered priority/age/schedule order, wide key/field/value sets,
+collisions, full unsigned values, state CAS and uniqueness, successful/rejected
+regrouping, empty replay, renewal/current versions, whole-claim expiry, preview,
+large administration, result limits and shutdown/caller cancellation.
+
+Use real PostgreSQL and qualified S3/stock Turso. Missing fixtures, ignored tests,
+only memory whitebox passes and current debug primitive timings are not parity or
+capacity evidence. Include paused apply, lost replies, writer/server process
+loss, fencing races, corrupt authority, native rollback/poison and exact rebuild.
+
+Snorri retains vectorized_resplit_replay_check and
+same_instance_siblings_use_independent_candidate_projections. Verify arbitrary JSON
+state and the complete JsonEqualityEncoding namespace/schema pin before indexed
+reads and writes in both numeric modes. State_version advances on transitions
+and await consumption, not dispatch/timeout/timer bookkeeping. Host maintenance
+must preserve ownership and resource drain semantics.
+
+Release performance acceptance includes the
+[first-principles matrix](../00-discover/first-principles-performance-model.md):
+its declared H-server local headline is 100,000 completed items/second
+(approximately 350,000 durable item mutations/second), batch p99 at most 10 ms,
+with 10M resident items. Apply the matrix's backend-specific topology and commit
+bounds to S3 and remote PostgreSQL; do not impose a local-NVMe latency assumption
+on remote storage. The Snorri campaign's 10,000 complete recipients/second and
+12,500/second stretch target are additional consumer gates, not substitutes for
+primitive targets. Both backends require matched durability/resources and settled
+runs; small diagnostics and historical results do not qualify this release.
+
+Deadline correctness tests observe the actual timeout branch before owned drain,
+using controlled Tokio time and real local storage. Separate real worker tests
+cover caller cancellation. Concurrent append correctness retains the full
+workload and checks durable completion progress, offsets, fencing and reopen;
+its 30-second no-progress watchdog is not an aggregate throughput qualification.
+
+Benchmark useful completed work after full settle/drain. Measure p50/p95/p99,
+RSS/retained memory, projection debt, storage volume and S3 requests/cost, with
+matched state/fanout/filter mixes and interleaved controls. Failed correctness
+invalidates every reported rate; shorter or cheaper durability is not comparable.
+
+## Risks and Rollbacks
+
+| Risk | Response |
+|---|---|
+| Stale/partial authority or missing original genesis | Fail closed; preserve authority; resolve original identity |
+| Large selector or value set | Native index intersection and admitted streaming/spool; no hidden cap |
+| Native parser/VM/cache resource growth | Bounded-depth query shape, explicit admission and measured SDK residency |
+| Documentation pruning breaks a live gate | Relocate exact fixtures and update readers/generators atomically; run negative controls |
+| Model/spec drift | Invalidate affected assurance and recheck correspondence before readiness |
+| Consumer cutover mismatch | Keep accepted semantics; fix adapter and rerun both real lanes before cutover |
+
+## Exit Criteria
+
+Both constructors implement API-007 identically. One real Snorri adapter passes
+both mandatory suites and recovery/durability paths. Architecture/configuration/
+diagnostics/formal obligations have executed evidence. Bounded metadata and
+matched settled 10M/density/numeric/drain/cost workloads qualify the claimed
+performance envelope. Every required slice and final Astra review passes.

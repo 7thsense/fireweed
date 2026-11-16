@@ -1,0 +1,65 @@
+{
+  "artifacts": {
+    "ci-policy.log.gz": {
+      "compression": "gzip",
+      "original": "/mnt/scratch/Projects/fireweed/target/formal-merge/ci-policy.log",
+      "original_sha256": "aea6a1acae486a2a7599dc0fb9bf068af6c7c2480b6ffca7e6facc56b9afd641",
+      "retained_sha256": "4ff9c342eec65b5751602e8e806f856cb2b303739094f1ca9490e9206d61f5a3"
+    },
+    "python-controls.log.gz": {
+      "compression": "gzip",
+      "original": "/mnt/scratch/Projects/fireweed/target/formal-merge/python-controls.log",
+      "original_sha256": "2493376f156c52923de44a6a3c9a7eef23aa2d0710d2a2b8d6c153b344caba92",
+      "retained_sha256": "ca80d40af4c8a79e7d0656c28e38a237a116cb81ba4d64c9105071e8be4d96ff"
+    },
+    "queue-boundaries.log.gz": {
+      "compression": "gzip",
+      "original": "/mnt/scratch/Projects/fireweed/target/formal-merge/queue-boundaries.log",
+      "original_sha256": "f102757791338d06a7fd26c80047ceee97fc3d19a50f75871401539f05b299e8",
+      "retained_sha256": "bd7681239d420832b1e2d639ef77fd1401c7cece88057a719e9a98581ff876df"
+    },
+    "replay-corpus.json.gz": {
+      "compression": "gzip",
+      "original": "/mnt/scratch/Projects/fireweed/target/formal-merge/replay-corpus.json",
+      "original_sha256": "7f0bf4a5ad92b3e742b8126ae9831bbafe0a3f84e1243332f1b66b9448c9d930",
+      "retained_sha256": "47ef44ec21a110d26e6bf14c46161ec6abd84faf5d80f11de797ed6de73d1bb7"
+    },
+    "replay-observations.json.gz": {
+      "compression": "gzip",
+      "original": "/mnt/scratch/Projects/fireweed/target/formal-merge/replay-observations.json",
+      "original_sha256": "0ee716b6da2e00842023b6fcfbb5ea838633dce50d460a8032472fa8c6d2097f",
+      "retained_sha256": "719c9dbd4ba444dca7b857e0d573b2f8b58d7710799a8aea19f3182a612fdd88"
+    },
+    "replay-progress.jsonl.gz": {
+      "compression": "gzip",
+      "original": "/mnt/scratch/Projects/fireweed/target/formal-merge/replay-progress.jsonl",
+      "original_sha256": "7248d1176e7aac61a15f56dfc75a258bb6cc8756a0bbe61a3048ea515628306c",
+      "retained_sha256": "7b0b24eb4d971418e616c77b275f94768f04f037527d28876b92915d18af9ece"
+    },
+    "replay-s3-cas.json.gz": {
+      "compression": "gzip",
+      "original": "/mnt/scratch/Projects/fireweed/target/formal-merge/replay-s3-cas.json",
+      "original_sha256": "7393b488d6fa1a933a99e5a3c0d2c5343060697c81994a51bee1514dcbe1d5d7",
+      "retained_sha256": "deeedb8b802b7f4ea189c9cc2a4920d3286ca81b2cb200d6eddd376dc14a8a61"
+    },
+    "replay.json.gz": {
+      "compression": "gzip",
+      "original": "/mnt/scratch/Projects/fireweed/target/formal-merge/replay.json",
+      "original_sha256": "f7cb8cb5d6eac18faa3f69250f77dc236a0a7e6245f8799daea75cdada7029d7",
+      "retained_sha256": "beb70dda5fa17468074b7fb994a1cf9a69837fdc6eba3354ebf5cbdca5b45d3d"
+    },
+    "replay.log.gz": {
+      "compression": "gzip",
+      "original": "/mnt/scratch/Projects/fireweed/target/formal-merge/replay.log",
+      "original_sha256": "79b5a6a453f93fe34c9ab844196707e2116d0a6ce53eab5819efb983e4eb84bf",
+      "retained_sha256": "261290c2b96a52dbdf969e47524a77e77362fd627e7f52de2ceb5ab24eedad0d"
+    }
+  },
+  "cases": 96,
+  "merge_branch_head": "6a6133b6123efe5644db26e0981b9c372aae9b57",
+  "schema": "fireweed-main-merge-integration-v1",
+  "scope": "legacy backend integration, not API-007 correspondence",
+  "status": "PASS",
+  "steps": 296,
+  "tested_head": "d4b55ccb731e168d624c870043d5d83bdb868501"
+}

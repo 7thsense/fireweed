@@ -1,8 +1,0 @@
-# Fireweed Queue CI values: first-class filesystem log × memory projection (public StorageConfig axes).
-storage:
-  log:
-    backend: filesystem
-  projection:
-    backend: memory
-image:
-  tag: ci

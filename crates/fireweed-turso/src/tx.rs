@@ -114,17 +114,18 @@ mod apply_statement_reuse_tests {
             Value::Blob([0, 255, 31, 128].repeat(16384)),
         ];
         let mut rows = statement.query(expected.clone()).await.unwrap();
-        let held: Vec<_> = rows.next().await.unwrap().unwrap().into_values().collect();
+        let row = rows.next().await.unwrap().unwrap();
+        let held: Vec<_> = crate::row_values(&row, rows.column_count())
+            .unwrap()
+            .collect();
         assert!(rows.next().await.unwrap().is_none());
         drop(rows);
         let replacement = vec![Value::Integer(7); 5];
         let mut rows = statement.query(replacement.clone()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
         assert_eq!(
-            rows.next()
-                .await
+            crate::row_values(&row, rows.column_count())
                 .unwrap()
-                .unwrap()
-                .into_values()
                 .collect::<Vec<_>>(),
             replacement
         );
@@ -449,7 +450,12 @@ impl RelTx for TursoRel<'_> {
                 let mut rows = stmt.query(params).await.map_err(storage)?;
                 let mut collected = Vec::new();
                 while let Some(row) = rows.next().await.map_err(storage)? {
-                    collected.push(RelRow(row.into_values().map(from_turso).collect()));
+                    collected.push(RelRow(
+                        crate::row_values(&row, rows.column_count())
+                            .map_err(storage)?
+                            .map(from_turso)
+                            .collect(),
+                    ));
                 }
                 Ok(collected)
             })
@@ -461,7 +467,12 @@ impl RelTx for TursoRel<'_> {
                 let mut rows = stmt.query(params).await.map_err(storage)?;
                 let mut collected = Vec::new();
                 while let Some(row) = rows.next().await.map_err(storage)? {
-                    collected.push(RelRow(row.into_values().map(from_turso).collect()));
+                    collected.push(RelRow(
+                        crate::row_values(&row, rows.column_count())
+                            .map_err(storage)?
+                            .map(from_turso)
+                            .collect(),
+                    ));
                 }
                 Ok(collected)
             })
@@ -735,7 +746,7 @@ mod packed_authority_first_tests {
         let foreign = item("7", "k7", 7);
         let leftover = item("8", "k8", 8);
         let extra = item("9", "k9", 9);
-        let legacy = item("10", "k10", 10);
+        let replayed = item("10", "k10", 10);
         let all = vec![
             a.clone(),
             b.clone(),
@@ -746,7 +757,7 @@ mod packed_authority_first_tests {
             foreign.clone(),
             leftover.clone(),
             extra.clone(),
-            legacy.clone(),
+            replayed.clone(),
         ];
         let ids: Vec<ItemId> = all.iter().map(|item| item.item_id).collect();
 
@@ -954,8 +965,8 @@ mod packed_authority_first_tests {
             &shard,
             9,
             vec![claim_envelope(
-                vec![legacy.item_id],
-                "legacy-token",
+                vec![replayed.item_id],
+                "replay-token",
                 900,
                 "wl",
                 false,
@@ -968,28 +979,28 @@ mod packed_authority_first_tests {
             &shard,
             10,
             vec![claim_envelope(
-                vec![legacy.item_id],
-                "legacy-token",
+                vec![replayed.item_id],
+                "replay-token",
                 900,
                 "wl",
                 false,
             )],
         )
         .await
-        .expect("legacy outbox claim replay must not poison");
+        .expect("non-authority-first claim replay must not poison");
         apply(
             &packed,
             &shard,
             11,
             vec![
-                claim_envelope(vec![legacy.item_id], "legacy-token", 900, "wl", false),
-                complete_envelope(vec![legacy.item_id]),
+                claim_envelope(vec![replayed.item_id], "replay-token", 900, "wl", false),
+                complete_envelope(vec![replayed.item_id]),
             ],
         )
         .await
-        .expect("legacy fused already-this-token must not poison");
+        .expect("non-authority-first fused already-this-token must not poison");
         assert_eq!(
-            AsyncProjectionStore::item_state(&packed, shard.clone(), legacy.item_id)
+            AsyncProjectionStore::item_state(&packed, shard.clone(), replayed.item_id)
                 .await
                 .unwrap(),
             Some(ItemState::Complete)
@@ -1325,7 +1336,7 @@ mod packed_authority_first_tests {
         for id in &ids {
             let packed_rows = packed
                 .query(
-                    "SELECT item_version,payload,metadata,lifecycle_state FROM fireweed_items \
+                    "SELECT item_version,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id),metadata,lifecycle_state FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                     vec![
                         Value::Text(shard.tenant_id.as_str().to_string()),
@@ -1337,7 +1348,7 @@ mod packed_authority_first_tests {
                 .unwrap();
             let solo_rows = solo
                 .query(
-                    "SELECT item_version,payload,metadata,lifecycle_state FROM fireweed_items \
+                    "SELECT item_version,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id),metadata,lifecycle_state FROM fireweed_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                     vec![
                         Value::Text(solo_shard.tenant_id.as_str().to_string()),

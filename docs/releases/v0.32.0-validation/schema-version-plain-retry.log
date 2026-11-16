@@ -1,0 +1,16 @@
+3eca75ece583c99bdbcf5b5a253939d404700167
+   Compiling fireweed-postgres v0.32.0 (/mnt/scratch/fw-release/src/crates/fireweed-postgres)
+    Finished `test` profile [optimized + debuginfo] target(s) in 6.61s
+     Running tests/schema_version.rs (/mnt/scratch/fw-release/target/debug/deps/schema_version-907a20e76e4cd95e)
+
+running 7 tests
+test components_sharing_one_schema_keep_separate_rows ... ok
+test concurrent_fresh_opens_all_succeed_with_one_row ... ok
+test concurrent_sync_and_async_control_plane_opens_share_one_stamp ... ok
+test fresh_open_stamps_and_reopen_succeeds ... ok
+test tables_from_before_the_version_table_existed_are_refused_without_creating_it ... ok
+test tables_without_a_version_row_are_refused_before_any_table_is_touched ... ok
+test wrong_version_is_refused_before_any_table_is_touched ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 102.85s
+

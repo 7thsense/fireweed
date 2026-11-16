@@ -17,6 +17,9 @@ ddx:
 
 # ADR-024: The public cell is s3 log × turso projection
 
+> **2026-10-10 precedence:** [ADR-026](../adr/ADR-026-postgres-baseline-queue-contract.md) and [API-007](../contracts/API-007-queue-claim-commit-contract.md) accept the simple claim/commit target with a PostgreSQL baseline and equal S3/Turso conformance. This document describes the existing implementation where not superseded; adoption remains outstanding.
+
+
 | Date | Status | Deciders | Related | Confidence |
 |------|--------|----------|---------|------------|
 | 2026-09-21 | Accepted | Project owner | ADR-012, ADR-013, ADR-015, ADR-016, ADR-017, AR-2026-09-21 | High |

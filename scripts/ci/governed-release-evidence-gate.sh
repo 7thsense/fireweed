@@ -76,7 +76,7 @@ case "${mode}" in
 esac
 
 run_cargo() {
-    rustup run 1.97.1 cargo "$@"
+    rustup run 1.99.0 cargo "$@"
 }
 
 echo "--- governed TP-002 semantic release manifest ---"

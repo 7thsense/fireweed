@@ -1,0 +1,17 @@
+{"phase":"ingest","layout":"L2","rows_completed":9500000,"rows_initial":500000,"elapsed_ms":611320.3,"rows_per_sec":16358}
+{"phase":"checkpoint","layout":"L2","pre_main_bytes":4431454208,"pre_wal_bytes":165467472,"post_main_bytes":4445007872,"checkpoint_ms":1794.1}
+{"phase":"claim","layout":"L2","trial":1,"reps":100,"batch":100,"elapsed_ms":134.7,"claims_per_sec":742.7,"records_per_sec":74266,"p50_us":1340.3,"p99_us":1487.8}
+{"phase":"finish","layout":"L2","trial":1,"reps":100,"batch":100,"elapsed_ms":153.6,"finishes_per_sec":651.0,"records_per_sec":65102,"p50_us":1292.2,"p99_us":1674.2}
+{"phase":"claim","layout":"L2","trial":2,"reps":100,"batch":100,"elapsed_ms":154.1,"claims_per_sec":649.0,"records_per_sec":64897,"p50_us":1530.2,"p99_us":1806.9}
+{"phase":"finish","layout":"L2","trial":2,"reps":100,"batch":100,"elapsed_ms":141.5,"finishes_per_sec":706.8,"records_per_sec":70682,"p50_us":1422.6,"p99_us":1568.2}
+{"phase":"claim","layout":"L2","trial":3,"reps":100,"batch":100,"elapsed_ms":158.3,"claims_per_sec":631.9,"records_per_sec":63189,"p50_us":1582.1,"p99_us":1739.4}
+{"phase":"finish","layout":"L2","trial":3,"reps":100,"batch":100,"elapsed_ms":143.8,"finishes_per_sec":695.4,"records_per_sec":69543,"p50_us":1433.7,"p99_us":1594.0}
+{"phase":"extend","layout":"L2","trial":1,"reps":20,"batch":1000,"elapsed_ms":3.8,"extends_per_sec":5220.1,"p50_us":162.7,"p99_us":437.5}
+{"phase":"extend","layout":"L2","trial":2,"reps":20,"batch":1000,"elapsed_ms":3.2,"extends_per_sec":6201.2,"p50_us":155.0,"p99_us":181.0}
+{"phase":"extend","layout":"L2","trial":3,"reps":20,"batch":1000,"elapsed_ms":3.2,"extends_per_sec":6283.0,"p50_us":155.1,"p99_us":210.8}
+{"phase":"sweep","layout":"L2","trial":1,"sweep_size":10000,"sub_batch":100,"discovery_ms":0.13,"total_ms":100.44,"item_rows_reclaimed":10000,"claims_touched":100}
+{"phase":"sweep","layout":"L2","trial":2,"sweep_size":10000,"sub_batch":100,"discovery_ms":0.15,"total_ms":97.81,"item_rows_reclaimed":10000,"claims_touched":100}
+{"phase":"sweep","layout":"L2","trial":3,"sweep_size":10000,"sub_batch":100,"discovery_ms":0.12,"total_ms":98.27,"item_rows_reclaimed":10000,"claims_touched":100}
+{"phase":"stage_blind","layout":"L2","mode":"bound","reps":1,"p50_us":291.7,"p99_us":291.7}
+{"phase":"stage_blind","layout":"L2","mode":"blind","reps":1,"p50_us":4105957.5,"p99_us":4105957.5}
+{"phase":"final_size","layout":"L2","main_bytes":4445007872}

@@ -43,10 +43,7 @@ if grep -nE -- '--revision[[:space:]]+"\$\{GITHUB_SHA\}"|--revision[[:space:]]+"
   fail "source-preview still binds --revision to GITHUB_SHA"
 fi
 if grep -nE -- '--commit[[:space:]]+"\$\{GITHUB_SHA\}"|--commit[[:space:]]+"\$GITHUB_SHA"|--commit \$\{?GITHUB_SHA\}?' "${WF}"; then
-  fail "attestation/image evidence still binds --commit to GITHUB_SHA"
-fi
-if grep -nE 'sha-\$\{GITHUB_SHA\}|sha-\$GITHUB_SHA|sha_tag=.*GITHUB_SHA' "${WF}"; then
-  fail "Docker sha_tag still uses GITHUB_SHA instead of measured S"
+  fail "attestation evidence still binds --commit to GITHUB_SHA"
 fi
 if grep -nE 'origin/main' "${WF}"; then
   fail "release workflow must not use origin/main cleanliness as release identity"
@@ -55,10 +52,6 @@ fi
 if grep -nE 'FIREWEED_GOVERNED_EVIDENCE_BASE_URL|\$\{GITHUB_SHA\}\.tar\.gz' "${WF}"; then
   fail "release must consume promoted evidence from E checkout, not ambient-SHA URL"
 fi
-# Positive: immutable image tag is sha-${S} / measured_source.
-grep -Fq 'sha-${s}' "${WF}" || grep -Fq 'sha-${{ steps.identity.outputs.measured_source }}' "${WF}" ||
-  grep -Fq 'sha_tag=${image}:sha-' "${WF}" ||
-  fail "missing sha-\${S} image tag wiring"
 
 echo "--- source producers receive expected-source/remote/ref ---"
 grep -Fq 'build-source-preview-artifacts.sh' "${WF}" || fail "missing source-preview builder"
@@ -72,7 +65,7 @@ echo "--- external run-owned root ---"
 grep -Fq 'fireweed-release-run' "${WF}" || fail "missing external run-owned root"
 grep -Fq 'RUNNER_TEMP' "${WF}" || fail "run root must be under RUNNER_TEMP"
 
-echo "--- no services / no kind; Docker publication exception retained ---"
+echo "--- no services / no kind / no container publication ---"
 if grep -nE '^[[:space:]]*services:' "${WF}"; then
   fail "release.yml must not declare GitHub Actions services (move to governed-product)"
 fi
@@ -82,8 +75,9 @@ fi
 if grep -nE 'kindest/node|install kind|KIND_NODE_IMAGE|setup-kind' "${WF}"; then
   fail "release.yml must not install or pin kind (governed-product owns kind)"
 fi
-grep -Fq 'docker/build-push-action' "${WF}" || fail "Docker publication exception missing"
-grep -Fq 'docker/login-action' "${WF}" || fail "GHCR login missing"
+if grep -nE 'docker/|ghcr\.io' "${WF}"; then
+  fail "release.yml must not publish container images"
+fi
 
 echo "--- governed composite + attestation bind measured S ---"
 grep -Fq 'verify-governed-release-composite.sh' "${WF}" || fail "missing composite verifier"

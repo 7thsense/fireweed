@@ -12,14 +12,15 @@ import subprocess
 import sys
 import tomllib
 
-from fireweed_test_placement import PlacementError
-from fireweed_test_placement import self_test as fireweed_placement_self_test
-from fireweed_test_placement import validate as validate_fireweed_test_placement
+from stock_turso_policy import StockTursoError, read_and_validate as validate_stock_turso, self_test as stock_turso_self_test
+
+from queue_pg_evidence import verify_report as verify_queue_report
+from queue_pg_workflow import validate as validate_queue_workflow, self_test as queue_workflow_self_test
 
 
 ROOT = Path(__file__).resolve().parents[2]
 INVENTORY = ROOT / "scripts/ci/storage-remediation-inventory.json"
-AUTHORITY = ROOT / "docs/helix/04-build/storage-authority-manifest.json"
+AUTHORITY = ROOT / "scripts/ci/manifests/storage-authority-manifest.json"
 MODE_FILE = ROOT / "scripts/ci/storage-remediation-policy.mode"
 GENERATOR = ROOT / "scripts/ci/inventory-storage-remediation.py"
 CI = ROOT / ".github/workflows/ci.yml"
@@ -36,64 +37,8 @@ def require(condition: bool, message: str) -> None:
         raise PolicyError(message)
 
 
-# These two ignores compensate for macro expansion / Cargo feature unification,
-# not unused dependencies. Keep the allowlist independent of vendor debt scope.
-VENDOR_MACHETE_PAIRS = {
-    ("vendor/turso_core/Cargo.toml", "antithesis_sdk"),
-    ("vendor/turso_sdk_kit/Cargo.toml", "parking_lot"),
-}
-
-
-def validate_vendor_dependency_invariants(
-    manifests: dict[str, dict[str, object]], core_source: str, sdk_source: str
-) -> None:
-    pairs = []
-    for path, manifest in manifests.items():
-        ignored = manifest.get("package", {}).get("metadata", {}).get("cargo-machete", {}).get("ignored", [])
-        require(isinstance(ignored, list), f"vendor cargo-machete ignored list: {path}")
-        pairs.extend((path, dependency) for dependency in ignored)
-    require(
-        len(pairs) == len(VENDOR_MACHETE_PAIRS) and set(pairs) == VENDOR_MACHETE_PAIRS,
-        "vendor cargo-machete ignores must be exactly the reviewed macro/feature pairs",
-    )
-    core = manifests["vendor/turso_core/Cargo.toml"]
-    antithesis = core.get("target", {}).get("cfg(antithesis)", {}).get("dependencies", {}).get("antithesis_sdk", {})
-    require(
-        antithesis.get("version") and antithesis.get("features") == ["full"]
-        and antithesis.get("default-features") is False,
-        "antithesis_sdk ignore requires the cfg(antithesis) full-feature dependency",
-    )
-    require(core.get("dependencies", {}).get("turso_macros", {}).get("version"), "assertion macro dependency missing")
-    exports = re.search(r"pub use turso_macros::\{([^}]+)\};", core_source, re.DOTALL)
-    require(
-        exports is not None and {"turso_assert", "turso_assert_sometimes"}.issubset(
-            {name.strip() for name in exports.group(1).split(",")}
-        ),
-        "antithesis_sdk ignore requires Turso assertion macro exports",
-    )
-    sdk = manifests["vendor/turso_sdk_kit/Cargo.toml"]
-    dependencies = sdk.get("dependencies", {})
-    parking_lot = dependencies.get("parking_lot", {})
-    require(
-        parking_lot.get("version") and parking_lot.get("features") == ["send_guard"]
-        and dependencies.get("turso_core", {}).get("path") == "../turso_core",
-        "parking_lot ignore requires send_guard feature unification with vendored core",
-    )
-    require(
-        "assert_send!(TursoDatabase, TursoConnection, TursoStatement);" in sdk_source,
-        "parking_lot ignore requires the SDK's Send assertions",
-    )
-
-
-def vendor_dependency_sources() -> tuple[dict[str, dict[str, object]], str, str]:
-    paths = subprocess.check_output(
-        ["git", "ls-files", "-z", "--", "vendor/"], cwd=ROOT, text=True
-    ).split("\0")
-    manifests = {
-        path: tomllib.loads((ROOT / path).read_text())
-        for path in sorted(paths) if Path(path).name == "Cargo.toml"
-    }
-    return manifests, (ROOT / "vendor/turso_core/lib.rs").read_text(), (ROOT / "vendor/turso_sdk_kit/src/rsapi.rs").read_text()
+# The retired fork has no surviving dependency-ignore exceptions.
+VENDOR_MACHETE_PAIRS: set[tuple[str, str]] = set()
 
 
 def validate_external_dependencies(
@@ -133,10 +78,10 @@ def validate_external_dependencies(
             machete_pairs.append((path, row["identity"]))
     require(
         len(machete_pairs) == len(VENDOR_MACHETE_PAIRS) and set(machete_pairs) == VENDOR_MACHETE_PAIRS,
-        "external observations must retain exactly the reviewed vendor macro/feature ignores",
+        "external observations cannot restore retired vendor dependency ignores",
     )
     if check_repository:
-        validate_vendor_dependency_invariants(*vendor_dependency_sources())
+        validate_stock_turso(ROOT)
 
 
 def parse_mode(path: Path) -> str:
@@ -166,7 +111,8 @@ def current_inventory() -> dict[str, object]:
     return json.loads(completed.stdout)
 
 
-def validate_inventory(document: object, policy: str, *, check_repository: bool) -> int:
+def validate_inventory(document: object, policy: str, *, check_repository: bool,
+                       executed_queue_ids: frozenset[str] = frozenset()) -> int:
     require(isinstance(document, dict), "inventory must be an object")
     required = {
         "schema_version",
@@ -176,10 +122,8 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
         "workspaces",
         "harness_routes",
         "rustdoc_routes",
-        "fireweed_test_placement",
         "debt_registries",
         "external_dependency_observations",
-        "release_repeat_quarantine",
         "discovery_negatives",
     }
     require(set(document) == required, "inventory schema drift")
@@ -202,7 +146,6 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
         all(row["routing"] == "independent" for row in document["workspaces"][1:]),
         "independent workspace classification",
     )
-    validate_fireweed_test_placement(document["fireweed_test_placement"])
     for workspace in document["workspaces"]:
         require(
             workspace["listing_status"] in {"listed", "compile_failure_debt"},
@@ -228,18 +171,20 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
             document["external_dependency_observations"] == refreshed["external_dependency_observations"],
             "external dependency observations changed; regenerate remediation inventory",
         )
-        require(
-            document["release_repeat_quarantine"] == refreshed["release_repeat_quarantine"],
-            "release-repeat quarantine changed; regenerate remediation inventory",
-        )
-        require(
-            document["fireweed_test_placement"] == refreshed["fireweed_test_placement"],
-            "Fireweed test placement changed; regenerate remediation inventory with --with-cargo",
-        )
 
     route_ids = [route["id"] for route in document["harness_routes"]]
     require(len(route_ids) == len(set(route_ids)), "duplicate harness route")
+    harness_route = runpy.run_path(str(GENERATOR))["cargo_harness_route"]
     for route in document["harness_routes"]:
+        features = route.get("features")
+        require(isinstance(features, list) and all(isinstance(feature, str) for feature in features),
+                f"route feature selection missing/invalid: {route['id']}")
+        require(features == sorted(set(features)), f"route features not canonical: {route['id']}")
+        expected = harness_route(route["workspace"], route["package"],
+                                 {"name": route["target"], "kind": route["target_kind"]},
+                                 route["harness_id"], route["listed_kind"], features)
+        require(route["exact_invocation"] == expected["exact_invocation"],
+                f"route feature/selector command differs: {route['id']}")
         require(route["expected_ran"] == 1, f"route lacks ran=1 contract: {route['id']}")
         require(route["exact_invocation"][-1] == "--exact", f"route not exact: {route['id']}")
     doc_ids = [route["id"] for route in document["rustdoc_routes"]]
@@ -256,8 +201,6 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
     debt_ids: set[str] = set()
     registries = document["debt_registries"]
     required_registries = {
-        "source_registration",
-        "test_boundary_debt",
         "cargo_machete_exceptions",
         "ignored_tests",
         "harness_skips",
@@ -267,24 +210,19 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
         "no_ops",
         "source_guards",
         "workflow_inline",
-        "release_repeat_contract",
         "rustdoc_unlisted_or_compile_only",
         "workspace_listing_failures",
         "public_release_gate_failures",
     }
     require(set(registries) == required_registries, "debt registry set drift")
     machete_exceptions = registries["cargo_machete_exceptions"]
-    # P12a bound Turso as a real server feature dependency (`dep:fireweed-turso`); the
-    # cargo-machete ignore exception is retired. Empty is the only legal end state.
-    # While any residual ignore remains, it must still be the single P12a-owned Turso row.
-    if machete_exceptions:
-        require(
-            len(machete_exceptions) == 1
-            and machete_exceptions[0]["path"] == "crates/fireweed-server/Cargo.toml"
-            and machete_exceptions[0]["identity"] == "fireweed-turso"
-            and machete_exceptions[0]["dependency_chain"] == ["P12a", "P2f"],
-            "cargo-machete exceptions must be empty or the single P12a-bound Turso dependency",
-        )
+    # The cargo-machete ignore exception is retired. Empty is the only legal end state.
+    require(not machete_exceptions, "cargo-machete exceptions must be empty")
+    eligible_queue_ids = {row['id'] for row in registries['ignored_tests']
+        if row['status'] == 'debt' and row['category'] == 'ignored_test'
+        and row['path'].startswith(('crates/fireweed-postgres/', 'crates/fireweed/'))}
+    require(executed_queue_ids <= eligible_queue_ids,
+            'queue execution cannot exempt unrelated categories or packages')
     for category, rows in registries.items():
         require(isinstance(rows, list), f"{category} registry")
         for row in rows:
@@ -295,7 +233,10 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
             require(row["dependency_chain"], f"unwired debt {row['id']}")
             require(row["status"] in {"debt", "legacy_false_green", "discovery_negative"}, "debt status")
             if row["status"] != "discovery_negative":
-                debt_count += 1
+                if (category != "ignored_tests" or row.get("category") != "ignored_test"
+                        or row["id"] not in executed_queue_ids or row["status"] != "debt"):
+                    debt_count += 1
+    require(executed_queue_ids <= debt_ids, "execution evidence contains unknown debt IDs")
     validate_external_dependencies(
         document["external_dependency_observations"], required_registries, debt_ids,
         check_repository=check_repository,
@@ -322,45 +263,8 @@ def validate_inventory(document: object, policy: str, *, check_repository: bool)
             str(row.get("detail", "")).startswith("policy_positive:"),
             f"workflow_inline row lacks executed policy_positive detail: {row['id']}",
         )
-    quarantine = document["release_repeat_quarantine"]
-    legacy_rows = quarantine["legacy_rows"]
-    if legacy_rows:
-        # Pre-P2r quarantine: nine false-green fixtures and eleven contract debts.
-        require(len(legacy_rows) == 9, "legacy repeat row count drift")
-        require(
-            all(
-                row["kind"] == "legacy_false_green" and row["executable"] is False
-                for row in legacy_rows
-            ),
-            "legacy repeat rows must be non-executable debt fixtures",
-        )
-        require(len(quarantine["required_contract_debts"]) == 11, "contract debt count drift")
-        require(
-            quarantine["current_verifier_semantics"] == "missing_only_required_minus_names",
-            "verifier characterization",
-        )
-    else:
-        # Post-P2r: real generated product_workflow + operator_validation bindings.
-        require(
-            quarantine["current_verifier_semantics"]
-            == "exact_set_product_workflow_namespace",
-            "post-P2r verifier characterization",
-        )
-        require(
-            not quarantine["required_contract_debts"],
-            "post-P2r residual release_repeat_contract debt",
-        )
-        generated = quarantine.get("generated_product_workflow_names") or []
-        require(len(generated) == 10, "post-P2r product workflow name count")
-        require(
-            quarantine.get("generated_operator_job") == "operator_validation_tests",
-            "post-P2r operator job missing",
-        )
-    require(quarantine["required_jobs_executed_or_counted"] is False, "false execution claim")
-
     if policy == "closure":
         require(debt_count == 0, f"closure blocked by {debt_count} assigned debt rows")
-        require(not quarantine["legacy_rows"], "closure blocked by legacy false-green rows")
     return debt_count
 
 
@@ -371,10 +275,6 @@ def validate_cargo_scope(text: str) -> None:
         "root Cargo comment omits independent benchmark workspace",
     )
     require(
-        "vendor/turso_core/Cargo.toml" in text,
-        "root Cargo comment omits vendored Turso tests",
-    )
-    require(
         "members below" in text,
         "root Cargo comment does not bound cargo test --workspace",
     )
@@ -383,6 +283,7 @@ def validate_cargo_scope(text: str) -> None:
 def validate_shape() -> None:
     require(parse_mode(MODE_FILE) in {"remediation", "closure"}, "versioned mode file invalid")
     ci = CI.read_text()
+    validate_queue_workflow(ci)
     workflow_marker = "run: bash scripts/ci/verify-github-actions-policy.sh"
     release_marker = "python3 scripts/ci/public-release-gate.py"
     policy_marker = "bash scripts/ci/storage-remediation-policy.sh --mode-file scripts/ci/storage-remediation-policy.mode"
@@ -405,15 +306,20 @@ def validate_shape() -> None:
 
 def self_test(document: dict[str, object]) -> None:
     validate_shape()
-    fireweed_placement_self_test(document["fireweed_test_placement"])
-    try:
-        validate_cargo_scope(
-            "# No crate is excluded, so cargo test covers everything\n[workspace]\nmembers=[]\n"
-        )
-    except PolicyError:
-        pass
-    else:
-        raise PolicyError("false-complete Cargo scope fixture passed")
+    queue_workflow_self_test(CI.read_text())
+    cargo = CARGO_MANIFEST.read_text()
+    validate_cargo_scope(cargo)
+    for label, text in (
+        ("false completeness", cargo + "\n# No crate is excluded\n"),
+        ("missing benchmark", cargo.replace("crates/fireweed-bench/Cargo.toml", "benchmark workspace")),
+        ("missing member bound", cargo.replace("members below", "all crates")),
+    ):
+        try:
+            validate_cargo_scope(text)
+        except PolicyError:
+            pass
+        else:
+            raise PolicyError(f"Cargo scope fixture passed: {label}")
     try:
         parse_mode(Path("scripts/ci/fixtures/closure/all-closed.json"))
     except PolicyError:
@@ -428,7 +334,52 @@ def self_test(document: dict[str, object]) -> None:
         pass
     else:
         raise PolicyError("malformed inventory fixture passed")
-    diagnostic_passed = runpy.run_path(str(GENERATOR))["sql_timing_diagnostic_log_passed"]
+    generator = runpy.run_path(str(GENERATOR))
+    route_for = generator["cargo_harness_route"]
+    for features in ([], ["local"], ["default", "local"]):
+        route = route_for("Cargo.toml", "fireweed-turso", {"name": "fireweed_turso", "kind": ["lib"]},
+                          "queue_projection::tests::feature_fixture", "test", features)
+        prefix = ["rustup", "run", "1.99.0", "cargo", "test", "--manifest-path", "Cargo.toml",
+                  "--locked", "-p", "fireweed-turso", "--no-default-features"]
+        if features:
+            prefix += ["--features", ",".join(features)]
+        require(route["features"] == features and route["exact_invocation"] == prefix +
+                ["--lib", "queue_projection::tests::feature_fixture", "--", "--exact"],
+                "Cargo artifact feature selection lost")
+        fixture = copy.deepcopy(document)
+        fixture["harness_routes"] = [route]
+        validate_inventory(fixture, "remediation", check_repository=False)
+        mutants = []
+        omitted = copy.deepcopy(fixture)
+        omitted["harness_routes"][0].pop("features")
+        mutants.append(omitted)
+        extra = copy.deepcopy(fixture)
+        extra["harness_routes"][0]["features"] = sorted(features + ["unexpected"])
+        mutants.append(extra)
+        omitted_flag = copy.deepcopy(fixture)
+        omitted_flag["harness_routes"][0]["exact_invocation"].remove("--no-default-features")
+        mutants.append(omitted_flag)
+        if features:
+            mismatch = copy.deepcopy(fixture)
+            position = mismatch["harness_routes"][0]["exact_invocation"].index("--features") + 1
+            mismatch["harness_routes"][0]["exact_invocation"][position] = "unexpected"
+            mutants.append(mismatch)
+        for mutant in mutants:
+            try:
+                validate_inventory(mutant, "remediation", check_repository=False)
+            except PolicyError as error:
+                require("feature" in str(error), "feature control failed for unrelated reason")
+            else:
+                raise PolicyError("Cargo artifact feature omission/mismatch fixture passed")
+    for invalid in (None, "local", [1]):
+        try:
+            route_for("Cargo.toml", "fireweed-turso", {"name": "fireweed_turso", "kind": ["lib"]},
+                      "fixture", "test", invalid)
+        except ValueError:
+            pass
+        else:
+            raise PolicyError("missing/invalid Cargo artifact feature metadata accepted")
+    diagnostic_passed = generator["sql_timing_diagnostic_log_passed"]
     summary = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
     ordinary = "running 1 test\ntest module::diagnostic ... ok\n\n" + summary
     interleaved = "running 1 test\ntest module::diagnostic ... measured=1\nmore output\nok\n\n" + summary
@@ -496,27 +447,37 @@ def self_test(document: dict[str, object]) -> None:
     else:
         raise PolicyError("arbitrary vendor dependency ignore passed")
 
-    manifests, core_source, sdk_source = vendor_dependency_sources()
-    validate_vendor_dependency_invariants(manifests, core_source, sdk_source)
-    for label in ("extra_ignore", "missing_send_guard", "missing_antithesis_cfg", "missing_assertion_macros", "missing_send_assertions"):
-        changed = copy.deepcopy(manifests)
-        changed_core, changed_sdk = core_source, sdk_source
-        if label == "extra_ignore":
-            changed["vendor/turso_sdk_kit/Cargo.toml"]["package"]["metadata"]["cargo-machete"]["ignored"].append("unused")
-        elif label == "missing_send_guard":
-            changed["vendor/turso_sdk_kit/Cargo.toml"]["dependencies"]["parking_lot"]["features"] = []
-        elif label == "missing_antithesis_cfg":
-            changed["vendor/turso_core/Cargo.toml"]["target"].pop("cfg(antithesis)")
-        elif label == "missing_assertion_macros":
-            changed_core = ""
-        else:
-            changed_sdk = ""
+    retired = (
+        ("vendor/turso_core/Cargo.toml", "antithesis_sdk"),
+        ("vendor/turso_sdk_kit/Cargo.toml", "parking_lot"),
+    )
+    for pairs in ((retired[0],), (retired[1],), retired):
+        fixture = copy.deepcopy(document)
+        for path, dependency in pairs:
+            fixture["external_dependency_observations"]["findings"].append({
+                "registry": "cargo_machete_exceptions",
+                "finding": {**upstream, "path": path, "category": "cargo_machete_exception", "identity": dependency},
+            })
         try:
-            validate_vendor_dependency_invariants(changed, changed_core, changed_sdk)
+            validate_inventory(fixture, "remediation", check_repository=False)
         except PolicyError:
             pass
         else:
-            raise PolicyError(f"vendor ignore invariant fixture passed: {label}")
+            raise PolicyError(f"retired vendor dependency ignores passed: {pairs}")
+    unrelated = copy.deepcopy(document)
+    row = next(row for row in unrelated['debt_registries']['ignored_tests'] if row['status'] == 'debt')
+    unrelated['debt_registries']['ignored_tests'].remove(row)
+    row['category'] = 'no_op'
+    unrelated['debt_registries']['no_ops'].append(row)
+    try:
+        validate_inventory(unrelated, 'remediation', check_repository=False,
+                           executed_queue_ids=frozenset({row['id']}))
+    except PolicyError:
+        pass
+    else:
+        raise PolicyError('queue execution incorrectly exempted unrelated debt category')
+    stock_turso_self_test()
+    validate_stock_turso(ROOT)
 
 
 def main() -> int:
@@ -525,6 +486,7 @@ def main() -> int:
     group.add_argument("--policy", choices=["remediation", "closure"])
     group.add_argument("--mode-file", type=Path)
     group.add_argument("--self-test", action="store_true")
+    parser.add_argument("--queue-evidence", type=Path)
     args = parser.parse_args()
     try:
         document = json.loads(INVENTORY.read_text())
@@ -534,15 +496,16 @@ def main() -> int:
             return 0
         policy = args.policy or parse_mode(args.mode_file)
         validate_shape()
-        debt_count = validate_inventory(document, policy, check_repository=True)
+        executed = frozenset(verify_queue_report(args.queue_evidence)) if args.queue_evidence else frozenset()
+        debt_count = validate_inventory(document, policy, check_repository=True, executed_queue_ids=executed)
         if policy == "remediation":
             print(f"storage remediation policy: {debt_count} assigned product debt rows (report-only; not closure)")
         else:
-            print("storage remediation policy: zero product debt; product closure enabled")
+            print(f"storage remediation policy: zero unexecuted product debt; {len(executed)} queue rows verified by execution and retained in inventory")
         count = len(document["external_dependency_observations"]["findings"])
         print(f"external dependency observations: {count}; not qualified by product closure")
         return 0
-    except (PolicyError, PlacementError, json.JSONDecodeError, KeyError, TypeError) as error:
+    except (ValueError, PolicyError, StockTursoError, json.JSONDecodeError, KeyError, TypeError, OSError, tomllib.TOMLDecodeError) as error:
         print(f"storage remediation policy failed: {error}", file=sys.stderr)
         return 1
 

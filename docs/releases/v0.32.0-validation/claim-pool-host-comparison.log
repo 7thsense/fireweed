@@ -1,0 +1,10 @@
+v0.31.33 run1: claim_pool_scale: single=4000 claimed in 6740 ms (593 items/s); pooled4=4000 claimed in 5402 ms (740 items/s); speedup=1.25x
+v0.31.33 run1: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.78s
+v0.32.0 run1: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.81s
+v0.31.33 run2: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.07s
+v0.32.0 run2: claim_pool_scale: single=4000 claimed in 4582 ms (873 items/s); pooled4=4000 claimed in 3982 ms (1005 items/s); speedup=1.15x
+v0.32.0 run2: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.91s
+v0.31.33 run3: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.12s
+v0.32.0 run3: claim_pool_scale: single=4000 claimed in 7641 ms (523 items/s); pooled4=4000 claimed in 7449 ms (537 items/s); speedup=1.03x
+v0.32.0 run3: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.15s
+

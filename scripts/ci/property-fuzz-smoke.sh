@@ -15,7 +15,7 @@ export RUST_TEST_THREADS=1
 
 echo "=== property + fuzz smoke ==="
 echo "--- core priority ordering properties (10,000 cases per property) ---"
-rustup run 1.97.1 cargo test --locked -p fireweed-core \
+rustup run 1.99.0 cargo test --locked -p fireweed-core \
     --test core_priority_model_tests -- --test-threads=1
 
 if [[ -f fuzz/Cargo.toml ]]; then

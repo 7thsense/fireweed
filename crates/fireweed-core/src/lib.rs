@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+pub mod queue_administration;
+pub mod queue_contract;
+pub mod queue_runtime;
+
 mod domain;
 mod query;
 
@@ -25,3 +29,6 @@ pub use query::{
     QueryRequestError, RangeScanRequest, RangeScanResponse, RangeScanRow, SortDirection,
     TimeBucket, TypedValue,
 };
+
+/// Exact JSON equality encoding for client-owned indexed attributes.
+pub mod queue_json;

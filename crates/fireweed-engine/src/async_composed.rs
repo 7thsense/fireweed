@@ -134,7 +134,18 @@ pub struct AsyncPushRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushFingerprint {
     pub canonical_sha256: [u8; 32],
-    pub legacy_body_hash: BodyHash,
+}
+
+impl PushFingerprint {
+    /// The request-id conflict key and envelope fingerprint: the leading eight bytes of
+    /// `canonical_sha256`, big-endian.
+    pub fn body_hash(&self) -> BodyHash {
+        BodyHash(u64::from_be_bytes(
+            self.canonical_sha256[..8]
+                .try_into()
+                .expect("SHA-256 prefix is eight bytes"),
+        ))
+    }
 }
 
 /// Planner result for a push. Constructors keep the representation typed and engine-validated.
@@ -189,7 +200,7 @@ pub enum PreparedClaim {
 }
 
 impl PreparedClaim {
-    /// Stamp `authority_first` on new item Claim envelopes. Legacy outbox recoveries stay false.
+    /// Stamp `authority_first` on new item Claim envelopes.
     pub fn with_item_authority_first(self) -> Self {
         match self {
             Self::Empty => Self::Empty,
@@ -640,6 +651,19 @@ impl<'a> MutationGenerationOverlay<'a> {
         let mut indexes = Vec::new();
         let mut groups = Vec::new();
         for item in &request.items {
+            // Compare whole unique keys. Individual indexed fields may repeat on every item.
+            let unique_keys =
+                match crate::unique_index_keys_for_push_spec(&self.snapshot.definition, item) {
+                    Ok(unique_keys) => unique_keys,
+                    Err(error) => return MutationGenerationMemberOutcome::Rejected(error),
+                };
+            for (name, key) in unique_keys {
+                let encoded = format!("{name}={key:?}");
+                if self.unique_index_values.contains(&encoded) {
+                    return MutationGenerationMemberOutcome::Rejected(EngineError::Conflict);
+                }
+                indexes.push(encoded);
+            }
             let Some(key) = item.client_item_key.as_ref() else {
                 continue;
             };
@@ -648,13 +672,6 @@ impl<'a> MutationGenerationOverlay<'a> {
                 return MutationGenerationMemberOutcome::Rejected(EngineError::Conflict);
             }
             keys.push(key);
-            for (name, value) in &item.index_fields {
-                let encoded = format!("{name}={value:?}");
-                if self.unique_index_values.contains(&encoded) {
-                    return MutationGenerationMemberOutcome::Rejected(EngineError::Conflict);
-                }
-                indexes.push(encoded);
-            }
             if let Some(group) = &item.group_key {
                 let next = self
                     .group_counts
@@ -684,7 +701,7 @@ impl<'a> MutationGenerationOverlay<'a> {
         }
         if let (Some(request_id), Some(fingerprint)) = (request.request_id.clone(), fingerprint) {
             self.request_fingerprints
-                .insert(request_id, fingerprint.legacy_body_hash);
+                .insert(request_id, fingerprint.body_hash());
         }
         MutationGenerationMemberOutcome::PushAccepted
     }
@@ -1556,7 +1573,6 @@ async fn planned_push<U: AsyncPushPlanner>(
     mut request: AsyncPushRequest,
 ) -> Result<PreparedPush, PushExecutionError> {
     let queue = request.shard.clone();
-    let original_items = request.items.clone();
     canonicalize_push_gate_keys(&mut request.items);
     let definition = planner
         .queue_definition(queue.clone())
@@ -1567,12 +1583,7 @@ async fn planned_push<U: AsyncPushPlanner>(
     let fingerprint = request
         .request_id
         .as_ref()
-        .map(|_| {
-            Ok(PushFingerprint {
-                canonical_sha256: crate::push_specs_fingerprint_sha256(&request.items)?,
-                legacy_body_hash: crate::compose::push_body_hash(&original_items)?,
-            })
-        })
+        .map(|_| crate::compose::push_specs_fingerprint(&request.items))
         .transpose()
         .map_err(PushExecutionError::BeforeCommit)?;
     let plan = planner
@@ -1785,7 +1796,7 @@ fn validate_push_plan(
         || envelope.checksum != CommandChecksum(0)
         || envelope.created_at != requested.now
         || envelope.request_id != requested.request_id
-        || envelope.request_fingerprint != fingerprint.map(|hash| hash.legacy_body_hash.0)
+        || envelope.request_fingerprint != fingerprint.map(|hash| hash.body_hash().0)
         || envelope.request_outcome
             != requested.request_id.as_ref().map(|_| RequestOutcome::Push {
                 item_ids: item_ids.to_vec(),
@@ -3545,15 +3556,13 @@ mod tests {
                 let envelope = CommandEnvelope {
                     command_id: CommandId::new("push-command"),
                     request_id: request.request_id.clone(),
-                    request_fingerprint: fingerprint.map(|hash| hash.legacy_body_hash.0).map(
-                        |hash| {
-                            if matches!(mode, PushPlanMode::WrongFingerprint) {
-                                hash ^ 1
-                            } else {
-                                hash
-                            }
-                        },
-                    ),
+                    request_fingerprint: fingerprint.map(|hash| hash.body_hash().0).map(|hash| {
+                        if matches!(mode, PushPlanMode::WrongFingerprint) {
+                            hash ^ 1
+                        } else {
+                            hash
+                        }
+                    }),
                     request_outcome: request.request_id.as_ref().map(|_| RequestOutcome::Push {
                         item_ids: ids.clone(),
                     }),
@@ -5299,7 +5308,6 @@ mod tests {
         MutationGenerationWork::Push {
             fingerprint: Some(PushFingerprint {
                 canonical_sha256: [index; 32],
-                legacy_body_hash: BodyHash(index as u64),
             }),
             request,
         }
@@ -5317,6 +5325,113 @@ mod tests {
             leased_ids: HashSet::new(),
             terminal_ids: HashSet::new(),
         }
+    }
+
+    fn indexed_definition() -> QueueDefinition {
+        let field = |name: &str| fireweed_core::CompoundIndexField {
+            field: name.into(),
+            index_type: fireweed_core::IndexType::String,
+        };
+        let compound = |name: &str, fields, unique| fireweed_core::QueueIndex {
+            name: name.into(),
+            declaration: fireweed_core::IndexDeclaration::Compound(
+                fireweed_core::CompoundIndexDef { fields, unique },
+            ),
+        };
+        let mut definition = generation_definition();
+        definition.typed_indexes = vec![
+            compound(
+                "by_run_target",
+                vec![field("run_id"), field("target_key")],
+                true,
+            ),
+            compound("by_action", vec![field("action_type")], false),
+        ];
+        definition
+    }
+
+    fn indexed_push_work(index: u8, run_id: &str, target_key: &str) -> MutationGenerationWork {
+        let mut work = push_work(index, &format!("key-{index}"));
+        let MutationGenerationWork::Push { request, .. } = &mut work else {
+            panic!("push work");
+        };
+        request.items[0].index_fields = BTreeMap::from([
+            ("action_type", "message.send"),
+            ("run_id", run_id),
+            ("target_key", target_key),
+        ])
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                name.to_string(),
+                fireweed_core::TypedValue::String(value.to_string()),
+            )
+        })
+        .collect();
+        work
+    }
+
+    #[test]
+    fn generation_overlay_admits_pushes_sharing_only_part_of_a_unique_key() {
+        let snapshot = MutationDriverSnapshot {
+            definition: indexed_definition(),
+            ..empty_snapshot()
+        };
+        // Every member shares `action_type` and `run_id`; only the full unique key is distinct.
+        let works: Vec<_> = (0..8)
+            .map(|index| indexed_push_work(index, "run", &format!("target-{index}")))
+            .collect();
+        let (members, folded) =
+            validate_inert_mutation_generation_folding(&snapshot, &works).unwrap();
+        for member in &members {
+            assert!(matches!(
+                member.outcome,
+                MutationGenerationMemberOutcome::PushAccepted
+            ));
+        }
+        // The next generation, before this one's apply covers it, must not see a conflict either.
+        let next =
+            validate_inert_mutation_generation(&folded, &[indexed_push_work(9, "run", "target-9")])
+                .unwrap();
+        assert!(matches!(
+            next[0].outcome,
+            MutationGenerationMemberOutcome::PushAccepted
+        ));
+    }
+
+    #[test]
+    fn generation_overlay_rejects_full_unique_key_collisions() {
+        let snapshot = MutationDriverSnapshot {
+            definition: indexed_definition(),
+            ..empty_snapshot()
+        };
+        let works = [
+            indexed_push_work(1, "run", "target"),
+            indexed_push_work(2, "run", "target"),
+            indexed_push_work(3, "run", "other"),
+        ];
+        let (members, folded) =
+            validate_inert_mutation_generation_folding(&snapshot, &works).unwrap();
+        assert!(matches!(
+            members[0].outcome,
+            MutationGenerationMemberOutcome::PushAccepted
+        ));
+        assert!(matches!(
+            members[1].outcome,
+            MutationGenerationMemberOutcome::Rejected(EngineError::Conflict)
+        ));
+        assert!(matches!(
+            members[2].outcome,
+            MutationGenerationMemberOutcome::PushAccepted
+        ));
+        // Accepted keys stay visible to the next generation until its apply covers them.
+        let next =
+            validate_inert_mutation_generation(&folded, &[indexed_push_work(4, "run", "target")])
+                .unwrap();
+        assert!(matches!(
+            next[0].outcome,
+            MutationGenerationMemberOutcome::Rejected(EngineError::Conflict)
+        ));
     }
 
     #[test]

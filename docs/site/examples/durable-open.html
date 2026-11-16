@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Public constructors for filesystem-log durability with native Turso or memory projections." />
-    <title>Open Turso and object-log backends — Fireweed Queue</title>
+    <meta name="description" content="Queue::s3_turso with an S3 object log, a local Turso cache directory and PostgreSQL queue leases." />
+    <title>Open the production queue — Fireweed Queue</title>
     <link rel="stylesheet" href="../assets/site.css" />
   </head>
   <body>
@@ -27,46 +27,50 @@
         <a href="../get-started.html">Get started</a>
         <a href="index.html" aria-current="page">Examples</a>
         <a href="../api/index.html">API</a>
-        <a href="../deploy/index.html">Deploy</a>
         <a href="../support.html">Support</a>
         </nav>
       </header>
       <main>
 
         <div class="page-intro">
-          <h2>Open Turso and object-log backends</h2>
-          <p>Public constructors for filesystem-log durability with native Turso or memory projections.</p>
+          <h2>Open the production queue</h2>
+          <p>Queue::s3_turso with an S3 object log, a local Turso cache directory and PostgreSQL queue leases.</p>
         </div>
         <div class="example-meta">
           <span class="badge neutral">construction</span>
-          <span>Provenance: <code>crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_turso · crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_objectlog</code></span>
+          <span>Provenance: <code>crates/fireweed/examples/queue_lifecycle.rs::open_production</code></span>
         </div>
         <div class="tag-list" style="margin-bottom:16px"><span class="tag">durable</span><span class="tag">construction</span></div>
         <div class="code-block">
   <div class="label"><span>docs/site/examples/src/durable-open.rs</span><span>rust</span></div>
-  <pre><code>// Provenance: crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_turso
+  <pre><code>// Provenance: crates/fireweed/examples/queue_lifecycle.rs::open_production
 // Do not edit by hand — regenerate with scripts/site/extract_examples.py
-fn lifecycle_over_shapes_turso() {
-    for shape in all_shapes() {
-        let root = tmp(&amp;format!(&quot;turso-{}&quot;, shape.name));
-        let fireweed = open_log_turso(&amp;root, Arc::new(SystemClock)).expect(&quot;open Turso&quot;);
-        run_one(&quot;turso&quot;, &amp;fireweed, &amp;shape, true);
-        drop(fireweed);
-        std::fs::remove_dir_all(root).expect(&quot;cleanup&quot;);
-    }
-}
-
-// Provenance: crates/fireweed-bench/tests/e2e_shapes_tests.rs::lifecycle_over_shapes_objectlog
-// Do not edit by hand — regenerate with scripts/site/extract_examples.py
-fn lifecycle_over_shapes_objectlog() {
-    for shape in all_shapes() {
-        let dir = tmp(&amp;format!(&quot;objectlog-{}&quot;, shape.name));
-        let _ = std::fs::remove_dir_all(&amp;dir);
-        let fireweed = open_objectlog(&amp;dir, Arc::new(SystemClock)).expect(&quot;open objectlog&quot;);
-        // Exercise the current public batch-update contract on the original rows.
-        run_one(&quot;objectlog&quot;, &amp;fireweed, &amp;shape, true);
-        let _ = std::fs::remove_dir_all(&amp;dir);
-    }
+async fn open_production() -&gt; QueueResult&lt;Queue&gt; {
+    let secret = |name: &amp;str| ConfigSecret::new(std::env::var(name).unwrap_or_default());
+    let options = S3TursoOptions::new(
+        S3LogOptions {
+            endpoint: &quot;https://s3.us-east-1.amazonaws.com&quot;.into(),
+            region: &quot;us-east-1&quot;.into(),
+            bucket: &quot;work-queues&quot;.into(),
+            namespace: &quot;prod/mail&quot;.into(),
+            access_key_id: secret(&quot;S3_ACCESS_KEY_ID&quot;),
+            secret_access_key: secret(&quot;S3_SECRET_ACCESS_KEY&quot;),
+            allow_insecure_http: false,
+        },
+        TursoCacheOptions {
+            directory: &quot;/var/lib/fireweed/cache&quot;.into(),
+        },
+        PostgresControlPlaneOptions {
+            url: secret(&quot;DATABASE_URL&quot;),
+            schema: &quot;fireweed&quot;.into(),
+            instance_id: OwnerId::new(&quot;worker-1&quot;)
+                .map_err(|e| QueueError::Invalid(e.to_string()))?,
+            heartbeat_ttl_ms: 10_000,
+            lease_ttl_ms: 30_000,
+            ownership_clock: None,
+        },
+    );
+    Queue::s3_turso(options, Arc::new(SystemClock)).await
 }</code></pre>
 </div>
         <div class="prose">
@@ -76,7 +80,7 @@ fn lifecycle_over_shapes_objectlog() {
           </p>
           <p>
             <a href="index.html">All examples</a> ·
-            Next: <a href="resp-drain.html">Redis client drain over RESP</a>
+            Next: <a href="basic-lifecycle.html">Provision, insert, claim, commit</a>
           </p>
         </div>
 
@@ -84,7 +88,7 @@ fn lifecycle_over_shapes_objectlog() {
       <footer class="site-footer">
         <p>
           Fireweed Queue v0.30.0 · source release ·
-          crates.io and GHCR deferred ·
+          crates.io deferred ·
           issues welcome · code contributions not accepted ·
           MIT OR Apache-2.0.
         </p>

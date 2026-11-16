@@ -4,7 +4,6 @@
 # Invoked by:
 #   - .github/workflows/pages.yml (build job)
 #   - scripts/ci/pr-gate.sh (bootstrap)
-#   - scripts/ci/deployment-release-gate.sh (validate_docs_microsite)
 #   - agent harness pre-commit / pre-push expectations (see AGENTS.md)
 #
 # Fail closed on broken local hrefs so GitHub Pages cannot stay stale behind a

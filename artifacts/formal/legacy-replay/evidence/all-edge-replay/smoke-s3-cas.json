@@ -1,0 +1,45 @@
+{
+  "bucket": "fireweed-formal",
+  "bucket_ensure": {
+    "etag": null,
+    "status": 200
+  },
+  "conditional_update": {
+    "if_match_current_status": 200,
+    "if_match_stale_status": 412,
+    "key": "fireweed-p1s-cas/1791745726-3515374/conditional-update",
+    "post_match_etag_present": true,
+    "seed_etag_present": true
+  },
+  "endpoint": "http://127.0.0.1:36311",
+  "native_atomic_conditional_create": true,
+  "native_atomic_conditional_update": true,
+  "probe_prefix": "fireweed-p1s-cas/1791745726-3515374",
+  "region": "us-east-1",
+  "sequential_create_only": {
+    "first_status": 200,
+    "key": "fireweed-p1s-cas/1791745726-3515374/create-only",
+    "second_status": 412,
+    "winner_body_preserved": true
+  },
+  "status": "passed",
+  "tls_mode": "plaintext",
+  "two_writer_create_only_race": {
+    "loser_statuses": [
+      412
+    ],
+    "winner": "writer-b",
+    "winner_etag": "\"d89c62308a22ad53959b2235437831f8\"",
+    "winner_status": 200,
+    "writer_results": [
+      {
+        "status": 200,
+        "writer": "writer-b"
+      },
+      {
+        "status": 412,
+        "writer": "writer-a"
+      }
+    ]
+  }
+}

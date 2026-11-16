@@ -1,0 +1,5 @@
+[load] ingest:start loadavg_1m=6.31
+[ingest] A queue=1/3 rows_so_far=200000
+[ingest] A queue=2/3 rows_so_far=400000
+[ingest] A queue=3/3 rows_so_far=600000
+[load] ingest:end loadavg_1m=7.31

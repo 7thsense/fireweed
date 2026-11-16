@@ -41,10 +41,10 @@ reference.
 
 > **Realized surfaces (ADR-007).** The hexagonal build realizes this transport-neutral contract through
 > **two** first-class faces: the **Rust library** (`fireweed` crate — full surface) and the **RESP/Redis-
-> Streams wire front** (`fireweed-resp` — the stock worker hot path, with the richer operations marked
+> Streams wire front** (the retired RESP crate — the stock worker hot path, with the richer operations marked
 > `library-only` in TD-006 §3). The **HTTP/JSON service** surface described below is retained as a valid
 > transport-neutral binding of the same command model, but was **not** built in this architecture (the
-> legacy HTTP `fireweed-service` crate was deleted); the `/v1` route table is therefore an illustrative
+> legacy HTTP the retired service crate was deleted); the `/v1` route table is therefore an illustrative
 > mapping, not a current implementation surface. Capability classification per face lives in the TD-006 §3
 > matrix.
 
@@ -64,7 +64,7 @@ first-class surfaces** (ADR-007; see the "Realized surfaces" note above):
 
 - The **Rust library** (`fireweed` crate) for embedded or same-process use — the
   full surface.
-- The **RESP wire front** (`fireweed-resp`, TD-006) — the stock-worker hot path.
+- The **RESP wire front** (the retired RESP crate, TD-006) — the stock-worker hot path.
 
 Other transports (a stateless HTTP/JSON service, SDKs wrapping it) are
 **possible bindings** of this transport-neutral contract, not committed
@@ -198,15 +198,15 @@ per-item result semantics as a one-item batch.
 | Element | Type / Shape | Required | Rules | Notes |
 |---------|--------------|----------|-------|-------|
 | Rust library surface | crate API (`fireweed`) | yes | MUST expose the native operations as typed async Rust functions or traits. MUST NOT require any wire service for same-process deployments. | Committed full-power surface (ADR-007/ADR-009). |
-| RESP wire surface | RESP protocol (`fireweed-resp`) | yes | MUST expose the stock-worker subset per TD-006 with the richer operations marked library-only in the TD-006 §3 capability matrix. | Committed remote surface (ADR-007). |
-| HTTP service surface | HTTP/JSON API | no (possible binding, not built) | IF ever built, MUST expose the native operations over versioned `/v1` routes and support stateless service containers behind a load balancer. | Not committed; the legacy `fireweed-service` crate was deleted (ADR-007). The route shape below is illustrative. |
+| RESP wire surface | RESP protocol (the retired RESP crate) | yes | MUST expose the stock-worker subset per TD-006 with the richer operations marked library-only in the TD-006 §3 capability matrix. | Committed remote surface (ADR-007). |
+| HTTP service surface | HTTP/JSON API | no (possible binding, not built) | IF ever built, MUST expose the native operations over versioned `/v1` routes and support stateless service containers behind a load balancer. | Not committed; the legacy the retired service crate was deleted (ADR-007). The route shape below is illustrative. |
 | SDK surface | client library | no (possible binding, not built) | IF ever built, SHOULD wrap a wire surface without changing operation semantics, result ordering, or error codes. | Not committed. |
 | Compatibility adapter surface | adapter API | may | MAY expose SQS-shaped or other compatibility APIs. MUST document unsupported native semantics. | P1, not the native contract. |
 
 ### HTTP Route Shape
 
 **This entire section is conditional and illustrative** (see Exposure Surfaces
-above): no HTTP binding is built or committed — the legacy `fireweed-service`
+above): no HTTP binding is built or committed — the legacy the retired service
 crate was deleted (ADR-007). Every requirement below applies **only IF** an
 HTTP binding is ever built; it then defines that binding's shape so the
 transport-neutral contract is preserved.

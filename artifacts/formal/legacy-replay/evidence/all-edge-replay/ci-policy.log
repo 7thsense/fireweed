@@ -1,0 +1,6 @@
+GitHub Actions policy valid: default CI is bounded and Actions contain no performance execution
+Turso correctness fixtures: PostgreSQL readiness, pinned native-CAS RustFS, masked environment and unconditional cleanup verified
+GitHub Actions policy valid: turso.yml is a governed focused public-default lane
+GitHub Actions policy valid: governed-product allowlist populated (12 commands); kafka digest pinned; product_release_readiness_claimed=false
+GitHub Actions policy valid: release.yml dual-checkout tag lane (Docker exception only)
+GitHub Actions policy valid: repository-side governed lane + external-proof prerequisites

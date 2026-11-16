@@ -1,9 +1,0 @@
-# Fireweed Queue CI runtime values: filesystem log × memory projection (public StorageConfig axes).
-# Filename retained for historical CI script keys; content uses public product names only.
-storage:
-  log:
-    backend: filesystem
-  projection:
-    backend: memory
-image:
-  tag: ci

@@ -472,7 +472,6 @@ pub struct QueueMetrics {
     pub leased: u64,
     pub complete: u64,
     pub failed: u64,
-    #[serde(default)]
     pub resident_terminal_count: u64,
 }
 
@@ -1364,14 +1363,12 @@ pub struct CommitTransitionEntry {
     /// Additional claimed items finalized with the same disposition as `claim_ref`. Every claim is
     /// validated before any entry write becomes visible, so the claims and the entry's side records,
     /// lifecycle items, and instance fence form one atomic transition boundary.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub additional_claim_refs: Vec<ClaimRef>,
     pub finalize: FinalizeKind,
     pub side_records: Vec<SideRecord>,
     pub lifecycle_items: Vec<PushSpec>,
     /// Optional caller-supplied instance/state fence advanced/validated atomically with this entry (C6).
-    /// `#[serde(default)]` so existing serialized commit bodies/definitions don't churn their fingerprint.
-    #[serde(default)]
     pub instance_fence: Option<InstanceFence>,
 }
 
@@ -1518,6 +1515,9 @@ pub struct SideRecordPage {
     pub next_cursor: Option<Vec<u8>>,
 }
 
+/// Maximum keys in one recovery side-record operation. Facades chunk larger inputs.
+pub const SIDE_RECORD_BATCH_MAX_KEYS: usize = 4096;
+
 /// Recovery/explain reads for the authoritative commit boundary (epic pqueue-2201fd37 acceptance #5). The
 /// default impl returns [`EngineError::Unavailable`](crate::EngineError::Unavailable) so backends without an
 /// authoritative commit boundary expose no (misleading) recovery surface.
@@ -1542,6 +1542,30 @@ pub trait RecoveryReadPort: Send + Sync {
         _key: &[u8],
     ) -> impl std::future::Future<Output = EngineResult<Option<Bytes>>> + Send {
         std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    /// Exact bounded point reads, preserving order, duplicates and missing keys.
+    /// The fallback drains each started 64-read group before returning an error.
+    fn side_records(
+        &self,
+        shard: &QueueKey,
+        keys: &[Vec<u8>],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<Option<Bytes>>>> + Send {
+        async move {
+            if keys.len() > SIDE_RECORD_BATCH_MAX_KEYS {
+                return Err(EngineError::Invalid("side-record batch exceeds key bound"));
+            }
+            let mut output = Vec::with_capacity(keys.len());
+            for chunk in keys.chunks(64) {
+                let results =
+                    futures::future::join_all(chunk.iter().map(|key| self.side_record(shard, key)))
+                        .await;
+                for result in results {
+                    output.push(result?);
+                }
+            }
+            Ok(output)
+        }
     }
 
     /// Paged, key-ascending-ordered scan of opaque side records whose key starts with `prefix`

@@ -1,0 +1,7 @@
+{
+  "scope": "/mnt/scratch/Projects/fireweed/target/all-edge/debug/deps",
+  "reason": "task-owned inactive compiler archives removed only after Rust test executable started; source/executables/evidence preserved",
+  "files": 701,
+  "bytes": 1267507742,
+  "time": 1791752075.0990613
+}

@@ -18,7 +18,7 @@ ddx:
     - {kind: informed_by, to: adr-async-commit-strategy-and-dispatch}
     - {kind: informed_by, to: td-object-log-turso-projection}
     - {kind: informed_by, to: td-batch-shape-and-critical-section-audit}
-    - {kind: informed_by, to: ss-objectlog-turso-memory-goal}
+    - {kind: informed_by, to: architecture}
   status: accepted
 ---
 
@@ -225,9 +225,9 @@ writes on the live path.
 
 ## Migration & Rollback
 
-- **Backward Compatibility**: log envelopes unchanged; replay of mixed
-  UpdateFields / Claim / Finalize histories remains valid.
-- **Data Migration**: none. Legacy claim outbox stays recovery-only.
+- **Backward Compatibility**: none. Pre-release; data from earlier builds is
+  refused. Replay of current UpdateFields / Claim / Finalize histories is valid.
+- **Data Migration**: none.
 - **Feature Toggle**: none. Derived object-log × Turso is the live path.
 - **Rollback**: revert the compose driver to the previous generation; do not
   reintroduce SQL-first serving.

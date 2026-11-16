@@ -1,0 +1,21 @@
+[workspace]
+
+[package]
+name = "value-boundary-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "spike"
+path = "src/main.rs"
+
+[dependencies]
+turso = { path = "../../vendor/turso", version = "=0.7.2", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+rand = "0.8"
+
+[profile.release]
+opt-level = 3
+debug = false
+panic = "unwind"

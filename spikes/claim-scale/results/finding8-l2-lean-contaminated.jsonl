@@ -1,0 +1,14 @@
+{"phase":"finding8_start_size","layout":"L2","row_layout":"lean","main_bytes":47911657472,"wal_bytes":0,"selected_queues":[26, 33, 50, 88, 20, 100, 6, 78, 84, 24, 10, 69, 76, 93, 23, 98, 77, 45, 25, 58]}
+{"phase":"finding8_claim","layout":"L2","row_layout":"lean","trial":1,"reps":100,"batch":100,"n_selected_queues":20,"elapsed_ms":344.1,"claims_per_sec":290.6,"p50_us":3320.2,"p99_us":6130.5}
+{"phase":"finding8_finish","layout":"L2","row_layout":"lean","trial":1,"reps":100,"batch":100,"n_selected_queues":20,"elapsed_ms":339.8,"finishes_per_sec":294.3,"p50_us":2828.7,"p99_us":13342.2}
+{"phase":"finding8_claim","layout":"L2","row_layout":"lean","trial":2,"reps":100,"batch":100,"n_selected_queues":20,"elapsed_ms":356.5,"claims_per_sec":280.5,"p50_us":3136.8,"p99_us":8843.0}
+{"phase":"finding8_finish","layout":"L2","row_layout":"lean","trial":2,"reps":100,"batch":100,"n_selected_queues":20,"elapsed_ms":326.2,"finishes_per_sec":306.5,"p50_us":3283.4,"p99_us":4323.6}
+{"phase":"finding8_claim","layout":"L2","row_layout":"lean","trial":3,"reps":100,"batch":100,"n_selected_queues":20,"elapsed_ms":427.8,"claims_per_sec":233.7,"p50_us":4283.5,"p99_us":5629.0}
+{"phase":"finding8_finish","layout":"L2","row_layout":"lean","trial":3,"reps":100,"batch":100,"n_selected_queues":20,"elapsed_ms":317.6,"finishes_per_sec":314.8,"p50_us":3177.1,"p99_us":4168.3}
+{"phase":"finding8_extend","layout":"L2","row_layout":"lean","trial":1,"reps":20,"batch":1000,"queue_no":26,"elapsed_ms":5.3,"extends_per_sec":3780.4,"p50_us":210.1,"p99_us":415.2}
+{"phase":"finding8_extend","layout":"L2","row_layout":"lean","trial":2,"reps":20,"batch":1000,"queue_no":33,"elapsed_ms":3.9,"extends_per_sec":5079.3,"p50_us":174.4,"p99_us":340.6}
+{"phase":"finding8_extend","layout":"L2","row_layout":"lean","trial":3,"reps":20,"batch":1000,"queue_no":50,"elapsed_ms":2.8,"extends_per_sec":7225.2,"p50_us":115.4,"p99_us":232.2}
+{"phase":"finding8_sweep","layout":"L2","row_layout":"lean","trial":1,"sweep_size":10000,"n_sweep_calls":1,"distinct_queues_touched":20,"claims_touched":100,"discovery_ms":0.40,"total_ms":351.10,"item_rows_reclaimed":10000}
+{"phase":"finding8_sweep","layout":"L2","row_layout":"lean","trial":2,"sweep_size":10000,"n_sweep_calls":1,"distinct_queues_touched":20,"claims_touched":100,"discovery_ms":0.28,"total_ms":244.40,"item_rows_reclaimed":10000}
+{"phase":"finding8_sweep","layout":"L2","row_layout":"lean","trial":3,"sweep_size":10000,"n_sweep_calls":1,"distinct_queues_touched":20,"claims_touched":100,"discovery_ms":0.16,"total_ms":203.51,"item_rows_reclaimed":10000}
+{"phase":"finding8_final_size","layout":"L2","row_layout":"lean","main_bytes":47912214528,"checkpoint_ms":785.4}

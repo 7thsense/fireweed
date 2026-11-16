@@ -40,9 +40,20 @@ fn storage(error: impl std::fmt::Display) -> EngineError {
 
 // Keep the statement failure visible when Turso has already aborted the transaction.
 async fn rollback_preserving_error(
-    transaction: turso::transaction::Transaction<'_>,
+    mut transaction: turso::transaction::Transaction<'_>,
     error: EngineError,
 ) -> EngineError {
+    // OR ROLLBACK may already have ended the transaction. Clear its deferred
+    // cleanup using the public API so the next operation does not issue a
+    // second ROLLBACK against an idle connection.
+    match transaction.is_autocommit() {
+        Ok(true) => {
+            transaction.set_drop_behavior(turso::transaction::DropBehavior::Ignore);
+            return error;
+        }
+        Ok(false) => {}
+        Err(state) => return storage(format!("{error}; transaction state check failed: {state}")),
+    }
     match transaction.rollback().await {
         Ok(()) => error,
         Err(rollback) => storage(format!("{error}; rollback also failed: {rollback}")),
@@ -335,7 +346,11 @@ async fn one_row(
     let Some(row) = rows.next().await.map_err(storage)? else {
         return Ok(None);
     };
-    Ok(Some(row.into_values().collect()))
+    Ok(Some(
+        crate::row_values(&row, rows.column_count())
+            .map_err(storage)?
+            .collect(),
+    ))
 }
 
 async fn one_outcome_row(
@@ -350,7 +365,11 @@ async fn one_outcome_row(
     let Some(row) = rows.next().await.map_err(outcome_read_error)? else {
         return Ok(None);
     };
-    Ok(Some(row.into_values().collect()))
+    Ok(Some(
+        crate::row_values(&row, rows.column_count())
+            .map_err(outcome_read_error)?
+            .collect(),
+    ))
 }
 
 async fn query_value_rows(
@@ -367,7 +386,11 @@ async fn query_value_rows(
     let mut rows = statement.query(params).await.map_err(outcome_read_error)?;
     let mut collected = Vec::new();
     while let Some(row) = rows.next().await.map_err(outcome_read_error)? {
-        collected.push(row.into_values().collect());
+        collected.push(
+            crate::row_values(&row, rows.column_count())
+                .map_err(outcome_read_error)?
+                .collect(),
+        );
     }
     trace_sql(
         query.as_ref(),
@@ -535,7 +558,13 @@ async fn validation_rows_by_item(
     let mut by_item = HashMap::with_capacity(ids.len());
     while let Some(row) = rows.next().await.map_err(storage)? {
         let item_id = ItemId::new(row.get::<String>(0).map_err(storage)?).map_err(storage)?;
-        by_item.insert(item_id, row.into_values().skip(1).collect());
+        by_item.insert(
+            item_id,
+            crate::row_values(&row, rows.column_count())
+                .map_err(storage)?
+                .skip(1)
+                .collect(),
+        );
     }
     trace_sql(&query, bind_count, by_item.len(), started.elapsed());
     Ok(by_item)
@@ -584,9 +613,12 @@ async fn validate_secondary_indexes_on_insert(
         parameters.push(queue.to_string().into());
         let query = format!(
             "WITH incoming(index_name,index_key) AS (VALUES {}) \
-             SELECT 1 FROM fireweed_item_index existing JOIN incoming \
-             ON existing.index_name=incoming.index_name AND existing.index_key=incoming.index_key \
-             WHERE existing.tenant_id=? AND existing.queue_id=? LIMIT 1",
+             SELECT 1 FROM incoming WHERE EXISTS (\
+               SELECT 1 FROM fireweed_item_index existing \
+                 INDEXED BY fireweed_item_index_key_numeric_asc_idx \
+               WHERE existing.tenant_id=? AND existing.queue_id=? \
+                 AND existing.index_name=incoming.index_name \
+                 AND existing.index_key=incoming.index_key) LIMIT 1",
             values_rows(chunk.len(), 2)
         );
         if one_row(transaction, &query, parameters).await?.is_some() {
@@ -1477,14 +1509,12 @@ pub(crate) async fn server_pending_by_ids_on(
     }
     let mut by_id = HashMap::<ItemId, (i64, u32)>::with_capacity(ids.len());
     for chunk in ids.chunks(500) {
-        let placeholders = (0..chunk.len())
-            .map(|index| format!("?{}", index + 3))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT item_id,lease_expires_at,retry_count FROM fireweed_items \
-                 WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
-                 AND lease_expires_at IS NOT NULL AND item_id IN ({placeholders})"
+        let sql = addressed_rows_sql(
+            "fireweed_items",
+            "item_id,lease_expires_at,retry_count",
+            " AND lifecycle_state='Leased' AND lease_expires_at IS NOT NULL",
+            chunk.len(),
+            3,
         );
         let mut params = vec![
             shard.tenant_id.as_str().to_string().into(),
@@ -1566,7 +1596,7 @@ pub(crate) fn retained_items_sql(same_width: bool) -> String {
     };
     format!(
         "SELECT i.item_id,i.client_item_key,i.item_version,i.lifecycle_state,i.priority,i.not_before,i.retry_count,\
-         CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.metadata \
+         p.payload,i.metadata \
          FROM fireweed_items i INDEXED BY fireweed_items_retained_numeric_idx \
          LEFT JOIN fireweed_item_payloads p \
          ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
@@ -1623,7 +1653,7 @@ pub(crate) async fn server_retained_items_on(
 }
 
 const LIVE_ITEMS_SQL: &str = "SELECT i.item_id,i.client_item_key,i.item_version,i.lifecycle_state,i.priority,i.group_key,i.not_before,i.retry_count,\
-         CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.fields \
+         p.payload,i.fields \
          FROM fireweed_items i INDEXED BY fireweed_items_active_key \
          LEFT JOIN fireweed_item_payloads p \
            ON p.tenant_id=i.tenant_id AND p.queue_id=i.queue_id AND p.item_id=i.item_id \
@@ -1854,9 +1884,9 @@ pub(crate) async fn push_idempotency_on(
         return Ok(IdempotencyDecision::Expired);
     }
     let stored = blob(&row[0])?;
-    if stored != fingerprint.canonical_sha256
-        && stored != fingerprint.legacy_body_hash.0.to_be_bytes()
-    {
+    // The durable envelope carries the eight-byte prefix of the canonical fingerprint, and the
+    // relational apply persists exactly that.
+    if stored != fingerprint.body_hash().0.to_be_bytes() {
         return Ok(IdempotencyDecision::Conflict);
     }
     let raw: Vec<String> = serde_json::from_str(&text(&row[1])?).map_err(storage)?;
@@ -1881,7 +1911,11 @@ async fn query_driver_value_rows(
     let mut rows = statement.query(params).await.map_err(driver_read_error)?;
     let mut collected = Vec::new();
     while let Some(row) = rows.next().await.map_err(driver_read_error)? {
-        collected.push(row.into_values().collect());
+        collected.push(
+            crate::row_values(&row, rows.column_count())
+                .map_err(driver_read_error)?
+                .collect(),
+        );
     }
     trace_sql(
         query.as_ref(),
@@ -1917,7 +1951,7 @@ fn class_s_item_from_driver_row(
 
 // Scan only index entries for eligibility, then materialize selected IDs. The
 // CROSS JOIN keeps the bounded candidate list outside full-row primary-key seeks.
-const ORDERED_ITEM_CLAIM_SQL: &str = "SELECT i.item_id,i.client_item_key,CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,i.item_version,i.retry_count,i.priority,i.group_key,\
+const ORDERED_ITEM_CLAIM_SQL: &str = "SELECT i.item_id,i.client_item_key,p.payload,i.item_version,i.retry_count,i.priority,i.group_key,\
      i.not_before,i.fields,i.metadata,i.max_attempts,i.entity_document,i.index_fields,i.eligible_since,i.cohort_size,t.priority_sort,t.created_seq \
      FROM (\
        SELECT item_id,priority_sort,created_seq \
@@ -2018,10 +2052,10 @@ pub async fn select_and_materialize_item_claims_on(
     let mut carriers = Vec::with_capacity(max);
     let mut next_floor = None;
     if let Some(mut floor) = scan.rowid_floor {
-        const FIFO_SQL: &str = "SELECT t.item_id,t.client_item_key,CASE WHEN p.item_id IS NULL THEN t.payload ELSE p.payload END,t.item_version,t.retry_count,t.priority,t.group_key,\
+        const FIFO_SQL: &str = "SELECT t.item_id,t.client_item_key,p.payload,t.item_version,t.retry_count,t.priority,t.group_key,\
              t.not_before,t.fields,t.metadata,t.max_attempts,t.entity_document,t.index_fields,t.eligible_since,t.cohort_size,t.rowid \
              FROM (\
-               SELECT item_id,client_item_key,item_version,retry_count,priority,group_key,payload,\
+               SELECT item_id,client_item_key,item_version,retry_count,priority,group_key,\
                 not_before,fields,metadata,max_attempts,entity_document,index_fields,eligible_since,cohort_size,rowid \
                FROM fireweed_items NOT INDEXED \
                WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
@@ -2058,8 +2092,11 @@ pub async fn select_and_materialize_item_claims_on(
                 if !claim_row_is_due(&row, now_n)? {
                     continue;
                 }
-                let Some((id, item)) =
-                    class_s_item_from_owned_values(row.into_values(), expires, &exclude_set)?
+                let Some((id, item)) = class_s_item_from_owned_values(
+                    crate::row_values(&row, rows.column_count()).map_err(driver_read_error)?,
+                    expires,
+                    &exclude_set,
+                )?
                 else {
                     continue;
                 };
@@ -2115,8 +2152,11 @@ pub async fn select_and_materialize_item_claims_on(
                 if !claim_row_is_due(&row, now_n)? {
                     continue;
                 }
-                let Some((id, item)) =
-                    class_s_item_from_owned_values(row.into_values(), expires, &exclude_set)?
+                let Some((id, item)) = class_s_item_from_owned_values(
+                    crate::row_values(&row, rows.column_count()).map_err(driver_read_error)?,
+                    expires,
+                    &exclude_set,
+                )?
                 else {
                     continue;
                 };
@@ -2185,6 +2225,19 @@ pub async fn materialize_grouped_cohort_claimed_on(
     materialize_claimed_on(connection, shard, ids, lease_token, lease_expires_at, None).await
 }
 
+pub(crate) fn addressed_rows_sql(
+    table: &str,
+    columns: &str,
+    extra: &str,
+    count: usize,
+    first_bind: usize,
+) -> String {
+    format!(
+        "{} SELECT {columns} FROM requested CROSS JOIN {table} INDEXED BY sqlite_autoindex_{table}_1 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=requested_item_id{extra}",
+        fireweed_relational::addressed_item_ids_cte(count, first_bind)
+    )
+}
+
 async fn materialize_claimed_on(
     connection: &Connection,
     shard: &QueueKey,
@@ -2217,10 +2270,6 @@ async fn materialize_claimed_on(
         ""
     };
     for chunk in ids.chunks(SQLITE_BIND_CAP.saturating_sub(id_bind).max(1)) {
-        let placeholders = (0..chunk.len())
-            .map(|index| format!("?{}", index + id_bind))
-            .collect::<Vec<_>>()
-            .join(",");
         let mut params = vec![
             shard.tenant_id.as_str().to_string().into(),
             shard.queue_id.as_str().to_string().into(),
@@ -2229,11 +2278,13 @@ async fn materialize_claimed_on(
             params.push(Value::Integer(due_at));
         }
         params.extend(chunk.iter().map(|id| id.to_string().into()));
-        let item_sql = format!(
-            "SELECT item_id,client_item_key,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,item_version,retry_count,priority,group_key,\
-             not_before,fields,metadata,max_attempts,entity_document,index_fields \
-             FROM fireweed_items \
-             WHERE tenant_id=?1 AND queue_id=?2 AND item_id IN ({placeholders}){due_clause}"
+        let item_sql = addressed_rows_sql(
+            "fireweed_items",
+            "item_id,client_item_key,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id),item_version,retry_count,priority,group_key,\
+             not_before,fields,metadata,max_attempts,entity_document,index_fields",
+            due_clause,
+            chunk.len(),
+            id_bind,
         );
         for values in query_driver_value_rows(connection, item_sql, params.clone()).await? {
             let item = class_s_item_from_driver_row(&values, expires)?;
@@ -2243,9 +2294,12 @@ async fn materialize_claimed_on(
         if !gated {
             continue;
         }
-        let gate_sql = format!(
-            "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 \
-             AND queue_id=?2 AND item_id IN ({placeholders}) ORDER BY item_id,gate_key"
+        let gate_sql = addressed_rows_sql(
+            "fireweed_item_gates",
+            "item_id,gate_key",
+            " ORDER BY item_id,gate_key",
+            chunk.len(),
+            id_bind,
         );
         for values in query_driver_value_rows(connection, gate_sql, params).await? {
             let id = ItemId::new(text(&values[0])?).map_err(storage)?;
@@ -2270,11 +2324,7 @@ fn addressed_item_rows_sql(count: usize, with_payload: bool) -> String {
         .map(|i| format!("(?{})", i + 3))
         .collect::<Vec<_>>()
         .join(",");
-    let payload_sql = if with_payload {
-        "CASE WHEN p.item_id IS NOT NULL THEN p.payload ELSE i.payload END"
-    } else {
-        "NULL"
-    };
+    let payload_sql = if with_payload { "p.payload" } else { "NULL" };
     let payload_join = if with_payload {
         "LEFT JOIN fireweed_item_payloads p ON p.tenant_id=?1 AND p.queue_id=?2 AND p.item_id=i.item_id"
     } else {
@@ -2465,7 +2515,7 @@ pub(crate) async fn load_queue_image_on(
     for values in query_value_rows(
         connection,
         "SELECT i.item_id,i.client_item_key,i.priority,i.not_before,i.eligible_since,i.group_key,i.cohort_size,\
-         CASE WHEN p.item_id IS NOT NULL THEN p.payload ELSE i.payload END,\
+         p.payload,\
          i.fields,i.metadata,i.index_fields,i.entity_document,i.lifecycle_state,i.item_version,\
          i.retry_count,i.max_attempts,i.created_seq,b.lease_token,i.lease_expires_at,i.worker_id,\
          i.fenced,i.superseded,i.terminal_at,i.terminal_command_epoch,i.last_command_sequence \
@@ -2583,7 +2633,7 @@ fn lease_target_rows_sql(count: usize) -> String {
         "WITH incoming(item_id) AS (VALUES {values}) \
          SELECT i.item_id,i.client_item_key,i.item_version,i.priority,i.group_key,i.not_before,\
          i.lease_expires_at,i.retry_count,i.max_attempts,\
-         CASE WHEN p.item_id IS NULL THEN i.payload ELSE p.payload END,\
+         p.payload,\
          i.fields,i.metadata,i.entity_document,i.index_fields \
          FROM incoming CROSS JOIN fireweed_items i INDEXED BY sqlite_autoindex_fireweed_items_1 \
          ON i.tenant_id=?1 AND i.queue_id=?2 AND i.item_id=incoming.item_id \
@@ -4284,10 +4334,6 @@ impl AsyncProjectionStore for TursoRelational {
             let mut item_rows = HashMap::<ItemId, Vec<Value>>::with_capacity(ids.len());
             let mut gate_keys = HashMap::<ItemId, Vec<String>>::new();
             for chunk in ids.chunks(500) {
-                let placeholders = (0..chunk.len())
-                    .map(|index| format!("?{}", index + 3))
-                    .collect::<Vec<_>>()
-                    .join(",");
                 let mut params = vec![
                     shard.tenant_id.as_str().to_string().into(),
                     shard.queue_id.as_str().to_string().into(),
@@ -4302,9 +4348,12 @@ impl AsyncProjectionStore for TursoRelational {
                     let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
                     item_rows.insert(id, row.values[1..].to_vec());
                 }
-                let gate_sql = format!(
-                    "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 \
-                     AND queue_id=?2 AND item_id IN ({placeholders}) ORDER BY item_id,gate_key"
+                let gate_sql = addressed_rows_sql(
+                    "fireweed_item_gates",
+                    "item_id,gate_key",
+                    " ORDER BY item_id,gate_key",
+                    chunk.len(),
+                    3,
                 );
                 for row in self.query(gate_sql, params).await.map_err(storage)? {
                     let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
@@ -4363,21 +4412,18 @@ impl AsyncProjectionStore for TursoRelational {
             let mut item_rows = HashMap::<ItemId, Vec<Value>>::with_capacity(visible.len());
             let mut gate_keys = HashMap::<ItemId, Vec<String>>::new();
             for chunk in visible.chunks(500) {
-                let placeholders = (0..chunk.len())
-                    .map(|index| format!("?{}", index + 3))
-                    .collect::<Vec<_>>()
-                    .join(",");
                 let mut params = vec![
                     shard.tenant_id.as_str().to_string().into(),
                     shard.queue_id.as_str().to_string().into(),
                 ];
                 params.extend(chunk.iter().map(|id| id.to_string().into()));
-                let item_sql = format!(
-                    "SELECT item_id,client_item_key,item_version,priority,group_key,not_before,\
-                     lease_expires_at,retry_count,max_attempts,CASE WHEN EXISTS(SELECT 1 FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) THEN (SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id) ELSE payload END,fields,metadata,entity_document,index_fields \
-                     FROM fireweed_items \
-                     WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
-                     AND item_id IN ({placeholders})"
+                let item_sql = addressed_rows_sql(
+                    "fireweed_items",
+                    "item_id,client_item_key,item_version,priority,group_key,not_before,\
+                     lease_expires_at,retry_count,max_attempts,(SELECT p.payload FROM fireweed_item_payloads p WHERE p.tenant_id=fireweed_items.tenant_id AND p.queue_id=fireweed_items.queue_id AND p.item_id=fireweed_items.item_id),fields,metadata,entity_document,index_fields",
+                    " AND lifecycle_state='Leased'",
+                    chunk.len(),
+                    3,
                 );
                 for row in self
                     .query(item_sql, params.clone())
@@ -4387,9 +4433,12 @@ impl AsyncProjectionStore for TursoRelational {
                     let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
                     item_rows.insert(id, row.values[1..].to_vec());
                 }
-                let gate_sql = format!(
-                    "SELECT item_id,gate_key FROM fireweed_item_gates WHERE tenant_id=?1 \
-                     AND queue_id=?2 AND item_id IN ({placeholders}) ORDER BY item_id,gate_key"
+                let gate_sql = addressed_rows_sql(
+                    "fireweed_item_gates",
+                    "item_id,gate_key",
+                    " ORDER BY item_id,gate_key",
+                    chunk.len(),
+                    3,
                 );
                 for row in self
                     .query(gate_sql, params.clone())
@@ -4399,9 +4448,12 @@ impl AsyncProjectionStore for TursoRelational {
                     let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
                     gate_keys.entry(id).or_default().push(text(&row.values[1])?);
                 }
-                let bearer_sql = format!(
-                    "SELECT item_id,lease_token FROM fireweed_lease_bearers \
-                     WHERE tenant_id=?1 AND queue_id=?2 AND item_id IN ({placeholders})"
+                let bearer_sql = addressed_rows_sql(
+                    "fireweed_lease_bearers",
+                    "item_id,lease_token",
+                    "",
+                    chunk.len(),
+                    3,
                 );
                 for row in self.query(bearer_sql, params).await.map_err(storage)? {
                     let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
@@ -4590,111 +4642,6 @@ mod committed_pool_helper_tests {
         }
     }
 
-    #[test]
-    fn post_publication_response_never_borrows_committed_pool() {
-        let projection = include_str!("projection.rs");
-        let local = include_str!("local.rs");
-        let compose = include_str!("../../fireweed/src/turso_compose.rs");
-
-        let render = between(projection, "fn render_claimed(", "fn item_state(");
-        asserts_no_pool_borrow(render, "render_claimed");
-        assert!(
-            render.contains("self.query("),
-            "post-append render_claimed must keep the serving reader, not a pool"
-        );
-
-        let apply_live = between(projection, "fn apply_live(", "fn apply_recovery(");
-        asserts_no_pool_borrow(apply_live, "apply_live");
-        assert!(
-            apply_live.contains("truncate_wal_if_unpinned"),
-            "apply must truncate WAL when no reader snapshot is live"
-        );
-        assert!(
-            projection.contains("PRAGMA wal_checkpoint(TRUNCATE)"),
-            "OFF-mode WAL bound is writer TRUNCATE"
-        );
-        assert!(
-            projection.contains("PRAGMA wal_checkpoint(PASSIVE)"),
-            "log-backed WAL is compacted with Passive, not autocheckpoint"
-        );
-        assert!(
-            apply_live.contains("maybe_passive_checkpoint_log_backed"),
-            "log-backed apply must admit Passive checkpoints without a 64-store stampede"
-        );
-
-        let (_, production) = compose
-            .rsplit_once("// Atomic log-replay × Turso")
-            .expect("production Turso composition boundary");
-        let derived_impl = production
-            .split("impl DerivedObjectLogTursoBackend {")
-            .nth(1)
-            .expect("derived Turso implementation");
-        let item_claim = between(
-            derived_impl,
-            "async fn dispatch_claim(",
-            "async fn dispatch_grouped_cohort_claim(",
-        );
-        assert!(
-            item_claim.contains("drive_candidate_mutation"),
-            "ordinary item Claim must join the packed Update generation"
-        );
-        assert!(
-            !item_claim.contains("acquire_exclusive"),
-            "ordinary item Claim must not take the exclusive selection fence"
-        );
-        assert!(
-            !item_claim.contains("class_s_claim_for_queue"),
-            "S5 cuts item Claim off the SQL-first writer lease-before-append lane"
-        );
-        assert!(
-            !item_claim.contains("render_claimed(")
-                && !item_claim.contains("render_prepared_claim"),
-            "item Claim continuation must retain pre-materialized rows"
-        );
-        let retained = between(
-            compose,
-            "fn finish_retained_grouped_cohort_response(",
-            "fn finish_inert_mutation_generation_append(",
-        );
-        asserts_no_pool_borrow(retained, "turso_compose retained post-publication");
-        let grouped = between(
-            compose,
-            "async fn dispatch_grouped_cohort_claim(",
-            "async fn append_class_s_claim(",
-        );
-        assert!(
-            !grouped.contains("render_prepared_claim") && !grouped.contains("render_claimed("),
-            "grouped/cohort post-publication must use the retained carrier"
-        );
-        let production_local = local
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production local.rs");
-        assert!(
-            !production_local.contains("PRAGMA wal_checkpoint"),
-            "committed-reader construction must not invoke wal_checkpoint"
-        );
-        let claim_micro = between(
-            local,
-            "pub async fn item_claim_microbatch_on_connection(",
-            "pub async fn mutation_driver_snapshot_on(",
-        );
-        assert!(
-            !claim_micro.contains("transaction_with_behavior"),
-            "item Claim SELECT must not open a Deferred snapshot that pins WAL"
-        );
-        let serving_claim = between(
-            local,
-            "pub async fn item_claim_microbatch_on_serving_reader(",
-            "pub async fn item_claim_microbatch_on_connection(",
-        );
-        assert!(
-            serving_claim.contains("claim_scan_is_fifo")
-                && serving_claim.contains("advance_claim_scan_hint"),
-            "serving Claim must advance the FIFO rowid floor under the reader mutex"
-        );
-    }
-
     #[tokio::test]
     async fn grouped_cohort_claim_materializes_before_append() {
         let store = TursoRelational::in_memory().await.expect("open");
@@ -4713,9 +4660,9 @@ mod committed_pool_helper_tests {
                 .expect("nonempty index fields");
         let insert = "INSERT INTO fireweed_items(\
              tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-             not_before,eligible_since,group_key,payload,fields,metadata,entity_document,index_fields,\
+             not_before,eligible_since,group_key,fields,metadata,entity_document,index_fields,\
              retry_count,item_version,last_command_sequence,created_at,updated_at,fenced,superseded,\
-             max_attempts,created_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+             max_attempts,created_seq) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
         for (id, entity, native_indexes, created_seq) in [
             (
                 stored_id,
@@ -4746,7 +4693,6 @@ mod committed_pool_helper_tests {
                         Value::Integer(7),
                         Value::Integer(1),
                         Value::Text("group-a".to_string()),
-                        Value::Blob(vec![0xCA, 0xFE]),
                         Value::Text(r#"{"blob":[1,2,3]}"#.to_string()),
                         Value::Text(r#"{"attempt":7,"source":"class-s"}"#.to_string()),
                         entity,
@@ -4764,6 +4710,14 @@ mod committed_pool_helper_tests {
                 )
                 .await
                 .expect("insert pending full row");
+            store
+                .execute(
+                    "INSERT INTO fireweed_item_payloads(tenant_id,queue_id,item_id,payload) \
+                     VALUES('t','q',?1,X'CAFE')",
+                    vec![Value::Text(id.to_string())],
+                )
+                .await
+                .expect("insert payload");
         }
         store
             .execute(
@@ -4945,7 +4899,7 @@ mod deterministic_cancellation_tests {
     use std::sync::Arc;
 
     use fireweed_conformance::{envelope, item, qdef, ts};
-    use fireweed_core::{BodyHash, ItemId, ItemState, RequestId};
+    use fireweed_core::{ItemId, ItemState, RequestId};
     use fireweed_engine::{
         AsyncProjectionStore, CommandPosition, IdempotencyDecision, PushCommand, PushFingerprint,
         QueueCommand, QueueKey, RequestOutcome, push_items_fingerprint_sha256,
@@ -4978,12 +4932,11 @@ mod deterministic_cancellation_tests {
         let ids = items.iter().map(|item| item.item_id).collect::<Vec<_>>();
         let fingerprint = PushFingerprint {
             canonical_sha256: push_items_fingerprint_sha256(&items).unwrap(),
-            legacy_body_hash: BodyHash(7),
         };
         let request_id = RequestId::new(request_id).unwrap();
         let mut command = envelope(QueueCommand::Push(PushCommand { items }), ids.clone());
         command.request_id = Some(request_id.clone());
-        command.request_fingerprint = Some(fingerprint.legacy_body_hash.0);
+        command.request_fingerprint = Some(fingerprint.body_hash().0);
         command.request_outcome = Some(RequestOutcome::Push { item_ids: ids });
         (
             CommandPosition::new(shard.clone(), 0, sequence),
@@ -5002,65 +4955,6 @@ mod deterministic_cancellation_tests {
         AsyncProjectionStore::push_idempotency(store, shard.clone(), request_id, fingerprint, ts(1))
             .await
             .unwrap()
-    }
-
-    #[tokio::test]
-    async fn legacy_push_fingerprint_repair_matches_exact_log_position_and_is_idempotent() {
-        let definition = qdef();
-        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-        let store = TursoRelational::in_memory().await.unwrap();
-        AsyncProjectionStore::ensure_shard(&store, definition)
-            .await
-            .unwrap();
-        let (position, command, request_id, fingerprint) =
-            replayable_push(&shard, ItemId::new("901").unwrap(), 0, "legacy-push", 1);
-        AsyncProjectionStore::apply_recovery(&store, vec![position.clone()], vec![command.clone()])
-            .await
-            .unwrap();
-        assert_eq!(store.execute(
-            "UPDATE fireweed_request_idempotency SET request_fingerprint=?1 WHERE operation='push'",
-            vec![vec![0x55u8; 32].into()],
-        ).await.unwrap(), 1);
-        assert!(store.has_legacy_push_fingerprints(&shard).await.unwrap());
-        let mut wrong_position = position.clone();
-        wrong_position.sequence += 1;
-        assert_eq!(
-            store
-                .repair_legacy_push_fingerprints(&[(wrong_position, command.clone())])
-                .await
-                .unwrap(),
-            0
-        );
-        let mut wrong_queue = position.clone();
-        wrong_queue.queue.queue_id = fireweed_core::QueueId::new("different-queue").unwrap();
-        assert_eq!(
-            store
-                .repair_legacy_push_fingerprints(&[(wrong_queue, command.clone())])
-                .await
-                .unwrap(),
-            0
-        );
-        assert!(store.has_legacy_push_fingerprints(&shard).await.unwrap());
-        let entries = vec![(position, command)];
-        assert_eq!(
-            store
-                .repair_legacy_push_fingerprints(&entries)
-                .await
-                .unwrap(),
-            1
-        );
-        assert!(!store.has_legacy_push_fingerprints(&shard).await.unwrap());
-        assert_eq!(
-            store
-                .repair_legacy_push_fingerprints(&entries)
-                .await
-                .unwrap(),
-            0
-        );
-        assert!(matches!(
-            replay(&store, &shard, request_id, fingerprint).await,
-            IdempotencyDecision::Replay(_)
-        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5176,7 +5070,6 @@ mod deterministic_cancellation_tests {
                 request_id,
                 PushFingerprint {
                     canonical_sha256: [0xff; 32],
-                    legacy_body_hash: BodyHash(u64::MAX),
                 },
             )
             .await,
@@ -5589,10 +5482,10 @@ mod item_mutation_tests {
             .collect::<Vec<_>>();
         for (table, key) in [("i", "item_id"), ("k", "client_item_key")] {
             assert!(
-                details.iter().any(
-                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
-                        && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))
-                ),
+                details.iter().any(|line| (line
+                    .starts_with(&format!("SEARCH {table} USING INDEX"))
+                    || line.starts_with(&format!("SEARCH {table} USING COVERING INDEX")))
+                    && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))),
                 "{details:?}"
             );
         }
@@ -5913,7 +5806,45 @@ mod item_mutation_tests {
     }
 
     #[tokio::test]
-    async fn partial_index_updates_skip_keys_outside_the_predicate() {
+    async fn unguarded_partial_expression_failure_preserves_the_original_row() {
+        let store = TursoRelational::in_memory().await.unwrap();
+        store
+            .execute(
+                "CREATE TABLE unguarded_key(id INTEGER PRIMARY KEY,v INTEGER,active INTEGER)",
+                vec![],
+            )
+            .await
+            .unwrap();
+        store
+            .execute(
+                "CREATE INDEX unguarded_abs ON unguarded_key(abs(v)) WHERE active=1",
+                vec![],
+            )
+            .await
+            .unwrap();
+        store
+            .execute("INSERT INTO unguarded_key VALUES(1,7,0)", vec![])
+            .await
+            .unwrap();
+        let result = store
+            .execute(
+                "UPDATE unguarded_key SET v=-9223372036854775808 WHERE id=1",
+                vec![],
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "record the current stock-engine overflow limitation explicitly"
+        );
+        let row = store
+            .query("SELECT v,active FROM unguarded_key WHERE id=1", vec![])
+            .await
+            .unwrap();
+        assert_eq!(row[0].values, vec![Value::Integer(7), Value::Integer(0)]);
+    }
+
+    #[tokio::test]
+    async fn guarded_partial_index_updates_skip_keys_outside_the_predicate() {
         let store = TursoRelational::in_memory().await.unwrap();
         store
             .execute(
@@ -5924,7 +5855,7 @@ mod item_mutation_tests {
             .unwrap();
         store
             .execute(
-                "CREATE UNIQUE INDEX partial_abs ON partial_key(abs(v)) WHERE active=1",
+                "CREATE UNIQUE INDEX partial_abs ON partial_key(CASE WHEN active=1 THEN abs(v) END) WHERE active=1",
                 vec![],
             )
             .await
@@ -5938,13 +5869,14 @@ mod item_mutation_tests {
             .unwrap();
         store
             .execute(
-                "CREATE INDEX partial_copy ON partial_key(abs(v)+1) WHERE active=1",
+                "CREATE INDEX partial_copy ON partial_key(CASE WHEN active=1 THEN abs(v)+1 END) WHERE active=1",
                 vec![],
             )
             .await
             .unwrap();
-        // These new rows do not belong to the index. Evaluating abs(MIN) for
-        // their unused keys is both wasted work and an erroneous overflow.
+        // Stock Turso can evaluate expression keys before the partial predicate.
+        // Guard the schema expression itself with public SQL CASE, so unused
+        // keys never overflow. Preserve all mutation/uniqueness assertions.
         store
             .execute(
                 "UPDATE partial_key SET v=-9223372036854775808 WHERE id IN(1,3)",
@@ -6034,11 +5966,11 @@ mod item_mutation_tests {
         use std::time::Instant;
         const POINT: &str = "UPDATE fireweed_items SET \
             lifecycle_state=?2,priority=?3,priority_sort=?4,not_before=?5,eligible_since=?6,\
-            payload=CASE WHEN ?16 THEN payload ELSE NULL END,fields=?7,metadata=?8,\
+            fields=?7,metadata=?8,\
             entity_document=?9,index_fields=?10,lease_token_hash=NULL,lease_expires_at=NULL,\
             worker_id=NULL,fenced=0,item_version=?11,terminal_at=?12,terminal_command_epoch=?13,\
-            updated_at=?17,last_command_sequence=?18,retry_count=retry_count+?15 \
-            WHERE tenant_id=?19 AND queue_id=?20 AND item_id=?1 AND item_version=?14 \
+            updated_at=?16,last_command_sequence=?17,retry_count=retry_count+?15 \
+            WHERE tenant_id=?18 AND queue_id=?19 AND item_id=?1 AND item_version=?14 \
             AND (?15=0 OR (lifecycle_state='Pending' AND superseded=0))";
         fn query_for(shape: &str, rows: usize) -> String {
             if shape == "point" {
@@ -6104,7 +6036,7 @@ mod item_mutation_tests {
             let plan = store
                 .query(
                     format!("EXPLAIN QUERY PLAN {}", query_for(shape, batch)),
-                    vec![Value::Null; 16 * batch + 4],
+                    vec![Value::Null; 15 * batch + 4],
                 )
                 .await
                 .unwrap();
@@ -6162,7 +6094,6 @@ mod item_mutation_tests {
                                     terminal.then_some(0_i64).into(),
                                     (round as i64 + 1).into(),
                                     0_i64.into(),
-                                    1_i64.into(),
                                 ]);
                             }
                             params.extend([
@@ -6273,7 +6204,7 @@ mod item_mutation_tests {
                         fireweed_relational::CLEARING_ITEM_REPLACEMENT_BATCH,
                     )
                 ),
-                vec![Value::Null; 16 * fireweed_relational::CLEARING_ITEM_REPLACEMENT_BATCH + 4],
+                vec![Value::Null; 15 * fireweed_relational::CLEARING_ITEM_REPLACEMENT_BATCH + 4],
             )
             .await
             .unwrap();
@@ -6892,10 +6823,10 @@ mod lease_target_query_tests {
             .collect();
         for table in ["i", "p"] {
             assert!(
-                details.iter().any(
-                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
-                        && line.contains("tenant_id=? AND queue_id=? AND item_id=?")
-                ),
+                details.iter().any(|line| (line
+                    .starts_with(&format!("SEARCH {table} USING INDEX"))
+                    || line.starts_with(&format!("SEARCH {table} USING COVERING INDEX")))
+                    && line.contains("tenant_id=? AND queue_id=? AND item_id=?")),
                 "{details:?}"
             );
         }
@@ -6927,10 +6858,10 @@ mod addressed_query_tests {
             .collect();
         for table in ["i", "p", "b"] {
             assert!(
-                details.iter().any(
-                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
-                        && line.contains("tenant_id=? AND queue_id=? AND item_id=?")
-                ),
+                details.iter().any(|line| (line
+                    .starts_with(&format!("SEARCH {table} USING INDEX"))
+                    || line.starts_with(&format!("SEARCH {table} USING COVERING INDEX")))
+                    && line.contains("tenant_id=? AND queue_id=? AND item_id=?")),
                 "{details:?}"
             );
         }
@@ -6948,10 +6879,10 @@ mod addressed_query_tests {
             .collect();
         for (table, key) in [("i", "client_item_key"), ("p", "item_id")] {
             assert!(
-                details.iter().any(
-                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
-                        && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))
-                ),
+                details.iter().any(|line| (line
+                    .starts_with(&format!("SEARCH {table} USING INDEX"))
+                    || line.starts_with(&format!("SEARCH {table} USING COVERING INDEX")))
+                    && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))),
                 "live-item key lookup: {details:?}"
             );
         }
@@ -6986,10 +6917,10 @@ mod ordered_claim_query_tests {
             .collect();
         for (table, key) in [("g", "item_id"), ("b", "gate_key")] {
             assert!(
-                details.iter().any(
-                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
-                        && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))
-                ),
+                details.iter().any(|line| (line
+                    .starts_with(&format!("SEARCH {table} USING INDEX"))
+                    || line.starts_with(&format!("SEARCH {table} USING COVERING INDEX")))
+                    && line.contains(&format!("tenant_id=? AND queue_id=? AND {key}=?"))),
                 "gate eligibility must seek the candidate's full key, never scan queue membership: {details:?}"
             );
         }
@@ -7012,7 +6943,8 @@ mod ordered_claim_query_tests {
         assert!(
             details
                 .iter()
-                .any(|line| line.starts_with("SEARCH g USING INDEX")
+                .any(|line| (line.starts_with("SEARCH g USING INDEX")
+                    || line.starts_with("SEARCH g USING COVERING INDEX"))
                     && line.contains("tenant_id=? AND queue_id=? AND item_id=?")),
             "claim metadata must seek selected IDs regardless of completed membership population: {details:?}"
         );
@@ -7087,10 +7019,10 @@ mod ordered_claim_query_tests {
         }
         for table in ["i", "p"] {
             assert!(
-                details.iter().any(
-                    |line| line.starts_with(&format!("SEARCH {table} USING INDEX"))
-                        && line.contains("tenant_id=? AND queue_id=? AND item_id=?")
-                ),
+                details.iter().any(|line| (line
+                    .starts_with(&format!("SEARCH {table} USING INDEX"))
+                    || line.starts_with(&format!("SEARCH {table} USING COVERING INDEX")))
+                    && line.contains("tenant_id=? AND queue_id=? AND item_id=?")),
                 "materialization must seek selected IDs: {details:?}"
             );
         }
@@ -7121,102 +7053,6 @@ mod metrics_query_tests {
                 || line.contains("TEMP B-TREE")),
             "four counts must not read resident rows: {details:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn lifecycle_counts_handle_empty_terminal_and_superseded_rows() {
-        let store = TursoRelational::in_memory().await.unwrap();
-        let shard = QueueKey::new(
-            fireweed_core::TenantId::new("tenant").unwrap(),
-            fireweed_core::QueueId::new("queue").unwrap(),
-        );
-        let empty = store.server_metrics(&shard).await.unwrap();
-        assert_eq!(
-            (
-                empty.pending,
-                empty.leased,
-                empty.complete,
-                empty.failed,
-                empty.resident_terminal_count
-            ),
-            (0, 0, 0, 0, 0)
-        );
-        for (tenant, queue) in [
-            ("tenant", "queue"),
-            ("foreign", "queue"),
-            ("tenant", "foreign"),
-        ] {
-            store
-                .execute(
-                    "INSERT INTO queues(tenant,queue,definition) VALUES(?1,?2,'{}')",
-                    vec![tenant.into(), queue.into()],
-                )
-                .await
-                .unwrap();
-        }
-        for (state, count) in [
-            ("Pending", 2),
-            ("Leased", 3),
-            ("Complete", 4),
-            ("Failed", 5),
-        ] {
-            for (tenant, queue, superseded) in [
-                ("tenant", "queue", 0),
-                ("foreign", "queue", 0),
-                ("tenant", "foreign", 0),
-                ("tenant", "queue", 1),
-            ] {
-                for n in 0..count {
-                    let id = format!("{state}-{superseded}-{n}");
-                    store
-                        .execute(
-                            "INSERT INTO fireweed_items(tenant_id,queue_id,item_id,client_item_key,\
-                         lifecycle_state,priority_sort,item_version,last_command_sequence,\
-                         created_at,updated_at,max_attempts,created_seq,superseded) \
-                         VALUES(?1,?2,?3,?3,?4,X'00',1,1,1,1,5,1,?5)",
-                            vec![
-                                tenant.into(),
-                                queue.into(),
-                                id.into(),
-                                state.into(),
-                                Value::Integer(superseded),
-                            ],
-                        )
-                        .await
-                        .unwrap();
-                }
-            }
-        }
-        // Raw SQL models a populated pre-counter projection; migration must
-        // backfill it exactly, including tenant/queue and supersession filters.
-        store.migrate().await.unwrap();
-        let metrics = store.server_metrics(&shard).await.unwrap();
-        assert_eq!(
-            (
-                metrics.pending,
-                metrics.leased,
-                metrics.complete,
-                metrics.failed,
-                metrics.resident_terminal_count
-            ),
-            (2, 3, 4, 5, 9)
-        );
-        let (snapshot, cursor) = store
-            .server_metrics_with_position_committed(&shard)
-            .await
-            .unwrap();
-        assert_eq!(snapshot, metrics);
-        assert_eq!(cursor, None, "legacy row has no applied cursor");
-        store.execute(
-            "INSERT INTO relational_cursor(tenant,queue,next_seq,next_item_seq,assignment_epoch) \
-             VALUES('tenant','queue',8,0,2)", vec![],
-        ).await.unwrap();
-        let (snapshot, cursor) = store
-            .server_metrics_with_position_committed(&shard)
-            .await
-            .unwrap();
-        assert_eq!(snapshot, metrics);
-        assert_eq!(cursor, Some(CommandPosition::new(shard, 2, 7)));
     }
 }
 
@@ -7330,8 +7166,8 @@ mod apply_error_preservation_tests {
             "primary error lost: {reported}"
         );
         assert!(
-            reported.contains("rollback also failed"),
-            "expected already-aborted transaction: {reported}"
+            !reported.contains("rollback also failed"),
+            "an already-aborted transaction must preserve its primary error: {reported}"
         );
 
         let transaction = connection

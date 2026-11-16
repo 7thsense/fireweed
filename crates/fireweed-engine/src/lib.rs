@@ -10,6 +10,7 @@ mod async_claim_planner;
 mod async_cohort_lifecycle;
 mod async_commit;
 mod async_composed;
+mod async_control_plane;
 mod async_lifecycle_planner;
 mod async_log_replay_product;
 mod async_projection_spec;
@@ -27,6 +28,9 @@ mod commit;
 pub mod commit_surface;
 mod compose;
 mod control_plane;
+pub use async_control_plane::{
+    AsyncQueueControlPlane, InMemoryAsyncControlPlane, acquire_and_fence_async,
+};
 mod density;
 /// Entity document wire: natural JSON on human-readable; opaque JSON blob on native binary.
 mod entity_wire;
@@ -41,6 +45,28 @@ mod object_log_segment_safety;
 mod operator;
 mod ownership;
 mod port;
+pub mod queue_administration;
+pub mod queue_admission;
+pub mod queue_body;
+pub mod queue_claim;
+pub mod queue_claim_publication;
+pub mod queue_claim_receipt;
+pub mod queue_contract;
+pub mod queue_cursor;
+pub mod queue_fields;
+pub mod queue_group_state_authority;
+pub mod queue_index;
+pub mod queue_log_record;
+pub mod queue_namespace;
+pub mod queue_original_authority;
+pub mod queue_planner;
+pub mod queue_recovery;
+pub mod queue_retention;
+pub mod queue_runtime;
+pub mod queue_source_index;
+pub mod queue_state_authority;
+pub mod queue_storage_layout;
+pub mod queue_unique_stream;
 pub mod schema_validation;
 pub mod sequenced_metadata;
 mod types;
@@ -191,8 +217,8 @@ pub use command::{
     UpdateFieldsCommand, WriteSideRecordsCommand, admit_push_item_indexes,
     admit_push_items_indexes, build_push_items, command_envelope_change_records,
     selection_fence_disposition, selection_fence_disposition_for_commands, stage_unique_push_keys,
-    unique_index_keys_for_push_item, validate_gate_command, validate_gate_push,
-    validate_request_replay_metadata,
+    unique_index_keys_for_push_item, unique_index_keys_for_push_spec, validate_gate_command,
+    validate_gate_push, validate_request_replay_metadata,
 };
 pub use commit::{AppendAdmissionClass, RawCommitFault, RawCommitOutcome, RawCommitRequest};
 pub use error::{CommitRejection, DurableIntegrityStage, EngineError, EngineResult};
@@ -219,11 +245,11 @@ pub use port::{
     PendingSummary, ProjectionRead, ProjectionSnapshot, PurgePort, PushBatchOutcome,
     PushDisposition, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver,
     ReclaimPort, RecoveryReadPort, RenewLeasePort, RequestIdReplayProbe, ReschedulePort,
-    RetainedItemView, SelectedMutation, SetGatesPort, SideRecordPage, SnapshotRef, SnapshotStore,
-    TerminalEmissionMetrics, TickReport, TimestampComparison, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort, generate_query_lease_token, is_api001_reserved_write_field,
-    validate_api001_reserved_write_fields, validate_distinct_commit_claims,
-    validate_instance_fence,
+    RetainedItemView, SIDE_RECORD_BATCH_MAX_KEYS, SelectedMutation, SetGatesPort, SideRecordPage,
+    SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport, TimestampComparison,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, generate_query_lease_token,
+    is_api001_reserved_write_field, validate_api001_reserved_write_fields,
+    validate_distinct_commit_claims, validate_instance_fence,
 };
 pub use schema_validation::{compile_entity_schema, validate_entity};
 pub use types::{CommandPosition, DurabilityClass, QueueKey};
@@ -231,54 +257,6 @@ pub use types::{CommandPosition, DurabilityClass, QueueKey};
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn canonical_resp_tokens_match_td006() {
-        // The wire vocabulary is pinned in TD-006 section 7 and asserted verbatim by conformance.
-        assert_eq!(
-            EngineError::Invalid("x").resp_token(),
-            Some("-ERR fireweed invalid")
-        );
-        assert_eq!(
-            EngineError::Terminal.resp_token(),
-            Some("-ERR fireweed terminal")
-        );
-        assert_eq!(
-            EngineError::StaleLease.resp_token(),
-            Some("-ERR fireweed stale_lease")
-        );
-        assert_eq!(
-            EngineError::Superseded.resp_token(),
-            Some("-ERR fireweed superseded")
-        );
-        assert_eq!(
-            EngineError::Unavailable.resp_token(),
-            Some("-ERR fireweed unavailable")
-        );
-        assert_eq!(
-            EngineError::Conflict.resp_token(),
-            Some("-ERR fireweed conflict")
-        );
-        assert_eq!(
-            EngineError::BatchTooLarge.resp_token(),
-            Some("-ERR fireweed batch_too_large")
-        );
-        assert_eq!(
-            EngineError::RequestIdConflict.resp_token(),
-            Some("-ERR fireweed request_id_conflict")
-        );
-        assert_eq!(
-            EngineError::RequestExpired.resp_token(),
-            Some("-ERR fireweed request_expired")
-        );
-        assert_eq!(
-            EngineError::EpochFenced.resp_token(),
-            Some("-ERR fireweed epoch_stale")
-        );
-        // NotFound (to nil) and Forbidden (to -NOPERM) have non-`-ERR` mappings; no token here.
-        assert_eq!(EngineError::NotFound.resp_token(), None);
-        assert_eq!(EngineError::Forbidden("x").resp_token(), None);
-    }
 
     #[test]
     fn durability_class_gates_upsert() {
@@ -312,14 +290,6 @@ mod tests {
     }
 
     #[test]
-    fn pause_error_is_structured() {
-        assert_eq!(
-            EngineError::Paused { drain_intake: true }.resp_token(),
-            Some("-ERR fireweed paused")
-        );
-    }
-
-    #[test]
     fn command_position_is_shard_local_monotonic() {
         let tenant = fireweed_core::TenantId::new("t").unwrap();
         let queue = fireweed_core::QueueId::new("q").unwrap();
@@ -332,3 +302,14 @@ mod tests {
         assert!(!p2.precedes(&p1));
     }
 }
+
+/// Shared API-007 operation memory accounting; physical stores charge before allocation.
+pub mod queue_memory;
+
+/// Versioned persisted queue definitions with strict legacy decoding.
+pub mod queue_schema_codec;
+
+/// Versioned resolved mutation framing and bounded structural scan.
+pub mod queue_publication;
+
+pub mod queue_sql;

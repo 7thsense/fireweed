@@ -1,0 +1,139 @@
+{
+  "schema": "fireweed.source-preview-validation.v1",
+  "version": "0.31.33",
+  "measured_source": "6d15f4032e96c044953a7517fb47f34b199e3df4",
+  "rust_source_tree": "93fa15890feda020a93b12c40c4a3975c177c970",
+  "scope": "source-preview correctness; no governed deployment or capacity claim",
+  "workspace": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--workspace",
+      "--all-features",
+      "--no-fail-fast"
+    ],
+    "result": "all cases passed across broad run and unchanged RESP suite retry",
+    "broad_run_exit_status": 101,
+    "broad_run_harnesses": 178,
+    "broad_run_passed": 2779,
+    "broad_run_failed": 1,
+    "ignored": 53,
+    "observed_failure": "fireweed-resp::e2e::crash_recovery_rebuilds_durable_state_over_the_wire: one Redis XADD response timeout",
+    "retry": {
+      "command": [
+        "target/debug/deps/e2e-7ce6a9f94d10da8a",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_status": 0,
+      "passed": 25,
+      "failed": 0,
+      "source_and_assertions_unchanged": true
+    }
+  },
+  "test_profile": {
+    "opt_level": 1,
+    "debug_assertions": true,
+    "overflow_checks": true,
+    "threads": 1
+  },
+  "postgres": {
+    "routes_covered": 32,
+    "execution_routes": 31,
+    "child_listings": 1,
+    "version": "postgres (PostgreSQL) 16.15",
+    "cleanup": true,
+    "closure": "zero unexecuted product debt",
+    "report_sha256": "7984cde2dffb96bc0e2cfc7b121a094512ac78fb3a4686dde06b7bbae9af5b35"
+  },
+  "formal": {
+    "unit_controls": 267,
+    "legacy_models": 9,
+    "legacy_negative_controls": 20,
+    "source_group_models": 12,
+    "source_group_negative_controls": 261,
+    "bounded_abstract_models_only": true
+  },
+  "replay": {
+    "profile": "schedule-smoke",
+    "traces": 96,
+    "status": "PASS",
+    "graph_edge_exhaustive": false
+  },
+  "benchmark_functional": {
+    "library_passed": 20,
+    "shape_suites_passed": 5,
+    "terminal_metrics_passed": 1,
+    "governed_capacity_campaigns": "not qualified in this source-preview channel"
+  },
+  "fixtures": {
+    "postgres": "16.15",
+    "postgres_tls": "16.15 with OpenSSL",
+    "rustfs": "1.0.0",
+    "kafka": "Apache Kafka 4.1.1 process fixture",
+    "java": "Temurin 17.0.21"
+  },
+  "other_checks": [
+    "all-target all-feature Clippy with -D warnings",
+    "default-feature server Clippy with -D warnings",
+    "root and independent benchmark dependency/advisory/license policy",
+    "full-history gitleaks",
+    "public crate and artifact boundaries",
+    "source archive/SBOM/checksums/provenance",
+    "microsite links/provenance/layout/deployed verification"
+  ],
+  "hosted_checks": [
+    {
+      "workflow": "ci",
+      "run_id": 42175936637,
+      "revision": "6d15f4032e96c044953a7517fb47f34b199e3df4",
+      "conclusion": "success",
+      "url": "https://github.com/7thsense/fireweed/actions/runs/42175936637"
+    },
+    {
+      "workflow": "turso projection",
+      "run_id": 42175595802,
+      "revision": "a32fbc9f29990cb0a78b9eca905b6e99c5ab4d20",
+      "conclusion": "success",
+      "url": "https://github.com/7thsense/fireweed/actions/runs/42175595802"
+    },
+    {
+      "workflow": "pages",
+      "run_id": 42175936597,
+      "revision": "6d15f4032e96c044953a7517fb47f34b199e3df4",
+      "conclusion": "success",
+      "url": "https://github.com/7thsense/fireweed/actions/runs/42175936597"
+    }
+  ],
+  "logs": {
+    "workspace": {
+      "path": "docs/releases/v0.31.33-validation/workspace.log",
+      "sha256": "97bcdaf100dcb63f8f1beff590193a05b2e21e317770c3accf4569fcff0c2ec4"
+    },
+    "resp-retry": {
+      "path": "docs/releases/v0.31.33-validation/resp-retry.log",
+      "sha256": "3d8a7fe733c87c6dd42ce3cb193c4188f6cdc1bb597ff84293911e8f1f43dfa2"
+    },
+    "benchmark-functional": {
+      "path": "docs/releases/v0.31.33-validation/benchmark-functional.log",
+      "sha256": "706616cef9639b16555e339da2302e1db0ad1948989395a8b84f497d8fdf3fe6"
+    },
+    "clippy": {
+      "path": "docs/releases/v0.31.33-validation/clippy.log",
+      "sha256": "06313d6e4103f1b398539d28d6139ef26ac2e08f7d1cc84667a9cbe09e5a05c1"
+    },
+    "formal": {
+      "path": "docs/releases/v0.31.33-validation/formal.log",
+      "sha256": "aa0e09c4b63c24aeb0673b2443856eb18929c1f778454f1e7bdea0a729322472"
+    },
+    "replay": {
+      "path": "docs/releases/v0.31.33-validation/replay.log",
+      "sha256": "527aa9edd296bc6fedbc6f2d27cc4149c1c514e89cbc436bf0a35e724b8a6057"
+    },
+    "storage-closure": {
+      "path": "docs/releases/v0.31.33-validation/storage-closure.log",
+      "sha256": "6c70e8e3af5cf2e2ab74b031d475d1bde43d26fbd4aed313bac3f8f746349865"
+    }
+  }
+}

@@ -515,15 +515,6 @@ macro_rules! durable_reconnect_suite {
     };
 }
 
-/// Backward-compatible name for DB-authoritative relational backends. New durable backends should prefer
-/// [`durable_reconnect_suite`].
-#[macro_export]
-macro_rules! relational_reconnect_suite {
-    ($make:expr) => {
-        $crate::durable_reconnect_suite!($make);
-    };
-}
-
 /// ADR-011 typed entity-schema and typed secondary-index scenario class. Backends that persist typed
 /// entity documents and implement `IndexQueryPort` should run this alongside their core suite. Durable
 /// reopen/replay mechanics remain backend-specific because each adapter owns how its factory reopens
@@ -622,18 +613,6 @@ mod storage_conformance {
     }
 
     #[test]
-    fn storage_conformance_entity_schema_error_has_resp_token() {
-        let schema = json!({"type": "object", "required": ["x"]});
-        let cs = compile_entity_schema(&schema).expect("compiles");
-        let err = validate_entity(Some(&cs), Some(&json!({}))).unwrap_err();
-        assert_eq!(
-            err.resp_token(),
-            Some("-ERR fireweed entity_schema_violation"),
-            "RESP token must match ADR-011"
-        );
-    }
-
-    #[test]
     fn storage_conformance_schema_compile_error_on_invalid_schema() {
         let bad = json!({"type": "not-a-valid-type"});
         let result = compile_entity_schema(&bad);
@@ -725,3 +704,11 @@ mod capability_gate_tests {
         );
     }
 }
+
+/// Mandatory new queue binding scenarios; no capability-dependent exemptions.
+pub mod queue_contract;
+
+pub mod queue_benchmark;
+
+/// Independent cold source-fact oracle shared by domain and adapter tests.
+pub mod queue_source_oracle;

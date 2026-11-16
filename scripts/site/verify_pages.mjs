@@ -65,7 +65,6 @@ const SCREENSHOT_ROUTES = [
   { id: "example-basic", path: "/examples/basic-lifecycle.html" },
   { id: "api", path: "/api/" },
   { id: "api-rust", path: "/api/rust.html" },
-  { id: "deploy", path: "/deploy/" },
   { id: "support", path: "/support.html" },
   { id: "contribute", path: "/contribute.html" },
 ];

@@ -4,7 +4,7 @@
 # Governing IDs (consume only; do not edit the storage authority manifest):
 #   capability_id = S3-NATIVE-CAS-CAPABILITY-ATTESTATION
 #   plan_key      = P1s
-#   schema        = docs/helix/04-build/storage-authority-manifest.json → topology_attestation.s3_fields
+#   schema        = scripts/ci/manifests/storage-authority-manifest.json → topology_attestation.s3_fields
 #
 # Survey policy:
 #   - Garage v2.2.0 is a known nonconforming candidate (If-None-Match:* not enforced;
@@ -275,7 +275,7 @@ attestation = {
     "run_id": os.environ["RUN_ID"],
     "selected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "authority_manifest": {
-        "path": "docs/helix/04-build/storage-authority-manifest.json",
+        "path": "scripts/ci/manifests/storage-authority-manifest.json",
         "consumed_only": True,
         "topology_attestation_s3_fields": [
             "provider",
@@ -349,7 +349,7 @@ attestation = {
             }
         ],
         "consumers": (
-            "Take docs/helix/04-build/storage-authority-manifest.json + this attestation "
+            "Take scripts/ci/manifests/storage-authority-manifest.json + this attestation "
             "explicitly. Missing attestation blocks S3 children/P8cs/final gates only."
         ),
     },

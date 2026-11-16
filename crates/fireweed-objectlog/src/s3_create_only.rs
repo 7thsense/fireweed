@@ -76,7 +76,8 @@ impl S3CreateOnlyPut {
                     }
                     PutClassify::Other => {
                         return Err(EngineError::Storage(format!(
-                            "S3 create-only PutObject (If-None-Match: *) failed for key {key}: {err}"
+                            "S3 create-only PutObject (If-None-Match: *) failed: {}",
+                            safe_put_error_diagnostic(&err)
                         )));
                     }
                 },
@@ -279,6 +280,17 @@ enum PutClassify {
     AlreadyExists,
     ConflictRetry,
     Other,
+}
+
+fn safe_put_error_diagnostic(err: &SdkError<PutObjectError>) -> String {
+    match err {
+        SdkError::ServiceError(context) => format!(
+            "operation=PutObject http_status={} service_code={}",
+            context.raw().status().as_u16(),
+            context.err().meta().code().unwrap_or("unknown")
+        ),
+        _ => "operation=PutObject failure_kind=transport_or_dispatch".into(),
+    }
 }
 
 fn classify_put_error(err: &SdkError<PutObjectError>) -> PutClassify {

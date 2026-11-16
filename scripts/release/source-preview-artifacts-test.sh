@@ -27,7 +27,7 @@ JSON
 # wrapping: call build script after installing a thin predicate shim is too heavy.
 # Build script always uses product authority; isolated fixture must satisfy it.
 # Copy product .gitignore subset and create empty roots.
-printf '%s\n' 'target/' '.ddx/agent-logs/' 'node_modules/' '__pycache__/' 'examples/python-resp/.venv/' >"$repo/.gitignore"
+printf '%s\n' 'target/' '.ddx/agent-logs/' 'node_modules/' '__pycache__/' >"$repo/.gitignore"
 git -C "$repo" add .
 GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' git -C "$repo" commit -qm fixture
 revision="$(git -C "$repo" rev-parse HEAD)"

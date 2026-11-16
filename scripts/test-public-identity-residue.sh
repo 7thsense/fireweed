@@ -61,8 +61,7 @@ expect_allowlist_rejects() {
 mkdir -p "$tmp_dir/src" \
     "$tmp_dir/docs/helix/00-discover" \
     "$tmp_dir/docs/helix/02-design/adr" \
-    "$tmp_dir/crates/fireweed-core/src" \
-    "$tmp_dir/scripts/ci/fixtures/public-crate-boundary/src"
+    "$tmp_dir/crates/fireweed-core/src"
 
 printf '%s\n' 'The pqueue CLI is public.' >"$tmp_dir/src/lowercase.md"
 printf '%s\n' 'fn construct_pqueue_runtime() {}' >"$tmp_dir/src/snake-case.md"
@@ -113,13 +112,7 @@ expect_rejects \
     "docs/helix/02-design/adr/unapproved-history.md" \
     "adjacent-history-path"
 
-# The negative compile fixtures are exact exceptions; copying one elsewhere is not.
-printf '%s\n' 'use fireweed::Pqueue;' \
-    >"$tmp_dir/scripts/ci/fixtures/public-crate-boundary/src/rejected_retired_generic_facade.rs"
-expect_accepts \
-    "scripts/ci/fixtures/public-crate-boundary/src/rejected_retired_generic_facade.rs" \
-    "exact-negative-fixture"
-
+# A negative-fixture path is not an exception anywhere.
 printf '%s\n' 'use fireweed::Pqueue;' >"$tmp_dir/src/copied-negative.rs"
 expect_rejects "src/copied-negative.rs" "copied-negative-fixture"
 

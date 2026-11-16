@@ -27,7 +27,6 @@
         <a href="get-started.html" aria-current="page">Get started</a>
         <a href="examples/index.html">Examples</a>
         <a href="api/index.html">API</a>
-        <a href="deploy/index.html">Deploy</a>
         <a href="support.html">Support</a>
         </nav>
       </header>
@@ -37,62 +36,40 @@
           <h2>Get started</h2>
           <p>
             Fireweed v0.30.0 is the current workspace package
-            identity. Clone the repository; crates.io and GHCR publication are deferred.
+            identity. Clone the repository; crates.io publication is deferred.
           </p>
         </div>
         <div class="callout warn">
           <p>
             Prerequisites: Git, rustup, a C toolchain and CMake for native crypto
-            dependencies. Prefer <code>open(StorageConfig)</code> for the full matrix;
-            convenience open helpers remain sugar over that model.
+            dependencies. <code>Queue::ephemeral_disk</code> needs no services;
+            production uses <code>Queue::s3_turso</code> with S3 and PostgreSQL.
           </p>
         </div>
-        <div class="section-title"><h2>Path A — embed Rust</h2></div>
+        <div class="section-title"><h2>Embed Rust</h2></div>
         <div class="code-block">
-  <div class="label"><span>clone and exercise the facade</span><span>sh</span></div>
+  <div class="label"><span>clone and run the lifecycle example</span><span>sh</span></div>
   <pre><code>git clone https://github.com/7thsense/fireweed.git
 cd fireweed
-# Requires rustup; toolchain from rust-toolchain.toml (Rust 1.97.1)
-cargo test -p fireweed --test concrete_fireweed
-cargo run -p fireweed --example scheduler_boundary</code></pre>
+# Requires rustup; toolchain from rust-toolchain.toml
+cargo run -p fireweed --example queue_lifecycle</code></pre>
 </div>
         <div class="prose">
           <p>
-            The public root type is concrete <code>Fireweed</code>. Compose with
-            <code>open</code> / <code>open_async(StorageConfig)</code> (Turso is the
-            default projection), or use convenience helpers such as
-            <code>open_memory</code> and
-            <code>open_objectlog</code>. Walk
-            <a href="examples/basic-lifecycle.html">basic lifecycle</a> then
-            <a href="examples/scheduler-boundary.html">scheduler boundary</a>.
+            The public entry point is <code>fireweed::queue::Queue</code>:
+            <code>Queue::s3_turso</code> (production),
+            <code>Queue::ephemeral_disk</code> (development and tests) and
+            <code>Queue::postgres</code> (feature <code>postgres</code>, the reference store).
+            Walk <a href="examples/basic-lifecycle.html">basic lifecycle</a> then
+            <a href="examples/scheduled-delivery.html">scheduled delivery</a>.
           </p>
         </div>
-        <div class="section-title"><h2>Path B — Redis-shaped workers</h2></div>
-        <div class="code-block">
-  <div class="label"><span>build the RESP service</span><span>sh</span></div>
-  <pre><code># From repository root after building fireweed-service
-# See README Quickstart for the in-memory RESP path with redis-cli.
-cargo build -p fireweed-server
-# Follow README for XADD / XREADGROUP / XACK against the local service.</code></pre>
-</div>
         <div class="prose">
-          <p>
-            Stock Streams worker commands map onto Fireweed claim/finalize semantics.
-            See the README quickstart for a full <code>redis-cli</code> session, and
-            <a href="examples/resp-drain.html">the RESP drain example</a> extracted from e2e tests.
-          </p>
-          <p>
-            Worked <strong>Python</strong> queue-management scenarios (docs + e2e + optional
-            performance) live in the repository at
-            <a href="https://github.com/7thsense/fireweed/tree/main/examples/python-resp"><code>examples/python-resp/</code></a>
-            (<code>run_e2e.py</code>, <code>run_perf.py</code>).
-          </p>
           <h2>Next</h2>
           <ul>
             <li><a href="concepts.html">Concepts</a> for the product contract</li>
             <li><a href="support.html">Support boundary</a> for supported profiles</li>
-            <li><a href="deploy/index.html">Deploy</a> for Helm and runtime axes</li>
-            <li><a href="api/index.html">API</a> for the two public faces</li>
+            <li><a href="api/index.html">API</a> for the public Rust surface</li>
           </ul>
         </div>
 
@@ -100,7 +77,7 @@ cargo build -p fireweed-server
       <footer class="site-footer">
         <p>
           Fireweed Queue v0.30.0 · source release ·
-          crates.io and GHCR deferred ·
+          crates.io deferred ·
           issues welcome · code contributions not accepted ·
           MIT OR Apache-2.0.
         </p>

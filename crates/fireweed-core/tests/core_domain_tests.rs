@@ -497,24 +497,6 @@ fn core_domain_tests_entity_schema_carried_through_validate() {
 }
 
 #[test]
-fn core_domain_tests_queue_definition_serde_defaults_entity_schema_and_typed_indexes() {
-    let mut request = valid_create_queue();
-    request.typed_indexes = vec![make_single_queue_index(
-        "by_id",
-        "job_id",
-        IndexType::String,
-    )];
-    let definition = request.validate(&policy()).unwrap();
-
-    let mut json: serde_json::Value = serde_json::to_value(&definition).unwrap();
-    json.as_object_mut().unwrap().remove("entity_schema");
-    json.as_object_mut().unwrap().remove("typed_indexes");
-    let restored: fireweed_core::QueueDefinition = serde_json::from_value(json).unwrap();
-    assert!(restored.entity_schema.is_none());
-    assert!(restored.typed_indexes.is_empty());
-}
-
-#[test]
 fn core_domain_tests_rejects_typed_index_empty_name() {
     let mut request = valid_create_queue();
     request.typed_indexes = vec![QueueIndex {

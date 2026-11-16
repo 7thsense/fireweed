@@ -17,6 +17,8 @@ mod log_engine_store;
 pub mod maintenance;
 pub mod object_store_observability;
 mod port_surface;
+#[doc(hidden)]
+pub mod queue_native_log;
 mod reclaim_tick;
 mod traced_blob_store;
 pub use reclaim_tick::{

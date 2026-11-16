@@ -37,7 +37,6 @@ rows as passed. The public cell for the pin is s3 × turso with
 - Approvers: technical lead and release owner
 - Supporting artifacts: [release notes](../../releases/v0.24.0.md),
   [public preview boundary](../00-discover/public-preview-boundary.md),
-  [deployment readiness contract](../04-build/DEPLOYMENT-READINESS.md),
   [storage matrix completion brief](../04-build/storage-matrix-completion-brief.md), and
   [ADR-021](../02-design/adr/ADR-021-open-source-license-and-contribution-policy.md)
 

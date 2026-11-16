@@ -5,7 +5,7 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::ObjectLogEngineStore;
 use crate::SegmentConfig;
@@ -47,45 +47,120 @@ pub(crate) fn objectlog_shared_runtime() -> &'static tokio::runtime::Runtime {
 /// and cannot complete `tokio::fs` / LogEngine I/O.
 #[derive(Default)]
 pub struct ObjectLogTaskDispatcher {
-    closed: AtomicBool,
+    state: Arc<DispatcherState>,
 }
-
+#[derive(Default)]
+struct DispatcherState {
+    admission: Mutex<(bool, usize)>,
+    changed: tokio::sync::Notify,
+}
+struct AcceptedTask(Arc<DispatcherState>);
+impl Drop for AcceptedTask {
+    fn drop(&mut self) {
+        self.0
+            .admission
+            .lock()
+            .expect("object-log dispatcher poisoned")
+            .1 -= 1;
+        self.0.changed.notify_waiters();
+    }
+}
 impl ObjectLogTaskDispatcher {
     pub fn new() -> Self {
         Self::default()
     }
 }
-
 impl OwnedTaskDispatcher for ObjectLogTaskDispatcher {
     fn submit<T: Send + 'static>(
         &self,
         factory: OwnedTaskFactory<T>,
     ) -> Result<TaskOutcome<T>, DispatchError> {
-        if self.closed.load(Ordering::SeqCst) {
+        let mut state = self
+            .state
+            .admission
+            .lock()
+            .expect("object-log dispatcher poisoned");
+        if state.0 {
             return Err(DispatchError::Closed);
         }
+        state.1 += 1;
+        let accepted = AcceptedTask(self.state.clone());
+        drop(state);
         let (sender, outcome) = task_outcome_channel();
-        // Spawn on the shared multi-thread runtime so LogEngine I/O has a reactor and stays
-        // on the same runtime that opened the store.
         objectlog_shared_runtime().spawn(async move {
+            let _accepted = accepted;
             sender.send(factory().await);
         });
         Ok(outcome)
     }
-
     fn close(&self) {
-        self.closed.store(true, Ordering::SeqCst);
+        self.state
+            .admission
+            .lock()
+            .expect("object-log dispatcher poisoned")
+            .0 = true;
     }
-
     fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::SeqCst)
+        self.state
+            .admission
+            .lock()
+            .expect("object-log dispatcher poisoned")
+            .0
     }
-
     fn drain(&self) -> TaskOutcome<()> {
         let (sender, outcome) = task_outcome_channel();
-        // Best-effort: resolve immediately. Accepted tasks complete independently on the runtime.
-        sender.send(());
+        let state = self.state.clone();
+        objectlog_shared_runtime().spawn(async move {
+            loop {
+                let changed = state.changed.notified();
+                if state
+                    .admission
+                    .lock()
+                    .expect("object-log dispatcher poisoned")
+                    .1
+                    == 0
+                {
+                    break;
+                }
+                changed.await;
+            }
+            sender.send(());
+        });
         outcome
+    }
+}
+
+#[cfg(test)]
+mod dispatcher_drain_tests {
+    use super::*;
+    #[tokio::test]
+    async fn drain_waits_for_accepted_work_even_when_caller_drops() {
+        let dispatcher = ObjectLogTaskDispatcher::new();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let outcome = dispatcher
+            .submit(Box::new(move || {
+                Box::pin(async move {
+                    entered.send(()).unwrap();
+                    released.await.unwrap();
+                })
+            }))
+            .unwrap();
+        started.await.unwrap();
+        drop(outcome);
+        dispatcher.close();
+        assert!(dispatcher.submit(Box::new(|| Box::pin(async {}))).is_err());
+        let mut drain = Box::pin(dispatcher.drain());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut drain)
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }
 
@@ -98,7 +173,7 @@ impl OwnedTaskDispatcher for ObjectLogTaskDispatcher {
 /// used directly from the calling thread.
 ///
 /// All sync objectlog open paths (`composed_objectlog_backend`,
-/// `open_object_log_engine_*_sync`, and facade `open_objectlog` via this helper)
+/// and `open_object_log_engine_*_sync`)
 /// inherit this behavior. Library I/O workers
 /// should also drive LogEngine futures through [`block_on_objectlog_future`].
 pub fn block_on_objectlog<F, T>(fut: F) -> EngineResult<T>
@@ -324,5 +399,28 @@ mod tests {
             .expect("open_local empty");
         drop(b);
         let _ = std::fs::remove_dir_all(&root);
+    }
+    #[tokio::test]
+    async fn generic_bridge_remains_safe_inside_owned_runtime_future() {
+        let workers = fireweed_queue_spool::ScratchWorkers::new(1, 1).unwrap();
+        let target = objectlog_shared_runtime().handle().clone();
+        let expected = target.id();
+        let result = workers
+            .run_on_runtime(target, move || async move {
+                tokio::task::yield_now().await;
+                let physical = std::thread::current().id();
+                let output = block_on_objectlog_future(async move {
+                    assert_ne!(std::thread::current().id(), physical);
+                    assert_eq!(tokio::runtime::Handle::current().id(), expected);
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    17
+                });
+                assert_eq!(std::thread::current().id(), physical);
+                Ok(output)
+            })
+            .await
+            .unwrap();
+        assert_eq!(result, 17);
+        workers.close_and_drain().await.unwrap();
     }
 }

@@ -113,11 +113,11 @@ history rewrite.
 | Environment prefix | `PQUEUE_` | Temporary compatibility alias | `FIREWEED_` |
 | Cargo packages | `pqueue*` | Temporary compatibility alias | `fireweed*` package names |
 | Rust crate paths | `crates/pqueue*`, `tools/pqueue*` | Temporary compatibility alias | `crates/fireweed*`, `tools/fireweed*` |
-| Binaries | `pqueue-service`, `pqueue-loadgen`, `pqueue-verify-*` | Temporary compatibility alias | `fireweed`, `fireweed-service`, `fireweed-loadgen`, etc. |
-| CLI entrypoints | `pqueue`, `pqueue-service` | Temporary compatibility alias | `fireweed`, `fireweed-service` |
+| Binaries | `pqueue-service`, `pqueue-loadgen`, `pqueue-verify-*` | Temporary compatibility alias | `fireweed`, etc. |
+| CLI entrypoints | `pqueue`, `pqueue-service` | Temporary compatibility alias | `fireweed`, the retired service |
 | Config and chart names | `pqueue` chart/package names | Temporary compatibility alias | `fireweed-queue` chart/package names |
 | Protocol and on-disk identifiers | `PQUEUE_*`, `pqueue_*`, `/var/lib/pqueue/*` | Intentionally retained persistence / wire identifier | Keep until a separate data-migration ADR changes them |
-| Services and images | `pqueue` service names, `pqueue-service` image names | Temporary compatibility alias | `fireweed` service names, `fireweed-service` image names |
+| Services and images | `pqueue` service names, `pqueue-service` image names | Temporary compatibility alias | `fireweed` service names, the retired service image names |
 | Repository URLs | current `pqueue` remote | Historical allowlist or rename-now, depending on the URL | New `fireweed` remote becomes authoritative |
 | Downstream consumers | CI, scripts, docs, release packaging | Temporary compatibility alias | Update to `fireweed` coordinates as each consumer migrates |
 | Audit identifiers | release tags, bead IDs, historical docs | Historical allowlist | Keep as-is for traceability |

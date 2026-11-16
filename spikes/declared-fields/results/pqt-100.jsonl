@@ -1,0 +1,1 @@
+{"phase":"per_queue_tables","n_queues":100,"rows_per_queue":20,"create_ms":2120.2,"checkpoint_ms":1407.4,"schema_bytes":163487744,"open_ms":5.587,"table_count":201}

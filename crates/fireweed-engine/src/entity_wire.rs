@@ -1,6 +1,6 @@
 //! Wire encoding for typed entity documents (ADR-011).
 //!
-//! Human-readable (JSON log legacy): natural nested JSON `Value`.
+//! Human-readable (JSON): natural nested JSON `Value`.
 //! Native binary (postcard / FWC1): the document is stored as an **opaque JSON
 //! blob** (`serialize_bytes` of `serde_json::to_vec`). That matches the product
 //! rule — payload and entity content are consumer-owned blobs; core queue
@@ -103,7 +103,7 @@ pub mod option_entity {
             }
 
             fn visit_map<A: de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-                // Human-readable Option-less object form (legacy bare field).
+                // JSON writes `Some(doc)` as the bare document (no Option wrapper).
                 let value =
                     serde_json::Value::deserialize(de::value::MapAccessDeserializer::new(map))?;
                 Ok(Some(value))

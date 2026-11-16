@@ -170,7 +170,7 @@ an item on a queue with no client traffic never transitions and orphans. The `Re
 | Progress-bound metering | eligible age > `progress_bound_ms` | **launch = meter-only:** emit a `progress_bound_breach` metric/event; **no lifecycle transition** (D2 resolved — escalation/auto-action is post-launch) |
 
 **Placement (hexagonal).** The transition *logic* is domain (`fireweed-engine`); the *clock/driving* is
-the composition root's: `fireweed-server` (and an async library embedding) spawns a periodic task; a
+the composition root's: the retired server crate (and an async library embedding) spawns a periodic task; a
 **synchronous** library embedding drives it via an explicit `engine.tick(now) -> TickReport` entry
 point. `tick(now)` is **idempotent** (re-running with the same/earlier `now` makes no further
 transitions) and **serializes against claim** (a reclaim and a concurrent claim of the same item
