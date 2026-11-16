@@ -168,19 +168,24 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D42 | "Fix them all", on the review findings, with claims ordered by due time and priority breaking ties, as recommended. | Owner, 2026-11-16 | Adopted in revision 9 (§3, §4, §5, §9). |
 | D43 | "Full UMF documents"; "there is no reason I can see that fireweed schemas shouldn't be UMF schemas"; "if we need umf improvements we should get them." | Owner, 2026-11-16 | Accepted, in progress (question 39). A space schema becomes a UMF core 0.10 document. Its physical tables are `umf.tables` (UMF CONTRACT-081), and the queue semantics go in a Fireweed extension. |
 | D44 | "We should be targetting postgres 18." "The additional types and additions to umf tables should go straight to core." Asked whether the extension must live in UMF: it may live in Fireweed, registered through `umf-core`'s registry. | Owner, 2026-11-16 | Adopted. PostgreSQL 18 is the target, matching `umf.tables`' `postgresql18/0.1` profile, and the executor's tests run on PostgreSQL 18.7. The JSON value, string sets, `jsonb` and array columns, GIN, and partial and descending indexes go into UMF core and `umf.tables` (DocumentDrivenDX/umf#172, rewritten). |
+| D45 | "We need the counters in dragonfly because they need to be cross run, campaign, list, and everything else. They are universal per tenant." "just check dragonfly in real time, it's stupidly fast and selected for this purpose because of that property." | Owner, 2026-11-16 | Adopted. Send caps and rate counters stay in Dragonfly, checked in real time, and Fireweed holds no copy. This resolves question 5 and the counter half of question 25. A cap check and a send's commit stay separate steps, as today. |
 
 ## Decision
 
 ### 1. Fireweed is the data plane for Snorri and Cayce
 
 Fireweed stores the durable workflow data that is high in volume or rate
-of change: work items, workflow state, per-recipient state, counters,
-admission chunk state, operational events and timelines. Large payloads are
+of change: work items, workflow state, per-recipient state, admission
+chunk state, operational events and timelines. Large payloads are
 not stored (D16); a field holds a reference.
 
-Outside Fireweed: the control plane (tenants, campaign definitions,
-configuration) in its own PostgreSQL, and exhaust (logs, traces, full
-history, analytics across data sets) in Niflheim. Fireweed's analytics
+Outside Fireweed:
+- the control plane (tenants, campaign definitions, configuration), in its
+  own PostgreSQL;
+- send caps and rate counters, which are universal per tenant across runs,
+  campaigns and lists, in Dragonfly, checked in real time (D45);
+- exhaust (logs, traces, full history, analytics across data sets), in
+  Niflheim. Fireweed's analytics
 cover live data: counts by state, lag and rate windows.
 
 ### 2. The DSL is the interface
@@ -211,10 +216,10 @@ statements:
   - settle: {queue: instances, outcome: complete, items: [{id: 41, token: "6f1c…"}], set: {step: 3}, require_all: true}
   - insert:   {into: effects, rows: [{key: "r1-send-1", body: {template: welcome}}], on_conflict: reject}
   - update:
-      target: send_slots
-      keys: [{contact: c1, hour: "2026-11-16T10:00:00Z"}]
-      where: {lt: [count, 3]}
-      set: {count: {add: [{field: count}, 1]}}
+      target: chunks
+      keys: [{run: r1, shard: 3}]
+      where: {eq: [version, 7]}
+      set: {cursor: 1200}
       expect: {min: 1, max: 1}
 ```
 
@@ -272,8 +277,9 @@ rejects the program unless it explicitly overrides the rule.
 
 A rule that spans runs, such as Snorri's re-entry rules, is checked against
 one keyed row per (workflow family, subject) in a family space (D29).
-Counters are table columns updated with `{add: …}`; rate and slot windows
-are rows keyed by a time bucket, with row expiry.
+A field updated with `{add: …}` holds a count within a space. Counters
+shared across a tenant's runs and campaigns, such as send caps, stay in
+Dragonfly (D45).
 
 ### 4. The executor is plain SQL
 
@@ -365,8 +371,10 @@ A Snorri transition is one program:
 - settle the instance-head item, patching its body and await fields;
 - settle the consumed event item;
 - insert effect items;
-- update counter rows;
 - insert its timeline row last.
+
+The send-cap check runs against Dragonfly before the effect is sent, as it
+does today (D45).
 
 ### 6. Durability
 
@@ -552,20 +560,15 @@ and ownership.
 ## Open questions for the owner
 
 Questions 1 to 4, 6 to 24 and 26 to 36 were resolved in revisions 7 and 8
-(D13 to D40).
+(D13 to D40). Question 5 (counters) is resolved by D45: send caps and rate
+counters stay in Dragonfly.
 
-5. **Counters.** Cayce's per-contact send-cap counter is one row per
-   account, contact and UTC hour, incremented while below the cap. A table
-   row with `SET n = n + 1 WHERE n < $cap` covers it, and no hot keys are
-   documented. It is keyed by account, so it falls under question 25.
-   Snorri's TD-011 recorded "cap counters stay in Dragonfly", which D21
-   reverses unless 7th Sense must keep reading them.
-25. **Account-scoped records across campaign spaces.** Suppression and
-    per-contact send caps belong to an account, but a transaction can't
-    span spaces. Draft: copy suppression into every campaign space of the
-    account, so each send's transaction checks it (`AddOnly` reasons
-    converge). Increment send caps in an account space first, and give the
-    slot back if the send fails.
+25. **Suppression across campaign spaces.** Suppression belongs to an
+    account, but a transaction can't span spaces. Draft: copy suppression
+    into every campaign space of the account, so each send's transaction
+    checks it. The copies converge because reasons are `add_only`. The
+    alternative is to check it in real time like send caps (D45), outside
+    the send's transaction.
 31. **PostgreSQL layout.** Each space gets its own tables, or spaces share
     tables with the space id leading every key and index. Both are being
     measured (D36): claim and commit latency, index size and bloat, vacuum
@@ -605,7 +608,6 @@ Questions 1 to 4, 6 to 24 and 26 to 36 were resolved in revisions 7 and 8
 | Every transition in a space waits on its sequenced table's counter row | M | M | Sequenced inserts come last in a program, so the row is held only for the final round trips. Question 31 measures it. |
 | An absence `assert` misses a concurrent insert of the same key | L | M | The two order as if the guard ran first. Copying suppression into each campaign space (question 25) keeps checks keyed. |
 | The interface grows into a general database | M | H | No joins, capped statements, index-backed selections, live data only. |
-| A hot counter row serializes commits on PostgreSQL | L | M | Question 5; buckets spread the load. |
 | A suppression checked outside the send's transaction lets a send through | M | H | Question 25. |
 | A single writer stalls claims behind a bulk change on the local engine | H | M | Statement caps, stepped bulk changes, gate B4. |
 | Thousands of per-space tables strain PostgreSQL's catalog | M | M | Question 31's measurement. The review measured 119 ms to plan a first query on a new table and 0.4 ms warm: a cost per connection and per space. |

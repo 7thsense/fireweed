@@ -78,13 +78,12 @@ tables:
       address:   {type: text}
       reasons:   {type: text_set, merge: add_only}
       lifted_at: {type: timestamp}
-  send_slots:
-    key: [contact, hour]
-    expire_after_write: 7d
+  chunks:
+    key: [run, shard]
     fields:
-      contact: {type: text}
-      hour:    {type: timestamp}
-      count:   {type: int, merge: non_decreasing}
+      run:    {type: text}
+      shard:  {type: int}
+      cursor: {type: int, merge: non_decreasing}
   timeline:
     sequenced: true
     expire_after_write: 31d
@@ -204,10 +203,10 @@ statements:
       rows: [{key: "r1-send-1", body: {template: "welcome"}}]
       on_conflict: reject
   - update:
-      target: send_slots
-      keys: [{contact: "c1", hour: "2026-11-16T10:00:00Z"}]
-      where: {lt: [count, 3]}
-      set: {count: {add: [{field: count}, 1]}}
+      target: chunks
+      keys: [{run: "r1", shard: 3}]
+      where: {eq: [version, 7]}
+      set: {cursor: 1200}
       expect: {min: 1, max: 1}
 ```
 
@@ -606,7 +605,7 @@ Names in SQL are validated object and field names, and quoted.
 | 7 | Timeline | A sequenced table, inserted last in each transition's program. Full history goes to Niflheim. |
 | 8 | Definitions (up to 256 KiB, D31) | Table row keyed by digest, with a `text` field. |
 | 9 | Admission chunk | Table row keyed by run and shard: `insert` with `on_conflict: reject`, then `update` by keys with `where: {eq: [version, v]}` and `expect: {min: 1, max: 1}`. |
-| 10 | Send-rate counters | Table keyed by slot and hour with `expire_after_write`: `insert` with `on_conflict: skip`, then `update` with `where: {lt: [count, cap]}`, `set: {count: {add: [{field: count}, 1]}}`, `expect: {min: 1, max: 1}`. |
+| 10 | Send-rate counters | Not in Fireweed: they stay in Dragonfly, universal per tenant and checked in real time before a send (ADR-025 D45). |
 | 11 | Re-entry across runs (D29) | Table in a family space keyed by (family, subject), with `non_decreasing` timestamps, updated with `expect`. |
 
 Snorri's queues declare `max_attempts: unlimited` (D30).
@@ -617,7 +616,7 @@ Snorri's queues declare `max_attempts: unlimited` (D30).
 |-------|-----------|
 | Per-recipient lifecycle | Queue items with indexed fields (campaign, step, domain, status) |
 | Suppression | Table with `reasons: text_set, merge: add_only`. A send's program first runs `assert` on the address with `expect: {max: 0}` (question 25 for spaces). |
-| Caps and rate windows | Counter rows as Snorri #10 |
+| Caps and rate windows | Dragonfly, checked in real time (ADR-025 D45) |
 | Delivery and engagement events | Queue items keyed by provider id; a sequenced table for timelines |
 | UI counts and lists | Declared reads |
 
