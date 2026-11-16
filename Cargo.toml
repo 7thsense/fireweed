@@ -18,11 +18,8 @@ members = [
     "crates/fireweed",
     "crates/fireweed-release",
     "crates/fireweed-sim-support",
-    "crates/fireweed-interface",
-    "crates/fireweed-interface-memory",
-    "crates/fireweed-interface-conformance",
-    "crates/fireweed-interface-engine",
-    "crates/fireweed-interface-postgres",
+    "crates/fireweed-dsl",
+    "crates/fireweed-dsl-postgres",
 ]
 resolver = "3"
 
