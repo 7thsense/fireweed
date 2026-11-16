@@ -628,10 +628,12 @@ next upload fails and no `Durable` commit is lost or forked. `FireAndForget`
 and `Tracked` commits touch only the local disk, so only the control
 plane's rule protects them: no new epoch while the old process may still
 run. Clients recheck placement on an interval and after a refusal, so
-readers move to the new node. Ownership is a constructor parameter, not a
-`DataPlane` operation. A fenced engine fails every later request with the
-definitive `InstanceSuperseded`, and a space opened at a higher epoch
-restores from the S3 log. Item state, including attempt counts, moves with
+readers move to the new node. The control plane grants an epoch per space,
+and the engine takes a space through a method on its own type
+(`LocalDataPlane::acquire`), not a `DataPlane` operation. Fencing is per
+space: a fenced space fails every later request to it with the definitive
+`InstanceSuperseded`, while the engine's other spaces keep serving, and a
+space opened at a higher epoch restores from the S3 log. Item state, including attempt counts, moves with
 the log: a clean handover keeps all of it, and a crash keeps everything up
 to the last shipped frame. Item leases stay with Fireweed; the control
 plane's lease covers only which node writes the space.

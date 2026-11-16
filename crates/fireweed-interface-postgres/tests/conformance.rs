@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use fireweed_interface::{DataPlane, ImplementationLimits, ManualClock};
-use fireweed_interface_conformance::{Instance, Status, run};
+use fireweed_interface_conformance::{Controls, Instance, Status, run};
 use fireweed_interface_postgres::PostgresDataPlane;
 
 fn test_limits() -> ImplementationLimits {
@@ -42,9 +42,20 @@ fn rule_pinning_tests() {
         let plane =
             Arc::new(PostgresDataPlane::isolated(&url, clock, test_limits()).expect("connect"));
         let primary = plane.clone();
-        Instance::new(plane).with_peer(Arc::new(move |clock: Arc<ManualClock>| {
-            Arc::new(primary.peer(clock).expect("connect a peer")) as Arc<dyn DataPlane>
-        }))
+        let survivor = plane.clone();
+        // A client process that dies loses nothing the server committed, so
+        // a new instance on the same database stands in for the restart.
+        let controls = Controls {
+            crash_and_reopen: Some(Arc::new(move |clock: Arc<ManualClock>| {
+                Ok(Arc::new(survivor.peer(clock)?) as Arc<dyn DataPlane>)
+            })),
+            ..Controls::default()
+        };
+        Instance::new(plane)
+            .with_peer(Arc::new(move |clock: Arc<ManualClock>| {
+                Arc::new(primary.peer(clock).expect("connect a peer")) as Arc<dyn DataPlane>
+            }))
+            .with_controls(controls)
     };
     let report = run(&factory);
     println!("{}", report.summary());

@@ -1668,10 +1668,11 @@ request; indexed loading and the protocol below are the next steps.
    transaction. Time is non-decreasing per space.
 2. Durability follows Niflheim's write modes (§Durability): one local fsync
    per batch, and commit frames shipped to S3 in order and in batches.
-3. Ownership belongs to the embedder's control plane (ADR-025 D15). The
-   engine is constructed with the ownership epoch the control plane
-   granted; it is not a `DataPlane` operation. Before accepting writes, the
-   engine writes a takeover record at the next S3 log sequence. Log objects
+3. Ownership belongs to the embedder's control plane (ADR-025 D15), which
+   grants an epoch per space. The engine takes a space at the granted epoch
+   through a method on its own type (`LocalDataPlane::acquire`), not a
+   `DataPlane` operation. Before accepting writes to the space, the engine
+   writes a takeover record at the next S3 log sequence of that space. Log objects
    are written with `If-None-Match: *`, so a stale writer's next upload
    fails and that engine stops. `FireAndForget` and `Tracked` commits are
    protected only by the control plane's rule: no new epoch while the old
@@ -1679,8 +1680,9 @@ request; indexed loading and the protocol below are the next steps.
    while the holder lives. Clients recheck placement on an interval and
    after `SpaceBusy` or `InstanceSuperseded`.
 4. **Fenced.** When an upload fails because a higher epoch wrote the next
-   sequence, the engine stops for good: every later request, and every
-   request still waiting for `Durable`, fails with `InstanceSuperseded`
+   sequence of a space, the engine stops serving that space for good: every
+   later request to it, and every request to it still waiting for
+   `Durable`, fails with `InstanceSuperseded`
    (definitive; it did not commit on the current owner). A space opened at a
    higher epoch restores from the S3 log up to its takeover record; commits
    the old writer acknowledged at `FireAndForget` or `Tracked` after its last
@@ -1784,10 +1786,24 @@ storage (in-memory: shared state; PostgreSQL: a new connection to the same
 schema). Tests that need concurrent instances (REC-5, MULTI-1, TIME-3,
 PG-1 to PG-3, DSL-5, DSL-8) run on threads across peers when a peer
 exists. The time authority is a `ManualClock` shared by every instance.
-The design below adds what only a storage-owning implementation can
-provide (the local engine): child processes, fault hooks and storage loss.
-Tests that need them are skipped with a reason that starts "harness gap:"
-or "local engine only:".
+
+An `Instance` may also carry `Controls`, the engine's own handles for the
+durability and ownership tests. Each is optional, and a test whose control
+is missing is skipped with "engine supplies no `<control>` control", so
+every engine runs the same tests from the shared suite and reports the
+same gaps:
+
+| Control | Does | Tests |
+|---------|------|-------|
+| `hold_replication(bool)` | Stops commits reaching `Durable`, then releases them | DUR-3, DUR-6 |
+| `crash_and_reopen(clock)` | Abandons the instance without a clean close (a killed child process where the engine runs one) and opens the same storage | DUR-4, SHARE-1 |
+| `lose_local_storage(clock)` | Abandons the instance, discards local storage, opens from what reached `Durable` | DUR-5 |
+| `open_competing(clock)` | Opens the space a second time on one host without a new grant; must fail | SHARE-1 |
+| `take_over(clock)` | The control plane grants the space to a new owner at a higher epoch | FENCE-1 |
+
+The child-process protocol below remains the design for faults inside one
+request (`StallAtReceive`, REC-4) and for SIGKILL; an engine may implement
+`crash_and_reopen` with it.
 
 ```rust
 pub trait Harness: Send + Sync + 'static {
@@ -1912,16 +1928,17 @@ vectors. IDs are stable and cited in failures.
 | COH-1 | Cohort deadline | A missing member, a gated member and a paused queue each fail the cohort at the deadline, including when the gate or pause is removed after the deadline before any request touches the cohort; a claimed cohort is exempt; enqueue after failure is `CohortFailed`. |
 | DUR-1 | Levels reported | Every write response, including rejections and `apply_schema`, reports a level within the declared range. |
 | DUR-2 | min_durability above max | Fails `InvalidRequest`. |
-| DUR-3 | DurabilityPending | With `HoldReplication`, the request returns `DurabilityPending { reached: Tracked }`; a replay after `Release` returns `Durable`. |
-| DUR-6 | Prefix-closed | After a later commit reaches `Durable`, every earlier commit reports `Durable` on replay. |
-| DUR-4 | Crash | Kill the child around acknowledged commits; every commit acknowledged at `Tracked` or above is present after reopen. |
+| DUR-3 | DurabilityPending | With `hold_replication`, a commit asked for at `Durable` returns `DurabilityPending { reached }` with `reached` below `Durable`; a replay after release returns `Durable`. |
+| DUR-6 | Prefix-closed | A commit acknowledged below `Durable` while replication is held reports `Durable` on replay once a later commit is `Durable`. |
+| DUR-4 | Crash | After `crash_and_reopen`, every commit acknowledged at `Tracked` or above is present. |
 | DUR-5 | Storage loss | After `lose_local_storage`, every commit acknowledged at `Durable` is present. |
 | DUR-7 | Requested level | Each offered level is acknowledged at or above what was asked and at most the maximum. |
 | LEASE-MAX | Redelivery bound | Lease expiry returns the item to pending until its claims have used `max_attempts`; the expiry after that fails it with `attempts-exhausted` at the expiry instant, without a version bump. |
 | LEASE-MAX-2 | Claim past the limit | After `max_attempts` claims each ended by `Release`, the item is pending with `attempt_count = max_attempts` and still claimable; that claim charges `max_attempts + 1`. Its lease expiry fails the item with `attempts-exhausted` at `lease_expires_at` with `item_version` unchanged; a `Retry` on it instead fails it the same way. |
 | LIN-1 | Concurrent claims | Peers never hold two active leases on one item. |
 | LIN-2 | Read after commit | A read starting after a commit's response observes it, across shapes. |
-| SHARE-1 | SingleProcess | A second open fails or supersedes while the holder lives; after the holder is killed, open succeeds. |
+| SHARE-1 | SingleProcess | `open_competing` fails with `SpaceBusy` while the holder lives; after `crash_and_reopen`, the space opens and has its schema. |
+| FENCE-1 | Fenced writer | After `take_over`, the new owner has every commit acknowledged at `Durable`; the old owner's next `Durable` commit, and every request after it, fails with `InstanceSuperseded`; the new owner commits. |
 | ASSERT-1 | Assert writes nothing | A passing `Assert` changes no version and refreshes no expiry. |
 | ASSERT-2 | Assert rejects | A failing `Assert` rejects the group and rolls back earlier operations; a version guard fails with `VersionMismatch`. |
 | ASSERT-3 | Assert and leases | `Assert` counts leased items and leaves `item_version` unchanged, so the worker's guarded finalize still commits. |
@@ -1976,17 +1993,22 @@ assert on final state through `get` and `read`.
 
 | Implementation | Pass | Fail | Skip |
 |----------------|------|------|------|
-| `fireweed-interface-memory` | 137 | 0 | 11 |
-| `fireweed-interface-postgres` (PostgreSQL 16) | 136 | 0 | 12 |
+| `fireweed-interface-memory` | 137 | 0 | 12 |
+| `fireweed-interface-postgres` (PostgreSQL 16) | 137 | 0 | 12 |
 
 Skipped on both: GRP-9, GRP-13 and COH-1 (cohorts are not declared yet);
 IDX-2 (harness gap: an index still building); REC-4 (harness gap:
-`StallAtReceive`); DUR-4 (harness gap: a child process killed with
-SIGKILL); SCAN-6 (local engine only: expired rows still stored). In-memory
-also skips DUR-3, DUR-5 and DUR-6 (`Durable` not declared) and SHARE-1
-(local engine only). PostgreSQL also skips DUR-2 (`Durable` is offered),
-DUR-3 and DUR-6 (harness gap: `HoldReplication`), DUR-5 (harness gap:
-`lose_local_storage`) and SHARE-1 (`MultiProcess`; MULTI-1 covers it).
+`StallAtReceive`); SCAN-6 (local engine only: expired rows still stored);
+FENCE-1 (no `take_over` control: neither has ownership epochs). In-memory
+also skips DUR-3 to DUR-6 (`Durable` and `Tracked` not declared) and
+SHARE-1 (no `open_competing` control). PostgreSQL also skips DUR-2
+(`Durable` is offered), DUR-3, DUR-5 and DUR-6 (no `hold_replication` or
+`lose_local_storage` control: the server is assumed fully replicated, so
+neither fault exists) and SHARE-1 (`MultiProcess`; MULTI-1 covers it). Its
+`crash_and_reopen` opens a new instance on the same database, so DUR-4
+runs. The Turso-queue session's `fireweed-local` reports 137/0/11 on
+Turso and SQLite before these controls; wiring its engine tests into them
+moves DUR-3 to DUR-6, SHARE-1 and FENCE-1 into the shared suite.
 Several tests still cover only part of what their row claims (TYP-1,
 CAST-1, GRP-3); generating them from the tables is open work.
 

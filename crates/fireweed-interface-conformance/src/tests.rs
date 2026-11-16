@@ -1,6 +1,7 @@
 //! The rule-pinning tests, by API-006 id.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use fireweed_interface::*;
 use futures::executor::block_on;
@@ -81,26 +82,15 @@ pub const ALL: &[(&str, Test)] = &[
     ("COH-1", coh_1),
     ("DUR-1", dur_1),
     ("DUR-2", dur_2),
-    ("DUR-3", |f| {
-        if_replicated(f, "needs the HoldReplication fault hook")
-    }),
-    ("DUR-4", |_| {
-        skip("harness gap: needs a child process and SIGKILL")
-    }),
-    ("DUR-5", |f| if_replicated(f, "needs lose_local_storage")),
-    ("DUR-6", |f| {
-        if_replicated(f, "needs the HoldReplication fault hook")
-    }),
+    ("DUR-3", dur_3),
+    ("DUR-4", dur_4),
+    ("DUR-5", dur_5),
+    ("DUR-6", dur_6),
     ("DUR-7", dur_7),
     ("LIN-1", lin_1),
     ("LIN-2", lin_2),
-    ("SHARE-1", |f| {
-        if f.plane.guarantees().sharing == Sharing::SingleProcess {
-            skip("local engine only: a second process opening the same storage")
-        } else {
-            skip("MultiProcess implementation: covered by MULTI-1")
-        }
-    }),
+    ("SHARE-1", share_1),
+    ("FENCE-1", fence_1),
     ("SCH-1", sch_1),
     ("READ-1", read_1),
     ("READ-2", read_2),
@@ -142,12 +132,34 @@ pub const ALL: &[(&str, Test)] = &[
     ("SUPP-3", supp_3),
 ];
 
-fn if_replicated(fx: &Fixture, why: &str) -> T {
-    if fx.caps().max_durability >= DurabilityLevel::Durable {
-        skip(&format!("harness gap: {why}"))
-    } else {
-        skip("Durable not declared")
+/// The engine's control, or a skip that names it.
+fn control<'a, X>(c: &'a Option<X>, name: &str) -> Result<&'a X, Fail> {
+    c.as_ref()
+        .ok_or_else(|| Fail::Skipped(format!("engine supplies no `{name}` control")))
+}
+
+fn needs_level(fx: &Fixture, level: DurabilityLevel) -> T {
+    if fx.caps().max_durability < level {
+        return skip(&format!("{level:?} not declared"));
     }
+    Ok(())
+}
+
+fn hdr_at(fx: &Fixture, level: DurabilityLevel) -> WriteHeader {
+    let mut h = fx.hdr();
+    h.min_durability = Some(level);
+    h
+}
+
+fn recorded(plane: &Arc<dyn DataPlane>, h: &WriteHeader) -> Result<bool, Fail> {
+    let r = ok(
+        block_on(plane.get_request(GetRequestRequest {
+            space: h.space.clone(),
+            request_id: h.request_id.clone(),
+        })),
+        "get_request",
+    )?;
+    Ok(r.is_some())
 }
 
 // ----------------------------------------------------------- expressions
@@ -2445,6 +2457,190 @@ fn dur_7(fx: &Fixture) -> T {
             r.durability
         );
     }
+    Ok(())
+}
+
+/// DUR-3: a commit asked for at `Durable` that cannot get there in time
+/// fails with `DurabilityPending`, which says it committed; replaying the
+/// request id once replication resumes reports `Durable`.
+fn dur_3(fx: &Fixture) -> T {
+    needs_level(fx, DurabilityLevel::Durable)?;
+    let hold = control(&fx.controls.hold_replication, "hold_replication")?;
+    let h = hdr_at(fx, DurabilityLevel::Durable);
+    hold(true);
+    let r = fx.commit_with(h.clone(), vec![put_op(80)], Params::new(), false);
+    hold(false);
+    ensure!(
+        matches!(r, Err(DataPlaneError::DurabilityPending { reached }) if reached < DurabilityLevel::Durable),
+        "held commit at Durable gave {r:?}"
+    );
+    let r = ok(
+        fx.commit_with(h, vec![put_op(80)], Params::new(), false),
+        "replay after release",
+    )?;
+    ensure!(
+        r.durability == Some(DurabilityLevel::Durable),
+        "replay reported {:?}",
+        r.durability
+    );
+    Ok(())
+}
+
+/// DUR-4: after a crash, every commit acknowledged at `Tracked` or above
+/// is present.
+fn dur_4(fx: &Fixture) -> T {
+    needs_level(fx, DurabilityLevel::Tracked)?;
+    let crash = control(&fx.controls.crash_and_reopen, "crash_and_reopen")?;
+    let mut acked = vec![];
+    for (i, l) in [DurabilityLevel::Tracked, DurabilityLevel::Durable]
+        .into_iter()
+        .filter(|l| *l <= fx.caps().max_durability)
+        .enumerate()
+    {
+        let h = hdr_at(fx, l);
+        ok(
+            fx.commit_with(h.clone(), vec![put_op(85 + i as i64)], Params::new(), false),
+            "commit",
+        )?;
+        acked.push(h);
+    }
+    let plane = ok(crash(fx.clock.clone()), "reopen after crash")?;
+    for h in &acked {
+        ensure!(
+            recorded(&plane, h)?,
+            "commit {:?} acknowledged at {:?} is missing after the crash",
+            h.request_id,
+            h.min_durability
+        );
+    }
+    Ok(())
+}
+
+/// DUR-5: after local storage is lost, every commit acknowledged at
+/// `Durable` is present.
+fn dur_5(fx: &Fixture) -> T {
+    needs_level(fx, DurabilityLevel::Durable)?;
+    let lose = control(&fx.controls.lose_local_storage, "lose_local_storage")?;
+    let durable = hdr_at(fx, DurabilityLevel::Durable);
+    ok(
+        fx.commit_with(durable.clone(), vec![put_op(90)], Params::new(), false),
+        "durable commit",
+    )?;
+    ok(fx.commit(vec![put_op(91)]), "default commit")?;
+    let plane = ok(lose(fx.clock.clone()), "open after storage loss")?;
+    ensure!(
+        recorded(&plane, &durable)?,
+        "a commit acknowledged at Durable is missing after storage loss"
+    );
+    Ok(())
+}
+
+/// DUR-6: durability is prefix-closed in a space. Once a later commit is
+/// `Durable`, an earlier one acknowledged below it reports `Durable` on
+/// replay.
+fn dur_6(fx: &Fixture) -> T {
+    needs_level(fx, DurabilityLevel::Durable)?;
+    let hold = control(&fx.controls.hold_replication, "hold_replication")?;
+    let lower = if fx.caps().max_durability >= DurabilityLevel::Tracked
+        && fx.plane.guarantees().durability <= DurabilityLevel::Tracked
+    {
+        DurabilityLevel::Tracked
+    } else {
+        DurabilityLevel::FireAndForget
+    };
+    let early = hdr_at(fx, lower);
+    let late = hdr_at(fx, DurabilityLevel::Durable);
+    hold(true);
+    let e = fx.commit_with(early.clone(), vec![put_op(95)], Params::new(), false);
+    hold(false);
+    let e = ok(e, "early commit")?;
+    ensure!(
+        e.durability.is_some_and(|d| d < DurabilityLevel::Durable),
+        "the early commit was held, yet reported {:?}",
+        e.durability
+    );
+    let l = ok(
+        fx.commit_with(late, vec![put_op(96)], Params::new(), false),
+        "late durable commit",
+    )?;
+    ensure!(
+        l.durability == Some(DurabilityLevel::Durable),
+        "late commit reported {:?}",
+        l.durability
+    );
+    let e = ok(
+        fx.commit_with(early, vec![put_op(95)], Params::new(), false),
+        "replay of the early commit",
+    )?;
+    ensure!(
+        e.durability == Some(DurabilityLevel::Durable),
+        "an earlier commit reports {:?} after a later one became Durable",
+        e.durability
+    );
+    Ok(())
+}
+
+/// SHARE-1: a `SingleProcess` space cannot be opened twice on one host
+/// while its holder lives; once the holder is gone, it opens.
+fn share_1(fx: &Fixture) -> T {
+    if fx.plane.guarantees().sharing != Sharing::SingleProcess {
+        return skip("MultiProcess implementation: covered by MULTI-1");
+    }
+    let open = control(&fx.controls.open_competing, "open_competing")?;
+    let crash = control(&fx.controls.crash_and_reopen, "crash_and_reopen")?;
+    let r = open(fx.clock.clone());
+    ensure!(
+        matches!(r, Err(DataPlaneError::SpaceBusy)),
+        "a second open while the holder lives gave {:?}",
+        r.as_ref().map(|_| "an instance")
+    );
+    let plane = ok(crash(fx.clock.clone()), "open after the holder is gone")?;
+    let schema = ok(block_on(plane.get_schema(sp())), "get_schema")?;
+    ensure!(schema.is_some(), "the reopened space has no schema");
+    Ok(())
+}
+
+/// FENCE-1: when the control plane grants a space to a new owner at a
+/// higher epoch, the new owner has every commit acknowledged at `Durable`,
+/// and the old owner's next `Durable` commit fails with the definitive
+/// `InstanceSuperseded`, as does every request after it.
+fn fence_1(fx: &Fixture) -> T {
+    let take = control(&fx.controls.take_over, "take_over")?;
+    needs_level(fx, DurabilityLevel::Durable)?;
+    let before = hdr_at(fx, DurabilityLevel::Durable);
+    ok(
+        fx.commit_with(before.clone(), vec![put_op(97)], Params::new(), false),
+        "durable commit before takeover",
+    )?;
+    let owner = ok(take(fx.clock.clone()), "take over")?;
+    ensure!(
+        recorded(&owner, &before)?,
+        "the new owner lacks a commit acknowledged at Durable"
+    );
+    let stale = fx.commit_with(
+        hdr_at(fx, DurabilityLevel::Durable),
+        vec![put_op(98)],
+        Params::new(),
+        false,
+    );
+    ensure!(
+        matches!(stale, Err(DataPlaneError::InstanceSuperseded)),
+        "the old owner's Durable commit gave {stale:?}"
+    );
+    let after = fx.commit(vec![put_op(99)]);
+    ensure!(
+        matches!(after, Err(DataPlaneError::InstanceSuperseded)),
+        "the old owner accepted a request after being fenced: {after:?}"
+    );
+    let mut h = WriteHeader::new(sp(), "fence-new-owner");
+    h.min_durability = Some(DurabilityLevel::Durable);
+    let r = block_on(owner.commit(CommitRequest {
+        header: h,
+        ops: vec![put_op(100)],
+        params: Params::new(),
+        dry_run: false,
+    }));
+    ensure!(r.is_ok(), "the new owner refused a commit: {r:?}");
     Ok(())
 }
 

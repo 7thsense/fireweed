@@ -20,7 +20,7 @@ mod tests;
 
 use std::sync::Arc;
 
-use fireweed_interface::{DataPlane, ManualClock};
+use fireweed_interface::{DataPlane, DpResult, ManualClock};
 
 pub use support::Fixture;
 
@@ -73,20 +73,63 @@ impl Report {
 /// attached to `clock`.
 pub type Peer = Arc<dyn Fn(Arc<ManualClock>) -> Arc<dyn DataPlane> + Send + Sync>;
 
-/// A fresh implementation on fresh storage, and optionally a way to open
-/// more instances on that storage (tests marked "needs a peer" use it).
+/// Opens an instance on the fixture's storage, attached to `clock`, or
+/// returns the error the open fails with.
+pub type Opener = Arc<dyn Fn(Arc<ManualClock>) -> DpResult<Arc<dyn DataPlane>> + Send + Sync>;
+
+/// Turns a fault on (`true`) or off (`false`).
+pub type Switch = Arc<dyn Fn(bool) + Send + Sync>;
+
+/// Engine controls for the durability and ownership tests (DUR-3 to DUR-6,
+/// SHARE-1, FENCE-1). Each is optional: a test whose control the engine
+/// does not supply is skipped and names the control, so every engine runs
+/// the same tests and reports the same gaps.
+#[derive(Clone, Default)]
+pub struct Controls {
+    /// `true` stops commits from reaching `Durable` (nothing new reaches
+    /// storage outside the node); `false` releases them. DUR-3, DUR-6.
+    pub hold_replication: Option<Switch>,
+    /// Abandons the fixture's instance without a clean close, as a crash
+    /// would (a killed child process where the engine can run one), and
+    /// opens a new instance on the same storage. DUR-4, SHARE-1.
+    pub crash_and_reopen: Option<Opener>,
+    /// Abandons the fixture's instance, discards its local storage, and
+    /// opens a new instance from what reached `Durable`. DUR-5.
+    pub lose_local_storage: Option<Opener>,
+    /// Opens the fixture's space a second time on the same host while the
+    /// first instance lives, without a new ownership grant. SHARE-1
+    /// expects it to fail.
+    pub open_competing: Option<Opener>,
+    /// The control plane grants the fixture's space to a new owner at a
+    /// higher epoch, which takes it over; returns the new owner. FENCE-1.
+    pub take_over: Option<Opener>,
+}
+
+/// A fresh implementation on fresh storage, optionally a way to open more
+/// instances on that storage (tests marked "needs a peer" use it), and the
+/// engine's controls.
 pub struct Instance {
     pub plane: Arc<dyn DataPlane>,
     pub peer: Option<Peer>,
+    pub controls: Controls,
 }
 
 impl Instance {
     pub fn new(plane: Arc<dyn DataPlane>) -> Self {
-        Self { plane, peer: None }
+        Self {
+            plane,
+            peer: None,
+            controls: Controls::default(),
+        }
     }
 
     pub fn with_peer(mut self, peer: Peer) -> Self {
         self.peer = Some(peer);
+        self
+    }
+
+    pub fn with_controls(mut self, controls: Controls) -> Self {
+        self.controls = controls;
         self
     }
 }

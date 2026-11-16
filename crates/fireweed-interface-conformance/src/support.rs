@@ -37,6 +37,7 @@ pub struct Fixture {
     pub plane: Arc<dyn DataPlane>,
     pub clock: Arc<ManualClock>,
     peer: Option<crate::Peer>,
+    pub controls: crate::Controls,
     seq: AtomicU64,
 }
 
@@ -329,6 +330,7 @@ impl Fixture {
             plane: inst.plane,
             clock,
             peer: inst.peer,
+            controls: inst.controls,
             seq: AtomicU64::new(0),
         };
         block_on(fx.plane.apply_schema(ApplySchemaRequest {
