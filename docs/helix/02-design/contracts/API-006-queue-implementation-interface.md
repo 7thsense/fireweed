@@ -56,7 +56,7 @@ expiry, filtered same-group claims, the full range access term in reads,
 and paging for `fw_gates`.
 
 Revision 7 (2026-11-15) applies the owner's rulings (ADR-025 D13 to D28;
-D29 and D30 were added on 2026-11-16).
+D29 to D32 were added on 2026-11-16).
 Durability levels are Niflheim's `FireAndForget`, `Tracked` and `Durable`,
 chosen per request; PostgreSQL commits are `Durable`. The Blob and
 EventLog shapes and queue history are removed; a table with

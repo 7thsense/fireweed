@@ -73,7 +73,9 @@ a family space (D29), and a queue may opt out of the store's redelivery
 bound when its embedder parks crash-looping items itself (D30). Snorri's
 TD-012 revision 7 text answers question 15, which moves to the resolved
 table. Definitions larger than one value were question 30, settled the
-same day by capping their size (D31).
+same day by capping their size (D31). The owner also accepted Snorri's
+space granularity, one space per (run, shard) (D32), which closes
+question 29.
 
 ## Context
 
@@ -174,7 +176,7 @@ needs Cayce's confirmation.
 | D10 | Cayce reads queue data only through versioned, named, declared reads, never engine tables. | Owner via Cayce, 2026-11-15 | Adopted (§6). |
 | D11 | All high-volume, fast-changing durable workflow data goes through Fireweed. The control plane is separate. Exhaust goes to Niflheim. | Owner via Cayce, 2026-11-15 | Adopted (§1). |
 | D12 | Requests are typed data with a selector, an action and a limit; a group commit is a list of them. Claim, bulk enqueue and complete stay fixed verbs. No SQL. Small expression language. Every write capped. Durability reported per commit. v1 covers what the Cayce UI and the recipient-lifecycle bulk operations need. Fireweed also provides ancillary storage shapes. | Owner via Cayce, 2026-11-15 | Adopted (§3 to §6, §10). |
-| D13 | "atomic writes should be per workflow or per campaign." | Owner, 2026-11-15 | A space is one workflow or one campaign (§3). Account-scoped records are open question 25. |
+| D13 | "atomic writes should be per workflow or per campaign." | Owner, 2026-11-15 | A space never spans workflows or campaigns (§3); D32 splits Snorri's runs by shard. Account-scoped records are open question 25. |
 | D14 | Durability is chosen per request with Niflheim's write modes: "we need to be able to control the level of durability required and wait accordingly. niflheim has a spec for this, we should try to use the same if possible - durable, tracked, fire and forget". For PostgreSQL: "Just assume postgres is fully replicated and design the protocol to ensure transactions are used to achieve that assuming perfect server durability." | Owner via the Turso-queue session, and owner, 2026-11-15 | Adopted (§7). Resolves questions 13, 14 and 19. |
 | D15 | "fencing should happen by the control plane. we'll have to have some sort of recheck interval to force readers to switch to the new node." Via the Turso-queue session: "the same applies to stopping old writers. the lease can be managed by the control plane via the embedder." | Owner, 2026-11-15 | Adopted (§11). Resolves question 16. |
 | D16 | "this system isn't really meant to store blobs. even history will need to be supported for timeline and event triggering … fireweed is exposing a generic interface similar to a sql database but with more constraints. define another table, be done." | Owner, 2026-11-15 | Shapes are queues and tables; history and event feeds are sequenced tables (§3). Resolves questions 4 and 18. |
@@ -190,9 +192,10 @@ needs Cayce's confirmation.
 | D26 | "no need to migrate spaces"; via the Turso-queue session: "we don't need a migration path". | Owner, 2026-11-15 | A space stays on the implementation it starts on (§11). Resolves question 22. |
 | D27 | Via the Turso-queue session: "we do need to ensure that the dsl can be fully implemented on this model". | Owner, 2026-11-15 | The Turso-queue session mapped every Snorri DSL construct onto revision 6 (its plan, Part 2). The one gap, a guard-only operation, is D20; three smaller additions are questions 26 to 28. |
 | D28 | Crashes are the embedder's: "crashes can be handled by the control plane via the embedder (snorri/cayce)". | Owner via the Turso-queue session, 2026-11-15 | The control plane grants ownership; the store still bounds redelivery (D17). |
-| D29 | "use the family space record" for re-entry across runs. | Owner, 2026-11-16 | Adopted (§3). Settles part of question 29. |
+| D29 | "use the family space record" for re-entry across runs. | Owner, 2026-11-16 | Adopted (§3). |
 | D30 | "accept Snorri's max_attempts opt-out". | Owner, 2026-11-16 | Adopted (§9). Amends D17: the store's bound is the default, and a queue may opt out. |
 | D31 | "Yes, cap at 256 KiB": Snorri caps workflow definitions at 256 KiB, one table value, and keeps transition output at 1 MiB inside the 2 MiB body. | Owner, 2026-11-16 | Adopted. Resolves question 30. No interface change; Cayce confirms no template exceeds 256 KiB. |
+| D32 | "Yes, per run-shard": Snorri's spaces are one per (run, shard). | Owner, 2026-11-16 | Adopted (§3). Narrows D13: a space never spans workflows or campaigns, and a campaign may be split over several spaces. Resolves question 29. Events correlated to instances in several runs are written once per run space, deduplicated per space; cancelling a run is one commit per shard; on the local engine each space and each family space needs its own writer grant from the control plane, which may cover several of one holder's spaces. |
 
 ## Decision
 
@@ -231,8 +234,11 @@ Consumers (`Fireweed` facade, Snorri, Cayce, `fireweed-resp`,
 
 ### 3. Spaces and shapes
 
-A **space** is one atomic and ordering domain, owned by one tenant: one
-workflow or one campaign (D13). It holds named objects of two shapes,
+A **space** is one atomic and ordering domain, owned by one tenant, and
+never wider than one workflow or one campaign (D13). Snorri's spaces are
+one per (run, shard), where a campaign is a run and members are spread
+over a run's shards by subject hash (D32); every operation on one
+instance is then one commit. It holds named objects of two shapes,
 queues and tables, declared in the space's schema. A sequenced table is a
 table whose key the implementation assigns:
 
@@ -561,6 +567,7 @@ not on the interface or on `Fireweed`.
 | Positive | Body patches shrink requests, and table rows take independently changing data out of the instance body. Engines still rewrite a stored JSON value on update. |
 | Negative | Large payloads (Snorri's transition outputs, workflow definitions) need a store outside Fireweed, referenced by a field. |
 | Negative | Records scoped to an account cannot be checked atomically with a campaign's effects (open question 25). |
+| Negative | With one space per (run, shard) (D32), an event for instances in several runs is one commit per run space, deduplicated per space only, and cancelling a run is one commit per shard. |
 | Positive | Expression, aggregate, group-commit and time rules are pinned by named conformance tests that both engines run. |
 | Positive | Correctness is defined by observable behaviour and checked against Postgres. |
 | Negative | The interface is much larger than a queue API. The expression language must behave identically on every implementation. |
@@ -627,7 +634,7 @@ object-log, RESP and TD-003 changes land at step 6.
 | # | Question | Ruling |
 |---|----------|--------|
 | 1 | Names | Kept (D23). |
-| 2 | Space granularity | One workflow or one campaign (D13); consequence in question 25. |
+| 2 | Space granularity | At most one workflow or campaign (D13); Snorri uses one per (run, shard) (D32); consequence in question 25. |
 | 3 | Object-log's future | Deprecated once the local engine's S3 log passes (D24). |
 | 4 | Blobs, event logs, history in v1 | No blobs; history and event feeds are sequenced tables (D16). |
 | 6 | Admission chunk state | A table row in the data plane (D21). |
@@ -646,6 +653,7 @@ object-log, RESP and TD-003 changes land at step 6.
 | 15 | Snorri's open items | Answered by Snorri TD-012 revision 7 (below). |
 | 20 | Bounding redelivery | Lease expiry counts toward `max_attempts` (D17); a queue may opt out with `u32::MAX` (D30). |
 | 30 | Definitions larger than one value | Snorri caps definitions at 256 KiB and transition output at 1 MiB (D31). |
+| 29 | A space per Snorri shard | One space per (run, shard) (D32); re-entry across runs uses the family record (D29). |
 | 21 | Choices made without a ruling | Adopted as needed, including `SERIALIZABLE` where it is required (D19). |
 | 22 | Moving spaces between implementations | Not needed (D26). |
 | 23 | Merge policies | `AddOnly` and `NonDecreasing` field rules, with an explicit override (D20). |
@@ -665,7 +673,7 @@ Snorri's TD-012 revision 7 (uncommitted there; sent to this session on
   question 5); history goes to Niflheim and to sequenced tables (D16);
   idempotency maps become a table with row expiry. Definitions of 31 to
   43 KB fit a table row, and Snorri caps them at 256 KiB (D31).
-- O17, what a space is: question 29.
+- O17, what a space is: one per (run, shard) (D32).
 - O18 and O19, the ownership-epoch and poison-report ports: interfaces
   between Snorri and Cayce's control plane. They fit §11's fencing, and
   O19's attempt counting is D30.
@@ -714,32 +722,6 @@ Snorri's TD-012 revision 7 (uncommitted there; sent to this session on
     the DSL scenarios use it (DSL-2 shows both). Is declaring instance
     queues recurring acceptable, or should any queue get a non-charging
     reschedule? Draft: use `Rearm`; no new outcome. (Turso-queue session.)
-29. **A space per Snorri shard.** Snorri maps a campaign to a run (a
-    continuously enrolling workflow is a long-lived run) and proposes one
-    space per (run, shard), with members spread over a run's shards by
-    subject hash. Every operation on one instance stays one commit:
-    transitions with their effects and consumed events, event matching,
-    intents, receipts, reconciliation, admission chunks, the duplicate
-    check within a run and poison parking. Three things stop being one
-    commit:
-    - re-entry across runs, now settled by D29: admission first updates a
-      (workflow family, subject) record in a family space, guarded by
-      `NonDecreasing` `last_enrolled_at` and `last_ended_at` fields, then
-      enqueues in the run's space. A crash between the two spends an
-      enrolment without admitting, and replaying the admission with the
-      same request ids repairs it. The end of an enrolment is a third
-      write, retried until acknowledged;
-    - an event correlated to instances in several runs, which becomes one
-      commit per run space, deduplicated per space only;
-    - cancelling a run, which spans its shards.
-    The split is narrower than "per workflow or per campaign" (D13): one
-    campaign becomes N spaces. At 16 open runs × 64 shards that is 1,024
-    spaces: one row each on PostgreSQL; on the local engine 1,024 writer
-    grants, about 100 renewals a second unless one grant covers all of a
-    holder's spaces. D29 adds one family space per workflow family, which
-    every run of the family writes and which needs its own grant on the
-    local engine. Is one space per (run, shard) acceptable, or should a
-    run's shards share one space?
 
 ## Risks
 
