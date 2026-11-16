@@ -87,8 +87,9 @@ memory. Claims, bulk changes and queries become statements of one IR
 instead of fixed verbs beside a request model. Sections 2, 4, 6, 8, 11 and
 12 change, as do the alternatives, consequences and migration order; the
 rest of revision 7 stands. Where weft already has the machinery, Fireweed
-shares it, and weft changes to make that possible (D35). Questions 31 to 36
-are new.
+shares it, and weft changes to make that possible (D35). The owner then
+ruled on the new questions and on 26 to 28 (D36 to D40); question 31
+waits on a measurement.
 
 ## Context
 
@@ -212,6 +213,11 @@ needs Cayce's confirmation.
 | D33 | "We are trying to define a DSL that allows for the claim, bulk change, and query flexibility we need without the limitations of a fixed function calling api. It may not need to be sql, and it might be typed, but it's going to need to compile down to sql. Fireweed *is* effectively a compiler from 'some typed ir' to 'some database backend (turso, sqlite, postgres)'." The IR: "Own IR, weft style". The shape: "Fireweed is effectively becomming a similar system to truss + weft: fireweed-compiler + fireweed-engine[turso,postgres,sqlite,memory]". | Owner, 2026-11-16 | Draft in revision 8 (§2, §4, §11, §12). Amends D12: the fixed verbs become statements; consumers still write no SQL. |
 | D34 | "We should leverage umf for the typesystem, underlying schemas, ddl, etc" | Owner, 2026-11-16 | Draft in revision 8 (§6). |
 | D35 | "If there is a machinery we can share with weft, we shuold do so. I own weft and can make channges to it." On types: "the missing types are obvious additions to weft". | Owner, 2026-11-16 | Draft in revision 8 (§2). Fireweed's IR stays its own (D33); the machinery under it is shared with weft where weft has it. |
+| D36 | Question 31: "we need to measure. i'm worried deletes and indices will become problematic if we don't use indpendent tables" | Owner, 2026-11-16 | Question 31 stays open until both PostgreSQL layouts are measured (§11). |
+| D37 | Question 32: "yaml (json) syntax is ok for now." | Owner, 2026-11-16 | Programs and schemas are YAML or JSON documents read by one reader, as Snorri's workflow DSL is (§4). No text syntax in v1. |
+| D38 | Question 33: "it can live in umf, open an issue for it" | Owner, 2026-11-16 | The `umf.fireweed` extension is published in UMF: DocumentDrivenDX/umf#172 (§6). |
+| D39 | Question 34: "ok". Question 35: "yes". Questions 26, 27 and 28: "ok". | Owner, 2026-11-16 | Drafts adopted: no UMF declarative actions in v1; the engine trait narrows (§2); claim indexes lead with due time (§6); no combined-action statement; non-charging waits use `Rearm` on a recurring queue. |
+| D40 | Question 36: "do it. make sure to evolve the rest of the weft tooling around any reorganization." The missing types: "obvious additions to weft". | Owner, 2026-11-16 | Extraction from weft starts in the weft repository, in the draft order of §2, and weft's bindings, WASM build, specs and CI move with it. |
 
 ## Decision
 
@@ -242,7 +248,7 @@ a storage layout on PostgreSQL. Fireweed has three parts:
 
 | Crate | Role |
 |-------|------|
-| `fireweed-interface` | The IR types, the space schema types, the result and error types, and the `DataPlane` trait. Depends on `fireweed-core` id types, `umf-core` and general-purpose crates only. |
+| `fireweed-interface` | The IR types, the space schema types, the result and error types, and the `DataPlane` trait: `apply_schema`, `get_schema`, `execute(program)` for writes, `read(query)` for snapshot reads, `get_request` and `metrics` (D39). Depends on `fireweed-core` id types, `umf-core` and general-purpose crates only. |
 | `fireweed-compiler` | Resolves and type-checks a program against the space schema, builds a logical plan, and lowers it to one backend's SQL with bound parameters and result decoders, or refuses. Pure: no I/O, no clock, no storage crate. |
 | `fireweed-engine` | Owns each backend's storage layout and DDL, and runs compiled plans: transactions, request time, leases, durability, request records, replay, fencing and sweeps. Backends: Turso, PostgreSQL, SQLite and memory. |
 
@@ -266,8 +272,12 @@ Types weft lacks today, such as nullable fields, timestamps and floats, are
 added to weft (D35). Fireweed adds what weft has no reason to hold: queue
 statements and their
 semantics, leases, time, durability, request records, and execution.
-SQLite and Turso emission are new for both projects. Question 36 sets the
-order of extraction.
+SQLite and Turso emission are new for both projects. Extraction starts
+with UMF model loading, resolution and typing, and exact values; then the
+expression and predicate core; then the backend boundary and PostgreSQL
+emission. Each part becomes a versioned crate in the weft repository that
+weft itself depends on, and weft's Python bindings, WASM build, specs and
+CI move with it (D40).
 
 The memory backend interprets the logical plan directly, without SQL. It is
 the reference interpreter: consumers test against it, and the differential
@@ -329,7 +339,7 @@ A consumer sends a **program**: typed data, serialized as JSON, never SQL
 text (D12). Together the IR and its expressions are Fireweed's request DSL,
 which replaces RESP as the way consumers drive Fireweed (D25). A program is
 a list of statements run in one space as one commit (§5). Draft statement
-set (question 32):
+set:
 
 - `Insert`: enqueue items or put table rows, with a key-conflict policy.
 - `Claim`: a selection over a queue, a claim order, a limit and a lease
@@ -383,8 +393,9 @@ LOCKED`, since one writer owns a space. The engine caches compiled plans by
 schema version and statement shape, so the hot statements are compiled and
 prepared once; that cache replaces the hand-written verbs of revision 7.
 
-The JSON IR is the wire format. A text syntax is a later frontend that
-compiles to the IR, in weft's style (question 32).
+Programs are YAML or JSON documents read by one reader, as Snorri's
+workflow DSL is (D37). A text syntax may come later as a frontend that
+compiles to the IR, in weft's style.
 
 The expression language has literals, declared-field and JSON-path access,
 parameters, `now()`, comparison and boolean operators, `in`, arithmetic,
@@ -422,7 +433,8 @@ A space's schema is a UMF document (D34). UMF core types are the IR's type
 system. A published UMF extension, `umf.fireweed`, declares what UMF core
 does not: queues and their system fields, priority, leases, gates,
 cohorts, recurrence, merge rules, sequenced keys, row expiry, key retention
-and declared reads (question 33). A UMF physical binding document per
+and declared reads. It is published in UMF (D38,
+DocumentDrivenDX/umf#172). A UMF physical binding document per
 backend (UMF CONTRACT-042) holds layout and index choices. The engine
 generates each backend's DDL from the schema and its binding, the way UMF's
 DDD-to-PostgreSQL projection does (UMF CONTRACT-043). Fireweed reads UMF
@@ -443,6 +455,10 @@ write may add values, never remove them) or `NonDecreasing` for an integer,
 float or timestamp. A write that breaks a rule rejects the group, unless it
 is a `Mutate` that declares it overrides merge rules, which is how a
 suppression is lifted or a counter reset.
+
+A queue's claim index leads with due time, so a claim skips items that are
+not yet due without spending its scan budget (D39). Claim order within the
+eligible items stays priority.
 
 A declared read has a name, a version, a source object, parameters, a
 filter, a projection or aggregate, an order and a row cap. Consumers invoke
@@ -584,7 +600,7 @@ so every step makes progress.
 
 | Implementation | Status | Durability | Sharing |
 |----------------|--------|------------|---------|
-| PostgreSQL | First-class and production-supported. Snorri and Cayce build against it first. Real tables generated from each space schema (layout: question 31). | `FireAndForget`; `Durable` by default | `MultiProcess` |
+| PostgreSQL | First-class and production-supported. Snorri and Cayce build against it first. Real tables generated from each space schema; per-space or shared tables, decided by measurement (question 31, D36). | `FireAndForget`; `Durable` by default | `MultiProcess` |
 | Turso: MVCC on NVMe, S3 log | The local engine, in the Turso-queue session's phases L0 to L4. Speed gates B1 to B4 (Turso-queue plan §3.8) apply here only. One database per space. | All three; `Tracked` by default | `SingleProcess` per space |
 | SQLite | The local engine's comparison arm and a single-process backend. One database per space. | `FireAndForget`, `Tracked` | `SingleProcess` per space |
 | Memory | The reference interpreter (§2), for consumers' tests and the differential test. | `FireAndForget` | `SingleProcess` |
@@ -692,7 +708,7 @@ not on the interface or on `Fireweed`.
 | Positive | New claim shapes, bulk changes and queries need no new API: they are programs the compiler checks and lowers. |
 | Positive | Schemas, types and DDL come from UMF, so the Cayce UI, generated types and Niflheim exports can read the same schema. |
 | Negative | Fireweed takes on a compiler: name resolution, typing, plan building and lowering for three SQL dialects, with golden fixtures for each. |
-| Negative | Fireweed depends on UMF's Rust crates and on UMF types it needs that are not in core yet (question 33). |
+| Negative | Fireweed depends on UMF's Rust crates and on UMF types it needs that are not in core yet (D38, DocumentDrivenDX/umf#172). |
 | Negative | The interface is much larger than a queue API. The expression language must behave identically on every implementation. |
 | Negative | Snorri migrates its side records, fences and in-memory idempotency to Fireweed shapes, and to token-addressed finalize. |
 | Negative | Every selector and read needs an index-backed conjunct, which constrains ad-hoc queries. |
@@ -779,6 +795,14 @@ object-log, RESP and TD-003 changes land at step 6.
 | 20 | Bounding redelivery | Lease expiry counts toward `max_attempts` (D17); a queue may opt out with `u32::MAX` (D30). |
 | 30 | Definitions larger than one value | Snorri caps definitions at 256 KiB and transition output at 1 MiB (D31). |
 | 29 | A space per Snorri shard | One space per (run, shard) (D32); re-entry across runs uses the family record (D29). |
+| 26 | Claim order with sleeping items | Claim indexes lead with due time (D39). |
+| 27 | Several actions on one record | No combined statement; a program holds several statements on one key (D39). |
+| 28 | Timers that do not charge attempts | `Rearm` on a recurring queue (D39). |
+| 32 | Statement set and surface | The §4 statements; YAML or JSON documents, no text syntax in v1 (D37). |
+| 33 | The `umf.fireweed` extension | Published in UMF, DocumentDrivenDX/umf#172 (D38). |
+| 34 | UMF declarative actions | Not in v1 (D39). |
+| 35 | The engine trait | Narrowed (D39). |
+| 36 | What to extract from weft | The §2 order, with weft's tooling evolved around it (D40). |
 | 21 | Choices made without a ruling | Adopted as needed, including `SERIALIZABLE` where it is required (D19). |
 | 22 | Moving spaces between implementations | Not needed (D26). |
 | 23 | Merge policies | `AddOnly` and `NonDecreasing` field rules, with an explicit override (D20). |
@@ -831,54 +855,16 @@ Snorri's TD-012 revision 7 (uncommitted there; sent to this session on
     first and give the slot back if the send's commit fails, as Cayce's
     design does today (it accepts no refund and fails open). Draft: (a) for
     suppression, which must be exact at send time; (c) for send caps.
-26. **Claim order with sleeping items.** A claim's scan budget counts items
-    that are gated or not yet due, and claim order is priority only, so
-    sleeping Snorri instances at the head of a queue can exhaust the budget
-    and starve claims. Snorri's workaround is priority = due time. Add a
-    claim order of due time first, or require implementations to skip items
-    not yet due without charging the budget? (Turso-queue session.)
-27. **Several actions on one record.** A Snorri wake patches the inbox,
-    removes the await key and reschedules, which today takes three `Mutate`
-    operations on one key in one group. Add `Action::Seq(Vec<Action>)`?
-    (Turso-queue session.)
-28. **Timers that do not charge attempts.** A Snorri `wait` through
-    `Retry { not_before }` counts toward `max_attempts`. On a queue
-    declared with `recurrence`, `Rearm` reschedules without charging, and
-    the DSL scenarios use it (DSL-2 shows both). Is declaring instance
-    queues recurring acceptable, or should any queue get a non-charging
-    reschedule? Draft: use `Rearm`; no new outcome. (Turso-queue session.)
-31. **PostgreSQL layout.** With real tables per space schema, does each
-    space get its own PostgreSQL schema (namespace), or do spaces with the
-    same schema version share tables with the space id leading every key
-    and index? At 1,024 or more Snorri spaces, the first means thousands
-    of tables; the second keeps the table count at the number of schema
-    versions. Draft: shared tables per schema version.
-32. **Statement set and surface.** Which revision 7 features become v1
-    statements: `claim_by_item_ids`, cohorts, group batching and
-    recurrence? Is a text syntax in v1 or later, and does it reuse weft's
-    grammar where it can? Draft: the §4 list, JSON IR only in v1.
-33. **The `umf.fireweed` extension.** Is it published in the UMF
-    repository, as UMF expects of target-shaped meaning, or kept in
-    Fireweed? UMF's temporal facets are a candidate core ideal, not yet
-    admitted (UMF CONTRACT-047), so Fireweed's `Timestamp` (UTC,
-    milliseconds) needs a stated meaning in the extension until they are.
-    The same holds for `TextSet` and the JSON body.
-34. **UMF declarative actions.** UMF specifies mutation contracts
-    executed by a qualified executor (UMF CONTRACT-900, CONTRACT-901). Should
-    Fireweed's statements be UMF actions, with the engine as their
-    executor? Draft: not in v1; the IR stays Fireweed's own (D33) and is
-    revisited with weft alignment.
-35. **The engine trait.** Does `DataPlane` keep the verb methods, or narrow
-    to `apply_schema`, `execute(program)`, `read(query)`, `get_request`
-    and `get_schema`? Draft: narrow it; the facade builds programs.
-36. **What to extract from weft first.** Draft order: UMF model loading,
-    resolution and typing; exact values; the expression and predicate
-    core; the backend boundary; PostgreSQL emission. Each moves into a
-    crate in the weft repository with its own version, and weft's
-    dialect slices depend on it as Fireweed does. Which crates, and in
-    what order? The types weft's v0.1 language refuses (nullable fields,
-    timestamps, floats) are weft additions, not Fireweed extensions:
-    "the missing types are obvious additions to weft" (owner, 2026-11-16).
+31. **PostgreSQL layout.** Each space schema becomes real tables. Either
+    every space gets its own tables (in its own PostgreSQL schema), or spaces
+    on one schema version share tables with the space id leading every key
+    and index. The owner is concerned that deletes and indexes become a
+    problem without independent tables (D36), so both are measured before
+    choosing. The measurement: 1,024 Snorri spaces and more, at the Snorri
+    inventory's rates; claim and commit latency; index size and bloat;
+    vacuum and autovacuum load; the cost of creating a space and of
+    retiring or deleting a whole space; and catalog and plan-cache cost
+    with thousands of tables.
 
 ## Risks
 

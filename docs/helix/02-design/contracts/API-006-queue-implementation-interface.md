@@ -67,7 +67,10 @@ expression, time, durability and conformance rules below keep their
 meaning and become the IR's semantics. Sections that describe the
 revision 7 verbs, the `DataPlane` methods and §Implementation rules
 §PostgreSQL are restated by that section and are rewritten once the
-review accepts it.
+review accepts it. The owner's rulings D36 to D40 narrow the `DataPlane`
+trait to `apply_schema`, `get_schema`, `execute(program)`, `read(query)`,
+`get_request` and `metrics`, keep YAML or JSON as the only syntax in v1,
+and publish the `umf.fireweed` extension in UMF.
 Durability levels are Niflheim's `FireAndForget`, `Tracked` and `Durable`,
 chosen per request; PostgreSQL commits are `Durable`. The Blob and
 EventLog shapes and queue history are removed; a table with
@@ -170,7 +173,8 @@ ADR-025 §2, §4 and §6 give the reasons; this section states the contract.
 A program is a list of statements for one space, run in list order as one
 commit (§Request and response types, group commit rules). Draft statements:
 `Insert`, `Claim`, `Settle`, `Renew`, `Reassign`, `Mutate`, `Assert`,
-`Query`, `SetGates`, `SetQueueState` (ADR-025 §4, question 32). Each
+`Query`, `SetGates`, `SetQueueState` (ADR-025 §4). Programs and schemas are
+YAML or JSON documents read by one reader (ADR-025 D37). Each
 revision 7 verb maps to a one-statement program with the same outcomes:
 
 | Revision 7 | Revision 8 |
@@ -190,7 +194,7 @@ program, as group commit does today.
 Every field and expression has a UMF type. The revision 7 `ScalarType`
 values map to UMF core types with facets; where UMF core has no admitted
 meaning (temporal facets, UMF CONTRACT-047; text sets; the JSON body), the
-`umf.fireweed` extension states it (ADR-025 question 33). `Timestamp` is a
+`umf.fireweed` extension states it (ADR-025 D38, DocumentDrivenDX/umf#172). `Timestamp` is a
 UTC instant in milliseconds. The rules in §Expressions (evaluation order,
 nulls, overflow, casts, collation, aggregate precision) become the typing
 and evaluation rules of the IR; there are no implicit casts.
