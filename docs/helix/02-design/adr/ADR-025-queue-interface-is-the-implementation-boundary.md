@@ -54,6 +54,19 @@ implementations run the same code. Both pass the same 96 executable
 rule-pinning tests (23 skipped), after fixes for two review passes. It also records the Turso-queue session's
 inputs to open questions 13, 16, 17 and 18, and adds questions 20 to 22.
 
+Revision 7 (2026-11-15) applies the owner's rulings on the open questions,
+given in this repository's interface session, and the rulings the owner
+gave the Turso-queue session (decisions D13 to D28). A space is one
+workflow or one campaign. Durability uses Niflheim's write modes, chosen per
+request, and PostgreSQL is assumed fully replicated. The control plane
+fences writers. Blobs and event logs leave the interface: a space holds
+queues and tables, and history and event feeds are sequenced tables. Lease
+expiry fails an item that has used up `max_attempts`. Tables gain field
+merge rules, and group commits gain a guard-only `Assert`. RESP is
+deprecated in favour of the request DSL; object-log is deprecated once the
+local engine ships its S3 log. Eighteen questions are resolved; questions 5
+and 15 wait on background for the owner, and questions 25 to 29 are new.
+
 ## Context
 
 ### Intent
@@ -122,7 +135,7 @@ Its report is held by that project; the figures are as it reported them.
 | Observation | Consequence |
 |-------------|-------------|
 | With one writer per database, a claim waited 2.3 s behind a 500,000-row `UPDATE`. | Every write carries a cap (§10). |
-| No asynchronous shipping design made an acknowledged write durable in S3 at return. | Durability is reported per commit as `Local` or `Replicated` (§7). |
+| No asynchronous shipping design made an acknowledged write durable in S3 at return. | Durability is reported per commit, and chosen per request (§7). |
 | A Durable Object has no interactive multi-call transactions. | Every request, including a group commit, is one atomic step (§5). |
 | A single-statement claim (`UPDATE … RETURNING` over a `UNION ALL` candidate set) works on SQLite, tursodb and a Durable Object. | The claim verb is one step on all three. |
 | The object-log implementation reached about 100 recipients/s end to end, against Cayce's target of about 17,000/s. | Object-log is not the first implementation behind the interface (§11). |
@@ -139,13 +152,13 @@ needs Cayce's confirmation.
 
 ## Owner decisions
 
-| # | Decision | Source | Status in revision 5 |
+| # | Decision | Source | Status in revision 7 |
 |---|----------|--------|----------------------|
 | D1 | Time-driven transitions are in the contract; no caller tick. | Owner, 2026-11-13 | Kept (§8). |
 | D2 | One time authority per storage. | Owner, 2026-11-13 | Kept. Claims take an optional eligibility time; lease time always comes from the authority (§8), pending Snorri O2. The Cayce project withdrew its "clock as an input to claim and lease" wording on 2026-11-15. |
-| D3 | ADR-008 ownership becomes internal to object-log, which declares `SingleProcess`. | Owner, 2026-11-13 | Conditional on object-log's future (open question 3). |
+| D3 | ADR-008 ownership becomes internal to object-log, which declares `SingleProcess`. | Owner, 2026-11-13 | Moot once object-log is deprecated (D24). |
 | D4 | `Bounded` new-work visibility allowed, fails closed. | Owner, 2026-11-13 | Kept in the type. No v1 implementation declares it, and v1 conformance defines `Immediate` only (§7). |
-| D5 | RESP gets a `StreamGroup` family. | Owner, 2026-11-13 | Deferred past v1 (open question 11). |
+| D5 | RESP gets a `StreamGroup` family. | Owner, 2026-11-13 | Superseded by D25: RESP is deprecated. |
 | D6 | Core leases are token-fenced, with per-item outcomes. | Owner, 2026-11-13 | Kept (§9). |
 | D7 | `MutateItems` and operator repair become optional families. | Owner, 2026-11-13 | Superseded by D12: selector writes are part of the request model every implementation provides. |
 | D8 | Snorri owns no tables. Its workflow state lives in Fireweed items; Fireweed provides group commit. | Owner via Cayce, 2026-11-15 | Adopted (§5). |
@@ -153,6 +166,22 @@ needs Cayce's confirmation.
 | D10 | Cayce reads queue data only through versioned, named, declared reads, never engine tables. | Owner via Cayce, 2026-11-15 | Adopted (§6). |
 | D11 | All high-volume, fast-changing durable workflow data goes through Fireweed. The control plane is separate. Exhaust goes to Niflheim. | Owner via Cayce, 2026-11-15 | Adopted (§1). |
 | D12 | Requests are typed data with a selector, an action and a limit; a group commit is a list of them. Claim, bulk enqueue and complete stay fixed verbs. No SQL. Small expression language. Every write capped. Durability reported per commit. v1 covers what the Cayce UI and the recipient-lifecycle bulk operations need. Fireweed also provides ancillary storage shapes. | Owner via Cayce, 2026-11-15 | Adopted (§3 to §6, §10). |
+| D13 | "atomic writes should be per workflow or per campaign." | Owner, 2026-11-15 | A space is one workflow or one campaign (§3). Account-scoped records are open question 25. |
+| D14 | Durability is chosen per request with Niflheim's write modes: "we need to be able to control the level of durability required and wait accordingly. niflheim has a spec for this, we should try to use the same if possible - durable, tracked, fire and forget". For PostgreSQL: "Just assume postgres is fully replicated and design the protocol to ensure transactions are used to achieve that assuming perfect server durability." | Owner via the Turso-queue session, and owner, 2026-11-15 | Adopted (§7). Resolves questions 13, 14 and 19. |
+| D15 | "fencing should happen by the control plane. we'll have to have some sort of recheck interval to force readers to switch to the new node." Via the Turso-queue session: "the same applies to stopping old writers. the lease can be managed by the control plane via the embedder." | Owner, 2026-11-15 | Adopted (§11). Resolves question 16. |
+| D16 | "this system isn't really meant to store blobs. even history will need to be supported for timeline and event triggering … fireweed is exposing a generic interface similar to a sql database but with more constraints. define another table, be done." | Owner, 2026-11-15 | Shapes are queues and tables; history and event feeds are sequenced tables (§3). Resolves questions 4 and 18. |
+| D17 | "yes, add max_attempts": lease expiry counts toward `max_attempts`. | Owner, 2026-11-15 | Adopted (§9). Resolves question 20. The Turso-queue session relayed "crashes can be handled by the control plane via the embedder"; both hold: the store bounds redelivery, and the embedder may park an item sooner. |
+| D18 | "yes, bump item_version" on renew and reassign. | Owner, 2026-11-15 | API-001's rule stands (§9). Resolves question 17. |
+| D19 | Cohort deadline draft: "yes". Rejected requests recorded: "yes." Choices made without a ruling: "yes, as needed. serializable transactions seems pretty aggressive but if it's necessary..." | Owner, 2026-11-15 | Drafts adopted (§5, §8, §10, §11). Resolves questions 7, 8 and 21. |
+| D20 | Field merge rules: "yes add merge rules". A guard-only operation: "agree". | Owner, 2026-11-15 | Adopted (§4, §6). Resolves questions 23 and 24. |
+| D21 | "all high-volume ops should be in the data plane, not control plane." | Owner, 2026-11-15 | Admission chunk state is a table row (§1). Resolves question 6. |
+| D22 | "no need for complex schema changes. these spaces will not have infinite lifetime" | Owner, 2026-11-15 | Schema changes stay additive (§6). Resolves question 9. |
+| D23 | Exact percentile: "agree." Names: "these are ok". | Owner, 2026-11-15 | Resolves questions 1 and 10. |
+| D24 | "object-log can be deprecated assuming we can implement the logs-to-s3 without it." | Owner, 2026-11-15 | Deprecated once the local engine's S3 log passes (§11). Resolves question 3. |
+| D25 | "deprecate RESP for now in favor of the DSL"; "drop protubuf unless required for the DSL". | Owner, 2026-11-15 | §4, §13. Resolves questions 11 and 12. |
+| D26 | "no need to migrate spaces"; via the Turso-queue session: "we don't need a migration path". | Owner, 2026-11-15 | A space stays on the implementation it starts on (§11). Resolves question 22. |
+| D27 | Via the Turso-queue session: "we do need to ensure that the dsl can be fully implemented on this model". | Owner, 2026-11-15 | The Turso-queue session mapped every Snorri DSL construct onto revision 6 (its plan, Part 2). The one gap, a guard-only operation, is D20; three smaller additions are questions 26 to 28. |
+| D28 | Crashes are the embedder's: "crashes can be handled by the control plane via the embedder (snorri/cayce)". | Owner via the Turso-queue session, 2026-11-15 | The control plane grants ownership; the store still bounds redelivery (D17). |
 
 ## Decision
 
@@ -160,8 +189,9 @@ needs Cayce's confirmation.
 
 Fireweed stores all durable workflow data that is high in volume or rate of
 change and is needed to operate Snorri and Cayce: work items, workflow
-state, per-recipient state, counters, ledgers, operational events and large
-payloads.
+state, per-recipient state, counters, ledgers, admission chunk state (D21),
+operational events and timelines. Large payloads are not stored (D16); a
+field holds a reference to wherever the consumer keeps them.
 
 Outside Fireweed:
 
@@ -190,15 +220,22 @@ Consumers (`Fireweed` facade, Snorri, Cayce, `fireweed-resp`,
 
 ### 3. Spaces and shapes
 
-A **space** is one atomic and ordering domain, owned by one tenant. It holds
-named objects of four shapes, declared in the space's schema:
+A **space** is one atomic and ordering domain, owned by one tenant: one
+workflow or one campaign (D13). It holds named objects of two shapes,
+queues and tables, declared in the space's schema. A sequenced table is a
+table whose key the implementation assigns:
 
 | Shape | Holds | Covers |
 |-------|-------|--------|
 | Queue | Work items: priority, schedule, leases, retries, gates, groups, cohorts, recurrence, declared typed fields, a JSON body patched by path, and key retention for dedupe | Recipient and workflow work; Snorri instance heads and their await fields (D8); effect items and send intents; external events deduplicated by provider id |
-| Table | Rows by typed primary key, with typed columns; atomic set, increment and conditional update; row expiry | Keyed state (per-recipient, per-run), handler idempotency records, admission chunk state, suppression flags, rollups, rate and slot counters, consumer cursors |
-| Event log | Append-only entries with a log-wide sequence in commit order and a declared partition key; read by partition or from a cursor; retention by age | Delivery and engagement events, outbox feeds (including export to Niflheim), queue transition history |
-| Blob | Immutable byte objects, content-addressed, referenced from other shapes | Large transition outputs, workflow definitions, rendered messages, attachments |
+| Table | Rows by typed primary key, with typed columns; atomic set, increment and conditional update; field merge rules; row expiry | Keyed state (per-recipient, per-run), handler idempotency records, admission chunk state, suppression flags, rollups, rate and slot counters, consumer cursors |
+| Sequenced table | A table whose single Int key the implementation assigns: gapless per table, in commit order, never reused. Rows are immutable; they leave by expiry or retire. Read by range from a cursor. | Timelines and transition history, written in the same group as the transition they record; delivery and engagement events; outbox feeds, including export to Niflheim |
+
+Blobs and event logs, specified in revisions 3 to 6, are removed (D16). A
+sequenced table gives an event log's guarantee: a reader paging forward
+never later sees a lower sequence than one it has already read. Queue
+transition history is not written by the implementation; the consumer
+writes the timeline rows it needs in the transition's own group.
 
 Counters are table columns with atomic increment, and a conditional
 increment is a guarded `Mutate` (§4). Rate and slot windows are table rows
@@ -208,25 +245,29 @@ question 5, needed only if hot-key increments prove too slow.
 Across shapes in one space: a group commit is atomic; every read observes
 one snapshot; `request_id` is scoped to the space; one durability level
 covers the whole commit; caps apply to the whole commit. Across spaces there
-is no atomicity or ordering. How spaces map to tenants, campaigns or Snorri
-shards is open question 2.
+is no atomicity or ordering. Records that belong to an account rather than a
+campaign, such as suppression and per-contact send caps, cannot share a
+group with a campaign's effects; open question 25.
 
 ### 4. Requests are typed data
 
-Every request is a Rust value, serializable as JSON and protobuf. There is
-no method per operation and no SQL or SQL subset.
+Every request is a Rust value, serializable as JSON. Together the requests
+and expressions are Fireweed's request DSL, which replaces RESP as the way
+consumers drive Fireweed (D25). Protobuf is dropped unless the DSL needs it.
+There is no method per operation and no SQL or SQL subset.
 
 - **Hot-path verbs** stay fixed and hand-tuned: `enqueue` (bulk push),
   `claim`, `claim_by_item_ids`, `renew`, `finalize` (complete, fail, retry,
   release, rearm).
 - **Writes** are operations: `Enqueue`, `Finalize`, `Renew`, `Reassign`,
-  `SetGates`, `SetQueueState`, `PutRows`, `Append`, and `Mutate`. A `Mutate`
+  `SetGates`, `SetQueueState`, `PutRows`, `Assert`, and `Mutate`. A `Mutate`
   has a target object, a selection (keys, or a predicate over declared
   fields), an action (set or increment fields, patch a JSON body by path,
   reschedule, transition, change item gates, retire), a limit, and an
   optional expectation on the number of matches. An unmet expectation
   rejects the group, which gives compare-and-swap and conditional
-  increment.
+  increment. `Assert` is the same selection and expectation with no action:
+  a guard that never writes and never changes a version (D20).
 - **Reads** are point gets by id or key, and declared reads (§6).
 
 The expression language has literals, declared-field and JSON-path access,
@@ -247,10 +288,8 @@ table (stale lease, version mismatch, key conflict, unmet match
 expectation, scan or match limit, cohort split, a fault in a written
 value), applies nothing, and reports that operation and entry.
 
-**[Draft pending owner]** A rejected group leaves a request record, so its
-replay returns the same rejection and no stalled earlier attempt can commit
-afterwards. Revision 3 recorded nothing; review round three showed that a
-replay could then be rejected while the original still committed.
+A rejected group leaves a request record (D19), so its replay returns the
+same rejection and no stalled earlier attempt can commit afterwards.
 
 A Snorri transition is one group: finalize the instance-head item with a
 patch to its body and await fields (token and `expected_item_version`
@@ -268,8 +307,15 @@ hints, retention, and its declared reads. Only declared fields can appear in
 selectors, filters and reads. A field may be multi-valued (a set of text
 values, such as an instance's await keys) and indexed per value. The
 implementation turns declarations into indexes. A field becomes usable once
-its index is ready, and `get_schema` reports index state. v1 schema changes
-are additive; other changes are open question 9.
+its index is ready, and `get_schema` reports index state. Schema changes
+are additive only (D22): spaces have finite lives, and a consumer that needs
+a different shape starts a new space.
+
+A table field may declare a **merge rule** (D20): `AddOnly` for a set (a
+write may add values, never remove them) or `NonDecreasing` for an integer,
+float or timestamp. A write that breaks a rule rejects the group, unless it
+is a `Mutate` that declares it overrides merge rules, which is how a
+suppression is lifted or a counter reset.
 
 A declared read has a name, a version, a source object, parameters, a
 filter, a projection or aggregate, an order and a row cap. Consumers invoke
@@ -289,28 +335,30 @@ Each implementation declares:
 
 | Guarantee | Values | Meaning |
 |-----------|--------|---------|
-| Durability | `Process`, `Local`, `Replicated` | The minimum level of every acknowledged commit. `Local`: survives a process crash and reopen of the implementation's own storage. `Replicated`: also survives loss of that storage, because a copy outside it was durable before the acknowledgement. |
+| Durability | `FireAndForget`, `Tracked`, `Durable` | Niflheim's write modes (Niflheim ADR-002), used as the levels a commit reaches (D14). `FireAndForget`: visible, may be lost if the process or machine fails. `Tracked`: survives a process crash and a reopen of the implementation's own storage. `Durable`: also survives loss of that storage. The declared value is the lowest level any acknowledgement can have. |
 | New-work visibility | `Immediate`, `Bounded { max_ms }` | v1 implementations are `Immediate`, and v1 conformance defines only `Immediate`. |
 | Sharing | `SingleProcess`, `MultiProcess` | Whether several instances may serve one space at once. |
 
-Every write response reports the level that commit reached. A request may
-require `Replicated`; the commit is then acknowledged only once it reaches
-that level. If it committed but has not reached the level in time, the
-request fails with `DurabilityPending { reached }`, which tells the caller
-the commit exists. `CommitTimeout` is kept for "outcome unknown". Replaying
-the `request_id` waits again, so a caller can wait for `Replicated` after a
-`Local` acknowledgement.
+Every write request may name the level it needs; with none, the
+implementation's default applies (`Tracked` where offered, as in Niflheim).
+The commit is acknowledged at the lowest level the implementation offers at
+or above the one asked for, and the response reports that level. A level
+above the implementation's maximum fails validation. If a commit has not
+reached the level in time, the request fails with
+`DurabilityPending { reached }`, which tells the caller the commit exists;
+replaying the `request_id` waits again. `CommitTimeout` is kept for "outcome
+unknown". Levels are prefix-closed in a space: when a commit is `Durable`,
+so is every earlier commit, which is what makes a `Durable` send intent
+safe even though it was derived from `FireAndForget` or `Tracked` state.
 
-| Implementation | Minimum | Maximum |
-|----------------|---------|---------|
-| Postgres | `Local`: flushed to the primary's WAL | `Replicated` only when a synchronous standby is configured (a standby confirmed the flush); otherwise `Local`, and a request requiring `Replicated` fails. **[Draft pending owner; Snorri O15]** |
-| Local engine | `Local`: fsynced locally | `Replicated`: the commit is in the S3 log. Commits ship in batches; a request requiring `Replicated` waits for its batch. **[Draft pending owner]** |
+| Implementation | Levels offered | Default | How |
+|----------------|----------------|---------|-----|
+| PostgreSQL | `FireAndForget`, `Durable` | `Durable` | The server is assumed fully replicated (D14): a committed transaction is `Durable`, and keeping the server so is the operator's job. A `FireAndForget` request commits with `synchronous_commit = off`. A `Tracked` request is acknowledged at `Durable`. |
+| Local engine | `FireAndForget`, `Tracked`, `Durable` | `Tracked` | `FireAndForget` replies once the commit is visible, `Tracked` after the batch fsync, `Durable` once the commit's log frame and every earlier one is in S3 (Turso-queue plan §5.1). |
+| In-memory | `FireAndForget` | `FireAndForget` | — |
 
-Revision 3 made every local-engine commit `Replicated`, which puts an S3
-round trip on every claim and conflicts with speed gate B2. Without a
-synchronous standby, Snorri's zero-loss send path cannot run on Postgres;
-the owner either requires a standby in production or accepts `Local` send
-intents and possible re-sends after losing the primary.
+Snorri's send intents are `Durable`. On PostgreSQL every default commit
+already is.
 
 Operations on one space are linearizable. Every read observes every effect
 committed before its linearization point, whatever its durability level.
@@ -342,8 +390,7 @@ This carries Snorri CONTRACT-005's separate execution and lease times. No
 other request overrides time. A selector that needs a fixed instant uses a
 parameter.
 
-**[Draft pending owner]** Cohort deadlines follow API-001, evaluated at
-the deadline instant: unless the cohort has been claimed, it fails with
+Cohort deadlines follow API-001 (D19), evaluated at the deadline instant: unless the cohort has been claimed, it fails with
 `cohort-incomplete` if fewer than `cohort_size` members are non-terminal,
 or if a non-terminal member is not eligible. Revision 3 counted committed
 members only; review showed that let a cohort with a retired member never
@@ -353,8 +400,16 @@ expire, and let one gated member withhold its siblings indefinitely.
 
 Renew, reassign and finalize address a lease by item id and token (or
 cohort id and cohort token). Finalize and `Mutate` may also carry
-`expected_item_version`. Reads never return a lease token. The id-only,
+`expected_item_version`. Renew and reassign change `item_version`, as
+API-001 says (D18). Reads never return a lease token. The id-only,
 all-or-nothing facade helpers are removed.
+
+Each claim charges an attempt. When a lease expires, the item returns to
+pending, unless its claims have used up `max_attempts`: then it fails with
+`attempts-exhausted` at the expiry instant (D17). A worker that crashes on
+an item every time therefore cannot loop on it forever. This amends
+API-001, where expiry charged nothing and `max_attempts` was checked only on
+a retry finalize.
 
 A `Mutate` that selects a leased item applies its lease policy: skip it
 (default), reject the group, preserve the lease (only for reschedule,
@@ -387,18 +442,41 @@ so every step makes progress.
 
 | Implementation | Status | Durability | Sharing |
 |----------------|--------|------------|---------|
-| PostgreSQL (shared server; new crate from TD-002) | First-class and production-supported. Defines correct semantics for the differential test. Snorri and Cayce build against it now. | `Local`; `Replicated` only with a synchronous standby | `MultiProcess` |
-| Local engine: Turso MVCC on NVMe, S3 log; SQLite as comparison arm | Later, in the Turso-queue session's phases L0 to L5 (ADR and spike; the engine with a SQLite arm; gates; the S3 log; event logs, blobs and cohorts; moving spaces off Postgres). Passes the same suite and the differential test. Speed gates B1 to B4 (Turso queue plan §3.8) apply here only. | `Local`; `Replicated` on request [draft pending owner] | `SingleProcess` per space |
-| In-memory (`fireweed-interface-memory`) | For consumers' tests, so that nobody re-implements Fireweed in memory. Queues and tables today. | `Process` | `SingleProcess` |
-| Object log × Turso (current runtime) | Not wrapped. Its future is open question 3. | — | — |
+| PostgreSQL (`fireweed-interface-postgres`) | First-class and production-supported. Defines correct semantics for the differential test. Snorri and Cayce build against it now. | `FireAndForget`; `Durable` by default | `MultiProcess` |
+| Local engine: Turso MVCC on NVMe, S3 log; SQLite as comparison arm | Later, in the Turso-queue session's phases L0 to L4. Passes the same suite and the differential test. Speed gates B1 to B4 (Turso-queue plan §3.8) apply here only. | All three; `Tracked` by default | `SingleProcess` per space |
+| In-memory (`fireweed-interface-memory`) | For consumers' tests, so that nobody re-implements Fireweed in memory. | `FireAndForget` | `SingleProcess` |
+| Object log × Turso (current runtime) | Deprecated once the local engine's S3 log passes (D24). Not wrapped. | — | — |
 | Durable Objects | Possible: every request is one atomic step. Not scheduled. | — | — |
 
 The Postgres implementation keeps TD-002's queue tables, indexes, `SKIP
 LOCKED` claim and group and cohort locking, and drops the command log,
 `LeaseExpired` commands, `assignment_epoch` fencing and epoch-fenced
-sweepers. Group commits and chunk steps run at `SERIALIZABLE`, so absence
-guards and range expectations cannot be defeated by write skew; verbs run
-at `READ COMMITTED` with an explicit lock protocol (API-006).
+sweepers. Group commits and chunk steps run at `SERIALIZABLE` where they
+need it (D19), so absence guards and range expectations cannot be defeated
+by write skew; verbs run at `READ COMMITTED` with an explicit lock protocol
+(API-006). Every acknowledged commit is one transaction, so the server's
+replication makes it `Durable` (D14).
+
+**Ownership.** A space on the local engine has one writer. The embedder's
+control plane (Snorri or Cayce) decides which node owns a space and fences
+old writers (D15, D28); Fireweed runs no lease or clock for it. The engine
+opens a space with the ownership epoch the control plane granted, and
+writes a takeover record at the next S3 log sequence before it accepts
+writes; log keys are written with `If-None-Match: *`, so a stale writer's
+next upload fails and no `Durable` commit is lost or forked. `FireAndForget`
+and `Tracked` commits touch only the local disk, so only the control
+plane's rule protects them: no new epoch while the old process may still
+run. Clients recheck placement on an interval and after a refusal, so
+readers move to the new node. Ownership is a constructor parameter, not a
+`DataPlane` operation. A fenced engine fails every later request with the
+definitive `InstanceSuperseded`, and a space opened at a higher epoch
+restores from the S3 log. Item state, including attempt counts, moves with
+the log: a clean handover keeps all of it, and a crash keeps everything up
+to the last shipped frame. Item leases stay with Fireweed; the control
+plane's lease covers only which node writes the space.
+
+A space stays on the implementation it starts on; there is no migration
+between implementations (D26).
 
 ### 12. Conformance
 
@@ -417,8 +495,9 @@ which keeps testing the current runtime until migration step 6.
 
 `Fireweed` (API-005) becomes a concrete wrapper over `Arc<dyn DataPlane>`,
 with convenience helpers over the verbs and request types. It names no
-implementation. `fireweed-resp` stays on the current runtime until RESP's
-place is decided (open question 11).
+implementation. RESP is deprecated for now in favour of the request DSL
+(D25): `fireweed-resp` stays frozen on the current runtime and is not
+ported.
 
 ADR-007's two driving interfaces and ADR-022's single concrete `Fireweed`
 stand. What sits under them changes.
@@ -440,7 +519,7 @@ not on the interface or on `Fireweed`.
 | Postgres as test oracle only | Less to support | Snorri and Cayce cannot build until the local engine exists | Rejected (D9) |
 | A separate store per shape | Each store tuned to its shape | No atomic commit across shapes; consumers coordinate stores themselves | Rejected |
 | Caller-supplied lease time, or a two-reading `Clock` (Turso queue plan §1.4 options A and C) | Matches CONTRACT-005 directly | Two time sources for lease fencing | Rejected for lease time; eligibility time adopted |
-| **One data-plane interface: spaces, four shapes, typed requests, group commit, declared reads, Postgres first** | Matches the intent; one abstraction for all workflow data | Large interface to specify and test | **Proposed** |
+| **One data-plane interface: spaces, queues and tables, typed requests, group commit, declared reads, Postgres first** | Matches the intent; one abstraction for all workflow data | Large interface to specify and test | **Proposed** |
 
 ## Consequences
 
@@ -449,7 +528,9 @@ not on the interface or on `Fireweed`.
 | Positive | Snorri and Cayce get one storage abstraction for all fast-changing workflow data, with atomic commits across shapes. |
 | Positive | Snorri and Cayce can build now on Postgres. The local engine slots in behind the same interface and suite. |
 | Positive | Bulk changes and live analytics need no new methods, only declarations and requests. |
-| Positive | Body patches shrink requests, and blob references and table rows take large or independently changing data out of the instance body. Engines still rewrite a stored JSON value on update. |
+| Positive | Body patches shrink requests, and table rows take independently changing data out of the instance body. Engines still rewrite a stored JSON value on update. |
+| Negative | Large payloads (Snorri's transition outputs, workflow definitions) need a store outside Fireweed, referenced by a field. |
+| Negative | Records scoped to an account cannot be checked atomically with a campaign's effects (open question 25). |
 | Positive | Expression, aggregate, group-commit and time rules are pinned by named conformance tests that both engines run. |
 | Positive | Correctness is defined by observable behaviour and checked against Postgres. |
 | Negative | The interface is much larger than a queue API. The expression language must behave identically on every implementation. |
@@ -464,22 +545,22 @@ not on the interface or on `Fireweed`.
 |----------|--------|
 | ADR-024 | Superseded. |
 | ADR-007 | Amended: the driven side is the data-plane interface. |
-| ADR-008, ADR-012, ADR-013, ADR-016, ADR-017 | Rescoped to the object-log implementation, pending open question 3. ADR-008's atomicity outcomes move into API-001 without an owner. |
+| ADR-008, ADR-012, ADR-013, ADR-016, ADR-017 | Rescoped to the object-log implementation, which is deprecated (D24). ADR-008's atomicity outcomes move into API-001 without an owner. |
 | ADR-009 | Amended: the facade holds a `dyn DataPlane`; its "no dyn backend" and crate-private-constructor rules and the publish topology change accordingly. |
 | ADR-010, ADR-011 | Restated as schema declarations: declared fields, index hints, typed payload schemas. |
-| ADR-014 | The Kafka consumer surface reads event logs and queue transition history. |
+| ADR-014 | The Kafka consumer surface reads sequenced tables. |
 | ADR-018 | Exact ensure becomes `apply_schema` with an expected version. |
 | ADR-022 | Stands for the single concrete `Fireweed`, except `projection_control()`, `StorageConfig` and maintenance leave it. |
-| API-001 | Major version. Remove storage language and `SetGates.applied_command_position`. Replace `MutateItems` with `Mutate` requests, drop `evaluated_at` and ordered-selector first-match ownership. Add `eligibility_time` to claims, declared-field filters, `ReassignLeases`, lease policies including lease break, the cohort deadline rule evaluated at the deadline instant (§8), the time rule, request records for rejected requests, and lease expiry not changing `item_version`. Define progress metrics by base eligibility. Restate atomicity without an owner. Move discovery authorization to the adapter. |
-| API-002 | Operator actions become requests: pause and resume are `SetQueueState`; redrive and repair are `Mutate` transitions with lease break where forced; purge is `Mutate` retire; archive sets item metadata and deletes nothing; audit is an event log; operation lookup is `request_id` replay. `max_affected` becomes the per-request limit. |
+| API-001 | Major version. Remove storage language and `SetGates.applied_command_position`. Replace `MutateItems` with `Mutate` requests, drop `evaluated_at` and ordered-selector first-match ownership. Add `eligibility_time` to claims, declared-field filters, `ReassignLeases`, lease policies including lease break, the cohort deadline rule evaluated at the deadline instant (§8), the time rule, request records for rejected requests, and lease expiry not changing `item_version`, and lease expiry failing an item whose claims used up `max_attempts` (D17). Define progress metrics by base eligibility. Restate atomicity without an owner. Move discovery authorization to the adapter. |
+| API-002 | Operator actions become requests: pause and resume are `SetQueueState`; redrive and repair are `Mutate` transitions with lease break where forced; purge is `Mutate` retire; archive sets item metadata and deletes nothing; audit is a sequenced table; operation lookup is `request_id` replay. `max_affected` becomes the per-request limit. |
 | API-003 | Profiles are restated in API-006 terms. |
 | API-004 | Replaced by declared reads. |
 | API-005 | Rewritten as the binding of API-006 to `Fireweed`. |
-| TD-002 | Revised per §11, extended to tables, event logs, blobs and declared reads. |
+| TD-002 | Revised per §11, extended to tables, sequenced tables and declared reads. |
 | TD-003 | Ownership and fencing become object-log internals. |
-| TD-006 | Bound to RESP's decision (open question 11). Its required `ReclaimDriver` is replaced by the time rule. |
+| TD-006 | Deprecated with RESP (D25). |
 | TD-007 | Durability classes become §7's levels; `ReclaimDriver` is replaced by the time rule; `UpsertPort` becomes `Enqueue` with a key-conflict policy. |
-| TD-008 | Queue change records become queue transition history in an event log. |
+| TD-008 | Queue change records become timeline rows the consumer writes to a sequenced table. |
 | Turso queue implementation plan | Part 2 (Snorri tables) and §3.4a (SQL read views) give way to Fireweed shapes and declared reads. |
 | AGENTS.md | The projection-lifecycle test rule names the object-log implementation's own projection control. |
 
@@ -495,7 +576,7 @@ object-log, RESP and TD-003 changes land at step 6.
    implementation `fireweed-interface-memory` alongside, so the suite has a
    first target. (Started in revision 5.)
 3. Build the Postgres implementation: queues and verbs, then group commit,
-   tables, declared reads, event logs, then blobs. Add the differential test;
+   tables, declared reads and sequenced tables. Add the differential test;
    Postgres becomes the reference once it passes the suite. (Started in
    revision 6: queues, tables, group commit, request records, claims,
    selector writes and declared reads, with a per-space lock and whole-object
@@ -504,102 +585,97 @@ object-log, RESP and TD-003 changes land at step 6.
    Postgres. The old facade and runtime stay frozen until this step lands.
 5. Build the local engine and run it through the suite, the differential
    test and gates B1 to B4.
-6. Decide object-log and RESP (open questions 3 and 11). Retire
+6. Deprecate object-log once the local engine's S3 log passes (D24), and
+   RESP (D25). Retire
    `StorageConfig`, `RETIRED_STORAGE_CELL` and whatever the decisions remove.
    Apply the document changes above.
 
 ## Open questions for the owner
 
-1. **Names.** `fireweed-interface`, `DataPlane`, "space", and the shape names
-   are working names.
-2. **Space granularity.** Per tenant, per campaign, or per Snorri shard?
-   Group commit is atomic only within a space, and a single-writer engine's
-   throughput is per space. A suppression check inside an effect's group
-   (API-006 §Suppression) needs the suppression table in the same space as
-   the effect's queue; per-account or per-tenant spaces allow that,
-   per-shard spaces do not without copying suppression into each shard.
-3. **Object-log's future.** The owner said it is "likely going to
-   deprecate". Not decided.
-4. **v1 scope of blobs, event logs and queue transition history.** All are
-   specified. Snorri's inventory needs blobs (large outputs, definitions) but
-   sends its full history to Niflheim. Does v1 need event logs?
-5. **Counters.** Are table increments enough, or is a dedicated counter shape
-   needed for hot keys? Moving Cayce's rate-limit counters out of Dragonfly
-   is Snorri open item O16.
-6. **Admission chunk state.** Snorri proposes a per-run, per-shard table row
-   instead of a Postgres control-plane compare-and-swap (Snorri O16).
-7. **Cohort deadline rule** (§8). Draft: API-001's rule, evaluated at the
-   deadline instant, with claimed cohorts exempt.
-8. **Rejected requests recorded** (§5). Draft: yes.
-9. **Schema evolution** beyond additive changes.
-10. **Percentile** exact (v1 draft) or approximate.
-11. **RESP and `StreamGroup`.** When, and over which implementation?
-12. **Protobuf schema.** Who owns it, and in which release?
-13. **Local engine durability** (§7). Draft: `Local` minimum, `Replicated`
-    on request. The Turso-queue session agrees: `Local` by default,
-    `Replicated` on request through a shipped watermark, send intents
-    require `Replicated`. Shipping every commit to S3 costs 17 to 64% on
-    gate B2 and is the upper bound.
-14. **Postgres `Replicated`** (§7; Snorri O15). Draft: only with a
-    synchronous standby. Does production Postgres require one, or does the
-    owner accept `Local` send intents?
-15. **Snorri's open items.** O2 (claim time), O14, O15 (durability) and O16
-    (counters and admission state in Fireweed) are with the owner. ADR-025
-    and API-006 text that depends on them is marked.
-16. **Local engine stale-writer fencing** (for the Turso queue session). How
-    does the local engine fence a stale writer on another host before it
-    acknowledges a `Local` commit? Shipping to S3 after a `Local`
-    acknowledgement cannot do it. Options from the Turso-queue session, for
-    the owner: (a) as the rule, no takeover while the old process may be
-    alive (kill it or fence its host); (b) as defence in depth, a
-    time-bounded writer lease in S3; (c) always write sequence-numbered log
-    keys with S3 conditional puts (`If-None-Match: *`, `If-Match`), which
-    fences `Replicated` commits exactly (a takeover record at the next
-    sequence) but cannot fence `Local` ones; (d) require `Replicated` for
-    loss-intolerant requests such as send intents. Turso has no lease or
-    epoch, but its `on_log_write_complete` hook can fail a commit. S3
-    conditional writes are documented by AWS but untested in the spike.
-17. **Renew and `item_version`.** API-001 makes renew and reassign change
-    `item_version`, so a heartbeat makes a worker's version-guarded commit
-    fail. Keep that, or exclude lease-only changes (an API-001 amendment)?
-    Purely semantic: the local engine is indifferent.
-18. **Event log sequence on Postgres.** One head-row lock per log (appends to
-    one log serialize, which matters at Cayce's event volumes and for queues
-    with history), or a sequence plus a visibility watermark? Either meets
-    the reader rule (a reader never later sees an entry with a lower
-    sequence than one already returned); the local engine assigns gapless
-    numbers in commit order inside its single writer.
-19. **Postgres per-request durability.** `Replicated` per request
-    (per-transaction `synchronous_commit`, with the commit LSN recorded for
-    replay waits), or cluster-wide (every commit waits for the standby,
-    claims included)?
-20. **Bounding redelivery.** Under API-001, lease expiry returns an item to
-    pending and charges nothing; `max_attempts` is checked only on a retry
-    finalize. An item whose worker crashes before finalizing is redelivered
-    without limit unless the worker checks `attempt_count`. A server-side
-    bound would be an API-001 amendment for every implementation. The
-    reference and both implementations follow API-001. The Turso-queue plan
-    earlier marked such items failed; it now agrees with API-001 and leaves
-    the bound to this question.
-21. **Choices made without a ruling.** (a) A chunk step that reaches a
-    cohort it cannot take whole skips and counts it, rather than rejecting
-    the step. (b) Postgres group commits run at `SERIALIZABLE` (target
-    protocol), rather than with explicit predicate locks. (c) An expired
-    lease returns the item to pending regardless of attempts (question 20).
-22. **Moving spaces from Postgres to the local engine.** No data-migration
-    design exists yet (Turso-queue open item 15); it is needed before
-    Snorri and Cayce spaces move off Postgres.
-23. **Declared merge policies on fields.** Cayce's suppression store needs
-    reasons that can only be added, never cleared except by an explicit
-    lift. The request language expresses the add (`SetAdd` in one group)
-    but cannot forbid a clear. Should a schema declare per-field merge
-    policies (add-only sets, increment-only counters, max-only timestamps),
-    rejecting writes that break them unless the request is a declared lift?
-    This would also settle question 5 without a separate counter shape.
-24. **A guard-only operation.** A check that a record does or does not
-    match, inside a group, is expressed today as a `Mutate` with a no-op
-    `Set` and `expect`. Should there be a `WriteOp::Assert` (selection plus
-    expectation, no action)?
+### Resolved in revision 7
+
+| # | Question | Ruling |
+|---|----------|--------|
+| 1 | Names | Kept (D23). |
+| 2 | Space granularity | One workflow or one campaign (D13); consequence in question 25. |
+| 3 | Object-log's future | Deprecated once the local engine's S3 log passes (D24). |
+| 4 | Blobs, event logs, history in v1 | No blobs; history and event feeds are sequenced tables (D16). |
+| 6 | Admission chunk state | A table row in the data plane (D21). |
+| 7 | Cohort deadline rule | Draft adopted (D19). |
+| 8 | Rejected requests recorded | Yes (D19). |
+| 9 | Schema evolution | Additive only (D22). |
+| 10 | Percentile | Exact (D23). |
+| 11 | RESP and `StreamGroup` | RESP deprecated in favour of the request DSL (D25). |
+| 12 | Protobuf | Dropped unless the DSL needs it (D25). |
+| 13 | Local engine durability | Niflheim write modes per request; `Tracked` default (D14). |
+| 14 | Postgres `Replicated` | PostgreSQL is assumed fully replicated; commits are `Durable` (D14). |
+| 16 | Local engine stale-writer fencing | The control plane fences; S3 conditional writes back up `Durable` commits; clients recheck placement (D15). |
+| 17 | Renew and `item_version` | Renew bumps it (D18). |
+| 18 | Event log sequence on Postgres | Event logs are gone; a sequenced table's counter is assigned under the space's writer lock today, and its row lock under the target protocol (D16). |
+| 19 | Postgres per-request durability | Per request: `synchronous_commit = off` for `FireAndForget`, a normal commit otherwise (D14). |
+| 20 | Bounding redelivery | Lease expiry counts toward `max_attempts` (D17). |
+| 21 | Choices made without a ruling | Adopted as needed, including `SERIALIZABLE` where it is required (D19). |
+| 22 | Moving spaces between implementations | Not needed (D26). |
+| 23 | Merge policies | `AddOnly` and `NonDecreasing` field rules, with an explicit override (D20). |
+| 24 | Guard-only operation | `WriteOp::Assert` (D20). |
+
+### Still open
+
+5. **Counters.** The only counter Snorri or Cayce keeps today is Cayce's
+   per-contact send-cap ("slotting") counter: one row per account,
+   contact and UTC hour, incremented only while below the cap, read in
+   batches of up to 168 hours for daily and time-of-day caps, expiring 7
+   days after its first write (Cayce `crates/scheduler/src/slotting.rs`,
+   `crates/snorri-effects/src/slotting_state.rs`). Snorri needs no counters;
+   its counts are aggregates over records. Contention is per contact per
+   hour, so there are many keys and no hot ones. A table row with a
+   `NonDecreasing` count and a `Mutate` filtered on `count < cap` covers
+   it; a dedicated counter shape would only matter for hot keys, and none
+   are documented. Two things need a ruling: the counter is keyed by
+   account, so it falls under question 25; and Snorri's TD-011 recorded an
+   owner decision that "cap counters stay in Dragonfly", shared with 7th
+   Sense, which D21 reverses unless 7th Sense must keep reading them.
+15. **Snorri's open items O2, O14, O15 and O16.** Their text is in Snorri's
+    TD-012 revision 6, which was never committed; no copy exists on this
+    machine. From how this ADR used them: O2 (claim time) matches §8's
+    `eligibility_time`, and D2 settles it; O14 and O15 (durability) are
+    answered by D14; O16 (counters and admission state in Fireweed) is
+    answered in direction by D21 and in shape by question 5. The Snorri
+    session should confirm against its own text.
+25. **Account-scoped records across campaign spaces.** Suppression and
+    per-contact send caps belong to an account, but a space is one
+    workflow or campaign (D13), and a group cannot span spaces. Options:
+    (a) copy suppression into every campaign space of the account, so each
+    send's group asserts it atomically (a suppression event writes one row
+    per active campaign; the copies converge because the reasons are
+    `AddOnly`); (b) keep account-scoped tables in an account space and check
+    them in a separate request before the send, accepting a race window and
+    re-checking after; (c) for send caps, increment in the account space
+    first and give the slot back if the send's commit fails, as Cayce's
+    design does today (it accepts no refund and fails open). Draft: (a) for
+    suppression, which must be exact at send time; (c) for send caps.
+26. **Claim order with sleeping items.** A claim's scan budget counts items
+    that are gated or not yet due, and claim order is priority only, so
+    sleeping Snorri instances at the head of a queue can exhaust the budget
+    and starve claims. Snorri's workaround is priority = due time. Add a
+    claim order of due time first, or require implementations to skip items
+    not yet due without charging the budget? (Turso-queue session.)
+27. **Several actions on one record.** A Snorri wake patches the inbox,
+    removes the await key and reschedules, which today takes three `Mutate`
+    operations on one key in one group. Add `Action::Seq(Vec<Action>)`?
+    (Turso-queue session.)
+28. **Timers that do not charge attempts.** A Snorri `wait` through
+    `Retry { not_before }` counts toward `max_attempts`. On a queue
+    declared with `recurrence`, `Rearm` reschedules without charging, and
+    the DSL scenarios use it (DSL-2 shows both). Is declaring instance
+    queues recurring acceptable, or should any queue get a non-charging
+    reschedule? Draft: use `Rearm`; no new outcome. (Turso-queue session.)
+29. **A space per Snorri shard.** The Snorri API session (TD-012 revision
+    7, uncommitted there) asks that each space hold at least one whole
+    shard, so every workflow operation is one commit. That fits D13 if a
+    Snorri shard never spans workflows or campaigns; if a shard holds
+    instances of several campaigns, D13 splits it and cross-campaign
+    operations in one shard stop being atomic. Which does Snorri shard by?
 
 ## Risks
 
@@ -609,8 +685,10 @@ object-log, RESP and TD-003 changes land at step 6.
 | Postgres group commits at `SERIALIZABLE` retry under contention | M | M | Bounded retries, then `Contention`; hot paths use the verbs at `READ COMMITTED` with explicit locks. The first increment serializes writes per space instead. |
 | The interface grows into a general database | M | H | No joins, capped requests, index-backed selectors, live data only; history to Niflheim. |
 | A hot table row (counter, rollup) serializes commits on Postgres | M | M | Open question 5; rate windows keyed by bucket spread the load. |
+| A suppression or send cap checked outside the effect's group lets a send through in the gap | M | H | Open question 25. |
 | A single-writer engine stalls claims behind bulk work | H | M | Caps, chunked `Mutate`, and B4. |
-| Waiting for `Replicated` on every send-intent commit limits throughput | M | M | Only commits that require it wait; the local engine reaches `Replicated` by batching shipments to S3. |
+| Waiting for `Durable` on every send-intent commit limits throughput on the local engine | M | M | Only commits that ask for it wait, and the engine ships frames to S3 in batches. |
+| The control plane grants a new epoch while the old local-engine writer lives | L | H | `Tracked` commits since the last shipped frame are lost; `Durable` ones are fenced by S3 regardless (§11). |
 | Snorri and Cayce adopt Postgres and never move to the local engine | M | M | Same interface and suite; the facade names no implementation. |
 | Two boundaries coexist while the old runtime is frozen | M | M | No new features on the old facade; step 4 cuts over. |
 | Relayed decisions are misread | L | H | The owner confirms D8 to D12 before acceptance. |
@@ -628,8 +706,8 @@ object-log, RESP and TD-003 changes land at step 6.
 
 ## Concern Impact
 
-- `resilience`: durability is declared per implementation and reported per
-  commit.
+- `resilience`: durability is chosen per request, declared per
+  implementation and reported per commit.
 - `technology-radar`: storage engines are chosen per implementation.
 
 ## References

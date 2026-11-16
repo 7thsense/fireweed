@@ -14,7 +14,7 @@ ddx:
 # API-006: Fireweed data-plane interface
 
 **Type**: Rust trait and request-type contract (implementation boundary)
-**Version**: v0 (draft, revision 6)
+**Version**: v0 (draft, revision 7)
 **Status**: draft. Proposed by ADR-025. Not normative until ADR-025 is accepted.
 **Related**: API-001, API-002, API-003, API-004, API-005, ADR-025, TD-002, TD-006
 
@@ -55,6 +55,17 @@ Timestamp span, request-size limits on every verb, claim-by-id replay
 expiry, filtered same-group claims, the full range access term in reads,
 and paging for `fw_gates`.
 
+Revision 7 (2026-11-15) applies the owner's rulings (ADR-025 D13 to D28).
+Durability levels are Niflheim's `FireAndForget`, `Tracked` and `Durable`,
+chosen per request; PostgreSQL commits are `Durable`. The Blob and
+EventLog shapes and queue history are removed; a table with
+`KeyAssignment::Sequence` replaces them. `WriteOp::Assert` is a guard that
+never writes. Table fields may declare `MergeRule::AddOnly` or
+`NonDecreasing`. Lease expiry fails an item that has used up
+`max_attempts`. The conformance harness can open a second instance on the
+same storage, and fourteen DSL scenario tests (DSL-1 to DSL-14) drive
+Snorri workflow patterns through edge cases.
+
 ## Purpose
 
 This contract defines the Rust types and traits every Fireweed
@@ -78,8 +89,8 @@ states every change; ADR-025 lists the API-001 amendments.
   configuration, storage layout, recovery, replication and maintenance API;
   authentication and authorization (the adapter in front of the interface).
 - Owning crate: `fireweed-interface` (working name).
-- Non-goals: SQL; joins; a storage-port SPI; history and analytics beyond
-  live data (Niflheim).
+- Non-goals: SQL; joins; a storage-port SPI; large payloads (ADR-025 D16);
+  history and analytics beyond live data (Niflheim).
 
 ## Terms
 
@@ -88,8 +99,8 @@ states every change; ADR-025 lists the API-001 amendments.
 | Implementation | A type implementing `DataPlane`, in its own crate. |
 | Instance | One constructed value of an implementation, attached to some storage. |
 | Space | One atomic and ordering domain owned by one tenant, holding named objects. |
-| Object | A queue, table or event log of a space, or its blob store. |
-| Record | One queue item, table row, event log entry, cohort, gate, blob or request record. |
+| Object | A queue or table of a space. |
+| Record | One queue item, table row, cohort, gate or request record. |
 | Request | One call on `DataPlane`. A write request carries a `request_id`. |
 | Commits | A write request takes effect at its linearization point. |
 | Conflict | Two requests conflict if both touch a common record and at least one writes it. |
@@ -149,8 +160,6 @@ pub struct SpaceSchema {
     pub request_id_retention_ms: u64,      // <= limits.max_request_id_retention_ms
     pub queues: Vec<QueueDecl>,
     pub tables: Vec<TableDecl>,
-    pub event_logs: Vec<EventLogDecl>,
-    pub blobs: Option<BlobPolicy>,         // None: the space has no blob store
     pub reads: Vec<ReadDecl>,
 }
 
@@ -160,11 +169,11 @@ pub struct FieldDecl {
     pub nullable: bool,
     pub source: FieldSource,
     pub index: IndexHint,
+    pub merge: MergeRule,                   // tables only; default Any
 }
 
-pub enum ScalarType {
-    Bool, Int, Float, Text, Bytes, Timestamp, Json, TextSet, BlobRef, BlobRefSet,
-}
+pub enum ScalarType { Bool, Int, Float, Text, Bytes, Timestamp, Json, TextSet }
+pub enum MergeRule { Any, AddOnly, NonDecreasing }
 pub enum FieldSource { Stored, BodyPointer(JsonPointer) }   // BodyPointer: derived, read-only
 pub enum IndexHint { None, Lookup, Range, Unique }
 pub enum BodyKind { Bytes, Json }
@@ -174,7 +183,6 @@ pub struct QueueDecl {
     pub spec: QueueSpec,
     pub body: BodyKind,
     pub fields: Vec<FieldDecl>,
-    pub history: Option<ObjectName>,        // an event log for transition history
 }
 
 pub struct QueueSpec {
@@ -199,18 +207,10 @@ pub struct TableDecl {
     pub key: Vec<FieldName>,                // 1 to 4 fields
     pub fields: Vec<FieldDecl>,             // includes the key fields
     pub expiry: Option<RowExpiry>,
+    pub key_assignment: KeyAssignment,      // default Caller
 }
 pub enum RowExpiry { AtField(FieldName), AfterWrite { ttl_ms: u64 } }
-
-pub struct EventLogDecl {
-    pub name: ObjectName,
-    pub partition_key: FieldName,           // Text or Int, not nullable
-    pub fields: Vec<FieldDecl>,
-    pub body: BodyKind,
-    pub retention_ms: u64,
-}
-
-pub struct BlobPolicy { pub orphan_grace_ms: u64 }
+pub enum KeyAssignment { Caller, Sequence }
 ```
 
 `QueueSpec` replaces `fireweed-core::QueueDefinition` at the interface. The
@@ -243,17 +243,39 @@ Schema rules:
    `IndexNotReady`. `get_schema` reports each index's state.
 5. Table key fields are `Int`, `Text`, `Bytes` or `Timestamp`, not nullable,
    and immutable: no action may change them. `Unique` fields treat nulls as
-   distinct. `TextSet`, `BlobRefSet`, `Json` and `Float` fields cannot be
+   distinct. `TextSet`, `Json` and `Float` fields cannot be
    `Unique` or table keys. `AtField` names a nullable or non-null
    `Timestamp`; a null value never expires.
-6. A `TextSet` or `BlobRefSet` holds at most `limits.max_set_values`
-   distinct values. An indexed `TextSet` is indexed per value. `BlobRefSet`
-   cannot be indexed.
+6. A `TextSet` holds at most `limits.max_set_values` distinct values. An
+   indexed `TextSet` is indexed per value.
 7. A `BodyPointer` field is computed from the JSON body and read-only. If
    the pointer is absent or the value does not cast to the field's type
    (§Casts), the field is null.
 8. Fields a write does not supply are null; a non-nullable field missing
    from a `PutRows` row or `NewItem` rejects that entry (`MissingField`).
+9. **Merge rules** apply to stored, non-key table fields: `AddOnly` to
+   `TextSet`, `NonDecreasing` to `Int`, `Float` and `Timestamp`; any other
+   placement fails `InvalidSchema`. Every change to an existing row is
+   checked (`PutRows` `Replace` and `Merge`, `Mutate` `Set`): `AddOnly`
+   requires the new set to contain the old one, `NonDecreasing` requires the
+   new value to be at least the old one. An old null allows any value; a
+   new null over a non-null value violates; a field a `Replace` omits is
+   null. A violation rejects the entry with `MergeRuleViolated { field }`,
+   which rejects the group. Only a `Mutate` with `override_merge_rules:
+   true` may break a rule (a lift); `PutRows` never can, and the flag on a
+   queue target is `InvalidRequest`. Adding or changing a field's rule is
+   not additive.
+10. **Sequenced tables.** With `KeyAssignment::Sequence`, the key is one
+    non-nullable `Int` field. A `PutRows` row must omit it (supplying it
+    rejects the entry `Invalid`); the implementation assigns 1, 2, 3, ... per
+    table, in commit order, and returns the value in `EntryResult.row_key`.
+    A number is consumed only by a row actually stored, so a rejected group
+    or a `Skip` leaves no gap, and a number is never reused after `Retire`
+    or expiry. Rows are immutable: `Set` on a sequenced table fails
+    validation. To page, declare the key `Range` and read with a range on
+    it (`seq > $after`, ascending); a reader paging forward never later
+    sees a lower number than one it has read. Changing `key_assignment` is
+    not additive.
 
 ### System fields
 
@@ -277,8 +299,6 @@ Always present, usable in expressions and reads, never set directly.
 | Queue | `fw_metadata` | Json | — |
 | Table | `fw_row_version` | Int | — |
 | Table | `fw_created_at`, `fw_updated_at` | Timestamp | — |
-| Event log | `fw_seq` | Int | Range |
-| Event log | `fw_appended_at` | Timestamp | Range |
 
 `fw_state`, `fw_lease_expires_at` and `fw_worker_id` are evaluated by the
 time rule: an item whose lease expired at or before request time reads as
@@ -291,9 +311,7 @@ pub enum Value {
     Null(ScalarType),
     Bool(bool), Int(i64), Float(f64), Text(String), Bytes(Bytes),
     Timestamp(UtcMillis), Json(serde_json::Value), TextSet(BTreeSet<String>),
-    BlobRef(BlobRef), BlobRefSet(BTreeSet<BlobRef>),
 }
-pub struct BlobRef { pub sha256: [u8; 32], pub size: u64 }
 ```
 
 A null carries its type. Value domains, enforced on every write and by
@@ -326,8 +344,7 @@ normalized before it is stored and compared:
 Encoding a `Value` into JSON (for `Patch` values): `Bool`, `Int`, `Float`
 and `Text` map to their JSON forms; `Bytes` to base64 (standard, padded);
 `Timestamp` to an RFC 3339 string `YYYY-MM-DDTHH:MM:SS.sssZ`; `TextSet` to a
-sorted array of strings; `BlobRef` to `{"sha256": "<hex>", "size": n}`;
-`BlobRefSet` to a sorted array of those; `Null` to `null`.
+sorted array of strings; `Null` to `null`.
 
 ## Expressions
 
@@ -374,14 +391,14 @@ the request with `InvalidRequest` (definitive, not recorded).
 | `Now` | — | Timestamp |
 | `Json` | field of type Json | Json |
 | `Cast` | per the cast table | target type |
-| `Cmp` `Eq`, `Ne` | same type: Bool, Int, Float, Text, Bytes, Timestamp, BlobRef | Bool |
+| `Cmp` `Eq`, `Ne` | same type: Bool, Int, Float, Text, Bytes, Timestamp | Bool |
 | `Cmp` `Lt`, `Le`, `Gt`, `Ge` | same type: Int, Float, Text, Bytes, Timestamp | Bool |
 | `And`, `Or` | Bool, 1 to 64 operands | Bool |
 | `Not` | Bool | Bool |
 | `IsNull` | any | Bool (never null) |
 | `In` | `expr` and every list item of one type allowed for `Eq`; at least one item (more than `max_in_list` is `BatchTooLarge`) | Bool |
-| `Contains` | TextSet and Text, or BlobRefSet and BlobRef | Bool |
-| `SetAdd`, `SetRemove` | TextSet with Text values, or BlobRefSet with BlobRef values | the set type |
+| `Contains` | TextSet and Text | Bool |
+| `SetAdd`, `SetRemove` | TextSet with Text values | TextSet |
 | `Arith` `Add`, `Sub`, `Mul`, `Div` | Int and Int → Int; Float and Float → Float | as stated |
 | `Arith` `Rem` | Int and Int | Int |
 | `Arith` `Add` | Timestamp and Int (ms) | Timestamp |
@@ -389,7 +406,7 @@ the request with `InvalidRequest` (definitive, not recorded).
 | `Coalesce` | 1 to 16 operands of one type | that type |
 | `Bucket` | Timestamp; `width_ms` 1 to 315,576,000,000 (10 years) | Timestamp |
 
-Json, TextSet and BlobRefSet values are not comparable with `Cmp`; Json is
+Json and TextSet values are not comparable with `Cmp`; Json is
 `Cast` first. Bool is not ordered. `Set` with the same field named twice
 fails validation. `Json { field, pointer }` yields `Null(Json)` when the
 pointer is absent and `Json(null)` when the JSON value there is `null`;
@@ -456,8 +473,8 @@ comparison and sort.
 
 `—` is a type error. RFC 3339 parsing accepts any offset, converts to UTC,
 truncates fractional seconds to milliseconds, and yields null for a leap
-second (`:60`) or a date outside `UtcMillis`. `Bytes`, `TextSet`, `BlobRef`
-and `BlobRefSet` cast only to Json (§Canonical JSON).
+second (`:60`) or a date outside `UtcMillis`. `Bytes` and `TextSet` cast
+only to Json (§Canonical JSON).
 
 ### Aggregates
 
@@ -519,8 +536,8 @@ Every request does bounded work on the writer.
 | Limit | Counts | When exceeded |
 |-------|--------|---------------|
 | `max_ops_per_commit` | operations in a commit | `BatchTooLarge` (validation) |
-| `max_entries_per_commit` | explicit entries over all operations: new items, finalize entries, leases, gates, rows, log entries, addressed keys | `BatchTooLarge` (validation) |
-| `max_request_bytes` | serialized request size (`put_blob` is exempt; it has `max_blob_bytes`) | `BatchTooLarge` (validation) |
+| `max_entries_per_commit` | explicit entries over all operations: new items, finalize entries, leases, gates, rows, addressed keys (`Mutate` and `Assert`) | `BatchTooLarge` (validation) |
+| `max_request_bytes` | serialized request size | `BatchTooLarge` (validation) |
 | `max_in_list` | `In` items | `BatchTooLarge` (validation) |
 | `max_claim_batch_size` | items one claim returns | `BatchTooLarge` (validation) |
 | `max_cohort_size` | members of one cohort | `BatchTooLarge` (validation), or rejection `Invalid` on enqueue |
@@ -531,7 +548,7 @@ Every request does bounded work on the writer.
 | `max_read_rows` | rows in one read page | page boundary |
 
 Records examined are the records the request's access path reads,
-counted physically: a row or log entry that has expired but is still stored
+counted physically: a row that has expired but is still stored
 counts. A claim's access path is the claim-order index of pending items
 (with expired leases), so a pending item skipped because it is gated or not
 yet due counts, and a leased item does not. When a scan budget is reached:
@@ -547,9 +564,9 @@ yet due counts, and a leased item does not. When a scan budget is reached:
 
 Examination order is result order: claim order for claims; `order` then key
 for ordered reads; for `Mutate` and unordered reads, the access field's
-value ascending, then the record key (item id, primary key, `fw_seq`).
+value ascending, then the record key (item id or primary key).
 
-Writes the implementation makes on its own (history entries, index entries,
+Writes the implementation makes on its own (index entries,
 due time-driven transitions) do not count against these limits. Due
 transitions may run as separate internal commits ordered before the
 request, each bounded by `max_cohort_size` and `max_writer_scan_rows`.
@@ -580,7 +597,7 @@ request, each bounded by `max_cohort_size` and `max_writer_scan_rows`.
 5. `claim` and `claim_by_item_ids` take an optional `eligibility_time`. It
    replaces `t` only when deciding whether `fw_not_before` and retry backoff
    have passed. It may be earlier or later than `t`. Everything else uses
-   `t`. **[draft pending owner: Snorri O2]**
+   `t`.
 6. No other request overrides time. A fixed instant in a predicate is a
    parameter.
 
@@ -605,13 +622,14 @@ Observable state is a function of committed requests and time.
 Applied to API-001:
 
 - **Lease expiry**: a lease has expired when `lease_expires_at <= t` (at
-  equality the lease is already expired). The item is `pending`, its token
-  is stale, `item_version` does not change, and `attempt_count` follows
-  API-001: expiry charges nothing, the next delivery charges one, and
-  `max_attempts` is checked only on a retry finalize. An item whose worker
-  crashes before finalizing is therefore redelivered without limit unless
-  the worker checks `attempt_count` (ADR-025 open question 20).
-- **Cohort deadline** **[draft pending owner]**. API-001's deadline is
+  equality the lease is already expired). Its token is stale and
+  `item_version` does not change. Each claim has already charged one
+  attempt. If `attempt_count >= max_attempts`, the item becomes `failed`
+  with code `attempts-exhausted` and `terminal_at = lease_expires_at`;
+  otherwise it is `pending` (ADR-025 D17). This amends API-001, where expiry
+  returned the item to pending and `max_attempts` was checked only on a
+  retry finalize. A retry finalize still checks it as before.
+- **Cohort deadline** (ADR-025 D19). API-001's deadline is
   `min(cohort_created_at, first_eligible_at) + completion_bound_ms`; since
   no member is eligible before the cohort exists, this is
   `cohort_created_at + completion_bound_ms`. At the deadline, unless the
@@ -626,8 +644,8 @@ Applied to API-001:
   deadline of the cohorts affected.
 - **Retention**: a request record older than `request_id_retention_ms` is
   forgotten. A terminal item or tombstone older than its retention stops
-  being addressable. A row is gone at its expiry. An event log entry is
-  gone `retention_ms` after `fw_appended_at`.
+  being addressable. A row is gone at its expiry, including a row of a
+  sequenced table; its sequence number is never reused.
 - **Recurrence**: a re-armed item's `not_before` is evaluated like any
   other.
 
@@ -645,8 +663,8 @@ Applied to API-001:
 ### Request records
 
 1. Every write request with an outcome (`Committed` or `Rejected`) leaves a
-   request record in its space: the request fingerprint and the response.
-   **[draft pending owner: rejected requests recorded]**
+   request record in its space: the request fingerprint and the response
+   (ADR-025 D19).
 2. The fingerprint is the SHA-256 of the canonical JSON serialization of the
    request with `min_durability` removed.
 3. A request that fails validation (definitive `Err`) leaves no record.
@@ -689,51 +707,54 @@ outcome by replaying the same request or by `get_request`.
 ## Durability
 
 ```rust
-pub enum DurabilityLevel { Process, Local, Replicated }   // ordered
+pub enum DurabilityLevel { FireAndForget, Tracked, Durable }   // ordered
 ```
 
-| Level | Rule |
-|-------|------|
-| `Process` | Survives only as long as the instance. |
-| `Local` | Survives a process crash and a reopen of the implementation's own storage. |
-| `Replicated` | Also survives loss of that storage: a copy outside it was durable before the response. |
+The levels are Niflheim's write modes (Niflheim ADR-002, architecture
+§Write Modes; ADR-025 D14), used as levels a commit reaches.
+
+| Level | Acknowledged when | Rule |
+|-------|-------------------|------|
+| `FireAndForget` | the commit is visible | May be lost if the process or machine fails. |
+| `Tracked` | the commit is fsynced locally | Survives a process crash and a reopen of the implementation's own storage. |
+| `Durable` | a copy outside that storage is durable | Also survives loss of that storage. |
 
 1. Every write response (verbs, `commit` whether `Committed` or
-   `Rejected`, `apply_schema`, `put_blob`) reports `durability`: the level
-   its effects and request record reached when the response was sent.
-   `apply_schema` and `put_blob` have no `request_id`; they are idempotent by
-   schema version and by content.
-2. Every write request may set `min_durability`. A level above
-   `capabilities().max_durability` fails with `InvalidRequest`.
-3. With `min_durability`, the response is sent once the commit reaches that
-   level. If it is committed but has not reached the level within the
-   implementation's documented wait, the request fails with
-   `DurabilityPending { reached }`: the commit exists, at `reached`. A
-   replay waits again.
+   `Rejected`, `apply_schema`) reports `durability`: the level its effects
+   and request record reached when the response was sent. `apply_schema`
+   has no `request_id`; it is idempotent by schema version.
+2. Every write request may set `min_durability`, the level it needs. With
+   none, the implementation's default applies. The commit is acknowledged
+   at the lowest level the implementation offers at or above the one asked
+   for. A level above `capabilities().max_durability` fails with
+   `InvalidRequest`. `guarantees().durability` is the lowest level any
+   acknowledgement can have.
+3. If the commit has not reached its level within the implementation's
+   documented wait, the request fails with `DurabilityPending { reached }`:
+   the commit exists, at `reached`. A replay waits again.
 4. `CommitTimeout` means the implementation does not know whether the
    request committed.
-5. Reads observe committed requests whatever their level. After the loss
-   of a `Local` copy, effects that were read but never reached
-   `Replicated` can disappear.
-6. A blob referenced by a commit is brought to the commit's level before the
-   commit reports that level.
-7. Levels are prefix-closed within a space: when a commit reaches
-   `Replicated`, every commit before it in linearization order has too.
-   Write-ahead logs and in-order shipping both give this.
+5. Reads observe committed requests whatever their level. After a failure,
+   effects that were read but never reached a level that survives it can
+   disappear.
+6. Levels are prefix-closed within a space: when a commit reaches a level,
+   every commit before it in linearization order has too. Write-ahead logs
+   and in-order shipping both give this. A `Durable` send intent therefore
+   makes the state it was derived from durable as well.
 
 Levels per implementation:
 
-| Implementation | Minimum | Maximum | Notes |
+| Implementation | Offered | Default | Notes |
 |----------------|---------|---------|-------|
-| PostgreSQL | `Local` (flushed to the primary's WAL) | `Replicated` only with a synchronous standby; otherwise `Local` | `Replicated` means a synchronous standby confirmed the WAL flush. **[draft pending owner: Snorri O15]** **[owner question]** whether `Replicated` is per request (per-transaction `synchronous_commit`, `local` by default and `on` when required, with the commit LSN recorded so a replay can wait for the standby) or cluster-wide (every commit waits for the standby, including claims). |
-| Local engine | `Local` (fsynced locally) | `Replicated` (the commit is in the S3 log) | Commits ship to S3 in batches; `min_durability: Replicated` waits for the batch. **[draft pending owner]** |
-| In-memory | `Process` | `Process` | — |
+| PostgreSQL | `FireAndForget`, `Durable` | `Durable` | The server is assumed fully replicated (ADR-025 D14): every committed transaction is `Durable`, and keeping the server so is the operator's job. `FireAndForget` commits with `SET LOCAL synchronous_commit = off`. A `Tracked` request is acknowledged at `Durable`. |
+| Local engine | `FireAndForget`, `Tracked`, `Durable` | `Tracked` | One fsync per batch; `Durable` once the shipped watermark passes the commit (Turso-queue plan §5.1). The engine rejects writes in every mode when shipping falls behind. |
+| In-memory | `FireAndForget` | `FireAndForget` | — |
 
 ## Guarantees and capabilities
 
 ```rust
 pub struct Guarantees {
-    pub durability: DurabilityLevel,          // minimum for every acknowledged commit
+    pub durability: DurabilityLevel,          // lowest level any acknowledgement can have
     pub new_work_visibility: Visibility,
     pub sharing: Sharing,
 }
@@ -744,12 +765,11 @@ pub struct Capabilities {
     pub max_durability: DurabilityLevel,
     pub shapes: BTreeSet<ShapeKind>,          // Queue and Table always
     pub queue_features: BTreeSet<QueueFeature>,
-    pub queue_history: bool,
     pub priority_kinds: BTreeSet<PriorityKind>,
     pub ordering_modes: BTreeSet<OrderingMode>,
     pub limits: ImplementationLimits,
 }
-pub enum ShapeKind { Queue, Table, EventLog, Blob }
+pub enum ShapeKind { Queue, Table }
 pub enum QueueFeature { DynamicGates, MetadataBlockers, Recurrence, GroupBatching, Cohorts }
 
 pub struct ImplementationLimits {
@@ -764,7 +784,6 @@ pub struct ImplementationLimits {
     pub max_body_bytes: u64,
     pub max_value_bytes: u64,
     pub max_set_values: u32,
-    pub max_blob_bytes: u64,
     pub max_dry_run_count: u64,
     pub max_read_rows: u32,
     pub max_claim_batch_size: u32,
@@ -781,7 +800,7 @@ declares `Bounded`.
 | Sharing | Rule |
 |---------|------|
 | `MultiProcess` | Several instances, in one or many processes, may serve a space at once and together behave as one. |
-| `SingleProcess` | At most one live instance serves a space. Opening a second while the first lives either fails with `SpaceBusy` or supersedes the first, whose later requests fail with `InstanceSuperseded` and have no effect. After the holding process dies, a new open succeeds. The implementation documents which it does, and how it fences a holder on another host. |
+| `SingleProcess` | At most one live instance serves a space. Opening a second while the first lives either fails with `SpaceBusy` or supersedes the first, whose later requests fail with `InstanceSuperseded` and have no effect. After the holding process dies, a new open succeeds. The implementation documents which it does, and how it fences a holder on another host; for the local engine, a holder fenced by a higher ownership epoch returns `InstanceSuperseded` (§Local engine). |
 
 ## Types
 
@@ -814,12 +833,8 @@ pub trait DataPlane: Send + Sync {
 
     fn get(&self, r: GetRequest) -> DpFuture<'_, GetResponse>;
     fn read(&self, r: ReadRequest) -> DpFuture<'_, ReadResponse>;
-    fn read_log(&self, r: ReadLogRequest) -> DpFuture<'_, ReadLogResponse>;
     fn metrics(&self, r: MetricsRequest) -> DpFuture<'_, QueueMetrics>;
     fn discover_active_scopes(&self, r: DiscoverRequest) -> DpFuture<'_, DiscoverResponse>;
-
-    fn put_blob(&self, r: PutBlobRequest) -> DpFuture<'_, PutBlobResponse>;
-    fn get_blob(&self, r: GetBlobRequest) -> DpFuture<'_, Bytes>;
 }
 ```
 
@@ -836,7 +851,7 @@ pub struct WriteHeader {
     pub space: SpaceKey,
     pub request_id: RequestId,
     pub min_durability: Option<DurabilityLevel>,
-    pub actor: Option<String>,     // recorded in history entries; not authorization
+    pub actor: Option<String>,     // recorded in the request record; not authorization
     pub reason: Option<String>,
 }
 
@@ -858,17 +873,19 @@ pub struct EntryResult {
     pub superseded_item_id: Option<ItemId>, // ReplacePending: the replaced item
     pub version: Option<u64>,        // item_version or fw_row_version after the entry
     pub lease: Option<NewLease>,     // claim, renew, reassign
+    pub row_key: Option<Vec<Value>>, // PutRows into a Sequence table: the assigned key
 }
 pub struct NewLease { pub lease_token: LeaseToken, pub lease_expires_at: UtcMillis, pub item_version: u64 }
 
 pub enum EntryStatus {
     Accepted, Duplicate, Replaced, Updated, Completed, Failed, Retried, Released,
-    Rearmed, Renewed, Reassigned, Redriven, Purged, Inserted, Deleted, Appended,
+    Rearmed, Renewed, Reassigned, Redriven, Purged, Inserted, Deleted,
     Skipped, Inapplicable, NotFound,
     // only as per-entry statuses of verbs, or in OpFailure of a rejected group:
     Conflict, UniqueViolation { field: FieldName }, StaleLease, VersionMismatch,
     Terminal, Superseded, NotEligible, Leased, CohortFailed, MissingField { field: FieldName },
-    ValueTooLarge, BlobMissing, EvaluationFault(EvalError), Invalid { reason: String },
+    ValueTooLarge, MergeRuleViolated { field: FieldName }, EvaluationFault(EvalError),
+    Invalid { reason: String },
 }
 ```
 
@@ -1017,11 +1034,10 @@ pub enum WriteOp {
     SetGates { queue: ObjectName, gates: Vec<(String, GateState)> },
     SetQueueState { queue: ObjectName, paused: Option<bool>, drain_intake: Option<bool> },
     PutRows { table: ObjectName, rows: Vec<BTreeMap<FieldName, Value>>, on_conflict: RowConflict },
-    Append { log: ObjectName, entries: Vec<LogEntry> },
     Mutate(Mutate),
+    Assert { target: ObjectName, selection: Selection, expect: MatchExpect },
 }
 pub enum RowConflict { Reject, Skip, Replace, Merge }
-pub struct LogEntry { pub fields: BTreeMap<FieldName, Value>, pub body: Option<Body> }
 
 pub struct Mutate {
     pub target: ObjectName,                 // a queue or table
@@ -1031,6 +1047,7 @@ pub struct Mutate {
     pub expect: Option<MatchExpect>,
     pub lease_policy: LeasePolicy,           // queues only
     pub chunk: Option<Chunk>,
+    pub override_merge_rules: bool,          // tables only: may break merge rules (a lift)
 }
 pub struct MatchExpect { pub min: u64, pub max: u64 }   // on `matched`, below
 
@@ -1127,16 +1144,16 @@ the validation caps. A failure is a definitive `Err`; nothing is recorded.
 
 | Operation | Rejects the group | Does not reject (recorded as entry status) |
 |-----------|-------------------|--------------------------------------------|
-| `Enqueue` | `Conflict` (`Reject` policy, or `ReplacePending` on a leased item); `UniqueViolation`; `CohortFailed`; `MissingField`; `ValueTooLarge`; `BlobMissing`; gate keys over the queue's limit or a cohort over `max_cohort_size` (`Invalid`) | `Duplicate`, `Replaced`, `Accepted` |
-| `Finalize` | `StaleLease`; `VersionMismatch`; `Terminal`; `Superseded`; `EvaluationFault` in `set` or `patch`; `UniqueViolation`; `MissingField` (null into a non-nullable field); `ValueTooLarge`; `BlobMissing` | — |
+| `Enqueue` | `Conflict` (`Reject` policy, or `ReplacePending` on a leased item); `UniqueViolation`; `CohortFailed`; `MissingField`; `ValueTooLarge`; gate keys over the queue's limit or a cohort over `max_cohort_size` (`Invalid`) | `Duplicate`, `Replaced`, `Accepted` |
+| `Finalize` | `StaleLease`; `VersionMismatch`; `Terminal`; `Superseded`; `EvaluationFault` in `set` or `patch`; `UniqueViolation`; `MissingField` (null into a non-nullable field); `ValueTooLarge` | — |
 | `Renew`, `Reassign` | `StaleLease`; `Terminal` | — |
 | `SetGates`, `SetQueueState` | none at execution | — |
-| `PutRows` | `Conflict` (`Reject` policy); `UniqueViolation`; `MissingField`; `ValueTooLarge`; `BlobMissing` | `Skipped` (`Skip` policy), `Inserted`, `Updated` |
-| `Append` | `MissingField`; `ValueTooLarge`; `BlobMissing` | `Appended` |
-| `Mutate` | `VersionMismatch` on a `Keyed` guard: `Some(0)` on an existing record, or `Some(n > 0)` on an absent record or a different version; `MatchExpectUnmet`; `LimitExceeded` (unchunked); `ScanLimitExceeded` (unchunked); `LeasedMatch` (`Reject` policy); `StaleLease` (`MatchToken` or `MatchCohortToken` mismatch); `CohortSplit` (unchunked); `EvaluationFault` in any action expression; `UniqueViolation`; `MissingField` (null into a non-nullable field); gate keys over the queue's limit (`Invalid`); `ValueTooLarge`; `BlobMissing`; `Conflict` from `IdAndKey` | `NotFound` for an addressed key with no guard; `Skipped` leased items; skipped cohorts (chunk steps); `Inapplicable` |
+| `PutRows` | `Conflict` (`Reject` policy); `UniqueViolation`; `MissingField`; `ValueTooLarge`; `MergeRuleViolated`; a key supplied to a sequenced table (`Invalid`) | `Skipped` (`Skip` policy), `Inserted`, `Updated` |
+| `Assert` | `VersionMismatch` on a `Keyed` guard, as `Mutate`; `MatchExpectUnmet`; `ScanLimitExceeded` | — |
+| `Mutate` | `VersionMismatch` on a `Keyed` guard: `Some(0)` on an existing record, or `Some(n > 0)` on an absent record or a different version; `MatchExpectUnmet`; `LimitExceeded` (unchunked); `ScanLimitExceeded` (unchunked); `LeasedMatch` (`Reject` policy); `StaleLease` (`MatchToken` or `MatchCohortToken` mismatch); `CohortSplit` (unchunked); `EvaluationFault` in any action expression; `UniqueViolation`; `MissingField` (null into a non-nullable field); gate keys over the queue's limit (`Invalid`); `ValueTooLarge`; `MergeRuleViolated` (without `override_merge_rules`); `Conflict` from `IdAndKey` | `NotFound` for an addressed key with no guard; `Skipped` leased items; skipped cohorts (chunk steps); `Inapplicable` |
 
-Constraints (unique fields, non-nullable fields, size limits, blob
-references) are checked on each record after each operation's change to
+Constraints (unique fields, non-nullable fields, size limits, merge rules)
+are checked on each record after each operation's change to
 it, so a later operation in the group cannot repair an earlier violation.
 
 #### Mutate semantics
@@ -1197,9 +1214,10 @@ it, so a later operation in the group cannot repair an earlier violation.
 8. **`item_version`** increments once per item per request in which the
    item is affected by any operation: enqueue replacement, claim, renew,
    reassign, finalize, `Mutate`. Lease expiry does not change it. Responses
-   return the new value. Whether renew and reassign should change it is an
-   **[owner question]**: today they do (API-001), so a heartbeat makes a
-   concurrently prepared `expected_item_version` guard fail.
+   return the new value. Renew and reassign change it, as API-001 says
+   (ADR-025 D18), so a heartbeat makes a concurrently prepared
+   `expected_item_version` guard fail. A lease expiry that fails an item
+   (attempts used up) does not change it either.
 9. **Rows.** `fw_row_version` increments once per row per request in
    which the row changes, like `item_version`. It never repeats for a key within
    `request_id_retention_ms` of the key's last deletion: the implementation
@@ -1236,7 +1254,21 @@ parent objects as `Set` does.
 
 Patches reduce request size. Engines that store JSON as one value (Postgres
 `jsonb`, SQLite text) still rewrite the stored value; large, independently
-changing data belongs in table rows or blobs.
+changing data belongs in table rows; large payloads are stored outside
+Fireweed (ADR-025 D16).
+
+#### `Assert`
+
+`Assert { target, selection, expect }` selects exactly as a `Mutate` with
+the same selection does (`Keys` with optional `filter` and
+`expected_version` guards, or `Where` within `max_writer_scan_rows`; no
+chunking) and rejects the group with `MatchExpectUnmet { matched }` when
+the count of matches is outside `expect`. Leased items count whatever
+their lease. It applies no action: nothing is written, no version changes,
+no expiry is refreshed, and its `OpResult` has `affected = 0` and no
+entries. It is the guard for read-your-writes checks inside a group, such
+as a suppression check before a send, or the wait-and-event race (DSL-5).
+`min > max` fails validation.
 
 #### `dry_run`
 
@@ -1275,20 +1307,6 @@ filter's access term bounds the scan. Key retention
 (`client_item_key_retention_ms`) is the dedupe window for event items keyed
 by a provider's event id.
 
-**History.** With `history: Some(name)`, `apply_schema` creates the event
-log `name` with this fixed schema (declaring it separately fails with
-`SchemaConflict`): partition key `item_id` (Int; 0 for queue-level events),
-and fields `kind` (Text: `enqueue`, `claim`, `renew`, `reassign`,
-`finalize`, `mutate`, `break`, `set_gates`, `set_queue_state`), `key`
-(Text, nullable), `outcome` (Text, nullable), `item_version` (Int,
-nullable), `attempt_count` (Int, nullable), `actor` (Text, nullable),
-`reason` (Text, nullable), `request_id` (Text), and no body. Every committed
-change of an item and every `SetGates` and `SetQueueState` appends one entry
-in the same commit. Rejected and dry-run requests append nothing; their
-request records are the audit for them. Time-driven transitions are not
-recorded in v1. The history log's retention is its own; an exporter that
-must not lose entries keeps its cursor ahead of retention.
-
 ### Table
 
 Rows by primary key. `PutRows` inserts with the conflict policy; `Replace`
@@ -1299,70 +1317,23 @@ with `Keys`, a `filter` (for example `count < limit`), and
 `expect: { min: 1, max: 1 }`. A row past its expiry is invisible at once
 and deleted later.
 
-### Event log
+### Sequenced table
 
-```rust
-pub struct ReadLogRequest {
-    pub space: SpaceKey, pub log: ObjectName,
-    pub from: LogCursor, pub max_entries: u32,
-}
-pub enum LogCursor { Start, After(u64), Partition { key: Value, after: Option<u64> } }
-pub struct ReadLogResponse {
-    pub entries: Vec<LogEntryView>, pub next: LogCursor,
-    pub earliest_retained: Option<u64>, pub as_of: UtcMillis,
-}
-pub struct LogEntryView {
-    pub seq: u64, pub appended_at: UtcMillis,
-    pub fields: BTreeMap<FieldName, Value>, pub body: Option<Body>,
-}
-```
+A table declared with `KeyAssignment::Sequence` (§Schema rule 10) replaces
+the event log and queue history of earlier revisions (ADR-025 D16):
 
-1. Every entry gets `fw_seq`, unique in the log and increasing in commit
-   order. A reader that has seen `seq = n` never later sees a new entry with
-   a smaller `seq`. Gaps are allowed.
-2. Retention is by age only. `fw_appended_at` is non-decreasing in `fw_seq`
-   (appends to one log conflict, §Time rule 3), so retention removes a
-   prefix of the log.
-3. `Start` reads from the earliest retained entry. `After(n)` fails with
-   `CursorExpired { earliest }` if an entry with `seq > n` has been removed
-   by retention; `earliest` is the earliest retained `seq`, or `None` if
-   retention has removed every entry. On an empty log, `next` is the cursor
-   given.
-4. A `Partition` cursor reads one partition in `seq` order, with the same
-   expiry check against that partition.
-5. Consumers keep their cursors in a table and advance them in the same
-   group commit as their processing.
-6. The reader-facing rule is rule 1: a reader never later sees an entry
-   with a lower `seq` than one already returned. How an implementation
-   assigns `seq` to meet it is its own: the local engine assigns gapless
-   numbers in commit order inside its single writer. On PostgreSQL the
-   choice is an **[owner question]** (ADR-025 open question 18): one
-   head-row lock per log (appends to one log serialize, which matters at
-   Cayce's event volumes and for every queue with `history`), or a sequence
-   plus a visibility watermark (appends run concurrently; readers lag the
-   oldest open appender).
-
-### Blob
-
-1. `put_blob(space, bytes, media_type, min_durability)` stores immutable
-   bytes and returns `BlobRef { sha256, size }` and the level reached.
-   Putting the same bytes again returns the same reference and restarts its
-   grace period. Up to `max_blob_bytes`.
-2. A reference is a value in a `BlobRef` or `BlobRefSet` field of a live
-   queue item, terminal item within retention, live table row or retained
-   log entry. References inside JSON bodies do not count. Tombstones hold
-   none.
-3. A reference ends when its value is overwritten or removed, or when its
-   record is retired, deleted, expires or leaves retention, at that
-   transition's instant.
-4. Orphan deletion is a time-driven transition. A blob with no reference
-   is deleted at `max(last put, last reference end) + orphan_grace_ms`. A
-   request whose time is at or after that instant sees the blob as absent,
-   so a commit that references it is rejected with `BlobMissing`. Physical
-   removal may happen later.
-5. `get_blob` returns the bytes, or `BlobNotFound`.
-6. `media_type` is metadata of the put, not of the content: a later put of
-   the same bytes with another media type replaces it.
+1. Writers append with `PutRows`, omitting the key; the implementation
+   assigns the next number per table, in commit order, gapless, never
+   reused. `EntryResult.row_key` returns it.
+2. Rows are immutable. `Retire` and row expiry remove them.
+3. Readers page with a declared read whose filter ranges on the key
+   (`seq > $after`) in ascending order, keeping their cursor in a table row
+   advanced in the same group as their processing. A reader that has read
+   `seq = n` never later sees a row with a lower number appear.
+4. A timeline or transition history is rows the consumer appends in the
+   same group as the transition it records. The implementation writes
+   none of its own; time-driven transitions (lease expiry, cohort
+   deadlines) are not recorded.
 
 ## Reads
 
@@ -1374,11 +1345,10 @@ pub enum GetTarget {
     Item { queue: ObjectName, item: ItemRef, include_terminal: bool },
     Row { table: ObjectName, key: Vec<Value> },
     QueueState { queue: ObjectName },
-    Blob { blob: BlobRef },
 }
 pub struct GetResponse { pub as_of: UtcMillis, pub results: Vec<Option<GetResult>> }
 pub enum GetResult {
-    Item(ItemView), Row(RowView), QueueState(QueueStateView), Blob { size: u64, media_type: String },
+    Item(ItemView), Row(RowView), QueueState(QueueStateView),
 }
 pub struct ItemView {
     pub item_id: ItemId, pub client_item_key: ClientItemKey, pub state: ItemState,
@@ -1402,7 +1372,7 @@ All targets are read at one linearization point. A request has at most
 ```rust
 pub struct ReadDecl {
     pub name: ReadName, pub version: u32,
-    pub source: ObjectName,                       // a queue, table or event log
+    pub source: ObjectName,                       // a queue or table
     pub params: Vec<(ParamName, ScalarType)>,
     pub filter: Expr,                             // index rule applies
     pub output: ReadOutput,
@@ -1499,13 +1469,13 @@ pub enum DataPlaneError {
     Evaluation(EvalError),            // reads only (Int Sum overflow)
     ScanLimitExceeded,                // aggregate reads only
     RequestIdConflict, RequestExpired,
-    CursorExpired { earliest: Option<u64> }, InvalidContinuation, BlobNotFound,
+    InvalidContinuation,
     DurabilityPending { reached: DurabilityLevel },
     Contention,
     CommitTimeout, RateLimited { retry_after_ms: Option<u64> }, Unavailable(String),
     SpaceBusy, InstanceSuperseded, Internal(String),
 }
-pub enum Unsupported { Shape(ShapeKind), QueueFeature(QueueFeature), Durability(DurabilityLevel), Limit(LimitKind), QueueHistory }
+pub enum Unsupported { Shape(ShapeKind), QueueFeature(QueueFeature), Durability(DurabilityLevel), Limit(LimitKind) }
 pub enum LimitKind { Ops, Entries, RequestBytes, InList, ClaimBatch, CohortSize, LeaseDuration, RequestIdRetention, Objects }
 ```
 
@@ -1516,11 +1486,10 @@ pub enum LimitKind { Ops, Entries, RequestBytes, InList, ClaimBatch, CohortSize,
 | `IndexNotReady` | Definitive | Later, same `request_id` |
 | `SelectorNotIndexed`, `GatesNotEnabled`, `InvalidRequest`, `BatchTooLarge`, `Evaluation`, `ScanLimitExceeded`, `InvalidContinuation` | Definitive | After changing the request |
 | `RequestIdConflict`, `RequestExpired` | Definitive | With a new `request_id` |
-| `CursorExpired`, `BlobNotFound` | Definitive | No |
 | `DurabilityPending` | Definitive: committed at `reached` | Same `request_id` to wait again |
 | `Contention`, `RateLimited`, `SpaceBusy` | Definitive: nothing committed | Same `request_id` (`RateLimited` after `retry_after_ms`) |
 | `CommitTimeout`, `Unavailable` | Indeterminate | Same `request_id`, or `get_request` |
-| `InstanceSuperseded` | Definitive | No; use the new instance |
+| `InstanceSuperseded` | Definitive: this instance no longer owns the space, and the request did not commit on the current owner. A local engine fenced by a higher ownership epoch returns it for every later request and for requests still waiting for `Durable`. | No; route to the new owner |
 | `Internal` | Definitive: a broken invariant was detected; nothing committed | No |
 
 A rejected group is a recorded outcome, not an error.
@@ -1578,32 +1547,53 @@ request; indexed loading and the protocol below are the next steps.
    collation.
 6. **JSON** is stored as `jsonb` after normalization (§Canonical JSON).
 7. **`Int` `Sum`** accumulates in `numeric` and checks the final range.
-8. **Event logs** assign `fw_seq` so that it follows commit order
-   (§Event log rule 6 is an owner question).
-9. **Durability.** `Local` is a commit flushed to the primary's WAL.
-   `Replicated` needs a synchronous standby; whether it is per request or
-   cluster-wide is an owner question (§Durability).
-10. **Blobs** are `bytea` rows with a reference count maintained in the
-    referencing transaction.
+8. **Sequenced tables** assign the key from a per-table counter in the same
+   transaction, so numbers follow commit order and a rolled-back group
+   leaves no gap. Under the target protocol the counter row is locked
+   `FOR UPDATE`, which serializes appends to one sequenced table.
+9. **Durability.** Every acknowledged request is one committed
+   transaction; the server is assumed fully replicated, so it is `Durable`
+   (§Durability). A `FireAndForget` request sets `synchronous_commit = off`
+   for its transaction only.
 
 ### Local engine
 
 1. One database per space, with one writer. A request is one write
    transaction. Time is non-decreasing per space.
-2. Commits are fsynced locally (`Local`) and shipped to the S3 log in
-   batches. `min_durability: Replicated` waits for its batch.
-   **[draft pending owner]**
-3. A second open on one host fails with `SpaceBusy` while the holder lives
-   (a lock on the database file). Fencing a stale writer on another host,
-   before it acknowledges a `Local` commit, is an open design question for
-   the Turso queue implementation (ADR-025 open question 16). Shipping to S3
-   after a `Local` acknowledgement cannot provide it.
-4. Lease expiry and row expiry are lazy. Reads run on MVCC snapshots.
-5. Speed gates B1 to B4 apply.
+2. Durability follows Niflheim's write modes (§Durability): one local fsync
+   per batch, and commit frames shipped to S3 in order and in batches.
+3. Ownership belongs to the embedder's control plane (ADR-025 D15). The
+   engine is constructed with the ownership epoch the control plane
+   granted; it is not a `DataPlane` operation. Before accepting writes, the
+   engine writes a takeover record at the next S3 log sequence. Log objects
+   are written with `If-None-Match: *`, so a stale writer's next upload
+   fails and that engine stops. `FireAndForget` and `Tracked` commits are
+   protected only by the control plane's rule: no new epoch while the old
+   process may still run. A second open on one host fails with `SpaceBusy`
+   while the holder lives. Clients recheck placement on an interval and
+   after `SpaceBusy` or `InstanceSuperseded`.
+4. **Fenced.** When an upload fails because a higher epoch wrote the next
+   sequence, the engine stops for good: every later request, and every
+   request still waiting for `Durable`, fails with `InstanceSuperseded`
+   (definitive; it did not commit on the current owner). A space opened at a
+   higher epoch restores from the S3 log up to its takeover record; commits
+   the old writer acknowledged at `FireAndForget` or `Tracked` after its last
+   shipped frame are lost, as with machine loss.
+5. **Item state across an epoch change.** Item state, including
+   `attempt_count`, `item_version` and leases, is space data and moves with
+   the log. A clean handover (close, ship, open at the next epoch) keeps all
+   of it. After a crash, the new owner has every commit up to the last
+   shipped frame; claims acknowledged at `Tracked` after it are lost, so
+   their attempt charges are lost too. A consumer that needs every charge to
+   survive machine loss claims at `Durable`. Item leases are Fireweed's;
+   the control plane's ownership lease covers only which node writes the
+   space.
+6. Lease expiry and row expiry are lazy. Reads run on MVCC snapshots.
+7. Speed gates B1 to B4 apply.
 
 ## Consumer inventory
 
-What Snorri and Cayce would otherwise keep in memory, in opaque blobs or in
+What Snorri and Cayce would otherwise keep in memory, in opaque JSON or in
 their own stores, and the shape that holds it.
 
 ### Snorri
@@ -1613,16 +1603,22 @@ repository). Rates are per recipient of a single-send campaign.
 
 | # | State | Size and rate | Shape and mechanism |
 |---|-------|---------------|---------------------|
-| 1 | Instance body: variables, node, waits, effect references, inbox, audit ring, engagement profile | Body up to 2 MiB; output up to 1 MiB; rewritten about 3 times per recipient plus once per profile update | Queue item with a `Json` body (D8). Field-level changes are `Patch`; a profile update or inbox append is a `Mutate` with `Patch` and `LeasePolicy::Preserve`, which bumps `item_version` so the worker's guarded commit sees it. Large outputs go to blobs, referenced from a `BlobRefSet` field. |
+| 1 | Instance body: variables, node, waits, effect references, inbox, audit ring, engagement profile | Body up to 2 MiB; output up to 1 MiB; rewritten about 3 times per recipient plus once per profile update | Queue item with a `Json` body (D8). Field-level changes are `Patch`; a profile update or inbox append is a `Mutate` with `Patch` and `LeasePolicy::Preserve`, which bumps `item_version` so the worker's guarded commit sees it. Large outputs are stored outside Fireweed and referenced from a `Text` field (ADR-025 D16). |
 | 2 | Consumed inputs | Up to 16, each up to 64 KiB; one per external event | Event items in an inputs queue, finalized `Complete` in the transition's group; or kept in the body and trimmed with `Patch`. |
 | 3 | Waits and await routing | Up to 128 per instance; names of 71 bytes | An indexed `TextSet` field on the instance item, changed with `SetAdd` and `SetRemove`; routing is a declared read with `Contains`. |
-| 4 | Effects: request, intent, receipt | Up to 256 KiB per effect item; intent commit about 1.2 KiB; 3 commits per send | Effect items in an effects queue. The intent commit sets `min_durability: Replicated` (§Durability; Snorri O15). |
+| 4 | Effects: request, intent, receipt | Up to 256 KiB per effect item; intent commit about 1.2 KiB; 3 commits per send | Effect items in an effects queue. The intent commit sets `min_durability: Durable` (§Durability). |
 | 5 | Handler idempotency per idempotency key | Small; one write per handler call | Table keyed by idempotency key with `RowExpiry::AfterWrite`. |
 | 6 | External events and dedupe | Up to 64 KiB per event; 31-day dedupe; at most 3 claims per event | Event items keyed by provider event id, with `client_item_key_retention_ms` of 31 days. |
-| 7 | Audit and history | One per transition | Hash chain and last 16 summaries in the body (`Patch` `Append`, `keep_last: 16`). Full history is exhaust for Niflheim (Snorri's TransitionObserver). |
-| 8 | Definitions | 31–43 KB, up to 8 MiB; once per artifact per queue | Blob, referenced from a table row keyed by artifact digest and queue. |
-| 9 | Admission in-flight chunk | About 100 B per run per shard; twice per chunk | Table row keyed by run and shard: created with `PutRows` and `RowConflict::Reject`, then updated by `Mutate` with `Keys` and `expected_version` set to the version last read. **[pending owner: Snorri O16]** |
-| 10 | Rate-limit counters (today Dragonfly in Cayce) | One counter per slot key (account, contact, hour); one conditional increment per effect intent | Table rows keyed by slot and hour bucket with expiry. In one group: `PutRows` with `RowConflict::Skip` and `count = 0` (creates the bucket if absent), then `Mutate` with `Keys`, `filter: count < limit`, `Set count = count + 1` and `expect: { min: 1, max: 1 }`. **[pending owner: Snorri O16]** |
+| 7 | Audit and history | One per transition | Hash chain and last 16 summaries in the body (`Patch` `Append`, `keep_last: 16`). The timeline the UI and event triggers need is a sequenced table written in each transition's group (ADR-025 D16). Full history is exhaust for Niflheim (Snorri's TransitionObserver). |
+| 8 | Definitions | 31–43 KB, up to 8 MiB; once per artifact per queue | Stored outside Fireweed (ADR-025 D16), referenced from a table row keyed by artifact digest and queue. |
+| 9 | Admission in-flight chunk | About 100 B per run per shard; twice per chunk | Table row keyed by run and shard: created with `PutRows` and `RowConflict::Reject`, then updated by `Mutate` with `Keys` and `expected_version` set to the version last read (ADR-025 D21). |
+| 10 | Rate-limit counters (today Dragonfly in Cayce) | One counter per slot key (account, contact, hour); one conditional increment per effect intent | Table rows keyed by slot and hour bucket with expiry. In one group: `PutRows` with `RowConflict::Skip` and `count = 0` (creates the bucket if absent), then `Mutate` with `Keys`, `filter: count < limit`, `Set count = count + 1` and `expect: { min: 1, max: 1 }`. `count` is `NonDecreasing`. Keyed by account, so it lives outside a campaign space (ADR-025 open questions 5 and 25). |
+
+Durability by class (Snorri TD-012 revision 7, uncommitted there):
+`Durable` for effect intents, admission chunks, event delivery and
+operator writes; `Tracked` for transitions, event consumption, receipts,
+poison parking and sweeper writes; no `FireAndForget`. On PostgreSQL every
+one of these commits is `Durable` (§Durability).
 
 Not shapes: the compiled WASM cache; the open-runs list and next-wake time
 (derived through `fw_queue_counts` and a declared read ordered by
@@ -1635,9 +1631,9 @@ Not shapes: the compiled WASM cache; the open-runs list and next-wake time
 | Per-recipient, per-run lifecycle | Queue item per recipient, with declared fields (campaign, step, domain, status) for claims, bulk changes and UI reads |
 | Recipient profile, suppression flags | Table keyed by recipient |
 | Frequency caps and send-rate windows | Table counters keyed by bucket |
-| Delivery and engagement events | Event items deduplicated by provider id that drive workflows; an event log for timelines and export |
-| UI counts by state, lag, send rates | Declared aggregate reads over queue items, tables and event logs |
-| Rendered messages and attachments | Blobs |
+| Delivery and engagement events | Event items deduplicated by provider id that drive workflows; a sequenced table for timelines and export |
+| UI counts by state, lag, send rates | Declared aggregate reads over queue items and tables |
+| Rendered messages and attachments | Outside Fireweed (ADR-025 D16) |
 
 ### Suppression (Cayce; tested by SUPP-1 to SUPP-3)
 
@@ -1647,17 +1643,12 @@ complaint). As a Fireweed table `supp` with fields `reasons` (`TextSet`) and
 `lifted_at` (`Timestamp`):
 
 | Need | Mechanism | Status |
-|------|-----------|--------|
-| (1) Keyed upsert with set-union, reasons only added | One group: `PutRows` with `RowConflict::Skip` (creates the row if absent), then `Mutate` by `Keys` with `Set reasons = SetAdd(reasons, [$reason])`. Both run at one linearization point, so there is no read-modify-write race. A lift is a separate `Mutate` that clears `reasons` and sets `lifted_at`. | Works (SUPP-1). The store does not enforce "only add": any writer allowed to send a `Mutate` can clear the set. Enforcement would need a schema-declared add-only field (ADR-025 open question 23); authorizing the lift belongs to the adapter. |
+|------|----------|--------|
+| (1) Keyed upsert with set-union, reasons only added | `reasons` declares `MergeRule::AddOnly`. One group: `PutRows` with `RowConflict::Skip` (creates the row if absent), then `Mutate` by `Keys` with `Set reasons = SetAdd(reasons, [$reason])`. Both run at one linearization point, so there is no read-modify-write race. A write that removes a reason rejects the group with `MergeRuleViolated`. A lift is a `Mutate` with `override_merge_rules: true` that clears `reasons` and sets `lifted_at`; authorizing it belongs to the adapter. | Works (SUPP-1). |
 | (2) Idempotent under duplicate and out-of-order events | The event id is the `request_id`, so a duplicate replays within `request_id_retention_ms`; `SetAdd` is idempotent and order-free, so later duplicates converge anyway. The `Mutate` filter `Coalesce(lifted_at, MIN) < $event_at` drops events older than the last lift. | Works (SUPP-1). |
-| (3) Durable before the event is acknowledged | `min_durability: Replicated` on the event's commit; `DurabilityPending` tells the caller the commit exists. | Contract: yes. Local engine: `Replicated` on request (draft). PostgreSQL: only with a synchronous standby (open questions 14, 19); the first PostgreSQL increment reports `Local` only, so it refuses `Replicated` with `InvalidRequest` today. |
-| (4) Read-your-writes at the moment of the effect | Put the check in the effect's own group: a `Mutate` on the suppression key with `filter: reasons is not null`, a no-op `Set`, and `expect: { min: 0, max: 0 }`, followed by the effect's operations. The group rejects with `MatchExpectUnmet` if the address is suppressed at that instant. | Works (SUPP-2) when the suppression table and the effect's queue are in one space (open question 2). A claim filter cannot read another object (no joins); to keep suppressed recipients from being claimed at all, the suppression event can also block a gate key such as `supp:<address>` carried by those items, in the same group. The no-op `Set` is a workaround for a missing guard-only operation (open question 24). |
+| (3) Durable before the event is acknowledged | `min_durability: Durable` on the event's commit; `DurabilityPending` tells the caller the commit exists. | Works on PostgreSQL, where every default commit is `Durable`, and on the local engine on request. |
+| (4) Read-your-writes at the moment of the effect | Put the check in the effect's own group: `Assert` on the suppression key with `filter: reasons is not null` and `expect: { min: 0, max: 0 }`, followed by the effect's operations. The group rejects with `MatchExpectUnmet` if the address is suppressed at that instant. `Assert` writes nothing and changes no version. | Works (SUPP-2) when the suppression table and the effect's queue are in one space. With one space per campaign (ADR-025 D13) suppression is account-scoped, so this needs a copy of the suppression row in each campaign space (ADR-025 open question 25, option a). A claim filter cannot read another object (no joins); to keep suppressed recipients from being claimed at all, the suppression event can also block a gate key such as `supp:<address>` carried by those items, in the same group. |
 | (5) Bounded batch read at claim time | `get` with up to `max_read_rows` `Row` targets, one snapshot; more fails with `BatchTooLarge`. A declared read over `address` with `In` also works, bounded by `max_in_list` and the scan budget. | Works (SUPP-3). |
-
-This bears on open question 5: suppression needs set-union, not a counter,
-and the table shape covers it. What it lacks is a declared merge policy on
-a field (add-only sets, as here; increment-only counters; max-only
-timestamps), which open question 23 asks about.
 
 ## Profiles
 
@@ -1666,13 +1657,25 @@ profile when `capabilities()` covers all of it.
 
 | Profile | Shapes and features | Minimum limits | `max_durability` |
 |---------|---------------------|----------------|------------------|
-| `snorri` | Queue, Table, Blob; `DynamicGates`; `Json` bodies | `max_body_bytes` 2 MiB; `max_value_bytes` 256 KiB; `max_set_values` 128; `max_blob_bytes` 8 MiB; `max_request_bytes` 4 MiB; `max_entries_per_commit` 4,096; key retention 31 days | `Replicated` for the zero-loss send path |
-| `cayce-ui` | Queue, Table, EventLog; declared reads with aggregates | `max_read_rows` 1,000; `max_read_scan_rows` 5,000,000 (snapshot reads, not the writer) | — |
+| `snorri` | Queue, Table (including sequenced tables); `DynamicGates`, `Recurrence`; `Json` bodies | `max_body_bytes` 2 MiB; `max_value_bytes` 256 KiB; `max_set_values` 128; `max_request_bytes` 4 MiB; `max_entries_per_commit` 4,096; key retention 31 days | `Durable` for the zero-loss send path |
+| `cayce-ui` | Queue, Table (including sequenced tables); declared reads with aggregates | `max_read_rows` 1,000; `max_read_scan_rows` 5,000,000 (snapshot reads, not the writer) | — |
 | `recipient-lifecycle` | Queue, Table; chunked `Mutate` | `max_entries_per_commit` 10,000; `max_selector_affected` 10,000; `max_writer_scan_rows` 50,000 | — |
 
 ## Conformance
 
 ### Harness
+
+**Built today.** `fireweed_interface_conformance::run` takes a factory
+that returns an `Instance`: the implementation on fresh storage, and
+optionally a `Peer`, a function that opens another instance on the same
+storage (in-memory: shared state; PostgreSQL: a new connection to the same
+schema). Tests that need concurrent instances (REC-5, MULTI-1, TIME-3,
+PG-1 to PG-3, DSL-5, DSL-8) run on threads across peers when a peer
+exists. The time authority is a `ManualClock` shared by every instance.
+The design below adds what only a storage-owning implementation can
+provide (the local engine): child processes, fault hooks and storage loss.
+Tests that need them are skipped with a reason that starts "harness gap:"
+or "local engine only:".
 
 ```rust
 pub trait Harness: Send + Sync + 'static {
@@ -1681,7 +1684,7 @@ pub trait Harness: Send + Sync + 'static {
     fn open<'a>(&'a self, storage: &'a StorageSpec, clock: SharedClock)
         -> BoxFuture<'a, Result<Self::Impl, HarnessError>>;
     fn child_binary(&self) -> Option<PathBuf>;
-    /// Optional: destroy the implementation's local copy, for Replicated scenarios.
+    /// Optional: destroy the implementation's local copy, for Durable scenarios.
     fn lose_local_storage<'a>(&'a self, storage: &'a StorageSpec)
         -> BoxFuture<'a, Result<(), HarnessError>> { Box::pin(async { Err(HarnessError::Unsupported) }) }
 }
@@ -1696,7 +1699,7 @@ pub enum Fault {
     BeforeCommit,                // fail the attempt before anything is written
     AfterCommitBeforeResponse,   // commit, then drop the response
     StallAtReceive,              // hold the request after receipt, before its record is read
-    HoldReplication,             // keep commits below Replicated until released
+    HoldReplication,             // keep commits below Durable until released
 }
 ```
 
@@ -1717,12 +1720,11 @@ record or takes any lock, so a replay can run to completion meanwhile.
    which the implementation compiles in for test builds. A wrapper around
    `DataPlane` does not satisfy them.
 4. Scenarios run by declared guarantees and capabilities. A scenario
-   required by what the implementation declares may not be skipped; the
-   `Replicated` scenarios are required when `max_durability` is
-   `Replicated`.
-5. For Postgres, the harness owns the database server process; `Local` and
-   `Replicated` crash scenarios kill the server (and, for `Replicated`,
-   promote the standby), not only the client.
+   required by what the implementation declares may not be skipped, except
+   that PostgreSQL's `Durable` rests on the server's replication (ADR-025
+   D14), which the suite does not test.
+5. For the local engine, `Tracked` crash scenarios kill the child process,
+   and `Durable` scenarios also destroy its local storage.
 
 ### Rule-pinning tests
 
@@ -1788,7 +1790,8 @@ vectors. IDs are stable and cited in failures.
 | REC-4 | Stalled original | With `StallAtReceive` on the original, a replay commits or rejects; after `Release`, the original returns the recorded result and does not commit. |
 | REC-7 | Verb replay | A `finalize` and a `renew` with mixed per-entry outcomes replay the same per-entry outcomes. |
 | REC-8 | Token redaction | `get_request` of a claim returns no tokens; a replay returns them. |
-| REC-5 | Lost response | With `AfterCommitBeforeResponse`, `get_request` and replay return the committed result. |
+| REC-5 | Lost response | A committed response is dropped; `get_request` and replay, on this instance and on a peer, return the committed result. |
+| MULTI-1 | Instances agree | Two instances on one storage see each other's commits at once. |
 | REC-6 | Claim replay | Replay while leases are active returns the same claim; after they end, `RequestExpired`; an empty claim replays empty. |
 | TIME-1 | Time-driven transitions | Lease expiry, cohort deadline, retention and row expiry under `SharedClock`, with no tick. |
 | TIME-3 | Monotonic along visibility | Under concurrent conflicting requests, `as_of` never decreases along observed effects (peers in child processes). |
@@ -1797,20 +1800,43 @@ vectors. IDs are stable and cited in failures.
 | COH-1 | Cohort deadline | A missing member, a gated member and a paused queue each fail the cohort at the deadline, including when the gate or pause is removed after the deadline before any request touches the cohort; a claimed cohort is exempt; enqueue after failure is `CohortFailed`. |
 | DUR-1 | Levels reported | Every write response, including rejections and `apply_schema`, reports a level within the declared range. |
 | DUR-2 | min_durability above max | Fails `InvalidRequest`. |
-| DUR-3 | DurabilityPending | With `HoldReplication`, the request returns `DurabilityPending { reached: Local }`; a replay after `Release` returns `Replicated`. |
-| DUR-6 | Prefix-closed | After a later commit reaches `Replicated`, every earlier commit reports `Replicated` on replay. |
-| DUR-4 | Local crash | Kill the server or child around acknowledged commits; every acknowledged commit is present after reopen. |
-| DUR-5 | Replicated loss | After `lose_local_storage`, every commit acknowledged at `Replicated` is present. |
+| DUR-3 | DurabilityPending | With `HoldReplication`, the request returns `DurabilityPending { reached: Tracked }`; a replay after `Release` returns `Durable`. |
+| DUR-6 | Prefix-closed | After a later commit reaches `Durable`, every earlier commit reports `Durable` on replay. |
+| DUR-4 | Crash | Kill the child around acknowledged commits; every commit acknowledged at `Tracked` or above is present after reopen. |
+| DUR-5 | Storage loss | After `lose_local_storage`, every commit acknowledged at `Durable` is present. |
+| DUR-7 | Requested level | Each offered level is acknowledged at or above what was asked and at most the maximum. |
+| LEASE-MAX | Redelivery bound | Lease expiry returns the item to pending until its claims have used `max_attempts`; the expiry after that fails it with `attempts-exhausted` at the expiry instant, without a version bump. |
 | LIN-1 | Concurrent claims | Peers never hold two active leases on one item. |
 | LIN-2 | Read after commit | A read starting after a commit's response observes it, across shapes. |
 | SHARE-1 | SingleProcess | A second open fails or supersedes while the holder lives; after the holder is killed, open succeeds. |
-| LOG-1 | Seq order | Concurrent appenders never let a reader see a smaller `seq` after a larger one. |
-| LOG-2 | Retention and cursors | `CursorExpired` exactly when an entry after the cursor was removed; `earliest: None` when retention removed everything; `Start`; empty log. |
-| LOG-3 | Partition cursors | The same checks for a `Partition` cursor. |
-| HIST-1 | History | Each kind of change appends one entry with the fixed schema; rejected and dry-run requests append nothing. |
-| BLOB-1 | Reference lifecycle | Overwrite, retire, expiry and retention end references at the transition instant; orphan deletion after grace; re-put restarts grace. |
-| BLOB-2 | Orphan instant | A commit referencing a blob at or after its orphan-deletion instant rejects with `BlobMissing`; one instant earlier, it succeeds and keeps the blob. |
-| BLOB-3 | Blob durability | A `Replicated` commit referencing a fresh blob survives `lose_local_storage` with the blob. |
+| ASSERT-1 | Assert writes nothing | A passing `Assert` changes no version and refreshes no expiry. |
+| ASSERT-2 | Assert rejects | A failing `Assert` rejects the group and rolls back earlier operations; a version guard fails with `VersionMismatch`. |
+| ASSERT-3 | Assert and leases | `Assert` counts leased items and leaves `item_version` unchanged, so the worker's guarded finalize still commits. |
+| MERGE-1 | NonDecreasing | Equal or larger values apply; smaller or null values reject, through `Set`, `Replace` and `Merge`, on Int, Float and Timestamp. |
+| MERGE-2 | AddOnly | Unions apply; removing a member or clearing the set rejects with `MergeRuleViolated`. |
+| MERGE-3 | Override | `override_merge_rules` lets a `Mutate` break a rule; it is refused on a queue. |
+| MERGE-4 | Rule placement | Rules on queue fields, key fields or mismatched types fail schema validation. |
+| SEQ-1 | Assignment | Keys are 1, 2, 3, ... across groups, returned in `row_key`, and stored. |
+| SEQ-2 | No gaps, no reuse | A rejected group assigns nothing; a supplied key is `Invalid`; `Set` is refused; a retired number is never reused. |
+| SEQ-3 | Cursor paging | A reader paging by key never goes backwards and sees later appends after its cursor. |
+| SEQ-4 | Declaration | `Sequence` needs one non-null `Int` key; key assignment cannot change. |
+| SUPP-1 | Suppression upsert | Set-union of reasons, duplicates and out-of-order events converge; a plain clear is refused; a lift needs the override. |
+| SUPP-2 | Suppression guard | An `Assert` in the send's group rejects a send to a suppressed address and leaves the row's version unchanged. |
+| SUPP-3 | Batch read | `get` reads up to `max_read_rows` rows in one snapshot; more is `BatchTooLarge`. |
+| DSL-1 | Timer instant | A timer is due exactly at its instant, not a millisecond before; instances due at one instant are claimed in priority order. |
+| DSL-2 | Timer attempts | Waiting through `Retry` charges attempts and ends in `attempts-exhausted`; waiting through `Rearm` does not. |
+| DSL-3 | Wait then event | The instance parks on an await; the event finds the waiter and wakes it with the payload. |
+| DSL-4 | Event then wait | The event is stored first; the instance's wait consumes it instead of parking. |
+| DSL-5 | Wait and event race | On threads and across peers, exactly one side delivers the payload, once. |
+| DSL-6 | Two awaits | The first event removes only its own await; the second wakes again; payloads arrive in order; an unawaited event is stored. |
+| DSL-7 | Duplicate and out-of-order events | Replays by event id never add a second payload or recreate a consumed event. |
+| DSL-8 | Fan-in | Children completing on several threads decrement a join counter; only the last wakes the parent; a duplicate completion is refused. |
+| DSL-9 | Suppressed send | The send intent commits with the step only if the address is not suppressed at that instant, including suppression that arrives after the claim. |
+| DSL-10 | Crash loop | A worker that crashes every time ends with the instance failed after `max_attempts`; a crash after a successful step does not count against the next. |
+| DSL-11 | Cancel a run | A chunked `Mutate` cancels a run while some instances are leased, under each lease policy. |
+| DSL-12 | Schedule tick | A recurring entry ticks, replays by request id, and handles missed ticks. |
+| DSL-13 | Timeline | Each transition appends a timeline row in its own group; a reader pages them by cursor. |
+| DSL-14 | Rate cap | A per-contact counter with `NonDecreasing` and a `count < cap` filter admits exactly `cap` sends. |
 | SCH-1 | Schema versioning | Expected-version conflict; identical re-apply; non-additive change rejected; unsupported feature rejected. |
 | READ-1 | Declared reads | Version immutability; pagination; built-in reads by each parameter. |
 | READ-2 | Null ordering and grouping | Nulls sort first ascending and last descending; nulls form one group. |
@@ -1821,29 +1847,31 @@ vectors. IDs are stable and cited in failures.
 | PG-2 | Postgres time | `as_of` of conflicting requests never decreases in commit order. |
 | PG-3 | Write skew | Two groups that each require the other's key absent and insert their own: at most one commits. |
 
-### Status (revision 6)
+### Status (revision 7)
 
-`fireweed-interface-conformance` implements the rule-pinning tests as
-executable checks through `DataPlane` only. Expression rules run through
-`Mutate` `Set` (action position) and `Where` dry runs (predicate position),
-so each implementation is tested on its own evaluation. Revision 6 adds
-vectors for every defect review round five found (ENQ-1b, GRP-4b, GRP-6b,
-GRP-8b, GRP-10b, TBL-2, RET-1, AGG-2b, AGG-5, SCH-1b, REC-3b, REC-9,
-SCAN-4b, READ-2b, LIM-1b, CAST-1b, PATCH-1b, and from the second review
-EVAL-1b, PATCH-1c, GRP-14b, ENQ-1c, REC-6b, SCAN-5b, READ-3, READ-4,
-FIN-1b, TBL-3, GRP-15, SCH-1c, LIM-1c) and runs LIN-1 with threads.
+`fireweed-interface-conformance` implements the rule-pinning tests and the
+DSL scenarios as executable checks through `DataPlane` only. Expression
+rules run through `Mutate` `Set` (action position) and `Where` dry runs
+(predicate position), so each implementation is tested on its own
+evaluation. The DSL scenarios (`scenarios.rs`) express Snorri workflow
+patterns from the Turso-queue session's DSL check as Fireweed requests and
+assert on final state through `get` and `read`.
 
 | Implementation | Pass | Fail | Skip |
 |----------------|------|------|------|
-| `fireweed-interface-memory` | 96 | 0 | 23 |
-| `fireweed-interface-postgres` (PostgreSQL 16) | 96 | 0 | 23 |
+| `fireweed-interface-memory` | 132 | 0 | 11 |
+| `fireweed-interface-postgres` (PostgreSQL 16) | 131 | 0 | 12 |
 
-The skipped tests need a capability neither implementation declares yet
-(cohorts, event logs, blobs, queue history, `Replicated`), a harness
-control not yet built (fault hooks, child processes, index builds), or the
-PostgreSQL concurrency protocol (PG-1 to PG-3). Several tests still cover
-only part of what their row claims (TYP-1, CAST-1, GRP-3); generating them
-from the tables is open work.
+Skipped on both: GRP-9, GRP-13 and COH-1 (cohorts are not declared yet);
+IDX-2 (harness gap: an index still building); REC-4 (harness gap:
+`StallAtReceive`); DUR-4 (harness gap: a child process killed with
+SIGKILL); SCAN-6 (local engine only: expired rows still stored). In-memory
+also skips DUR-3, DUR-5 and DUR-6 (`Durable` not declared) and SHARE-1
+(local engine only). PostgreSQL also skips DUR-2 (`Durable` is offered),
+DUR-3 and DUR-6 (harness gap: `HoldReplication`), DUR-5 (harness gap:
+`lose_local_storage`) and SHARE-1 (`MultiProcess`; MULTI-1 covers it).
+Several tests still cover only part of what their row claims (TYP-1,
+CAST-1, GRP-3); generating them from the tables is open work.
 
 ### Differential test
 
@@ -1868,9 +1896,9 @@ type, selector writes, chunk sequences, aggregates and clock moves.
 
 | Implementation | Durability (min / max) | Visibility | Sharing | Shapes |
 |----------------|------------------------|------------|---------|--------|
-| PostgreSQL (shared server; new crate from TD-002) | `Local` / `Replicated` with a synchronous standby, else `Local` | `Immediate` | `MultiProcess` | all |
-| Local engine (Turso MVCC on NVMe, S3 log; SQLite comparison arm) | `Local` / `Replicated` [draft pending owner] | `Immediate` | `SingleProcess` per space | all |
-| In-memory (`fireweed-interface-memory`) | `Process` / `Process` | `Immediate` | `SingleProcess` | Queue, Table (others pending the owner's v1 scope) |
+| PostgreSQL (`fireweed-interface-postgres`) | `FireAndForget` / `Durable` (default `Durable`) | `Immediate` | `MultiProcess` | Queue, Table |
+| Local engine (Turso MVCC on NVMe, S3 log; SQLite comparison arm) | `FireAndForget` / `Durable` (default `Tracked`) | `Immediate` | `SingleProcess` per space | Queue, Table |
+| In-memory (`fireweed-interface-memory`) | `FireAndForget` / `FireAndForget` | `Immediate` | `SingleProcess` | Queue, Table |
 
 ## Facade binding (summary for API-005)
 
@@ -1935,7 +1963,7 @@ and 10 `operator_*` methods in `crates/fireweed/src/operator.rs`.
 | `operator_purge` | `Mutate` `Retire` | `max_affected` becomes `limit` with `expect` |
 | `operator_archive` | `Mutate` `SetMetadata` (`archived: true`) on retained terminal items | none: the item stays retained; nothing is deleted |
 | `operator_get_operation` | `get_request` | read-only |
-| `operator_audit_records` | `read_log` on the queue's history log | needs `history`; principal and reason come from `actor` and `reason` |
+| `operator_audit_records` | declared read on an audit sequenced table the operator path appends to in each action's group | principal and reason are fields of the row |
 | `projection_control`, `snapshot_policy`, `set_snapshot_policy`, `should_snapshot`, `snapshot_now`, `latest_snapshot_info`, `compact_log_behind_snapshot`, `last_rebuild_stats`, `ownership`, `renew_owned`, `reclaim_expired`, `current_position`, `peek` | object-log implementation type | leave `Fireweed` (ADR-025 open question 3) |
 
 ## Compatibility
