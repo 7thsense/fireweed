@@ -72,7 +72,8 @@ Snorri's items. Re-entry across runs is checked against a keyed record in
 a family space (D29), and a queue may opt out of the store's redelivery
 bound when its embedder parks crash-looping items itself (D30). Snorri's
 TD-012 revision 7 text answers question 15, which moves to the resolved
-table; definitions larger than one value are new question 30.
+table. Definitions larger than one value were question 30, settled the
+same day by capping their size (D31).
 
 ## Context
 
@@ -191,6 +192,7 @@ needs Cayce's confirmation.
 | D28 | Crashes are the embedder's: "crashes can be handled by the control plane via the embedder (snorri/cayce)". | Owner via the Turso-queue session, 2026-11-15 | The control plane grants ownership; the store still bounds redelivery (D17). |
 | D29 | "use the family space record" for re-entry across runs. | Owner, 2026-11-16 | Adopted (§3). Settles part of question 29. |
 | D30 | "accept Snorri's max_attempts opt-out". | Owner, 2026-11-16 | Adopted (§9). Amends D17: the store's bound is the default, and a queue may opt out. |
+| D31 | "Yes, cap at 256 KiB": Snorri caps workflow definitions at 256 KiB, one table value, and keeps transition output at 1 MiB inside the 2 MiB body. | Owner, 2026-11-16 | Adopted. Resolves question 30. No interface change; Cayce confirms no template exceeds 256 KiB. |
 
 ## Decision
 
@@ -643,6 +645,7 @@ object-log, RESP and TD-003 changes land at step 6.
 | 19 | Postgres per-request durability | Per request: `synchronous_commit = off` for `FireAndForget`, a normal commit otherwise (D14). |
 | 15 | Snorri's open items | Answered by Snorri TD-012 revision 7 (below). |
 | 20 | Bounding redelivery | Lease expiry counts toward `max_attempts` (D17); a queue may opt out with `u32::MAX` (D30). |
+| 30 | Definitions larger than one value | Snorri caps definitions at 256 KiB and transition output at 1 MiB (D31). |
 | 21 | Choices made without a ruling | Adopted as needed, including `SERIALIZABLE` where it is required (D19). |
 | 22 | Moving spaces between implementations | Not needed (D26). |
 | 23 | Merge policies | `AddOnly` and `NonDecreasing` field rules, with an explicit override (D20). |
@@ -661,7 +664,7 @@ Snorri's TD-012 revision 7 (uncommitted there; sent to this session on
 - O16, ancillary state: counters and admission state become tables (D21,
   question 5); history goes to Niflheim and to sequenced tables (D16);
   idempotency maps become a table with row expiry. Definitions of 31 to
-  43 KB fit a table row; larger ones are question 30.
+  43 KB fit a table row, and Snorri caps them at 256 KiB (D31).
 - O17, what a space is: question 29.
 - O18 and O19, the ownership-epoch and poison-report ports: interfaces
   between Snorri and Cayce's control plane. They fit §11's fencing, and
@@ -737,17 +740,6 @@ Snorri's TD-012 revision 7 (uncommitted there; sent to this session on
     every run of the family writes and which needs its own grant on the
     local engine. Is one space per (run, shard) acceptable, or should a
     run's shards share one space?
-30. **Definitions larger than one value.** Snorri stores workflow
-    definitions in table rows. Typical ones are 31 to 43 KB; the largest
-    are up to 8 MiB, over `max_value_bytes` (256 KiB) and `max_body_bytes`
-    (2 MiB). Large transition outputs must also fit in 2 MiB. With no blob
-    shape (D16), these need a store outside Fireweed, chunking across
-    rows of a table, or higher caps. Draft, from Snorri TD-012 revision 7
-    (its O23): bound both sizes instead. Snorri lowers its definition cap
-    from 8 MiB to 256 KiB, so a definition fits one table value, and keeps
-    transition output at its existing 1 MiB cap inside the 2 MiB body.
-    This needs no interface change, and Cayce must confirm that no
-    template exceeds 256 KiB.
 
 ## Risks
 
