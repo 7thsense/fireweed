@@ -522,18 +522,6 @@ clock (ADR-025 D1):
 The response reports the level. ADR-025 §Durability gives the local
 engine's levels.
 
-## Tenant scope: the deliverability check
-
-The data plane's tenant scope (ADR-025 §13, D47) is Dragonfly, and is not
-part of this contract. Snorri defines the deliverability check as its
-`DeliverabilityCheck` port, and Cayce implements it (Cayce ADR-015). No
-DSL statement or program reads or writes tenant-scope state.
-
-The only point of contact with this contract: when Snorri's send handler
-gets `Defer { until }` from the check, it returns the effect to ready
-without charging an attempt. In this DSL that is a `settle` with
-`outcome: release` and `after`.
-
 ## Limits
 
 | Limit | Value |
@@ -617,7 +605,7 @@ Names in SQL are validated object and field names, and quoted.
 | 7 | Timeline | A sequenced table, inserted last in each transition's program. Full history goes to Niflheim. |
 | 8 | Definitions (up to 256 KiB, D31) | Table row keyed by digest, with a `text` field. |
 | 9 | Admission chunk | Table row keyed by run and shard: `insert` with `on_conflict: reject`, then `update` by keys with `where: {eq: [version, v]}` and `expect: {min: 1, max: 1}`. |
-| 10 | Send-rate counters | Tenant scope: Dragonfly, behind Snorri's deliverability-check port, which the send effect handler calls at dispatch (ADR-025 §13). Not in Fireweed. |
+| 10 | Send-rate counters | Not Fireweed's (ADR-025 D49). |
 | 11 | Re-entry across runs (D29) | Table in a family space keyed by (family, subject), with `non_decreasing` timestamps, updated with `expect`. |
 
 Snorri's queues declare `max_attempts: unlimited` (D30).
@@ -628,7 +616,7 @@ Snorri's queues declare `max_attempts: unlimited` (D30).
 |-------|-----------|
 | Per-recipient lifecycle | Queue items with indexed fields (campaign, step, domain, status) |
 | Suppression | Table with `reasons: text_set, merge: add_only`. A send's program first runs `assert` on the address with `expect: {max: 0}` (question 25 for spaces). |
-| Caps and rate windows | Snorri's deliverability-check port, implemented on Dragonfly per Cayce ADR-015 (ADR-025 §13) |
+| Caps and rate windows | Not Fireweed's (ADR-025 D49) |
 | Delivery and engagement events | Queue items keyed by provider id; a sequenced table for timelines |
 | UI counts and lists | Declared reads |
 

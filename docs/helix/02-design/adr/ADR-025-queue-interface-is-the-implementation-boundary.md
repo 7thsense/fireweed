@@ -168,10 +168,11 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D42 | "Fix them all", on the review findings, with claims ordered by due time and priority breaking ties, as recommended. | Owner, 2026-11-16 | Adopted in revision 9 (§3, §4, §5, §9). |
 | D43 | "Full UMF documents"; "there is no reason I can see that fireweed schemas shouldn't be UMF schemas"; "if we need umf improvements we should get them." | Owner, 2026-11-16 | Accepted, in progress (question 39). A space schema becomes a UMF core 0.10 document. Its physical tables are `umf.tables` (UMF CONTRACT-081), and the queue semantics go in a Fireweed extension. |
 | D44 | "We should be targetting postgres 18." "The additional types and additions to umf tables should go straight to core." Asked whether the extension must live in UMF: it may live in Fireweed, registered through `umf-core`'s registry. | Owner, 2026-11-16 | Adopted. PostgreSQL 18 is the target, matching `umf.tables`' `postgresql18/0.1` profile, and the executor's tests run on PostgreSQL 18.7. The JSON value, string sets, `jsonb` and array columns, GIN, and partial and descending indexes go into UMF core and `umf.tables` (DocumentDrivenDX/umf#172, rewritten). |
-| D45 | "We need the counters in dragonfly because they need to be cross run, campaign, list, and everything else. They are universal per tenant." "just check dragonfly in real time, it's stupidly fast and selected for this purpose because of that property." | Owner, 2026-11-16 | Adopted. Send caps and rate counters stay in Dragonfly, checked in real time, and Fireweed holds no copy. This resolves question 5 and the counter half of question 25. A cap check and a send's commit stay separate steps, as today. |
-| D46 | "Dragonfly is part of the dataplane. That said, we should think about how to integrate it properly in the snorri model. It probably should be 'hidden' behind an effect handler." | Owner, 2026-11-16 | Direction for Snorri. The send effect handler checks and takes the Dragonfly slot. Snorri core and the workflow DSL don't see caps. This replaces TD-011's core `RateLimiter` port (its D9). The handler needs a way to answer "not now, retry at T" without failing the effect. Snorri's design to follow. |
-| D47 | "Thats an additional 'tenant scope' portion of the dataplane. We should think about how to include it in the design -- I think hiding it behind a 'deliverability check' action of sorts makes the most sense. Make sure these spec changes and scope limits are completely captured across fireweed AND snorri AND cayce specs." | Owner via the Cayce session, 2026-11-16 | Adopted as §13. The data plane has two scopes: the space scope, which is Fireweed, and the tenant scope, which is Dragonfly. The tenant scope is reached only through the deliverability check, a Snorri port Cayce implements. It refines D46: Snorri's send effect handler calls the check, and Snorri core and workflows don't see it. Cayce ADR-015 stays the system of record for the counters. |
-| D48 | "I think we need control over fail open vs fail closed. Deliverability slotting should generally be fail open, isn't that how it is in 7thsense?" | Owner, 2026-11-16 | Adopted in §13. Each rule in the deliverability check has its own failure policy, `open` or `closed`. Slotting defaults to `open`, as in Cayce ADR-015, which says 7th Sense behaves the same; 7th Sense's code isn't available here to confirm. Suppression, if it joins the check, defaults to `closed`. Cayce's implementation holds the setting. Resolves the open question on whether counters stay fail-open. |
+| D45 | "We need the counters in dragonfly because they need to be cross run, campaign, list, and everything else. They are universal per tenant." "just check dragonfly in real time, it's stupidly fast and selected for this purpose because of that property." | Owner, 2026-11-16 | Adopted: Fireweed holds no tenant-wide counters. Resolves question 5. |
+| D46 | "Dragonfly is part of the dataplane. That said, we should think about how to integrate it properly in the snorri model. It probably should be 'hidden' behind an effect handler." | Owner, 2026-11-16 | Snorri and Cayce design; outside Fireweed (D49). |
+| D47 | "Thats an additional 'tenant scope' portion of the dataplane. We should think about how to include it in the design -- I think hiding it behind a 'deliverability check' action of sorts makes the most sense. Make sure these spec changes and scope limits are completely captured across fireweed AND snorri AND cayce specs." | Owner via the Cayce session, 2026-11-16 | Snorri and Cayce design; outside Fireweed (D49). |
+| D48 | "I think we need control over fail open vs fail closed. Deliverability slotting should generally be fail open, isn't that how it is in 7thsense?" | Owner, 2026-11-16 | Cayce design; outside Fireweed (D49). |
+| D49 | "Slotting shouldn't be part of any fireweed specs though, or even snorri. Snorri provides a port that cayce can use to implement slotting. That's it." | Owner, 2026-11-16 | Adopted. Fireweed's specs only state that tenant-wide state isn't Fireweed's (§1). Slotting, its counters and its failure policy are Cayce's. The port Cayce implements them behind is Snorri's. |
 
 ## Decision
 
@@ -182,15 +183,10 @@ of change: work items, workflow state, per-recipient state, admission
 chunk state, operational events and timelines. Large payloads are
 not stored (D16); a field holds a reference.
 
-The data plane has two scopes (§13, D47):
-- **The space scope** is Fireweed. It covers one run, campaign or family,
-  and its writes are transactional.
-- **The tenant scope** is Dragonfly. It holds counters that are universal
-  per tenant across runs, campaigns and lists: send caps and rate limits
-  (Cayce ADR-015). They are checked in real time, never copied into
-  Fireweed (D45), and reached only through Snorri's deliverability-check
-  port, which Cayce implements (§13). Snorri's send effect handler calls
-  it, so workflows never see it (D46).
+Fireweed is the data plane's space scope: one run, campaign or family,
+with transactional writes. State a tenant shares across all its spaces,
+such as Cayce's send caps, is not Fireweed's. Fireweed holds none of it,
+and nothing in these specs describes it (D45–D49).
 
 Outside the data plane:
 - the control plane (tenants, campaign definitions, configuration), in its
@@ -288,9 +284,7 @@ rejects the program unless it explicitly overrides the rule.
 
 A rule that spans runs, such as Snorri's re-entry rules, is checked against
 one keyed row per (workflow family, subject) in a family space (D29).
-A field updated with `{add: …}` holds a count within a space. Counters
-shared across a tenant's runs and campaigns, such as send caps, stay in
-Dragonfly (D45).
+A field updated with `{add: …}` holds a count within a space.
 
 ### 4. The executor is plain SQL
 
@@ -383,9 +377,6 @@ A Snorri transition is one program:
 - settle the consumed event item;
 - insert effect items;
 - insert its timeline row last.
-
-The send-cap check against Dragonfly happens inside the send effect
-handler when the effect is dispatched, not in the transition (D45, D46).
 
 ### 6. Durability
 
@@ -508,65 +499,6 @@ programs: enqueue, claim, complete and renew. RESP is deprecated (D25).
 Maintenance belongs to each executor: sweeps, index builds, S3 shipping
 and ownership.
 
-### 13. The tenant scope and the deliverability check
-
-The tenant scope holds what one tenant shares across all its spaces, read
-and changed in real time, outside any space's transaction. Today that is
-Cayce's per-contact send-cap counters in Dragonfly (Cayce ADR-015):
-- keys `slotting:{accountId}:{contactKey}:{yyyyMMddHH}`;
-- a conditional Lua increment;
-- counts that only go up;
-- fail open;
-- shared with 7th Sense.
-
-It is reached through one operation, the **deliverability check**. Snorri
-defines it as its `DeliverabilityCheck` port, which replaces TD-011's
-`RateLimiter` port, and Cayce implements it on Dragonfly. Snorri's send
-effect handler calls it after the effect's durable intent commit and
-before the provider call (D46, D47). It answers:
-- `Proceed { fail_open }`: send. `fail_open` means a rule's store didn't
-  answer and that rule's failure policy is `open`.
-- `Defer { until }`: the effect returns to ready at `until` without
-  charging an attempt, which is a Fireweed `settle` with `outcome:
-  release` and `after`.
-- `Suppress { rule }`: the effect ends without delivery.
-
-Neither Snorri core nor the workflow DSL names caps or Dragonfly.
-
-**Scope limits:**
-- **Fireweed has no part in it.** No Fireweed statement, program or
-  backend reads or writes tenant-scope state, and Snorri doesn't call
-  Fireweed for the check. A check and a send's commit are separate steps,
-  as ADR-015 already has them.
-- **Not a general store.** Nothing else goes into the tenant scope without
-  an owner ruling.
-
-**Two points for the port's design:**
-- **Idempotency.** A dispatch can be retried after a crash between the
-  check and the receipt. If the check takes an effect idempotency key, and
-  keeps a marker beside the count in the same Lua script, a retried check
-  takes no second slot.
-- **A failure policy per rule (D48).** Each rule the check applies has its
-  own policy for when its store can't answer:
-  - `open`: the rule is skipped, and the result is `Proceed { fail_open:
-    true }`;
-  - `closed`: the result is `Defer { until }`, at a short backoff, so the
-    send waits for the store.
-
-  Defaults:
-  - slotting is `open`, as Cayce ADR-015 has it ("which is the 7th Sense
-    behavior too"), and its fail-open metric and alert stay;
-  - suppression, if it joins the check (question 25), is `closed`, because
-    sending to a suppressed address is worse than a delay.
-
-  The policy is configuration in Cayce's implementation, per rule, with an
-  account-level override for tenants that want caps enforced strictly.
-  Callers can't choose it per send. Snorri only sees the decision.
-
-Tenant-scope counters stay non-durable: losing Dragonfly resets caps for
-at most the 7-day window (ADR-015). Whether suppression moves into the
-check is question 25.
-
 ## Alternatives
 
 | Option | Evaluation |
@@ -630,23 +562,18 @@ check is question 25.
 ## Open questions for the owner
 
 Questions 1 to 4, 6 to 24 and 26 to 36 were resolved in revisions 7 and 8
-(D13 to D40). Question 5 (counters) is resolved by D45: send caps and rate
-counters stay in Dragonfly.
+(D13 to D40). Question 5 (counters) is closed: tenant-wide counters are not
+Fireweed's (D45, D49).
 
 25. **Suppression.** Suppression belongs to an account, but a transaction
-    can't span spaces. The options:
-    - **(a)** Copy suppression into every campaign space of the account,
-      so each send's transaction checks it. The copies converge because
-      reasons are `add_only`.
-    - **(b)** Make suppression part of the deliverability check (§13), read
-      from one account-level record at dispatch, right before the send.
-      The Snorri session proposes this too: the result's `Suppress { rule }`.
+    can't span spaces. Either:
+    - **(a)** copies live in every campaign space, as Fireweed tables, and
+      each send's program checks its own copy with `assert`. The copies
+      converge because reasons are `add_only`.
+    - **(b)** suppression isn't Fireweed's. It's checked outside Fireweed,
+      for example by Cayce behind a Snorri port.
 
-    Draft: (b). One record per account, checked closer to the send than
-    (a)'s check at the intent commit. It differs from caps on failure:
-    suppression fails closed (`defer`) rather than open, because sending
-    to a suppressed address is worse than a delay. Where the account-level
-    record lives is Cayce's decision (ADR-014).
+    Only (a) touches Fireweed.
 31. **PostgreSQL layout.** Each space gets its own tables, or spaces share
     tables with the space id leading every key and index. Both are being
     measured (D36): claim and commit latency, index size and bloat, vacuum
