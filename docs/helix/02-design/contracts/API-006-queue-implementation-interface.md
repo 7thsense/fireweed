@@ -64,7 +64,7 @@ queues:
   instances:
     max_attempts: unlimited  # or an integer; default 10
     retention: 31d           # finished items are deleted this long after they finish (default 7d)
-    priority: asc            # asc (default): lower priority claimed first; or desc
+    priority: asc            # asc (default) or desc: breaks ties among items due at the same instant
     fields:
       campaign: {type: text, index: true}
       awaits:   {type: text_set, index: true}
@@ -114,7 +114,7 @@ that aren't leased:
 | `id` | Assigned at insert; never reused in the queue. |
 | `key` | Optional client key, unique in the queue while the item exists. |
 | `state` | `pending`, `leased`, `complete` or `failed` (see Time). |
-| `priority` | Integer; claim order. |
+| `priority` | Integer; orders items due at the same instant. |
 | `due_at` | When the item next needs attention. For a pending item, when it becomes claimable. For a leased item, when its lease expires. |
 | `attempts` | Claims charged so far. |
 | `version` | Increases on every change to the item. |
@@ -131,10 +131,13 @@ The executor creates for each queue:
 - the claim index `(due_at, priority, id) WHERE state IN ('pending', 'leased')`,
   which leads with due time (ADR-025 D39) and is the claim order;
 - an index on `finished_at` for retention;
+- an index on `due_at` over leased items, for the sweep;
 - one index per indexed field: `(field, id)` for a btree, so stepping
-  through a field's matches is a range scan.
+  through a field's matches with one `eq` is a range scan.
 
-A queue table is created with `fillfactor = 80`.
+A queue table is created with `fillfactor = 80`. That keeps updates of
+unindexed fields on their page. Claims, settles and renews change indexed
+columns, so they write every index (ADR-025 question 40).
 
 `max_attempts: unlimited` turns off the store's redelivery bound
 (ADR-025 D30).
@@ -316,7 +319,8 @@ priority, then `id`. This is the claim index's order, so a claim reads about
 Priority breaks ties among items due at the same instant (ADR-025 D42). Each one becomes `leased`, gets a new random lease
 token, `due_at` = now + `lease`, one more attempt, and a new version.
 Items that other transactions hold are skipped, not waited for. `where`
-filters further and needs no index. `eligible_at` replaces now only when
+filters further and follows the index rule, so a rare value narrows
+through its index. `eligible_at` replaces now only when
 testing whether a pending item is due (Snorri CONTRACT-005); leases use
 now. A paused queue returns no items.
 
@@ -446,10 +450,10 @@ A paused queue's claims return nothing. Result: `{}`.
 A program runs in one database transaction:
 - **Isolation.** Programs run at `READ COMMITTED`.
   - Guards lock what they count: `update` and `delete` lock their matched
-    rows `FOR UPDATE`, and `assert` locks them `FOR KEY SHARE`. So no
-    count changes before commit.
-  - An `assert` that expects no row has nothing to lock, so a concurrent
-    insert of that key can commit beside it. The two order as if the
+    rows `FOR UPDATE`, and `assert` locks them `FOR SHARE`. So no counted
+    row changes or leaves before commit.
+  - A guard can't lock rows that don't exist yet. A concurrent insert can
+    therefore raise a count past any `max`, and the two order as if the
     guard ran first.
   - A program retries a deadlock up to 5 times, then fails with
     `contention`.
@@ -459,7 +463,10 @@ A program runs in one database transaction:
     fingerprint matches, without running again. Otherwise it fails with
     `request_id_conflict`.
   - A program running concurrently with the same id waits for the first
-    to commit, then returns its record.
+    to commit, under the statement timeout, then returns its record.
+  - A claim's items are recorded as ids and tokens. A replay re-reads
+    their current fields and returns them with the tokens the claim
+    granted.
   - Records older than `request_retention` are forgotten.
 - **Rejections.** A rejection rolls back every statement but keeps the
   request record, so a replay returns the same rejection (ADR-025 D19).
@@ -555,14 +562,19 @@ database.
   Whether spaces should instead share tables is ADR-025 question 31.
 
 **Running a program.**
-1. Read the space's schema document (one row by primary key).
-2. Check the program against it in Rust.
-3. Write the request record.
-4. Run each statement as one SQL statement inside a savepoint.
+1. BEGIN.
+2. In one pipelined flight, set the timeouts, call
+   `fireweed.open_space(tenant, space, request_id, fingerprint)`, which
+   reads the schema row and writes the request record, and set the
+   savepoint.
+3. Check the program against the schema in Rust.
+4. Run each statement as one SQL statement.
 5. Write the response, and commit.
 
 Queries are sent unprepared, with every parameter typed `text`, so each
-is one round trip and nothing is cached per connection.
+is one round trip and nothing is cached per connection. `apply_schema`
+sets a 5 s lock timeout, so an `ALTER TABLE` never leaves claims queued
+behind an unbounded lock wait.
 
 Each statement's SQL:
 
@@ -573,7 +585,7 @@ Each statement's SQL:
 | `settle`, `renew` | `UPDATE q SET … FROM jsonb_to_recordset($items) i WHERE q.id = i.id AND q.lease_token = i.token AND <unexpired> RETURNING q.id` |
 | `update` | `WITH m AS (SELECT id, <old merge fields> … ORDER BY id LIMIT $limit + 1 FOR UPDATE), total AS (…), u AS (UPDATE … FROM <first $limit of m> WHERE <count passes> RETURNING <merge checks>) SELECT …` |
 | `delete` | The same shape with `DELETE … USING` |
-| `assert` | `SELECT count(*) FROM (SELECT 1 … LIMIT $max + 1 FOR KEY SHARE)` |
+| `assert` | `SELECT count(*) FROM (SELECT 1 … LIMIT $max + 1 FOR SHARE)` |
 | `select`, `read` | `SELECT jsonb_build_object(…) FROM … WHERE … LIMIT $n`; with `order_by` or `aggregate`, over a CTE capped at 100,001 rows |
 
 Literals and parameters are always bound, never spliced into SQL text.
@@ -637,4 +649,9 @@ the resulting rows. They cover:
 - that claims, indexed selects and keyed updates over 5,000 items add
   nothing to PostgreSQL's sequential-scan count for the table;
 - that a claim on a queue of 5,000 sleeping items and 3 due ones reads
-  fewer than 50 index entries.
+  fewer than 50 index entries;
+- that a filtered claim, a grouped count and a sweep over 5,000 items do no
+  sequential scans;
+- that an update leaves no matched item holding a lapsed lease;
+- that an insert waiting on a same-key insert reports the winner's id;
+- that a replayed claim re-reads its items, and its record holds no bodies.

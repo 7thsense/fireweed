@@ -1268,6 +1268,7 @@ name = "fireweed-dsl-postgres"
 version = "0.32.0"
 dependencies = [
  "fireweed-dsl",
+ "futures",
  "serde_json",
  "tokio",
  "tokio-postgres",

@@ -11,6 +11,7 @@ description = "PostgreSQL executor for Fireweed's data-plane DSL (API-006): DDL 
 fireweed-dsl = { path = "../fireweed-dsl" }
 serde_json = "1"
 tokio-postgres = "0.7"
+futures = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

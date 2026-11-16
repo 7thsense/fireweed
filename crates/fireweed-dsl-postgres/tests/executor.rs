@@ -621,6 +621,8 @@ async fn programs_that_break_the_rules_are_refused() {
         "statements:\n  - select: {from: work, where: {ge: [id, 0]}, fields: [id], limit: 1}\n",
         // Comparing a column with itself isn't an access term.
         "statements:\n  - select: {from: work, where: {eq: [campaign, {field: campaign}]}, fields: [id], limit: 1}\n",
+        // A claim filter without an access term.
+        "request_id: x\nstatements:\n  - claim: {from: work, limit: 1, lease: 30s, worker: w, where: {eq: [step, 1]}}\n",
         // A key twice in one insert.
         "request_id: x\nstatements:\n  - insert: {into: work, rows: [{key: a}, {key: a}]}\n",
         // A write after a sequenced insert.
@@ -690,12 +692,21 @@ async fn statements_use_indexes_not_table_scans() {
 request_id: x1
 statements:
   - claim: {from: work, limit: 10, lease: 30s, worker: w}
+  - claim: {from: work, limit: 5, lease: 30s, worker: w, where: {eq: [campaign, c9]}}
   - select: {from: work, where: {eq: [campaign, c7]}, aggregate: {n: count}, limit: 1}
+  - select: {from: work, where: {eq: [campaign, c8]}, aggregate: {n: count}, group_by: [state], limit: 5}
   - update: {target: work, keys: [k1-5, k2-6], set: {step: 1}, leased: preserve}
   - select: {from: work, where: {eq: [key, k3-3]}, fields: [id, state], limit: 1}
 "#,
     )
     .await;
+    // Leases expire; the sweep writes them back through the leased-only index.
+    c.batch_execute("SET fireweed.now = '2100-01-01T00:00:00Z'")
+        .await
+        .unwrap();
+    let swept = sweep(&mut c, "t", &sp, 100).await.unwrap();
+    assert_eq!(swept.expired_leases, 15);
+    c.batch_execute("RESET fireweed.now").await.unwrap();
     assert_eq!(
         seq_scans(&c, &table).await,
         before,
@@ -816,4 +827,130 @@ statements:
     )
     .await;
     assert_eq!(rows(&r, 1), vec![json!({"state": "complete"})]);
+}
+
+/// An update never leaves a matched item holding a lapsed lease: the old
+/// token can't settle afterwards (ADR-025 D6).
+#[tokio::test]
+async fn update_retires_lapsed_leases() {
+    let Some((mut c, sp)) = setup("lapsed").await else {
+        return;
+    };
+    set_now(&c, "2030-01-01T00:00:00Z").await;
+    run(
+        &mut c,
+        &sp,
+        "request_id: f\nstatements:\n  - insert: {into: work, rows: [{key: a, campaign: x}]}\n",
+    )
+    .await;
+    let r = run(
+        &mut c,
+        &sp,
+        "request_id: c1\nstatements:\n  - claim: {from: work, limit: 1, lease: 10s, worker: w}\n",
+    )
+    .await;
+    let it = rows(&r, 0)[0].clone();
+    set_now(&c, "2030-01-01T00:01:00Z").await;
+    let r = run(
+        &mut c,
+        &sp,
+        r#"
+request_id: u1
+statements:
+  - update: {target: work, where: {eq: [campaign, x]}, set: {due_at: "2030-01-01T01:00:00Z"}}
+  - select: {from: work, where: {eq: [key, a]}, fields: [state, due_at], limit: 1}
+"#,
+    )
+    .await;
+    assert_eq!(r.results[0]["matched"], json!(1));
+    assert_eq!(rows(&r, 1)[0]["state"], "pending");
+    let r = run(&mut c, &sp, &format!(
+        "request_id: s1\nstatements:\n  - settle: {{queue: work, outcome: complete, items: [{{id: {}, token: \"{}\"}}]}}\n",
+        it["id"], it["token"].as_str().unwrap()
+    )).await;
+    assert_eq!(rows(&r, 0)[0]["status"], "stale");
+}
+
+/// An insert that waits on a concurrent insert of the same key reports the
+/// winner's id, not null.
+#[tokio::test]
+async fn insert_racing_the_same_key_reports_its_id() {
+    let Some((mut c, sp)) = setup("race-key").await else {
+        return;
+    };
+    let schema: String = c
+        .query_one(
+            "SELECT 'fws_' || id FROM fireweed.spaces WHERE tenant = 't' AND space = $1",
+            &[&sp],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let mut other = connect().await.unwrap();
+    let tx = other.transaction().await.unwrap();
+    tx.batch_execute(&format!(
+        "INSERT INTO \"{schema}\".q_work (key, state, priority, due_at, attempts, version, created_at, updated_at)
+         VALUES ('k1', 'pending', 0, now(), 0, 1, now(), now())"
+    ))
+    .await
+    .unwrap();
+    let sp2 = sp.clone();
+    let waiting = tokio::spawn(async move {
+        let mut c2 = connect().await.unwrap();
+        run(
+            &mut c2,
+            &sp2,
+            "request_id: i1\nstatements:\n  - insert: {into: work, rows: [{key: k1}]}\n",
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    tx.commit().await.unwrap();
+    let r = waiting.await.unwrap();
+    let e = &rows(&r, 0)[0];
+    assert_eq!(e["status"], "exists");
+    assert!(e["id"].is_i64(), "{e}");
+    // The record replays the same id.
+    let again = run(
+        &mut c,
+        &sp,
+        "request_id: i1\nstatements:\n  - insert: {into: work, rows: [{key: k1}]}\n",
+    )
+    .await;
+    assert!(again.replayed);
+    assert_eq!(rows(&again, 0)[0]["id"], e["id"]);
+}
+
+/// A replayed claim returns the items with the tokens it granted, re-read:
+/// the record keeps only ids and tokens.
+#[tokio::test]
+async fn replayed_claims_reread_their_items() {
+    let Some((mut c, sp)) = setup("replay-claim").await else {
+        return;
+    };
+    run(&mut c, &sp, "request_id: f\nstatements:\n  - insert: {into: work, rows: [{key: a, campaign: x, body: {n: 1}}]}\n").await;
+    let doc =
+        "request_id: c1\nstatements:\n  - claim: {from: work, limit: 1, lease: 30s, worker: w}\n";
+    let first = run(&mut c, &sp, doc).await;
+    let again = run(&mut c, &sp, doc).await;
+    assert!(again.replayed);
+    assert_eq!(again.results, first.results);
+    let stored: String = c
+        .query_one(
+            &format!(
+                "SELECT response::text FROM {}.fw_requests WHERE request_id = 'c1'",
+                c.query_one(
+                    "SELECT 'fws_' || id FROM fireweed.spaces WHERE tenant = 't' AND space = $1",
+                    &[&sp]
+                )
+                .await
+                .unwrap()
+                .get::<_, String>(0)
+            ),
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(!stored.contains("\"body\""), "{stored}");
 }

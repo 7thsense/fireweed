@@ -20,7 +20,7 @@ use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Client, Row, Transaction};
 
 pub use ddl::CATALOG;
-use lower::{NOW, Q};
+use lower::Q;
 
 /// How many times a program retries a deadlock or serialization failure.
 const RETRIES: usize = 5;
@@ -110,6 +110,11 @@ pub async fn apply_schema(
         .await
         .map_err(db)?;
     tx.batch_execute(CATALOG).await.map_err(db)?;
+    // ALTER TABLE waits for an exclusive lock, and claims would queue behind
+    // that wait: bound it.
+    tx.batch_execute("SET LOCAL lock_timeout = '5s'")
+        .await
+        .map_err(db)?;
     let doc = serde_json::to_string(schema).expect("schemas serialize");
     let version = schema.version.to_string();
     let row = tx
@@ -178,14 +183,9 @@ pub async fn apply_schema(
 
 /// Runs a program as one transaction (API-006 §Transactions).
 pub async fn execute(c: &mut Client, tenant: &str, space: &str, p: &Program) -> Result<Response> {
-    let (id, schema) = load(c, tenant, space).await?.ok_or(Error::SpaceNotFound)?;
-    let resolved = check::resolve(&schema, p)?;
-    let sp = Space {
-        schema_name: ddl::schema_name(id),
-        schema,
-    };
+    let fingerprint = check::fingerprint(p)?;
     for _ in 0..RETRIES {
-        match attempt(c, &sp, p, &resolved).await {
+        match attempt(c, tenant, space, p, &fingerprint).await {
             Err(Attempt::Retry) => continue,
             Err(Attempt::Failed(e)) => return Err(e),
             Ok(r) => return Ok(r),
@@ -215,51 +215,78 @@ impl From<Error> for Attempt {
     }
 }
 
-/// One try at a program. Round trips: BEGIN, the request record (with an
-/// id), settings and savepoint, one per statement, the response, COMMIT.
+/// One try at a program. Round trips: BEGIN; one pipelined flight of the
+/// settings, `fireweed.open_space` (the space's schema and its request
+/// record) and the savepoint; one per statement; the response; COMMIT.
 async fn attempt(
     c: &mut Client,
-    sp: &Space,
+    tenant: &str,
+    space: &str,
     p: &Program,
-    r: &check::Resolved,
+    fingerprint: &str,
 ) -> std::result::Result<Response, Attempt> {
     let tx = c.transaction().await?;
     let durability = match p.durability {
         Some(Durability::FireAndForget) => Durability::FireAndForget,
         _ => Durability::Durable,
     };
-    let requests = format!("\"{}\".fw_requests", sp.schema_name);
-    if let Some(rid) = &p.request_id {
-        // Record the request, or take over a record past retention. A live
-        // record (or a concurrent first run, once it commits) means replay.
-        let mut q = Q::default();
-        let (id, fp) = (
-            q.bind(Some(rid.clone())),
-            q.bind(Some(r.fingerprint.clone())),
-        );
-        let retention = q.duration(sp.schema.request_retention.0);
-        q.sql = format!(
-            "INSERT INTO {requests} AS t (request_id, fingerprint, response, recorded_at) VALUES ({id}, {fp}, NULL, {NOW})
-             ON CONFLICT (request_id) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, response = NULL, recorded_at = EXCLUDED.recorded_at
-             WHERE t.recorded_at <= {NOW} - {retention}
-             RETURNING 1"
-        );
-        if rows(&tx, &q).await?.is_empty() {
-            return replay(tx, &requests, rid, &r.fingerprint).await;
-        }
-    }
+    // The timeouts come first, so even a wait on a duplicate request's
+    // record is bounded.
     let mut setup = String::from("SET LOCAL TimeZone = 'UTC'; SET LOCAL statement_timeout = '5s';");
     if durability == Durability::FireAndForget {
         setup.push_str(" SET LOCAL synchronous_commit = off;");
     }
-    if p.request_id.is_some() {
-        setup.push_str(" SAVEPOINT program;");
+    let rid = p.request_id.clone();
+    let fp = fingerprint.to_owned();
+    let open = "SELECT space_id, schema_doc, fingerprint, response, fresh FROM fireweed.open_space($1, $2, $3, $4)";
+    let open_params: [(&(dyn ToSql + Sync), Type); 4] = [
+        (&tenant, Type::TEXT),
+        (&space, Type::TEXT),
+        (&rid, Type::TEXT),
+        (&fp, Type::TEXT),
+    ];
+    let (_, row, _) = match futures::try_join!(
+        tx.batch_execute(&setup),
+        tx.query_typed_one(open, &open_params),
+        tx.batch_execute("SAVEPOINT program"),
+    ) {
+        Ok(x) => x,
+        // No catalog yet: no space exists.
+        Err(e)
+            if e.code()
+                .is_some_and(|c| matches!(c.code(), "42883" | "3F000" | "42P01")) =>
+        {
+            return Err(Attempt::Failed(Error::SpaceNotFound));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let Some(id) = row.get::<_, Option<i64>>(0) else {
+        return Err(Attempt::Failed(Error::SpaceNotFound));
+    };
+    let schema: Schema = serde_json::from_str(row.get::<_, &str>(1))
+        .map_err(|e| Attempt::Failed(Error::Unavailable(format!("stored schema: {e}"))))?;
+    let sp = Space {
+        schema_name: ddl::schema_name(id),
+        schema,
+    };
+    let r = check::resolve(&sp.schema, p)?;
+    if !row.get::<_, bool>(4) {
+        if row.get::<_, Option<&str>>(2) != Some(fingerprint) {
+            return Err(Attempt::Failed(Error::RequestIdConflict));
+        }
+        let mut resp: Response =
+            serde_json::from_str(row.get::<_, Option<&str>>(3).unwrap_or("null")).map_err(|e| {
+                Attempt::Failed(Error::Unavailable(format!("stored response: {e}")))
+            })?;
+        run::rehydrate_claims(&tx, &sp, &r, &mut resp).await?;
+        resp.replayed = true;
+        tx.rollback().await?;
+        return Ok(resp);
     }
-    tx.batch_execute(&setup).await?;
     let mut results = vec![];
     let mut rejected = None;
     for (i, st) in r.statements.iter().enumerate() {
-        match run::statement(&tx, sp, st).await? {
+        match run::statement(&tx, &sp, st).await? {
             run::Outcome::Done(v) => results.push(v),
             run::Outcome::Rejected(reason) => {
                 rejected = Some(fireweed_dsl::Rejection {
@@ -285,50 +312,31 @@ async fn attempt(
     };
     let Some(rid) = &p.request_id else {
         // No record to keep: a rejection just rolls back.
-        if resp.rejected.is_some() {
+        if is_rejected {
             tx.rollback().await?;
         } else {
             tx.commit().await?;
         }
         return Ok(resp);
     };
-    if resp.rejected.is_some() {
+    if is_rejected {
         tx.batch_execute("ROLLBACK TO SAVEPOINT program").await?;
     }
+    // Claims are recorded as ids and tokens; a replay re-reads the items.
+    let recorded = run::compact_claims(&r, &resp);
     let mut q = Q::default();
     let (id, doc) = (
         q.bind(Some(rid.clone())),
         q.bind(Some(
-            serde_json::to_string(&resp).expect("responses serialize"),
+            serde_json::to_string(&recorded).expect("responses serialize"),
         )),
     );
-    q.sql = format!("UPDATE {requests} SET response = {doc}::jsonb WHERE request_id = {id}");
+    q.sql = format!(
+        "UPDATE \"{}\".fw_requests SET response = {doc}::jsonb WHERE request_id = {id}",
+        sp.schema_name
+    );
     rows(&tx, &q).await?;
     tx.commit().await?;
-    Ok(resp)
-}
-
-async fn replay(
-    tx: Transaction<'_>,
-    requests: &str,
-    rid: &str,
-    fingerprint: &str,
-) -> std::result::Result<Response, Attempt> {
-    let row = tx
-        .query_typed_one(
-            &format!("SELECT fingerprint, response::text FROM {requests} WHERE request_id = $1"),
-            &[(&rid, Type::TEXT)],
-        )
-        .await?;
-    let stored: &str = row.get(0);
-    if stored != fingerprint {
-        return Err(Attempt::Failed(Error::RequestIdConflict));
-    }
-    let doc: Option<&str> = row.get(1);
-    let mut resp: Response = serde_json::from_str(doc.unwrap_or("null"))
-        .map_err(|e| Attempt::Failed(Error::Unavailable(format!("stored response: {e}"))))?;
-    resp.replayed = true;
-    tx.rollback().await?;
     Ok(resp)
 }
 

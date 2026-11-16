@@ -246,7 +246,7 @@ pub async fn statement(tx: &Transaction<'_>, sp: &Space, st: &RStatement) -> R {
             let cap =
                 q.bind_i64(expect.max.map_or(expect.min.unwrap_or(0), |m| m + 1).max(1) as i64);
             q.sql = format!(
-                "SELECT count(*) FROM (SELECT 1 FROM {} o WHERE {cond} LIMIT {cap} FOR KEY SHARE) x",
+                "SELECT count(*) FROM (SELECT 1 FROM {} o WHERE {cond} LIMIT {cap} FOR SHARE) x",
                 ob.table
             );
             let n: i64 = query(tx, &q).await?[0].get(0);
@@ -426,21 +426,31 @@ async fn update(
             sets.push(format!("finished_at = {fin}"));
         }
     }
-    if sets_state || leased == LeasedPolicy::Break {
+    // Unless leases are preserved, no matched row keeps a lease: a live
+    // lease is broken (`break`), and an expired one is written back as its
+    // effective state, so its old token can never settle (ADR-025 D6).
+    if ob.kind == Kind::Queue && leased != LeasedPolicy::Preserve {
+        let exhausted = ob.exhausted("o");
+        let lapsed = format!("(o.state = 'leased' AND o.due_at <= {NOW})");
         sets.push("lease_token = NULL".into());
         sets.push("lease_owner = NULL".into());
-    }
-    if leased == LeasedPolicy::Break {
         if !sets_state {
-            sets.push(
-                "state = CASE WHEN o.state = 'leased' THEN 'pending' ELSE o.state END".into(),
-            );
+            sets.push(format!(
+                "state = CASE WHEN o.state <> 'leased' THEN o.state \
+                 WHEN {lapsed} AND {exhausted} THEN 'failed' ELSE 'pending' END"
+            ));
+            sets.push(format!(
+                "finished_at = CASE WHEN {lapsed} AND {exhausted} THEN o.due_at ELSE o.finished_at END"
+            ));
         }
         if !sets_due {
             sets.push(format!(
-                "due_at = CASE WHEN o.state = 'leased' THEN {NOW} ELSE o.due_at END"
+                "due_at = CASE WHEN o.state = 'leased' AND o.due_at > {NOW} THEN {NOW} ELSE o.due_at END"
             ));
         }
+    } else if sets_state {
+        sets.push("lease_token = NULL".into());
+        sets.push("lease_owner = NULL".into());
     }
     if ob.kind == Kind::Table
         && let Some(ttl) = sp.schema.tables[&o.name].expire_after_write
@@ -571,9 +581,43 @@ async fn select(tx: &Transaction<'_>, sp: &Space, s: &RSelect) -> R {
             ob.table
         );
     } else {
+        // Read only the columns the output uses, so a count can be an
+        // index-only scan and no body is copied.
+        let mut used: BTreeSet<String> = BTreeSet::new();
+        let mut need = |c: &Column| {
+            if ob.kind == Kind::Queue && c.system && c.name == "state" {
+                used.extend(["state", "due_at", "attempts"].map(String::from));
+            } else {
+                used.insert(Obj::col_name(c));
+            }
+        };
+        match &s.output {
+            Output::Fields(cs) => cs.iter().for_each(&mut need),
+            Output::Aggregate { aggs, group_by } => {
+                group_by.iter().for_each(&mut need);
+                for (_, a) in aggs {
+                    match a {
+                        Agg::Count => {}
+                        Agg::Sum(c)
+                        | Agg::Min(c)
+                        | Agg::Max(c)
+                        | Agg::Avg(c)
+                        | Agg::Percentile(c, _) => need(c),
+                    }
+                }
+            }
+        }
+        let projection = if used.is_empty() {
+            "1 AS one".to_string()
+        } else {
+            used.iter()
+                .map(|c| format!("o.{c}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let cap = q.bind_i64(MAX_SCAN as i64 + 1);
         q.sql = format!(
-            "WITH o AS (SELECT * FROM {t} o WHERE {cond} LIMIT {cap})
+            "WITH o AS (SELECT {projection} FROM {t} o WHERE {cond} LIMIT {cap})
              SELECT {json}::text, (SELECT count(*) FROM o) FROM o{group}{order} LIMIT {n}",
             t = ob.table
         );
@@ -636,7 +680,8 @@ async fn insert_queue(
             Value::Object(m)
         })
         .collect();
-    let p = q.bind_json(&Value::Array(recs));
+    let recs_again = Value::Array(recs);
+    let p = q.bind_json(&recs_again);
     let retention = q.duration(decl.retention.0);
     let mut defs: Vec<String> = [
         "ord bigint",
@@ -709,7 +754,50 @@ async fn insert_queue(
             json!({"id": id, "key": key, "status": if inserted { "inserted" } else { "exists" }}),
         );
     }
+    refetch_ids(
+        tx,
+        &ob.table,
+        &mut out,
+        &recs_again,
+        "ord bigint, key text",
+        "e.key = r.key",
+    )
+    .await?;
     Ok(Outcome::Done(Value::Array(out)))
+}
+
+/// Ids of rows reported `exists` that the insert's own snapshot couldn't
+/// see: a concurrent insert of the same key committed while the insert
+/// waited on it. A second statement gets a fresh snapshot under READ
+/// COMMITTED. It runs only when that race happened.
+async fn refetch_ids(
+    tx: &Transaction<'_>,
+    table: &str,
+    out: &mut [Value],
+    recs: &Value,
+    defs: &str,
+    on: &str,
+) -> std::result::Result<(), Attempt> {
+    let missing: Vec<i64> = out
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e["id"].is_null())
+        .map(|(i, _)| i as i64 + 1)
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut q = Q::default();
+    let p = q.bind_json(recs);
+    let ords = q.bind_ids(&missing);
+    q.sql = format!(
+        "SELECT r.ord, e.id FROM jsonb_to_recordset({p}) AS r({defs}) JOIN {table} e ON {on} WHERE r.ord = ANY({ords})"
+    );
+    for row in query(tx, &q).await? {
+        let (ord, id): (i64, i64) = (row.get(0), row.get(1));
+        out[ord as usize - 1]["id"] = json!(id);
+    }
+    Ok(())
 }
 
 /// One statement per insert. A row past its expiry gives up its key; with
@@ -740,7 +828,8 @@ async fn insert_table(
         Some(d) => format!("{NOW} + {}", q.duration(d.0)),
         None => "NULL::timestamptz".into(),
     };
-    let p = q.bind_json(&Value::Array(recs));
+    let recs_again = Value::Array(recs);
+    let p = q.bind_json(&recs_again);
     let t = &ob.table;
     let mut defs = vec!["ord bigint".to_string()];
     let mut cols = vec![];
@@ -869,6 +958,14 @@ async fn insert_table(
         };
         out.push(json!({"id": id, "status": status}));
     }
+    let key_defs: Vec<String> = std::iter::once("ord bigint".to_string())
+        .chain(
+            decl.key
+                .iter()
+                .map(|k| format!("\"f_{k}\" {}", record_type(decl.fields[k].ty))),
+        )
+        .collect();
+    refetch_ids(tx, t, &mut out, &recs_again, &key_defs.join(", "), &on("e")).await?;
     Ok(Outcome::Done(Value::Array(out)))
 }
 
@@ -961,4 +1058,70 @@ pub async fn sweep(
         }
     }
     Ok(out)
+}
+
+/// The response to record: claim results keep only ids and tokens, so a
+/// record never copies item bodies (ADR-025 §5).
+pub fn compact_claims(
+    r: &fireweed_dsl::check::Resolved,
+    resp: &fireweed_dsl::Response,
+) -> fireweed_dsl::Response {
+    let mut out = resp.clone();
+    for (st, res) in r.statements.iter().zip(out.results.iter_mut()) {
+        if matches!(st, RStatement::Claim { .. })
+            && let Value::Array(items) = res
+        {
+            for it in items.iter_mut() {
+                *it = json!({"id": it["id"], "token": it["token"]});
+            }
+        }
+    }
+    out
+}
+
+/// On replay, claim results are re-read: each item's current fields, with
+/// the token the claim granted.
+pub async fn rehydrate_claims(
+    tx: &Transaction<'_>,
+    sp: &Space,
+    r: &fireweed_dsl::check::Resolved,
+    resp: &mut fireweed_dsl::Response,
+) -> std::result::Result<(), Attempt> {
+    for (st, res) in r.statements.iter().zip(resp.results.iter_mut()) {
+        let (RStatement::Claim { obj: o, .. }, Value::Array(items)) = (st, res) else {
+            continue;
+        };
+        if items.is_empty() {
+            continue;
+        }
+        let ob = obj(sp, o);
+        let ids: Vec<i64> = items.iter().filter_map(|i| i["id"].as_i64()).collect();
+        let mut q = Q::default();
+        let p = q.bind_ids(&ids);
+        let mut cols: Vec<(String, String)> =
+            ["id", "key", "attempts", "priority", "version", "body"]
+                .iter()
+                .map(|c| (c.to_string(), format!("o.{c}")))
+                .collect();
+        for f in sp.schema.queues[&o.name].fields.keys() {
+            cols.push((f.clone(), format!("o.\"f_{f}\"")));
+        }
+        q.sql = format!(
+            "SELECT {}::text FROM {} o WHERE o.id = ANY({p})",
+            ob.json_of(&cols),
+            ob.table
+        );
+        let mut current: BTreeMap<i64, Value> = BTreeMap::new();
+        for row in query(tx, &q).await? {
+            let v = parse(row.get(0))?;
+            current.insert(v["id"].as_i64().unwrap_or_default(), v);
+        }
+        for it in items.iter_mut() {
+            if let Some(mut v) = it["id"].as_i64().and_then(|id| current.remove(&id)) {
+                v["token"] = it["token"].clone();
+                *it = v;
+            }
+        }
+    }
+    Ok(())
 }

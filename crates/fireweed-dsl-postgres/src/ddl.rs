@@ -13,6 +13,33 @@ CREATE TABLE IF NOT EXISTS fireweed.spaces (
   version bigint NOT NULL,
   schema_doc jsonb NOT NULL,
   UNIQUE (tenant, space));
+CREATE OR REPLACE FUNCTION fireweed.open_space(p_tenant text, p_space text, p_request text, p_fingerprint text,
+  OUT space_id bigint, OUT schema_doc text, OUT fingerprint text, OUT response text, OUT fresh boolean)
+LANGUAGE plpgsql AS $$
+DECLARE retention bigint;
+BEGIN
+  SELECT s.id, s.schema_doc::text, (s.schema_doc->>'request_retention')::bigint
+    INTO space_id, schema_doc, retention
+    FROM fireweed.spaces s WHERE s.tenant = p_tenant AND s.space = p_space;
+  IF NOT FOUND OR p_request IS NULL THEN
+    fresh := true;
+    RETURN;
+  END IF;
+  -- Record the request, or take over a record past retention. A live record,
+  -- or a concurrent first run once it commits, means replay.
+  EXECUTE format('INSERT INTO %I.fw_requests AS t (request_id, fingerprint, response, recorded_at)
+      VALUES ($1, $2, NULL, fireweed.now())
+      ON CONFLICT (request_id) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, response = NULL,
+        recorded_at = EXCLUDED.recorded_at
+      WHERE t.recorded_at <= fireweed.now() - $3 * interval ''1 millisecond''
+      RETURNING true', 'fws_' || space_id)
+    INTO fresh USING p_request, p_fingerprint, retention;
+  IF fresh IS NULL THEN
+    fresh := false;
+    EXECUTE format('SELECT fingerprint, response::text FROM %I.fw_requests WHERE request_id = $1', 'fws_' || space_id)
+      INTO fingerprint, response USING p_request;
+  END IF;
+END $$;
 CREATE OR REPLACE FUNCTION fireweed.now() RETURNS timestamptz LANGUAGE sql STABLE AS
 $$ SELECT coalesce(nullif(current_setting('fireweed.now', true), '')::timestamptz, now()) $$;
 CREATE OR REPLACE FUNCTION fireweed.text_set(j jsonb) RETURNS text[] LANGUAGE sql IMMUTABLE AS
@@ -100,6 +127,7 @@ fn queue(schema: &str, name: &str, q: &QueueDecl) -> String {
 CREATE UNIQUE INDEX ON {t} (key);
 CREATE INDEX ON {t} (due_at, priority{desc}, id) WHERE state IN ('pending', 'leased');
 CREATE INDEX ON {t} (finished_at) WHERE finished_at IS NOT NULL;
+CREATE INDEX ON {t} (due_at) WHERE state = 'leased';
 "
     );
     for (f, d) in q.fields.iter().filter(|(_, d)| d.index) {

@@ -431,6 +431,17 @@ pub struct Resolved {
 
 // -------------------------------------------------------------- resolving
 
+/// SHA-256 of a program's canonical JSON, hex: what a request record keeps
+/// to tell a replay from a different program under the same id.
+pub fn fingerprint(p: &Program) -> Result<String> {
+    use sha2::Digest;
+    let canonical = serde_json::to_vec(p).map_err(|e| Error::Invalid(e.to_string()))?;
+    Ok(sha2::Sha256::digest(&canonical)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
 /// Checks `p` against `s` and resolves it.
 pub fn resolve(s: &Schema, p: &Program) -> Result<Resolved> {
     let canonical = serde_json::to_vec(p).map_err(|e| Error::Invalid(e.to_string()))?;
@@ -463,9 +474,7 @@ pub fn resolve(s: &Schema, p: &Program) -> Result<Resolved> {
         sequenced |= is_seq;
         statements.push(r);
     }
-    use sha2::Digest;
-    let digest = sha2::Sha256::digest(&canonical);
-    let fingerprint = digest.iter().map(|b| format!("{b:02x}")).collect();
+    let fingerprint = fingerprint(p)?;
     Ok(Resolved {
         statements,
         writes,
@@ -1090,7 +1099,20 @@ fn statement(s: &Schema, st: &Statement, params: &Params) -> Result<RStatement> 
                 limit: limit(Some(cl.limit), 1, MAX_CLAIM)?,
                 lease_ms: cl.lease.0,
                 worker: cl.worker.clone(),
-                filter: cl.filter.as_ref().map(|p| c.pred(p)).transpose()?,
+                filter: match &cl.filter {
+                    None => None,
+                    Some(p) => {
+                        let p = c.pred(p)?;
+                        // A claim filter must narrow through an index too, or
+                        // a rare value walks the whole claim index.
+                        if !c.has_access(&p) {
+                            return invalid(
+                                "a claim's where needs an access term (API-006 §Index rule)",
+                            );
+                        }
+                        Some(p)
+                    }
+                },
                 eligible_at,
                 obj: c.obj,
             }

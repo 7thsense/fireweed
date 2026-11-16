@@ -254,8 +254,11 @@ The executor creates for every queue:
   a stepped update on the field is a range scan; a `text_set` gets a GIN
   index, such as for Snorri's await keys.
 
-Queue tables leave 20% free space per page (`fillfactor = 80`), so updates
-that change no indexed column can stay on their page. Indexes come only
+Queue tables leave 20% free space per page (`fillfactor = 80`). That helps
+only updates of unindexed fields, which can stay on their page. Claims,
+settles and renews always change `state` and `due_at`, so they write every
+index on the item (question 40). A second partial index, `(due_at) WHERE
+state = 'leased'`, lets the sweep find expired leases without a scan. Indexes come only
 with new objects. A field added to a live object is unindexed, because an
 index build would block the object's writes.
 
@@ -299,7 +302,7 @@ Each call reads the space's schema row, checks the program, and runs it.
 | `settle`, `renew` | `UPDATE q SET … FROM jsonb_to_recordset($items) i WHERE q.id=i.id AND q.lease_token=i.token AND <lease unexpired> RETURNING q.id` |
 | `update` | One statement: a `FOR UPDATE` CTE of up to `limit + 1` rows in id order, their count, and `UPDATE … FROM` the first `limit` when the count allows, returning merge-rule checks |
 | `delete` | The same shape with `DELETE … USING` |
-| `assert` | `SELECT count(*) FROM (SELECT 1 FROM obj WHERE <where> LIMIT $max+1 FOR KEY SHARE)` |
+| `assert` | `SELECT count(*) FROM (SELECT 1 FROM obj WHERE <where> LIMIT $max+1 FOR SHARE)` |
 | `select`, `read` | `SELECT jsonb_build_object(…) FROM obj WHERE … LIMIT $n`; sorted or aggregating selects read through a CTE capped at 100,000 rows |
 | `pause`, `resume` | `INSERT … ON CONFLICT DO UPDATE` on the space's queue-state row |
 
@@ -312,11 +315,16 @@ items unless it asks to preserve or break the lease (API-002).
 
 Each statement is one round trip. Queries are sent unprepared with text
 parameters, so nothing is prepared or cached per connection. A program
-with a request id adds four fixed round trips:
-- writing the request record;
-- the settings and savepoint;
-- writing the response;
+adds four fixed round trips:
+- BEGIN;
+- one pipelined flight of the settings (timeouts first), the SQL function
+  `fireweed.open_space`, and the savepoint. `open_space` reads the
+  space's schema row and writes or takes over the request record;
+- writing the response (with a request id);
 - the commit.
+
+A one-statement claim is therefore five round trips. A program without a
+request id writes no response, so it takes four.
 
 ### 5. One program is one transaction
 
@@ -329,24 +337,28 @@ statement rolls back and the response names the statement and reason.
 Request ids give idempotent replay. The space's `fw_requests` table holds
 (`request_id`, `fingerprint`, `response`, `recorded_at`):
 
-1. The transaction starts with `INSERT INTO fw_requests … ON CONFLICT DO
-   NOTHING`. If the row exists, the stored response is returned. A
-   different fingerprint fails with `request_id_conflict`. A concurrent
-   program with the same id waits on the row lock, then replays.
+1. `fireweed.open_space` runs `INSERT INTO fw_requests … ON CONFLICT DO
+   UPDATE … WHERE recorded_at <= now - request_retention`. A record past
+   retention is taken over. Otherwise, if the row exists, the stored
+   response is returned, and a different fingerprint fails with
+   `request_id_conflict`. A concurrent program with the same id waits on
+   the row lock, under the statement timeout, then replays.
 2. The statements run inside a savepoint.
 3. On success, the response is written to the row and the transaction
-   commits. On rejection, the savepoint is rolled back, the rejection is
+   commits. A claim's items are recorded as ids and tokens only; a replay
+   re-reads their current fields. On rejection, the savepoint is rolled back, the rejection is
    written to the row, and the transaction commits. A replay therefore
    returns the same rejection (D19).
 
 Programs run at `READ COMMITTED`. Guards lock the rows they count:
 - `update` and `delete` lock them `FOR UPDATE`;
-- `assert` locks them `FOR KEY SHARE`.
+- `assert` locks them `FOR SHARE`, which every update and delete of those
+  rows waits for.
 
-A count can't change under a guard before commit. An `assert` that
-expects no row can't lock a row that doesn't exist yet. A concurrent
-insert of that key can therefore commit beside it, and the two order as if
-the guard ran first. A program retries deadlocks a bounded number of
+No counted row changes or leaves before commit. A guard can't lock rows
+that don't exist yet, so a concurrent insert can still raise a count past
+any `max`, not only `max: 0`. The insert and the guard then order as if the
+guard ran first. A program retries deadlocks a bounded number of
 times, then fails with `contention`.
 
 A Snorri transition is one program:
@@ -429,7 +441,12 @@ timer that charges nothing is a `release` settle with `after` (D39).
 - An `update` larger than its limit either rejects, or runs as steps. Each
   step changes up to `limit` rows in id order, returns the last id it
   changed, and is its own commit. The next step adds `{gt: [id, last]}` to
-  its `where`, a range scan on the `(field, id)` index.
+  its `where`. With a single `eq` on an indexed field that is a range scan
+  on the `(field, id)` index. With `in`, `contains` or a table's key fields,
+  each step reads the matches and sorts them by id. That is bounded by the
+  matches, not by `limit`.
+- A claim's `where` follows the same index rule. Without an access term, a
+  rare filter value would walk the whole claim index.
 
 ### 10. Backends
 
@@ -570,8 +587,9 @@ Questions 1 to 4, 6 to 24 and 26 to 36 were resolved in revisions 7 and 8
       the field.
     - **weft.** Its shared crates have no `json` or set types, and no `not`,
       `in` or `contains`, so v1 doesn't use them. Its PostgreSQL identifier
-      and parameter helpers fit once published. Until then, names are
-      validated `[a-z0-9_]` and quoted.
+      and parameter helpers (`weft-postgresql-emit`) fit. weft#71 set up
+      their crates.io release, which waits on the registry token. Until
+      they're published, names are validated `[a-z0-9_]` and quoted.
 40. **A narrow lease table.** Every claim, settle and renew changes
     indexed columns (`state`, `due_at`), so it writes every index on the
     item, including the field indexes and the GIN index. Splitting the

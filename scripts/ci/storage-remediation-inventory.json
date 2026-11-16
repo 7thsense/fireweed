@@ -658,9 +658,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "ff9f44ccd0d561eb8ff1",
+        "id": "07ad8bf748d9fa9e11b2",
         "identity": "/// transactions hold are skipped.",
-        "line": 346,
+        "line": 354,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-dsl-postgres/src/lib.rs",
         "status": "discovery_negative"
@@ -672,9 +672,9 @@
           "P2f"
         ],
         "detail": "early_success=false",
-        "id": "f9756065c302bad9eb37",
+        "id": "68e4c65aa1eec076e06f",
         "identity": "/// `batch` rows per object. Rows other transactions hold are skipped, and",
-        "line": 876,
+        "line": 973,
         "owner": "P3-P9/P15",
         "path": "crates/fireweed-dsl-postgres/src/run.rs",
         "status": "discovery_negative"
@@ -76514,7 +76514,7 @@
   ],
   "rustdoc_routes": [],
   "schema_version": 1,
-  "source_inventory_sha256": "41c0668068c636336f3dcf85e6d8e2cf30498930864fda8ee206903554a2a053",
+  "source_inventory_sha256": "c01ca0df0f7dde35a112f39b0414065a6b52042cb04d5426977f66d7c80e55fa",
   "workspaces": [
     {
       "listing_error_sha256": "",
