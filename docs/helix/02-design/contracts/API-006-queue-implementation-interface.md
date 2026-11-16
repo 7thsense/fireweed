@@ -1838,6 +1838,10 @@ vectors. IDs are stable and cited in failures.
 | DSL-12 | Schedule tick | A recurring entry ticks, replays by request id, and handles missed ticks. |
 | DSL-13 | Timeline | Each transition appends a timeline row in its own group; a reader pages them by cursor. |
 | DSL-14 | Rate cap | A per-contact counter with `NonDecreasing` and a `count < cap` filter admits exactly `cap` sends. |
+| DSL-15 | Suppression copy across spaces | An account space S holds authoritative suppression and numbers each change from a sequenced table; a campaign space C holds a copy. Activation seeds C and opens the send gate in one group. Out-of-order fan-out converges. A send's `Assert` blocks while C's copy is suppressed. The lift is written to S first, and C clears only by an override lift marker carrying S's number; a plain clear is `MergeRuleViolated`. Between S's lift and the marker, sends stay blocked (fail closed). A late pre-lift copy is dropped by S's number even with a provider time skewed ahead, and a post-lift bounce re-suppresses. |
+| DSL-16 | Duplicate admission | A repeated subject in one batch is `Duplicate`, naming the first item. After completion the subject stays `Duplicate` (re-entry `never`), including as a tombstone, up to `client_item_key_retention_ms`, where it is admitted again. |
+| DSL-17 | Effect outcome unknown | Recording an unknown outcome replays identically. Re-enqueueing the key is `Duplicate`, so one effect exists. The reconciler sees the same id, key and body, and completes it once; a second completion is rejected. |
+| DSL-18 | Crash before the provider call | An intent committed at `max_durability` reports at least that level. After the worker's lease expires, the effect returns with the same id, key and body and one more attempt. Replaying the intent returns the identical response and creates no second effect. |
 | SCH-1 | Schema versioning | Expected-version conflict; identical re-apply; non-additive change rejected; unsupported feature rejected. |
 | READ-1 | Declared reads | Version immutability; pagination; built-in reads by each parameter. |
 | READ-2 | Null ordering and grouping | Nulls sort first ascending and last descending; nulls form one group. |
@@ -1860,8 +1864,8 @@ assert on final state through `get` and `read`.
 
 | Implementation | Pass | Fail | Skip |
 |----------------|------|------|------|
-| `fireweed-interface-memory` | 133 | 0 | 11 |
-| `fireweed-interface-postgres` (PostgreSQL 16) | 132 | 0 | 12 |
+| `fireweed-interface-memory` | 137 | 0 | 11 |
+| `fireweed-interface-postgres` (PostgreSQL 16) | 136 | 0 | 12 |
 
 Skipped on both: GRP-9, GRP-13 and COH-1 (cohorts are not declared yet);
 IDX-2 (harness gap: an index still building); REC-4 (harness gap:

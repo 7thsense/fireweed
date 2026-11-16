@@ -34,6 +34,10 @@ pub const ALL: &[(&str, Test)] = &[
     ("DSL-12", dsl_schedule_tick),
     ("DSL-13", dsl_timeline),
     ("DSL-14", dsl_rate_cap),
+    ("DSL-15", dsl_suppression_copy),
+    ("DSL-16", dsl_duplicate_admission),
+    ("DSL-17", dsl_effect_outcome_unknown),
+    ("DSL-18", dsl_crash_before_provider_call),
 ];
 
 const FAR: i64 = 86_400_000;
@@ -64,7 +68,24 @@ fn setup(fx: &Fixture) -> T {
         name: o("effects"),
         spec: QueueSpec::basic(PriorityKind::Int64),
         body: BodyKind::Json,
-        fields: vec![FieldDecl::stored("run", Text, true, IndexHint::Lookup)],
+        fields: vec![
+            FieldDecl::stored("run", Text, true, IndexHint::Lookup),
+            FieldDecl::stored("outcome", Text, true, IndexHint::Lookup),
+        ],
+    });
+    // Admission: keyed by (run, subject); a terminal item stops being
+    // addressable after a minute and releases its key after two.
+    let mut admit = QueueSpec::basic(PriorityKind::Int64);
+    admit.terminal_retention_ms = 60_000;
+    admit.client_item_key_retention_ms = 120_000;
+    s.queues.push(QueueDecl {
+        name: o("admit"),
+        spec: admit,
+        body: BodyKind::Json,
+        fields: vec![
+            FieldDecl::stored("run", Text, true, IndexHint::Lookup),
+            FieldDecl::stored("subject", Text, true, IndexHint::None),
+        ],
     });
     s.tables.push(TableDecl {
         name: o("events"),
@@ -1282,5 +1303,899 @@ fn dsl_rate_cap(fx: &Fixture) -> T {
         .ok_or_else(|| Fail::Failed("counter missing".into()))?;
     ensure!(row.fields[&f("count")] == Value::Int(3), "counter: {row:?}");
     ensure!(effect_count(fx)? == 4, "effects: {}", effect_count(fx)?);
+    Ok(())
+}
+
+// ------------------------------------------------ suppression across spaces
+
+fn s_key() -> SpaceKey {
+    SpaceKey::new("tenant", "acct")
+}
+
+fn c_key() -> SpaceKey {
+    SpaceKey::new("tenant", "camp")
+}
+
+fn commit_in(
+    p: &Arc<dyn DataPlane>,
+    space: SpaceKey,
+    id: &str,
+    ops: Vec<WriteOp>,
+    ps: Params,
+) -> DpResult<CommitResponse> {
+    block_on(p.commit(CommitRequest {
+        header: WriteHeader::new(space, id),
+        ops,
+        params: ps,
+        dry_run: false,
+    }))
+}
+
+fn row_in(p: &Arc<dyn DataPlane>, space: SpaceKey, table: &str, addr: &str) -> Option<RowView> {
+    let r = block_on(p.get(GetRequest {
+        space,
+        targets: vec![GetTarget::Row {
+            table: o(table),
+            key: vec![text(addr)],
+        }],
+    }))
+    .ok()?;
+    match r.results.into_iter().next().flatten() {
+        Some(GetResult::Row(v)) => Some(v),
+        _ => None,
+    }
+}
+
+fn reasons_of(row: &Option<RowView>) -> BTreeSet<String> {
+    match row.as_ref().and_then(|r| r.fields.get(&f("reasons"))) {
+        Some(Value::TextSet(s)) => s.clone(),
+        _ => BTreeSet::new(),
+    }
+}
+
+fn int_of(row: &Option<RowView>, field: &str) -> Option<i64> {
+    match row.as_ref().and_then(|r| r.fields.get(&f(field))) {
+        Some(Value::Int(n)) => Some(*n),
+        _ => None,
+    }
+}
+
+/// S, the account space: the authoritative `supp` table and `supp_log`, a
+/// sequenced table whose numbers order every suppression and lift.
+/// C, the campaign space: `supp_copy` and the `sends` queue.
+fn two_spaces(fx: &Fixture) -> T {
+    use ScalarType::*;
+    let apply = |space: SpaceKey, schema: SpaceSchema| {
+        block_on(fx.plane.apply_schema(ApplySchemaRequest {
+            space,
+            schema,
+            expected_version: None,
+            min_durability: None,
+        }))
+    };
+    let s = SpaceSchema {
+        version: 1,
+        request_id_retention_ms: 600_000,
+        queues: vec![],
+        tables: vec![
+            TableDecl {
+                name: o("supp"),
+                key: vec![f("address")],
+                fields: vec![
+                    FieldDecl::stored("address", Text, false, IndexHint::None),
+                    FieldDecl::stored("reasons", TextSet, true, IndexHint::None)
+                        .with_merge(MergeRule::AddOnly),
+                ],
+                expiry: None,
+                key_assignment: KeyAssignment::Caller,
+            },
+            TableDecl {
+                name: o("supp_log"),
+                key: vec![f("seq")],
+                fields: vec![
+                    FieldDecl::stored("seq", Int, false, IndexHint::Range),
+                    FieldDecl::stored("address", Text, true, IndexHint::None),
+                    FieldDecl::stored("kind", Text, true, IndexHint::None),
+                    FieldDecl::stored("reason", Text, true, IndexHint::None),
+                ],
+                expiry: None,
+                key_assignment: KeyAssignment::Sequence,
+            },
+        ],
+        reads: vec![ReadDecl {
+            name: ReadName::new("log_after"),
+            version: 1,
+            source: o("supp_log"),
+            params: vec![(ParamName::new("after"), Int)],
+            filter: Expr::cmp(CmpOp::Gt, Expr::field("seq"), Expr::param("after")),
+            output: ReadOutput::Rows {
+                fields: vec![f("seq")],
+            },
+            order: vec![(f("seq"), Direction::Asc)],
+            max_rows: 100,
+        }],
+    };
+    ok(apply(s_key(), s), "S schema")?;
+    let mut spec = QueueSpec::basic(PriorityKind::Int64);
+    spec.gates = Some(GatePolicy {
+        max_gate_keys_per_item: 4,
+        max_gates_per_request: 16,
+    });
+    let c = SpaceSchema {
+        version: 1,
+        request_id_retention_ms: 600_000,
+        queues: vec![QueueDecl {
+            name: o("sends"),
+            spec,
+            body: BodyKind::Json,
+            fields: vec![FieldDecl::stored("addr", Text, true, IndexHint::Lookup)],
+        }],
+        tables: vec![TableDecl {
+            name: o("supp_copy"),
+            key: vec![f("address")],
+            fields: vec![
+                FieldDecl::stored("address", Text, false, IndexHint::None),
+                FieldDecl::stored("reasons", TextSet, true, IndexHint::None)
+                    .with_merge(MergeRule::AddOnly),
+                FieldDecl::stored("lift_seq", Int, true, IndexHint::None)
+                    .with_merge(MergeRule::NonDecreasing),
+                FieldDecl::stored("supp_max", Int, true, IndexHint::None)
+                    .with_merge(MergeRule::NonDecreasing),
+            ],
+            expiry: None,
+            key_assignment: KeyAssignment::Caller,
+        }],
+        reads: vec![],
+    };
+    ok(apply(c_key(), c), "C schema")?;
+    Ok(())
+}
+
+fn s_number(r: &CommitResponse) -> Result<i64, Fail> {
+    match r.ops[0].entries.first().and_then(|e| e.row_key.as_deref()) {
+        Some([Value::Int(n)]) if r.status == CommitStatus::Committed => Ok(*n),
+        _ => Err(Fail::Failed(format!("no S number: {r:?}"))),
+    }
+}
+
+/// A suppression in S: numbered by `supp_log`, then unioned into `supp`.
+fn s_suppress(fx: &Fixture, addr: &str, reason: &str) -> Result<i64, Fail> {
+    let r = ok(
+        commit_in(
+            &fx.plane,
+            s_key(),
+            &fx.rid(),
+            vec![
+                put_rows(
+                    "supp_log",
+                    vec![row_of(vec![
+                        ("address", text(addr)),
+                        ("kind", text("supp")),
+                        ("reason", text(reason)),
+                    ])],
+                    RowConflict::Reject,
+                ),
+                put_rows(
+                    "supp",
+                    vec![row_of(vec![("address", text(addr))])],
+                    RowConflict::Skip,
+                ),
+                WriteOp::Mutate(Mutate::new(
+                    "supp",
+                    row_sel(vec![text(addr)], None),
+                    Action::Set(vec![(
+                        f("reasons"),
+                        Expr::SetAdd {
+                            set: Box::new(Expr::field("reasons")),
+                            values: vec![Expr::text(reason)],
+                        },
+                    )]),
+                    1,
+                )),
+            ],
+            Params::new(),
+        ),
+        "S suppress",
+    )?;
+    s_number(&r)
+}
+
+/// The lift in S, authoritative first: numbered, then an override clear.
+fn s_lift(fx: &Fixture, addr: &str) -> Result<i64, Fail> {
+    let mut clear = Mutate::new(
+        "supp",
+        row_sel(vec![text(addr)], None),
+        Action::Set(vec![(f("reasons"), Expr::null(ScalarType::TextSet))]),
+        1,
+    );
+    clear.override_merge_rules = true;
+    let r = ok(
+        commit_in(
+            &fx.plane,
+            s_key(),
+            &fx.rid(),
+            vec![
+                put_rows(
+                    "supp_log",
+                    vec![row_of(vec![
+                        ("address", text(addr)),
+                        ("kind", text("lift")),
+                    ])],
+                    RowConflict::Reject,
+                ),
+                WriteOp::Mutate(clear),
+            ],
+            Params::new(),
+        ),
+        "S lift",
+    )?;
+    s_number(&r)
+}
+
+fn copy_seed_op(addr: &str) -> WriteOp {
+    put_rows(
+        "supp_copy",
+        vec![row_of(vec![
+            ("address", text(addr)),
+            ("lift_seq", Value::Int(0)),
+            ("supp_max", Value::Int(0)),
+        ])],
+        RowConflict::Skip,
+    )
+}
+
+/// A suppression fanned out to C with S's number `n`. It applies only if
+/// `n` is above the copy's `lift_seq`; `provider_at` is carried but never
+/// used for ordering.
+fn c_apply_supp(
+    p: &Arc<dyn DataPlane>,
+    id: &str,
+    addr: &str,
+    reason: &str,
+    n: i64,
+    provider_at: i64,
+) -> DpResult<CommitResponse> {
+    let add = Mutate::new(
+        "supp_copy",
+        row_sel(
+            vec![text(addr)],
+            Some(Expr::cmp(
+                CmpOp::Lt,
+                Expr::field("lift_seq"),
+                Expr::param("n"),
+            )),
+        ),
+        Action::Set(vec![(
+            f("reasons"),
+            Expr::SetAdd {
+                set: Box::new(Expr::field("reasons")),
+                values: vec![Expr::param("reason")],
+            },
+        )]),
+        1,
+    );
+    let high = Mutate::new(
+        "supp_copy",
+        row_sel(
+            vec![text(addr)],
+            Some(Expr::cmp(
+                CmpOp::Lt,
+                Expr::field("supp_max"),
+                Expr::param("n"),
+            )),
+        ),
+        Action::Set(vec![(f("supp_max"), Expr::param("n"))]),
+        1,
+    );
+    commit_in(
+        p,
+        c_key(),
+        id,
+        vec![
+            copy_seed_op(addr),
+            WriteOp::Mutate(add),
+            WriteOp::Mutate(high),
+        ],
+        params(vec![
+            ("n", Value::Int(n)),
+            ("reason", text(reason)),
+            ("provider_at", Value::Timestamp(UtcMillis(provider_at))),
+        ]),
+    )
+}
+
+/// The lift marker with S's number `l`. The copy clears (by override) only
+/// if `l` is above both its `lift_seq` and every suppression it holds;
+/// otherwise it stays suppressed (fail closed). `lift_seq` then advances
+/// to `l`, so older suppressions arriving later are dropped.
+fn c_apply_lift(p: &Arc<dyn DataPlane>, id: &str, addr: &str, l: i64) -> DpResult<CommitResponse> {
+    let below = |field: &str| Expr::cmp(CmpOp::Lt, Expr::field(field), Expr::param("l"));
+    let mut clear = Mutate::new(
+        "supp_copy",
+        row_sel(
+            vec![text(addr)],
+            Some(Expr::And(vec![below("lift_seq"), below("supp_max")])),
+        ),
+        Action::Set(vec![
+            (f("reasons"), Expr::null(ScalarType::TextSet)),
+            (f("lift_seq"), Expr::param("l")),
+        ]),
+        1,
+    );
+    clear.override_merge_rules = true;
+    let advance = Mutate::new(
+        "supp_copy",
+        row_sel(vec![text(addr)], Some(below("lift_seq"))),
+        Action::Set(vec![(f("lift_seq"), Expr::param("l"))]),
+        1,
+    );
+    commit_in(
+        p,
+        c_key(),
+        id,
+        vec![
+            copy_seed_op(addr),
+            WriteOp::Mutate(clear),
+            WriteOp::Mutate(advance),
+        ],
+        params(vec![("l", Value::Int(l))]),
+    )
+}
+
+fn c_claim(fx: &Fixture) -> Result<Option<ClaimedItem>, Fail> {
+    let r = ok(
+        block_on(fx.plane.claim(ClaimRequest::new(
+            WriteHeader::new(c_key(), fx.rid()),
+            "sends",
+            "w",
+            1,
+            600_000,
+        ))),
+        "claim send",
+    )?;
+    Ok(r.items.into_iter().next())
+}
+
+fn c_enqueue_send(fx: &Fixture, key: &str, addr: &str, prio: i64) -> T {
+    let mut it = NewItem::new(Some(key), PriorityValue::Int(prio));
+    it.fields.insert(f("addr"), text(addr));
+    it.gate_keys.insert("active".into());
+    let r = commit_in(
+        &fx.plane,
+        c_key(),
+        &fx.rid(),
+        vec![WriteOp::Enqueue {
+            queue: o("sends"),
+            items: vec![it],
+            on_key_conflict: KeyConflict::Reject,
+        }],
+        Params::new(),
+    );
+    ensure!(committed(&r), "enqueue send {key}: {r:?}");
+    Ok(())
+}
+
+/// The send: completes the claimed send only if C's copy is not
+/// suppressed at that instant.
+fn c_send(fx: &Fixture, c: &ClaimedItem) -> DpResult<CommitResponse> {
+    let addr = c.fields.get(&f("addr")).cloned().unwrap_or(text(""));
+    commit_in(
+        &fx.plane,
+        c_key(),
+        &fx.rid(),
+        vec![
+            assert_op(
+                "supp_copy",
+                row_sel(
+                    vec![addr],
+                    Some(Expr::Not(Box::new(Expr::IsNull(Box::new(Expr::field(
+                        "reasons",
+                    )))))),
+                ),
+                0,
+                0,
+            ),
+            WriteOp::Finalize {
+                queue: o("sends"),
+                entries: vec![FinalizeEntry::new(lease_of(c), FinalizeOutcome::Complete)],
+            },
+        ],
+        Params::new(),
+    )
+}
+
+fn blocked(r: &DpResult<CommitResponse>) -> bool {
+    rejected_for(r, |x| *x == FailureReason::MatchExpectUnmet { matched: 1 })
+}
+
+/// Account-level suppression copied into a campaign space, ordered by S's
+/// own numbers: activation seeding (f), out-of-order fan-out (a), sends
+/// blocked by the copy (b), authoritative-first lift (c), fail closed
+/// between S's lift and the copy (d), late and skewed copies dropped while
+/// a real post-lift bounce re-suppresses (e), and a post-lift suppression
+/// that reaches the copy before the lift marker.
+fn dsl_suppression_copy(fx: &Fixture) -> T {
+    two_spaces(fx)?;
+    let other = fx.open_peer().unwrap_or_else(|| fx.plane.clone());
+    // (f) Sends wait behind a closed activation gate.
+    let gate = |state: GateState| WriteOp::SetGates {
+        queue: o("sends"),
+        gates: vec![("active".into(), state)],
+    };
+    ensure!(
+        committed(&commit_in(
+            &fx.plane,
+            c_key(),
+            &fx.rid(),
+            vec![gate(GateState::Blocked)],
+            Params::new()
+        )),
+        "close gate"
+    );
+    c_enqueue_send(fx, "s-x", "x@y", 1)?;
+    c_enqueue_send(fx, "s-z", "z@y", 2)?;
+    ensure!(
+        c_claim(fx)?.is_none(),
+        "a send was claimable before activation"
+    );
+    let n1 = s_suppress(fx, "x@y", "bounce")?;
+    // Activation: snapshot S (its highest number H, then its rows), seed
+    // the copy at H and open the gate in the same group.
+    let mut h = 0;
+    let mut token = None;
+    loop {
+        let r = ok(
+            block_on(fx.plane.read(ReadRequest {
+                space: s_key(),
+                name: ReadName::new("log_after"),
+                version: 1,
+                params: params(vec![("after", Value::Int(0))]),
+                page_token: token,
+            })),
+            "S log",
+        )?;
+        for row in &r.rows {
+            if let Some(Value::Int(n)) = row.get(&f("seq")) {
+                h = h.max(*n);
+            }
+        }
+        token = r.next_page_token;
+        if token.is_none() {
+            break;
+        }
+    }
+    let mut seed = vec![];
+    for addr in ["x@y", "z@y"] {
+        let mut row = row_of(vec![
+            ("address", text(addr)),
+            ("lift_seq", Value::Int(h)),
+            ("supp_max", Value::Int(h)),
+        ]);
+        let rs = reasons_of(&row_in(&fx.plane, s_key(), "supp", addr));
+        if !rs.is_empty() {
+            row.insert(f("reasons"), Value::TextSet(rs));
+        }
+        seed.push(row);
+    }
+    let r = commit_in(
+        &fx.plane,
+        c_key(),
+        &fx.rid(),
+        vec![
+            put_rows("supp_copy", seed, RowConflict::Reject),
+            gate(GateState::Open),
+        ],
+        Params::new(),
+    );
+    ensure!(committed(&r) && h >= n1, "activation: {r:?}");
+    let cx = must(c_claim(fx)?, "claim x")?;
+    ensure!(
+        blocked(&c_send(fx, &cx)),
+        "seeded suppression did not block x@y"
+    );
+    let cz = must(c_claim(fx)?, "claim z")?;
+    ensure!(committed(&c_send(fx, &cz)), "unsuppressed z@y blocked");
+    // The fan-out of n1 arrives after seeding: already reflected, dropped.
+    ok(
+        c_apply_supp(&fx.plane, "f-n1", "x@y", "bounce", n1, START),
+        "late n1",
+    )?;
+    ensure!(
+        reasons_of(&row_in(&fx.plane, c_key(), "supp_copy", "x@y")) == set_of(&["bounce"]),
+        "x@y copy"
+    );
+    // (a) Two suppressions fan out in reverse order, concurrently.
+    let n2 = s_suppress(fx, "z@y", "stop")?;
+    let n3 = s_suppress(fx, "z@y", "complaint")?;
+    let (r3, r2) = std::thread::scope(|scope| {
+        let a = scope.spawn(|| c_apply_supp(&fx.plane, "f-n3", "z@y", "complaint", n3, START));
+        let b = scope.spawn(|| c_apply_supp(&other, "f-n2", "z@y", "stop", n2, START));
+        (a.join().unwrap(), b.join().unwrap())
+    });
+    ensure!(committed(&r3) && committed(&r2), "fan-out: {r3:?} {r2:?}");
+    let copy = row_in(&fx.plane, c_key(), "supp_copy", "z@y");
+    ensure!(
+        reasons_of(&copy) == reasons_of(&row_in(&fx.plane, s_key(), "supp", "z@y"))
+            && reasons_of(&copy) == set_of(&["stop", "complaint"])
+            && int_of(&copy, "supp_max") == Some(n3),
+        "copy did not converge: {copy:?}"
+    );
+    // (b) A send to z@y is blocked while the copy is suppressed.
+    c_enqueue_send(fx, "s-z2", "z@y", 3)?;
+    let cz2 = must(c_claim(fx)?, "claim z2")?;
+    ensure!(blocked(&c_send(fx, &cz2)), "send to suppressed z@y");
+    // (c), (d) The lift lands in S first; until the copy applies it, the
+    // send stays blocked, and C cannot clear the copy on its own.
+    let l = s_lift(fx, "z@y")?;
+    ensure!(
+        reasons_of(&row_in(&fx.plane, s_key(), "supp", "z@y")).is_empty(),
+        "S lift"
+    );
+    ensure!(blocked(&c_send(fx, &cz2)), "send between S lift and copy");
+    let plain = commit_in(
+        &fx.plane,
+        c_key(),
+        &fx.rid(),
+        vec![WriteOp::Mutate(Mutate::new(
+            "supp_copy",
+            row_sel(vec![text("z@y")], None),
+            Action::Set(vec![(f("reasons"), Expr::null(ScalarType::TextSet))]),
+            1,
+        ))],
+        Params::new(),
+    );
+    ensure!(
+        rejected_for(&plain, |x| matches!(
+            x,
+            FailureReason::Entry(EntryStatus::MergeRuleViolated { .. })
+        )),
+        "plain clear in C: {plain:?}"
+    );
+    ensure!(
+        committed(&c_apply_lift(&fx.plane, "f-l", "z@y", l)),
+        "lift marker"
+    );
+    let copy = row_in(&fx.plane, c_key(), "supp_copy", "z@y");
+    ensure!(
+        reasons_of(&copy).is_empty() && int_of(&copy, "lift_seq") == Some(l),
+        "after the marker: {copy:?}"
+    );
+    ensure!(committed(&c_send(fx, &cz2)), "send after the lift");
+    // (e) A late copy of a pre-lift suppression, even with a provider time
+    // skewed far after the lift, is dropped; a real post-lift bounce, with
+    // a higher S number, re-suppresses.
+    ok(
+        c_apply_supp(&fx.plane, "f-n2-late", "z@y", "stop", n2, START + FAR),
+        "late n2",
+    )?;
+    ensure!(
+        reasons_of(&row_in(&fx.plane, c_key(), "supp_copy", "z@y")).is_empty(),
+        "a pre-lift copy re-suppressed"
+    );
+    let n4 = s_suppress(fx, "z@y", "bounce")?;
+    ensure!(n4 > l, "S numbers out of order");
+    ok(
+        c_apply_supp(&fx.plane, "f-n4", "z@y", "bounce", n4, START),
+        "n4",
+    )?;
+    c_enqueue_send(fx, "s-z3", "z@y", 4)?;
+    let cz3 = must(c_claim(fx)?, "claim z3")?;
+    ensure!(
+        blocked(&c_send(fx, &cz3)),
+        "post-lift bounce did not re-suppress"
+    );
+    // A post-lift suppression that reaches the copy before the lift marker:
+    // the marker does not clear it (fail closed); S agrees it is suppressed.
+    let m5 = s_suppress(fx, "w@y", "stop")?;
+    let l2 = s_lift(fx, "w@y")?;
+    let m6 = s_suppress(fx, "w@y", "bounce")?;
+    ok(
+        c_apply_supp(&fx.plane, "f-m5", "w@y", "stop", m5, START),
+        "m5",
+    )?;
+    ok(
+        c_apply_supp(&fx.plane, "f-m6", "w@y", "bounce", m6, START),
+        "m6",
+    )?;
+    ensure!(
+        committed(&c_apply_lift(&fx.plane, "f-l2", "w@y", l2)),
+        "marker l2"
+    );
+    let copy = row_in(&fx.plane, c_key(), "supp_copy", "w@y");
+    ensure!(
+        !reasons_of(&copy).is_empty()
+            && !reasons_of(&row_in(&fx.plane, s_key(), "supp", "w@y")).is_empty()
+            && int_of(&copy, "lift_seq") == Some(l2),
+        "reversed lift: {copy:?}"
+    );
+    Ok(())
+}
+
+// --------------------------------------------------------------- admission
+
+fn admit_ops(subjects: &[&str]) -> Vec<WriteOp> {
+    let items = subjects
+        .iter()
+        .map(|s| {
+            let mut it = NewItem::new(Some(&format!("adm-{s}")), PriorityValue::Int(1));
+            it.fields.insert(f("run"), text("adm"));
+            it.fields.insert(f("subject"), text(s));
+            it
+        })
+        .collect();
+    vec![WriteOp::Enqueue {
+        queue: o("admit"),
+        items,
+        on_key_conflict: KeyConflict::Duplicate,
+    }]
+}
+
+/// A batch admitting one subject twice admits it once. Re-entry `never`:
+/// after the instance completes, the subject stays a duplicate while its
+/// key is retained, including after the item stops being addressable, and
+/// is admitted again exactly at `client_item_key_retention_ms`.
+fn dsl_duplicate_admission(fx: &Fixture) -> T {
+    setup(fx)?;
+    let r = ok(fx.commit(admit_ops(&["s1", "s2", "s1"])), "admit")?;
+    let st: Vec<_> = r.ops[0].entries.iter().map(|e| e.status.clone()).collect();
+    ensure!(
+        st == [
+            EntryStatus::Accepted,
+            EntryStatus::Accepted,
+            EntryStatus::Duplicate
+        ],
+        "batch statuses: {st:?}"
+    );
+    let s1 = r.ops[0].entries[0]
+        .item_id
+        .ok_or_else(|| Fail::Failed("id".into()))?;
+    ensure!(
+        r.ops[0].entries[2].item_id == Some(s1),
+        "duplicate entry names another item: {:?}",
+        r.ops[0].entries[2]
+    );
+    let mut req = ClaimRequest::new(fx.hdr(), "admit", "w", 2, 60_000);
+    req.max_items = 2;
+    let c = ok(fx.claim_req(req), "claim")?;
+    ensure!(c.items.len() == 2, "admitted {} instances", c.items.len());
+    let done = c
+        .items
+        .iter()
+        .find(|i| i.item_id == s1)
+        .ok_or_else(|| Fail::Failed("s1 not claimed".into()))?;
+    ok(
+        fx.commit(vec![WriteOp::Finalize {
+            queue: o("admit"),
+            entries: vec![FinalizeEntry::new(
+                lease_of(done),
+                FinalizeOutcome::Complete,
+            )],
+        }]),
+        "complete",
+    )?;
+    let dup = |fx: &Fixture| -> Result<EntryStatus, Fail> {
+        let r = ok(fx.commit(admit_ops(&["s1"])), "re-admit")?;
+        Ok(r.ops[0].entries[0].status.clone())
+    };
+    ensure!(
+        dup(fx)? == EntryStatus::Duplicate,
+        "re-entry after completion"
+    );
+    fx.advance(60_000);
+    ensure!(
+        fx.get_in("admit", s1).is_none(),
+        "terminal item still addressable"
+    );
+    ensure!(
+        dup(fx)? == EntryStatus::Duplicate,
+        "re-entry on a tombstone"
+    );
+    fx.advance(59_999);
+    ensure!(
+        dup(fx)? == EntryStatus::Duplicate,
+        "re-entry before key retention"
+    );
+    fx.advance(1);
+    let r = ok(fx.commit(admit_ops(&["s1"])), "after retention")?;
+    let e = &r.ops[0].entries[0];
+    ensure!(
+        e.status == EntryStatus::Accepted && e.item_id.is_some_and(|id| id != s1),
+        "admission at key retention: {e:?}"
+    );
+    Ok(())
+}
+
+// ----------------------------------------------------------------- effects
+
+fn intent_ops(key: &str) -> Vec<WriteOp> {
+    let mut e = NewItem::new(Some(key), PriorityValue::Int(1));
+    e.body = Some(Body::Json(json!({ "to": "a@y", "template": "t1" })));
+    e.fields.insert(f("run"), text("fx"));
+    vec![WriteOp::Enqueue {
+        queue: o("effects"),
+        items: vec![e],
+        on_key_conflict: KeyConflict::Reject,
+    }]
+}
+
+fn effects_with_key(fx: &Fixture, key: &str) -> Result<usize, Fail> {
+    let r = ok(
+        block_on(fx.plane.read(ReadRequest {
+            space: sp(),
+            name: ReadName::new("fw_items"),
+            version: 1,
+            params: params(vec![("queue", text("effects")), ("key_prefix", text(key))]),
+            page_token: None,
+        })),
+        "fw_items",
+    )?;
+    Ok(r.rows.len())
+}
+
+fn claim_effect(
+    fx: &Fixture,
+    filter: Option<Expr>,
+    lease: u64,
+) -> Result<Option<ClaimedItem>, Fail> {
+    let mut req = ClaimRequest::new(fx.hdr(), "effects", "w", 1, lease);
+    req.filter = filter;
+    Ok(ok(fx.claim_req(req), "claim effect")?
+        .items
+        .into_iter()
+        .next())
+}
+
+fn effect_fin(c: &ClaimedItem, outcome: FinalizeOutcome, set: Vec<(&str, Expr)>) -> WriteOp {
+    let mut e = FinalizeEntry::new(lease_of(c), outcome);
+    e.set = set.into_iter().map(|(n, x)| (f(n), x)).collect();
+    WriteOp::Finalize {
+        queue: o("effects"),
+        entries: vec![e],
+    }
+}
+
+/// The provider call times out; the worker records the outcome as unknown
+/// and parks the effect for reconciliation. The same effect item, with the
+/// body fixed at intent time, is reconciled exactly once.
+fn dsl_effect_outcome_unknown(fx: &Fixture) -> T {
+    setup(fx)?;
+    let intent = ok(fx.commit(intent_ops("eff-1")), "intent")?;
+    ensure!(
+        intent.status == CommitStatus::Committed,
+        "intent: {intent:?}"
+    );
+    let id = intent.ops[0].entries[0]
+        .item_id
+        .ok_or_else(|| Fail::Failed("no effect id".into()))?;
+    let c = must(claim_effect(fx, None, 60_000)?, "claim effect")?;
+    let body0 = c.body.clone();
+    // Timeout: unknown outcome, retry later through reconciliation.
+    let h = fx.hdr();
+    let ops = vec![effect_fin(
+        &c,
+        FinalizeOutcome::Retry {
+            not_before: Schedule::After { delay_ms: 1000 },
+            priority: None,
+        },
+        vec![("outcome", Expr::text("unknown"))],
+    )];
+    let t1 = ok(
+        fx.commit_with(h.clone(), ops.clone(), Params::new(), false),
+        "unknown",
+    )?;
+    ensure!(
+        t1.status == CommitStatus::Committed,
+        "record unknown: {t1:?}"
+    );
+    let t1b = ok(fx.commit_with(h, ops, Params::new(), false), "replay")?;
+    ensure!(t1b == t1, "replayed transition differs");
+    let again = ok(
+        fx.commit(
+            intent_ops("eff-1")
+                .into_iter()
+                .map(|op| match op {
+                    WriteOp::Enqueue { queue, items, .. } => WriteOp::Enqueue {
+                        queue,
+                        items,
+                        on_key_conflict: KeyConflict::Duplicate,
+                    },
+                    other => other,
+                })
+                .collect(),
+        ),
+        "re-enqueue",
+    )?;
+    ensure!(
+        again.ops[0].entries[0].status == EntryStatus::Duplicate
+            && again.ops[0].entries[0].item_id == Some(id),
+        "re-enqueue: {:?}",
+        again.ops[0].entries[0]
+    );
+    ensure!(effects_with_key(fx, "eff-1")? == 1, "a second effect item");
+    fx.advance(1000);
+    let unknown = Expr::eq(Expr::field("outcome"), Expr::text("unknown"));
+    let r = must(claim_effect(fx, Some(unknown), 60_000)?, "reconcile claim")?;
+    ensure!(
+        r.item_id == id
+            && r.client_item_key == ClientItemKey::new("eff-1")
+            && r.body == body0
+            && r.attempt_count == 2,
+        "reconciliation sees another effect: {r:?}"
+    );
+    let done = |rid: &str| {
+        fx.commit_with(
+            WriteHeader::new(sp(), rid),
+            vec![effect_fin(
+                &r,
+                FinalizeOutcome::Complete,
+                vec![("outcome", Expr::text("sent"))],
+            )],
+            Params::new(),
+            false,
+        )
+    };
+    ensure!(committed(&done("rec-1")), "reconcile");
+    ensure!(!committed(&done("rec-2")), "reconciled twice");
+    let v = fx
+        .get_in("effects", id)
+        .ok_or_else(|| Fail::Failed("effect missing".into()))?;
+    ensure!(
+        v.state == ItemState::Complete
+            && v.fields.get(&f("outcome")) == Some(&text("sent"))
+            && v.body == body0,
+        "final effect: {v:?}"
+    );
+    ensure!(
+        effects_with_key(fx, "eff-1")? == 1,
+        "effects after reconcile"
+    );
+    Ok(())
+}
+
+/// The intent commits at the strongest level offered; the worker crashes
+/// before calling the provider. The same effect is redelivered with one
+/// more attempt, and replaying the intent creates nothing new.
+fn dsl_crash_before_provider_call(fx: &Fixture) -> T {
+    setup(fx)?;
+    let max = fx.caps().max_durability;
+    let mut h = fx.hdr();
+    h.min_durability = Some(max);
+    let intent = ok(
+        fx.commit_with(h.clone(), intent_ops("eff-2"), Params::new(), false),
+        "intent",
+    )?;
+    ensure!(
+        intent.status == CommitStatus::Committed && intent.durability.is_some_and(|d| d >= max),
+        "intent durability: {intent:?}"
+    );
+    let id = intent.ops[0].entries[0]
+        .item_id
+        .ok_or_else(|| Fail::Failed("no effect id".into()))?;
+    let c1 = must(claim_effect(fx, None, 1000)?, "first claim")?;
+    fx.advance(1000); // crashed before the provider call; the lease expires
+    let c2 = must(claim_effect(fx, None, 1000)?, "second claim")?;
+    ensure!(
+        c2.item_id == id
+            && c2.client_item_key == c1.client_item_key
+            && c2.body == c1.body
+            && c2.attempt_count == c1.attempt_count + 1,
+        "redelivery: {c1:?} then {c2:?}"
+    );
+    let replay = ok(
+        fx.commit_with(h, intent_ops("eff-2"), Params::new(), false),
+        "replay",
+    )?;
+    ensure!(replay == intent, "replayed intent differs");
+    ensure!(
+        effects_with_key(fx, "eff-2")? == 1,
+        "replay created an effect"
+    );
+    let v = fx
+        .get_in("effects", id)
+        .ok_or_else(|| Fail::Failed("effect missing".into()))?;
+    ensure!(
+        v.state == ItemState::Leased && v.attempt_count == 2,
+        "the crash exhausted the effect: {v:?}"
+    );
     Ok(())
 }
