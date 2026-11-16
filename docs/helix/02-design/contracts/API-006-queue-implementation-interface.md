@@ -522,6 +522,52 @@ clock (ADR-025 D1):
 The response reports the level. ADR-025 §Durability gives the local
 engine's levels.
 
+## Tenant scope: the deliverability check
+
+The data plane's tenant scope (ADR-025 §13, D47) has one operation. Cayce
+implements it on Dragonfly (Cayce ADR-015), and Snorri's send effect handler
+calls it at dispatch. It isn't a DSL statement, and no program can call it.
+
+```rust
+pub trait DeliverabilityCheck: Send + Sync {
+    /// May this send go now? Takes a cap slot when it answers `Allow`.
+    async fn check(&self, request: CheckRequest) -> CheckResult;
+    /// The same, for a batch, in order: one Dragonfly round trip.
+    async fn check_batch(&self, requests: Vec<CheckRequest>) -> Vec<CheckResult>;
+}
+
+pub struct CheckRequest {
+    pub account: String,          // the tenant account
+    pub contact: String,          // the contact key, as ADR-015 normalizes it
+    pub channel: String,          // email, sms, ...
+    pub at: Timestamp,            // the intended send instant (usually now)
+    pub idempotency_key: String,  // the effect's key: a repeat takes no second slot
+}
+
+pub enum CheckResult {
+    Allow { degraded: bool },                         // degraded: Dragonfly didn't answer; failed open
+    Defer { not_before: Timestamp, reason: String },  // e.g. "cap_hourly", "cap_daily"
+    Deny { reason: String },                          // e.g. "suppressed" (question 25)
+}
+```
+
+Rules:
+- **No error variant.** A failure to reach Dragonfly is `Allow { degraded:
+  true }` for caps, as ADR-015 fails open. If suppression joins the check
+  (ADR-025 question 25), a suppression lookup that can't answer is `Defer`.
+- **One slot per idempotency key.** A repeated check takes no second slot
+  and returns the first decision while the key's marker lives. The marker
+  lives 7 days, as long as the counters.
+- **Counts only go up.** A slot is never given back, and no other
+  operation changes a count (ADR-015).
+- **Snorri's mapping:**
+  - `Allow` goes on to send;
+  - `Defer` is a `settle` with `outcome: release` and `after` until
+    `not_before`, which charges no attempt;
+  - `Deny` settles the effect `complete` with the reason in its receipt.
+
+  The workflow sees only the outcome.
+
 ## Limits
 
 | Limit | Value |
@@ -605,7 +651,7 @@ Names in SQL are validated object and field names, and quoted.
 | 7 | Timeline | A sequenced table, inserted last in each transition's program. Full history goes to Niflheim. |
 | 8 | Definitions (up to 256 KiB, D31) | Table row keyed by digest, with a `text` field. |
 | 9 | Admission chunk | Table row keyed by run and shard: `insert` with `on_conflict: reject`, then `update` by keys with `where: {eq: [version, v]}` and `expect: {min: 1, max: 1}`. |
-| 10 | Send-rate counters | In Dragonfly, the data plane's per-tenant counter store, checked in real time by the send effect handler; not in Fireweed (ADR-025 D45, D46). |
+| 10 | Send-rate counters | Tenant scope: in Dragonfly, behind the deliverability check that the send effect handler calls at dispatch (§Tenant scope; ADR-025 §13). Not in Fireweed. |
 | 11 | Re-entry across runs (D29) | Table in a family space keyed by (family, subject), with `non_decreasing` timestamps, updated with `expect`. |
 
 Snorri's queues declare `max_attempts: unlimited` (D30).
@@ -616,7 +662,7 @@ Snorri's queues declare `max_attempts: unlimited` (D30).
 |-------|-----------|
 | Per-recipient lifecycle | Queue items with indexed fields (campaign, step, domain, status) |
 | Suppression | Table with `reasons: text_set, merge: add_only`. A send's program first runs `assert` on the address with `expect: {max: 0}` (question 25 for spaces). |
-| Caps and rate windows | Dragonfly, checked in real time by the send effect handler (ADR-025 D45, D46) |
+| Caps and rate windows | The deliverability check (§Tenant scope), on Dragonfly per Cayce ADR-015 |
 | Delivery and engagement events | Queue items keyed by provider id; a sequenced table for timelines |
 | UI counts and lists | Declared reads |
 
