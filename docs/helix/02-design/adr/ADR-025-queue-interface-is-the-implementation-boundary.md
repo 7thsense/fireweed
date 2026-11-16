@@ -171,6 +171,7 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D45 | "We need the counters in dragonfly because they need to be cross run, campaign, list, and everything else. They are universal per tenant." "just check dragonfly in real time, it's stupidly fast and selected for this purpose because of that property." | Owner, 2026-11-16 | Adopted. Send caps and rate counters stay in Dragonfly, checked in real time, and Fireweed holds no copy. This resolves question 5 and the counter half of question 25. A cap check and a send's commit stay separate steps, as today. |
 | D46 | "Dragonfly is part of the dataplane. That said, we should think about how to integrate it properly in the snorri model. It probably should be 'hidden' behind an effect handler." | Owner, 2026-11-16 | Direction for Snorri. The send effect handler checks and takes the Dragonfly slot. Snorri core and the workflow DSL don't see caps. This replaces TD-011's core `RateLimiter` port (its D9). The handler needs a way to answer "not now, retry at T" without failing the effect. Snorri's design to follow. |
 | D47 | "Thats an additional 'tenant scope' portion of the dataplane. We should think about how to include it in the design -- I think hiding it behind a 'deliverability check' action of sorts makes the most sense. Make sure these spec changes and scope limits are completely captured across fireweed AND snorri AND cayce specs." | Owner via the Cayce session, 2026-11-16 | Adopted as §13. The data plane has two scopes: the space scope, which is Fireweed, and the tenant scope, which is Dragonfly. The tenant scope is reached only through the deliverability check, a Snorri port Cayce implements. It refines D46: Snorri's send effect handler calls the check, and Snorri core and workflows don't see it. Cayce ADR-015 stays the system of record for the counters. |
+| D48 | "I think we need control over fail open vs fail closed. Deliverability slotting should generally be fail open, isn't that how it is in 7thsense?" | Owner, 2026-11-16 | Adopted in §13. Each rule in the deliverability check has its own failure policy, `open` or `closed`. Slotting defaults to `open`, as in Cayce ADR-015, which says 7th Sense behaves the same; 7th Sense's code isn't available here to confirm. Suppression, if it joins the check, defaults to `closed`. Cayce's implementation holds the setting. Resolves the open question on whether counters stay fail-open. |
 
 ## Decision
 
@@ -523,8 +524,8 @@ defines it as its `DeliverabilityCheck` port, which replaces TD-011's
 `RateLimiter` port, and Cayce implements it on Dragonfly. Snorri's send
 effect handler calls it after the effect's durable intent commit and
 before the provider call (D46, D47). It answers:
-- `Proceed { fail_open }`: send. `fail_open` means the store didn't
-  answer.
+- `Proceed { fail_open }`: send. `fail_open` means a rule's store didn't
+  answer and that rule's failure policy is `open`.
 - `Defer { until }`: the effect returns to ready at `until` without
   charging an attempt, which is a Fireweed `settle` with `outcome:
   release` and `after`.
@@ -545,15 +546,26 @@ Neither Snorri core nor the workflow DSL names caps or Dragonfly.
   check and the receipt. If the check takes an effect idempotency key, and
   keeps a marker beside the count in the same Lua script, a retried check
   takes no second slot.
-- **Suppression fails closed.** If suppression moves into the check
-  (question 25), a suppression lookup that can't answer should `Defer`,
-  not `Proceed`. Sending to a suppressed address is worse than a delay;
-  caps still fail open per ADR-015.
+- **A failure policy per rule (D48).** Each rule the check applies has its
+  own policy for when its store can't answer:
+  - `open`: the rule is skipped, and the result is `Proceed { fail_open:
+    true }`;
+  - `closed`: the result is `Defer { until }`, at a short backoff, so the
+    send waits for the store.
 
-Open owner questions on the tenant scope:
-- whether tenant-scope counters stay fail-open and non-durable, as ADR-015
-  has them;
-- whether suppression moves into the check (question 25).
+  Defaults:
+  - slotting is `open`, as Cayce ADR-015 has it ("which is the 7th Sense
+    behavior too"), and its fail-open metric and alert stay;
+  - suppression, if it joins the check (question 25), is `closed`, because
+    sending to a suppressed address is worse than a delay.
+
+  The policy is configuration in Cayce's implementation, per rule, with an
+  account-level override for tenants that want caps enforced strictly.
+  Callers can't choose it per send. Snorri only sees the decision.
+
+Tenant-scope counters stay non-durable: losing Dragonfly resets caps for
+at most the 7-day window (ADR-015). Whether suppression moves into the
+check is question 25.
 
 ## Alternatives
 
