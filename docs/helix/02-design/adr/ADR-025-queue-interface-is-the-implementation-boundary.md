@@ -733,14 +733,21 @@ Snorri's TD-012 revision 7 (uncommitted there; sent to this session on
     campaign becomes N spaces. At 16 open runs × 64 shards that is 1,024
     spaces: one row each on PostgreSQL; on the local engine 1,024 writer
     grants, about 100 renewals a second unless one grant covers all of a
-    holder's spaces. Is one space per (run, shard) acceptable, or should a
+    holder's spaces. D29 adds one family space per workflow family, which
+    every run of the family writes and which needs its own grant on the
+    local engine. Is one space per (run, shard) acceptable, or should a
     run's shards share one space?
 30. **Definitions larger than one value.** Snorri stores workflow
     definitions in table rows. Typical ones are 31 to 43 KB; the largest
     are up to 8 MiB, over `max_value_bytes` (256 KiB) and `max_body_bytes`
     (2 MiB). Large transition outputs must also fit in 2 MiB. With no blob
     shape (D16), these need a store outside Fireweed, chunking across
-    rows of a table, or higher caps. Which?
+    rows of a table, or higher caps. Draft, from Snorri TD-012 revision 7
+    (its O23): bound both sizes instead. Snorri lowers its definition cap
+    from 8 MiB to 256 KiB, so a definition fits one table value, and keeps
+    transition output at its existing 1 MiB cap inside the 2 MiB body.
+    This needs no interface change, and Cayce must confirm that no
+    template exceeds 256 KiB.
 
 ## Risks
 
