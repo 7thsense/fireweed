@@ -15,6 +15,7 @@ type Test = fn(&Fixture) -> T;
 
 pub const ALL: &[(&str, Test)] = &[
     ("LEASE-MAX", lease_max),
+    ("LEASE-MAX-2", lease_max_release),
     ("ASSERT-1", assert_1),
     ("ASSERT-2", assert_2),
     ("ASSERT-3", assert_3),
@@ -101,6 +102,101 @@ fn lease_max(fx: &Fixture) -> T {
     }
     let c = ok(fx.claim(1, 1000), "claim after failure")?;
     ensure!(c.items.is_empty(), "a failed item was claimed: {c:?}");
+    Ok(())
+}
+
+/// Claims `max_attempts` times, releasing each lease, then claims once more.
+/// Returns the item and the last claim.
+fn claim_past_limit(fx: &Fixture, key: &str, max: u32) -> Result<(ItemId, ClaimedItem), Fail> {
+    let id = fx.push(key, 1);
+    for attempt in 1..=max {
+        let c = ok(fx.claim(1, 1000), "claim")?;
+        ensure!(
+            c.items.len() == 1 && c.items[0].item_id == id && c.items[0].attempt_count == attempt,
+            "claim {attempt}: {:?}",
+            c.items
+        );
+        let r = ok(
+            fx.finalize(vec![FinalizeEntry::new(
+                lease_of(&c.items[0]),
+                FinalizeOutcome::Release,
+            )]),
+            "release",
+        )?;
+        ensure!(
+            r.entries[0].status == EntryStatus::Released,
+            "release {attempt}: {:?}",
+            r.entries
+        );
+    }
+    // 1. Pending at the limit: Release charges nothing and fails nothing.
+    let v = fx
+        .get_item(id, true)
+        .ok_or_else(|| Fail::Failed("item missing".into()))?;
+    ensure!(
+        v.state == ItemState::Pending && v.attempt_count == max,
+        "pending at the limit: {v:?}"
+    );
+    // 2. A pending item at its limit is still claimable; the claim charges one more.
+    let c = ok(fx.claim(1, 1000), "claim past the limit")?;
+    ensure!(
+        c.items.len() == 1 && c.items[0].item_id == id && c.items[0].attempt_count == max + 1,
+        "claim past the limit: {:?}",
+        c.items
+    );
+    Ok((id, c.items.into_iter().next().expect("one item")))
+}
+
+/// A pending item at its limit (after `Release`) stays claimable; that
+/// claim's lease expiry, or a `Retry` on it, fails the item with
+/// `attempts-exhausted`. Expiry fails it at `lease_expires_at` without a
+/// version bump.
+fn lease_max_release(fx: &Fixture) -> T {
+    let max = 2; // base schema
+    // 3. Expiry of the claim past the limit.
+    let (id, c) = claim_past_limit(fx, "lmr-expire", max)?;
+    fx.advance(1000);
+    let v = fx
+        .get_item(id, true)
+        .ok_or_else(|| Fail::Failed("item missing".into()))?;
+    let term = v
+        .terminal
+        .clone()
+        .ok_or_else(|| Fail::Failed(format!("not terminal after expiry: {v:?}")))?;
+    ensure!(
+        v.state == ItemState::Failed
+            && term.code.as_deref() == Some("attempts-exhausted")
+            && term.terminal_at == c.lease_expires_at
+            && v.item_version == c.item_version,
+        "after expiry past the limit (lease to {:?}, version {}): {v:?}",
+        c.lease_expires_at,
+        c.item_version
+    );
+    // 4. A Retry finalize on the claim past the limit.
+    let (id, c) = claim_past_limit(fx, "lmr-retry", max)?;
+    let r = ok(
+        fx.finalize(vec![FinalizeEntry::new(
+            lease_of(&c),
+            FinalizeOutcome::Retry {
+                not_before: Schedule::After { delay_ms: 0 },
+                priority: None,
+            },
+        )]),
+        "retry",
+    )?;
+    ensure!(
+        r.entries[0].status == EntryStatus::Failed,
+        "retry past the limit: {:?}",
+        r.entries
+    );
+    let v = fx
+        .get_item(id, true)
+        .ok_or_else(|| Fail::Failed("item missing".into()))?;
+    ensure!(
+        v.state == ItemState::Failed
+            && v.terminal.as_ref().and_then(|t| t.code.as_deref()) == Some("attempts-exhausted"),
+        "after retry past the limit: {v:?}"
+    );
     Ok(())
 }
 

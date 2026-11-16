@@ -1806,6 +1806,7 @@ vectors. IDs are stable and cited in failures.
 | DUR-5 | Storage loss | After `lose_local_storage`, every commit acknowledged at `Durable` is present. |
 | DUR-7 | Requested level | Each offered level is acknowledged at or above what was asked and at most the maximum. |
 | LEASE-MAX | Redelivery bound | Lease expiry returns the item to pending until its claims have used `max_attempts`; the expiry after that fails it with `attempts-exhausted` at the expiry instant, without a version bump. |
+| LEASE-MAX-2 | Claim past the limit | After `max_attempts` claims each ended by `Release`, the item is pending with `attempt_count = max_attempts` and still claimable; that claim charges `max_attempts + 1`. Its lease expiry fails the item with `attempts-exhausted` at `lease_expires_at` with `item_version` unchanged; a `Retry` on it instead fails it the same way. |
 | LIN-1 | Concurrent claims | Peers never hold two active leases on one item. |
 | LIN-2 | Read after commit | A read starting after a commit's response observes it, across shapes. |
 | SHARE-1 | SingleProcess | A second open fails or supersedes while the holder lives; after the holder is killed, open succeeds. |
@@ -1859,8 +1860,8 @@ assert on final state through `get` and `read`.
 
 | Implementation | Pass | Fail | Skip |
 |----------------|------|------|------|
-| `fireweed-interface-memory` | 132 | 0 | 11 |
-| `fireweed-interface-postgres` (PostgreSQL 16) | 131 | 0 | 12 |
+| `fireweed-interface-memory` | 133 | 0 | 11 |
+| `fireweed-interface-postgres` (PostgreSQL 16) | 132 | 0 | 12 |
 
 Skipped on both: GRP-9, GRP-13 and COH-1 (cohorts are not declared yet);
 IDX-2 (harness gap: an index still building); REC-4 (harness gap:
