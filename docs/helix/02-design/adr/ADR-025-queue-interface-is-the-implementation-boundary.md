@@ -67,6 +67,13 @@ deprecated in favour of the request DSL; object-log is deprecated once the
 local engine ships its S3 log. Eighteen questions are resolved; questions 5
 and 15 wait on background for the owner, and questions 25 to 29 are new.
 
+A 2026-11-16 amendment to revision 7 records two more owner rulings on
+Snorri's items. Re-entry across runs is checked against a keyed record in
+a family space (D29), and a queue may opt out of the store's redelivery
+bound when its embedder parks crash-looping items itself (D30). Snorri's
+TD-012 revision 7 text answers question 15, which moves to the resolved
+table; definitions larger than one value are new question 30.
+
 ## Context
 
 ### Intent
@@ -155,7 +162,7 @@ needs Cayce's confirmation.
 | # | Decision | Source | Status in revision 7 |
 |---|----------|--------|----------------------|
 | D1 | Time-driven transitions are in the contract; no caller tick. | Owner, 2026-11-13 | Kept (§8). |
-| D2 | One time authority per storage. | Owner, 2026-11-13 | Kept. Claims take an optional eligibility time; lease time always comes from the authority (§8), pending Snorri O2. The Cayce project withdrew its "clock as an input to claim and lease" wording on 2026-11-15. |
+| D2 | One time authority per storage. | Owner, 2026-11-13 | Kept. Claims take an optional eligibility time; lease time always comes from the authority (§8). Snorri accepts this as its O2 (TD-012 revision 7). The Cayce project withdrew its "clock as an input to claim and lease" wording on 2026-11-15. |
 | D3 | ADR-008 ownership becomes internal to object-log, which declares `SingleProcess`. | Owner, 2026-11-13 | Moot once object-log is deprecated (D24). |
 | D4 | `Bounded` new-work visibility allowed, fails closed. | Owner, 2026-11-13 | Kept in the type. No v1 implementation declares it, and v1 conformance defines `Immediate` only (§7). |
 | D5 | RESP gets a `StreamGroup` family. | Owner, 2026-11-13 | Superseded by D25: RESP is deprecated. |
@@ -182,6 +189,8 @@ needs Cayce's confirmation.
 | D26 | "no need to migrate spaces"; via the Turso-queue session: "we don't need a migration path". | Owner, 2026-11-15 | A space stays on the implementation it starts on (§11). Resolves question 22. |
 | D27 | Via the Turso-queue session: "we do need to ensure that the dsl can be fully implemented on this model". | Owner, 2026-11-15 | The Turso-queue session mapped every Snorri DSL construct onto revision 6 (its plan, Part 2). The one gap, a guard-only operation, is D20; three smaller additions are questions 26 to 28. |
 | D28 | Crashes are the embedder's: "crashes can be handled by the control plane via the embedder (snorri/cayce)". | Owner via the Turso-queue session, 2026-11-15 | The control plane grants ownership; the store still bounds redelivery (D17). |
+| D29 | "use the family space record" for re-entry across runs. | Owner, 2026-11-16 | Adopted (§3). Settles part of question 29. |
+| D30 | "accept Snorri's max_attempts opt-out". | Owner, 2026-11-16 | Adopted (§9). Amends D17: the store's bound is the default, and a queue may opt out. |
 
 ## Decision
 
@@ -248,6 +257,14 @@ covers the whole commit; caps apply to the whole commit. Across spaces there
 is no atomicity or ordering. Records that belong to an account rather than a
 campaign, such as suppression and per-contact send caps, cannot share a
 group with a campaign's effects; open question 25.
+
+A rule that spans runs, such as Snorri's re-entry rules `never` and
+`after_duration`, is checked against one keyed record per (workflow family,
+subject) in a family space (D29). Admission updates that record with a
+guarded `Mutate` and then enqueues in the run's space. Two runs admitting
+the same subject at once serialize on the record, so only one wins. A
+crash between the two writes spends an enrolment without admitting the
+subject; replaying the admission with the same request ids repairs it.
 
 ### 4. Requests are typed data
 
@@ -410,6 +427,17 @@ pending, unless its claims have used up `max_attempts`: then it fails with
 an item every time therefore cannot loop on it forever. This amends
 API-001, where expiry charged nothing and `max_attempts` was checked only on
 a retry finalize.
+
+A queue may opt out of that bound by declaring `max_attempts = u32::MAX`
+(D30). Snorri does: it parks an item after K claims without a commit and
+reports it to the control plane, so the item's pending effect goes through
+recovery instead of failing silently. An embedder that opts out takes over
+the bound, and its count is only as good as the claims' durability: on
+the local engine a claim lost in a crash leaves no attempt charged, so
+Snorri claims at `Durable` there (one durable write per claim batch), or
+at `Tracked` except for two lease periods after a crash takeover, which
+needs a `previous_released` flag on the control plane's grant. Neither
+needs an interface change. On PostgreSQL every claim is `Durable`.
 
 A `Mutate` that selects a leased item applies its lease policy: skip it
 (default), reject the group, preserve the lease (only for reschedule,
@@ -613,11 +641,31 @@ object-log, RESP and TD-003 changes land at step 6.
 | 17 | Renew and `item_version` | Renew bumps it (D18). |
 | 18 | Event log sequence on Postgres | Event logs are gone; a sequenced table's counter is assigned under the space's writer lock today, and its row lock under the target protocol (D16). |
 | 19 | Postgres per-request durability | Per request: `synchronous_commit = off` for `FireAndForget`, a normal commit otherwise (D14). |
-| 20 | Bounding redelivery | Lease expiry counts toward `max_attempts` (D17). |
+| 15 | Snorri's open items | Answered by Snorri TD-012 revision 7 (below). |
+| 20 | Bounding redelivery | Lease expiry counts toward `max_attempts` (D17); a queue may opt out with `u32::MAX` (D30). |
 | 21 | Choices made without a ruling | Adopted as needed, including `SERIALIZABLE` where it is required (D19). |
 | 22 | Moving spaces between implementations | Not needed (D26). |
 | 23 | Merge policies | `AddOnly` and `NonDecreasing` field rules, with an explicit override (D20). |
 | 24 | Guard-only operation | `WriteOp::Assert` (D20). |
+
+Snorri's TD-012 revision 7 (uncommitted there; sent to this session on
+2026-11-16) answers question 15:
+
+- O2, claim time: callers pass only an eligibility time; lease time comes
+  from the store (D2).
+- O14, how Cayce tells Snorri where the queues live: a Snorri-defined
+  store configuration from which Snorri builds the implementation. It is
+  between Snorri and Cayce and needs nothing from this interface.
+- O15, durability: withdrawn; Snorri uses per-request levels (D14) and its
+  per-class choices are in API-006's Snorri inventory.
+- O16, ancillary state: counters and admission state become tables (D21,
+  question 5); history goes to Niflheim and to sequenced tables (D16);
+  idempotency maps become a table with row expiry. Definitions of 31 to
+  43 KB fit a table row; larger ones are question 30.
+- O17, what a space is: question 29.
+- O18 and O19, the ownership-epoch and poison-report ports: interfaces
+  between Snorri and Cayce's control plane. They fit §11's fencing, and
+  O19's attempt counting is D30.
 
 ### Still open
 
@@ -635,13 +683,6 @@ object-log, RESP and TD-003 changes land at step 6.
    account, so it falls under question 25; and Snorri's TD-011 recorded an
    owner decision that "cap counters stay in Dragonfly", shared with 7th
    Sense, which D21 reverses unless 7th Sense must keep reading them.
-15. **Snorri's open items O2, O14, O15 and O16.** Their text is in Snorri's
-    TD-012 revision 6, which was never committed; no copy exists on this
-    machine. From how this ADR used them: O2 (claim time) matches §8's
-    `eligibility_time`, and D2 settles it; O14 and O15 (durability) are
-    answered by D14; O16 (counters and admission state in Fireweed) is
-    answered in direction by D21 and in shape by question 5. The Snorri
-    session should confirm against its own text.
 25. **Account-scoped records across campaign spaces.** Suppression and
     per-contact send caps belong to an account, but a space is one
     workflow or campaign (D13), and a group cannot span spaces. Options:
@@ -670,12 +711,36 @@ object-log, RESP and TD-003 changes land at step 6.
     the DSL scenarios use it (DSL-2 shows both). Is declaring instance
     queues recurring acceptable, or should any queue get a non-charging
     reschedule? Draft: use `Rearm`; no new outcome. (Turso-queue session.)
-29. **A space per Snorri shard.** The Snorri API session (TD-012 revision
-    7, uncommitted there) asks that each space hold at least one whole
-    shard, so every workflow operation is one commit. That fits D13 if a
-    Snorri shard never spans workflows or campaigns; if a shard holds
-    instances of several campaigns, D13 splits it and cross-campaign
-    operations in one shard stop being atomic. Which does Snorri shard by?
+29. **A space per Snorri shard.** Snorri maps a campaign to a run (a
+    continuously enrolling workflow is a long-lived run) and proposes one
+    space per (run, shard), with members spread over a run's shards by
+    subject hash. Every operation on one instance stays one commit:
+    transitions with their effects and consumed events, event matching,
+    intents, receipts, reconciliation, admission chunks, the duplicate
+    check within a run and poison parking. Three things stop being one
+    commit:
+    - re-entry across runs, now settled by D29: admission first updates a
+      (workflow family, subject) record in a family space, guarded by
+      `NonDecreasing` `last_enrolled_at` and `last_ended_at` fields, then
+      enqueues in the run's space. A crash between the two spends an
+      enrolment without admitting, and replaying the admission with the
+      same request ids repairs it. The end of an enrolment is a third
+      write, retried until acknowledged;
+    - an event correlated to instances in several runs, which becomes one
+      commit per run space, deduplicated per space only;
+    - cancelling a run, which spans its shards.
+    The split is narrower than "per workflow or per campaign" (D13): one
+    campaign becomes N spaces. At 16 open runs × 64 shards that is 1,024
+    spaces: one row each on PostgreSQL; on the local engine 1,024 writer
+    grants, about 100 renewals a second unless one grant covers all of a
+    holder's spaces. Is one space per (run, shard) acceptable, or should a
+    run's shards share one space?
+30. **Definitions larger than one value.** Snorri stores workflow
+    definitions in table rows. Typical ones are 31 to 43 KB; the largest
+    are up to 8 MiB, over `max_value_bytes` (256 KiB) and `max_body_bytes`
+    (2 MiB). Large transition outputs must also fit in 2 MiB. With no blob
+    shape (D16), these need a store outside Fireweed, chunking across
+    rows of a table, or higher caps. Which?
 
 ## Risks
 

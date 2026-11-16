@@ -55,7 +55,8 @@ Timestamp span, request-size limits on every verb, claim-by-id replay
 expiry, filtered same-group claims, the full range access term in reads,
 and paging for `fw_gates`.
 
-Revision 7 (2026-11-15) applies the owner's rulings (ADR-025 D13 to D28).
+Revision 7 (2026-11-15) applies the owner's rulings (ADR-025 D13 to D28;
+D29 and D30 were added on 2026-11-16).
 Durability levels are Niflheim's `FireAndForget`, `Tracked` and `Durable`,
 chosen per request; PostgreSQL commits are `Durable`. The Blob and
 EventLog shapes and queue history are removed; a table with
@@ -1613,12 +1614,18 @@ repository). Rates are per recipient of a single-send campaign.
 | 8 | Definitions | 31–43 KB, up to 8 MiB; once per artifact per queue | Stored outside Fireweed (ADR-025 D16), referenced from a table row keyed by artifact digest and queue. |
 | 9 | Admission in-flight chunk | About 100 B per run per shard; twice per chunk | Table row keyed by run and shard: created with `PutRows` and `RowConflict::Reject`, then updated by `Mutate` with `Keys` and `expected_version` set to the version last read (ADR-025 D21). |
 | 10 | Rate-limit counters (today Dragonfly in Cayce) | One counter per slot key (account, contact, hour); one conditional increment per effect intent | Table rows keyed by slot and hour bucket with expiry. In one group: `PutRows` with `RowConflict::Skip` and `count = 0` (creates the bucket if absent), then `Mutate` with `Keys`, `filter: count < limit`, `Set count = count + 1` and `expect: { min: 1, max: 1 }`. `count` is `NonDecreasing`. Keyed by account, so it lives outside a campaign space (ADR-025 open questions 5 and 25). |
+| 11 | Enrolment history for re-entry across runs | One row per (workflow family, subject); one write at admission and one at the enrolment's end | Table in a family space (ADR-025 D29): `rule`, and `NonDecreasing` `last_enrolled_at` and `last_ended_at`. A first enrolment is `PutRows` with `RowConflict::Reject`. A re-entry is a `Mutate` with `Keys`, a filter on the rule and the timestamps, `Set last_enrolled_at = now()` and `expect: { min: 1, max: 1 }`. The end is a `Mutate` filtered on `(last_ended_at IS NULL OR last_ended_at < $ended_at) AND last_enrolled_at = $enrolled_at` with `expect: { min: 0, max: 1 }`, so a stale or repeated end commits as a no-op. An enrolment is open while `last_ended_at` is null or earlier than `last_enrolled_at`. |
 
 Durability by class (Snorri TD-012 revision 7, uncommitted there):
 `Durable` for effect intents, admission chunks, event delivery and
 operator writes; `Tracked` for transitions, event consumption, receipts,
 poison parking and sweeper writes; no `FireAndForget`. On PostgreSQL every
 one of these commits is `Durable` (§Durability).
+
+Snorri's queues declare `max_attempts = u32::MAX` (ADR-025 D30): Snorri
+parks an item after K claims without a commit and reports it to Cayce's
+control plane, instead of letting lease expiry fail it. On the local engine
+it claims at `Durable`, so a crash cannot lose a charged attempt.
 
 Not shapes: the compiled WASM cache; the open-runs list and next-wake time
 (derived through `fw_queue_counts` and a declared read ordered by
