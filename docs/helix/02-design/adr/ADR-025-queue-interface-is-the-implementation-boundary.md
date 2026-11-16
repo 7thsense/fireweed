@@ -152,7 +152,7 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D26 | "no need to migrate spaces"; "we don't need a migration path". | Owner, 2026-11-15 | Kept. |
 | D27 | "we do need to ensure that the dsl can be fully implemented on this model". | Owner via the Turso-queue session, 2026-11-15 | Kept: API-006's Snorri inventory maps each construct to a statement. |
 | D28 | "crashes can be handled by the control plane via the embedder (snorri/cayce)". | Owner via the Turso-queue session, 2026-11-15 | Kept. |
-| D29 | "use the family space record" for re-entry across runs. | Owner, 2026-11-16 | Kept (§3). With D50, a family within one workflow needs no separate space (question 41). |
+| D29 | "use the family space record" for re-entry across runs. | Owner, 2026-11-16 | Kept as one record per (family, subject), now in the workflow's own space; no family space (D51). |
 | D30 | "accept Snorri's max_attempts opt-out". | Owner, 2026-11-16 | Kept (§8). |
 | D31 | "Yes, cap at 256 KiB" for Snorri workflow definitions. | Owner, 2026-11-16 | Kept. No interface change. |
 | D32 | "Yes, per run-shard": Snorri's spaces are one per (run, shard). | Owner, 2026-11-16 | Superseded by D50. |
@@ -174,6 +174,7 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D48 | "I think we need control over fail open vs fail closed. Deliverability slotting should generally be fail open, isn't that how it is in 7thsense?" | Owner, 2026-11-16 | Cayce design; outside Fireweed (D49). |
 | D49 | "Slotting shouldn't be part of any fireweed specs though, or even snorri. Snorri provides a port that cayce can use to implement slotting. That's it." | Owner, 2026-11-16 | Adopted. Fireweed's specs only state that tenant-wide state isn't Fireweed's (§1). Slotting, its counters and its failure policy are Cayce's. The port Cayce implements them behind is Snorri's. |
 | D50 | Asked "Did you rule that Snorri has no shards, with one space per workflow?" (relayed from the Snorri session): "Yes, per workflow". | Owner, 2026-11-16 | Adopted; supersedes D32. A Snorri space is one workflow, holding every run. The run is an indexed field on items and rows, and there are no shards. D13 is unchanged: a space is still never wider than one workflow or one campaign. |
+| D51 | Asked "Can a Snorri re-entry family span more than one workflow?": "No, one workflow". | Owner, 2026-11-16 | Adopted. Resolves question 41. The re-entry record lives in the workflow's space, so admission and the re-entry check are one transaction, and there are no family spaces. |
 
 ## Decision
 
@@ -285,11 +286,9 @@ A table field may declare a merge rule (D20): `add_only` for a set,
 rejects the program unless it explicitly overrides the rule.
 
 A rule that spans runs, such as Snorri's re-entry rules, is checked against
-one keyed row per (workflow family, subject) (D29). With one space per
-workflow (D50), a family that stays inside one workflow keeps that row in
-the workflow's own space, so admission and the re-entry check are one
-transaction. A family spanning workflows still needs a family space
-(question 41).
+one keyed row per subject (D29) in the workflow's own space. A family never
+spans workflows (D51), so admission and the re-entry check are one
+transaction, and there are no family spaces.
 
 Work on one run is a selection on its `run` field:
 - cancelling a run is a stepped `update` over `{eq: [run, r]}`;
@@ -625,10 +624,30 @@ Fireweed's (D45, D49).
     lease columns into a narrow table beside the item would keep lease
     churn off those indexes, at the cost of a join on reads. Draft: measure
     it in question 31's run before deciding.
-41. **Re-entry families that span workflows.** If a workflow family never
-    spans workflows, D29's family record lives in the workflow's space
-    (§3), and the separate family space goes away. Draft: keep the family
-    space only for families that span workflows, if Snorri has any.
+
+42. **Garbage collection of runs.** With one space per workflow (D50), a
+    long-lived workflow accumulates runs. Today two mechanisms clear it:
+    - finished queue items are deleted once past their queue's
+      `retention`;
+    - table rows with `expire_after_write` expire.
+
+    Two gaps remain. Rows in tables without expiry, such as admission
+    chunks, stay forever. And a run is retired only row by row, as its
+    items age out. Draft:
+    - **Declare the run key.** The schema names the field that identifies
+      a run, for example `runs: {field: run}`. Every queue and table that
+      holds run data carries it.
+    - **One retire operation.** A `retire(tenant, space, run, batch)`
+      executor function, beside `sweep`, removes a finished run's items and
+      rows across every object in bounded steps. If question 31
+      recommends partitioning by run, it detaches and drops the run's
+      partitions instead. It refuses while the run still has pending or
+      leased items, unless forced.
+    - **Who calls it.** The embedder (Snorri or Cayce) calls retire when it
+      closes a run. The sweep then only handles retention and expiry.
+
+    The run layout measurement (question 31) decides between bounded
+    deletes and partitions.
 
 ## Risks
 

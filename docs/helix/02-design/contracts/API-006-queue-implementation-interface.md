@@ -614,7 +614,7 @@ Names in SQL are validated object and field names, and quoted.
 | 8 | Definitions (up to 256 KiB, D31) | Table row keyed by digest, with a `text` field. |
 | 9 | Admission chunk | Table row keyed by run and chunk: `insert` with `on_conflict: reject`, then `update` by keys with `where: {eq: [version, v]}` and `expect: {min: 1, max: 1}`. |
 | 10 | Send-rate counters | Not Fireweed's (ADR-025 D49). |
-| 11 | Re-entry across runs (D29) | Table in a family space keyed by (family, subject), with `non_decreasing` timestamps, updated with `expect`. |
+| 11 | Re-entry across runs (D29) | Table in the workflow's space, keyed by subject, with `non_decreasing` timestamps, updated with `expect`. Admission and the re-entry check share one program, so one transaction (ADR-025 D51). |
 
 Snorri's queues declare `max_attempts: unlimited` (D30). A Snorri space is one
 workflow with all its runs (ADR-025 D50). Its queues and tables carry an
