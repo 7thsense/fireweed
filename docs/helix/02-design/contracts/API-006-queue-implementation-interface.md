@@ -2000,6 +2000,18 @@ assert on final state through `get` and `read`.
 |----------------|------|------|------|
 | `fireweed-interface-memory` | 137 | 0 | 12 |
 | `fireweed-interface-postgres` (PostgreSQL 16) | 137 | 0 | 12 |
+| `fireweed-local`, Turso (reported) | 139 | 0 | 10 |
+| `fireweed-local`, SQLite (reported) | 139 | 0 | 10 |
+| `fireweed-local`, Turso with S3 shipping (reported) | 142 | 0 | 7 |
+
+The `fireweed-local` rows are the Turso-queue session's results on its
+branch `claude/fireweed-sqlite-s3-logs-37f26c` (commit b2bfdc25), with
+this suite merged at 62206865; they were not rerun here. It supplies every
+control: `crash_and_reopen` and `open_competing` on all three arms, and
+`hold_replication`, `lose_local_storage` and `take_over` with shipping. Its
+shipping arm skips only IDX-2, REC-4, SCAN-6, the cohort tests and DUR-2;
+the other two arms also skip DUR-3, DUR-5, DUR-6 (`Durable` not declared)
+and FENCE-1.
 
 Skipped on both: GRP-9, GRP-13 and COH-1 (cohorts are not declared yet);
 IDX-2 (harness gap: an index still building); REC-4 (harness gap:
@@ -2011,9 +2023,7 @@ SHARE-1 (no `open_competing` control). PostgreSQL also skips DUR-2
 `lose_local_storage` control: the server is assumed fully replicated, so
 neither fault exists) and SHARE-1 (`MultiProcess`; MULTI-1 covers it). Its
 `crash_and_reopen` opens a new instance on the same database, so DUR-4
-runs. The Turso-queue session's `fireweed-local` reports 137/0/11 on
-Turso and SQLite before these controls; wiring its engine tests into them
-moves DUR-3 to DUR-6, SHARE-1 and FENCE-1 into the shared suite.
+runs.
 Several tests still cover only part of what their row claims (TYP-1,
 CAST-1, GRP-3); generating them from the tables is open work.
 
