@@ -411,6 +411,7 @@ pub fn claim_by_item_ids(
         return Err(DataPlaneError::BatchTooLarge(LimitKind::ClaimBatch));
     }
     validate::text_ok(r.worker_id.as_str(), "worker id")?;
+    validate::eligibility_time(r.eligibility_time)?;
     let elig_t = r.eligibility_time.map(|e| e.0).unwrap_or(t);
     let empty = Params::new();
     let mut cx = cx(t, limits, &empty, &r.header.space);
@@ -559,7 +560,28 @@ pub fn commit(
         return Ok(recorded!(rep?, Commit));
     }
     validate::commit(space, r, limits)?;
-    let mut work = space.clone();
+    // Ops change only the objects they name and the id counters, so the
+    // working copy holds just those; it replaces them if the group commits.
+    let objects = commit_objects(r);
+    let mut work = Space {
+        schema: space.schema.clone(),
+        queues: space
+            .queues
+            .iter()
+            .filter(|(n, _)| objects.contains(*n))
+            .map(|(n, q)| (n.clone(), q.clone()))
+            .collect(),
+        tables: space
+            .tables
+            .iter()
+            .filter(|(n, _)| objects.contains(*n))
+            .map(|(n, tb)| (n.clone(), tb.clone()))
+            .collect(),
+        records: BTreeMap::new(),
+        next_item_id: space.next_item_id,
+        next_token: space.next_token,
+        last_time: space.last_time,
+    };
     let mut cx = cx(t, limits, &r.params, &r.header.space);
     let mut ops: Vec<OpResult> = Vec::with_capacity(r.ops.len());
     let mut failure = None;
@@ -615,7 +637,10 @@ pub fn commit(
         },
     };
     if status == CommitStatus::Committed {
-        *space = work;
+        space.queues.extend(work.queues);
+        space.tables.extend(work.tables);
+        space.next_item_id = work.next_item_id;
+        space.next_token = work.next_token;
     }
     if !r.dry_run {
         record(

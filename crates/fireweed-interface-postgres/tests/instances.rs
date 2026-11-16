@@ -182,3 +182,92 @@ fn two_instances_never_lease_one_item_twice() {
     drop((a, b));
     drop_schema(&url, &name);
 }
+
+fn apply(dp: &PostgresDataPlane) -> DpResult<ApplySchemaResponse> {
+    block_on(dp.apply_schema(ApplySchemaRequest {
+        space: space(),
+        schema: schema(),
+        expected_version: None,
+        min_durability: None,
+    }))
+}
+
+/// Requests awaited inside a tokio runtime run on the connection worker,
+/// not as a nested runtime on the caller's thread.
+#[test]
+fn requests_work_inside_a_tokio_runtime() {
+    let Some(url) = url() else { return };
+    let name = fresh_schema(&url, "tokio");
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    let a = open(&url, &name, &clock);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        a.apply_schema(ApplySchemaRequest {
+            space: space(),
+            schema: schema(),
+            expected_version: None,
+            min_durability: None,
+        })
+        .await
+        .unwrap();
+        assert!(a.get_schema(space()).await.unwrap().is_some());
+    });
+    drop(a);
+    drop_schema(&url, &name);
+}
+
+/// Two instances creating one space at once: both succeed, one creates it.
+#[test]
+fn concurrent_first_apply_schema_is_idempotent() {
+    let Some(url) = url() else { return };
+    let name = fresh_schema(&url, "create");
+    let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+    for _ in 0..10 {
+        let planes: Vec<_> = (0..4)
+            .map(|_| Arc::new(open(&url, &name, &clock)))
+            .collect();
+        let results: Vec<_> = planes
+            .iter()
+            .cloned()
+            .map(|dp| std::thread::spawn(move || apply(&dp)))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap().expect("apply_schema"))
+            .collect();
+        assert_eq!(results.iter().filter(|r| r.changed).count(), 1);
+        drop(planes);
+        let mut c = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        c.batch_execute(&format!(
+            "SET search_path={name}; TRUNCATE fw_spaces, fw_queue_meta, fw_items, fw_rows, fw_row_hwm, fw_requests, fw_table_seq"
+        ))
+        .unwrap();
+    }
+    drop_schema(&url, &name);
+}
+
+/// A read's request time is stored, so a later request through an instance
+/// whose clock is behind does not get an earlier time (API-006 §Time rule 3).
+#[test]
+fn a_read_time_bounds_later_requests() {
+    let Some(url) = url() else { return };
+    let name = fresh_schema(&url, "readtime");
+    let slow = Arc::new(ManualClock::new(1_700_000_000_000));
+    let fast = Arc::new(ManualClock::new(1_700_000_010_000));
+    let a = open(&url, &name, &fast);
+    let b = open(&url, &name, &slow);
+    apply(&b).unwrap();
+    block_on(a.get_schema(space())).unwrap();
+    let c = block_on(b.claim(ClaimRequest::new(
+        WriteHeader::new(space(), "c1"),
+        "work",
+        "w",
+        1,
+        60_000,
+    )))
+    .unwrap();
+    assert_eq!(c.as_of, UtcMillis(1_700_000_010_000));
+    drop((a, b));
+    drop_schema(&url, &name);
+}

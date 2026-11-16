@@ -534,16 +534,22 @@ pub fn enqueue_items(
     new_items(q, items)
 }
 
+/// A claim's `eligibility_time`, if given, is in the Timestamp domain.
+pub fn eligibility_time(e: Option<UtcMillis>) -> R {
+    match e {
+        Some(e) if !timestamp_in_domain(e.0) => {
+            invalid("eligibility_time outside the Timestamp domain")
+        }
+        _ => Ok(()),
+    }
+}
+
 pub fn claim(q: &Queue, r: &ClaimRequest, limits: &ImplementationLimits) -> R {
     text_ok(r.worker_id.as_str(), "worker id")?;
     if let Some(g) = &r.group_key {
         text_ok(g.as_str(), "group key")?;
     }
-    if let Some(e) = r.eligibility_time
-        && !timestamp_in_domain(e.0)
-    {
-        return invalid("eligibility_time outside the Timestamp domain");
-    }
+    eligibility_time(r.eligibility_time)?;
     if r.max_items == 0 || r.max_items > limits.max_claim_batch_size {
         return Err(DataPlaneError::BatchTooLarge(LimitKind::ClaimBatch));
     }

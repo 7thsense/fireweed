@@ -6,6 +6,11 @@
 //! - Records live in PostgreSQL tables (`fw_spaces`, `fw_queue_meta`,
 //!   `fw_items`, `fw_rows`, `fw_row_hwm`, `fw_requests`), one row per item,
 //!   table row and request record.
+//! - Each instance owns one connection on a worker thread. Requests run
+//!   there one at a time, and the returned futures wait for the worker
+//!   without blocking the caller's executor, so the blocking `postgres`
+//!   client never runs inside an async runtime. The worker reopens the
+//!   connection when it has closed.
 //! - Every write request is one transaction. It locks the space's row
 //!   (`SELECT … FOR UPDATE`), so writes to one space are serialized across
 //!   every process and instance (`MultiProcess`). Request time is
@@ -15,19 +20,26 @@
 //!   reference evaluator as the in-memory implementation), and writes back
 //!   the records that changed. Request records are written in the same
 //!   transaction, so a rejected group's record is atomic with its outcome.
-//! - Reads run in a `REPEATABLE READ` read-only transaction.
+//! - Reads run in a `READ COMMITTED` transaction that also locks the space
+//!   row `FOR UPDATE`: no write to the space commits while the read runs,
+//!   and the read stores its request time, so no later request gets an
+//!   earlier one (API-006 §Time rule 3). Reads and writes to one space are
+//!   therefore serialized.
 //!
 //! Not yet done, and required before production use: loading only the
 //! records a request touches (today a request loads whole queues and
 //! tables), pushing access terms and claims into indexed SQL (`FOR UPDATE
 //! SKIP LOCKED`), the `SERIALIZABLE` group-commit protocol of API-006
 //! §PostgreSQL in place of the per-space lock, database time as the
-//! production authority. Cohorts and group batching are reported
+//! production authority, and a connection pool in place of the one
+//! connection per instance. Cohorts and group batching are reported
 //! unsupported.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, mpsc};
+use std::thread::JoinHandle;
 
 use fireweed_interface::*;
 use fireweed_interface_engine::handlers::{self, Profile};
@@ -73,11 +85,43 @@ const PROFILE: Profile = Profile {
 pub struct PostgresDataPlane {
     clock: Arc<dyn Clock>,
     limits: ImplementationLimits,
-    client: Mutex<Client>,
-    /// For isolated test instances: the schema to drop, and how to connect.
-    cleanup: Option<(String, String)>,
+    /// Requests for the connection worker; `None` once dropped.
+    jobs: Option<mpsc::Sender<Job>>,
+    worker: Option<JoinHandle<()>>,
     /// How this instance connected: the URL and the schema, if any.
     location: (String, Option<String>),
+}
+
+/// Work for the connection worker.
+type Job = Box<dyn FnOnce(&mut Conn) + Send>;
+
+/// The worker's connection, reopened when it has closed.
+struct Conn {
+    url: String,
+    schema: Option<String>,
+    client: Option<Client>,
+}
+
+impl Conn {
+    fn client(&mut self) -> DpResult<&mut Client> {
+        if self.client.as_ref().is_none_or(|c| c.is_closed()) {
+            self.client = None;
+            self.client = Some(open_client(&self.url, self.schema.as_deref())?);
+        }
+        Ok(self.client.as_mut().expect("connection just opened"))
+    }
+}
+
+/// Connects, with `search_path` set to `schema` if given, and creates the
+/// tables if needed.
+fn open_client(url: &str, schema: Option<&str>) -> DpResult<Client> {
+    let mut cfg = postgres::Config::from_str(url).map_err(unavailable)?;
+    if let Some(s) = schema {
+        cfg.options(&format!("-c search_path={s}"));
+    }
+    let mut client = cfg.connect(NoTls).map_err(unavailable)?;
+    client.batch_execute(DDL).map_err(unavailable)?;
+    Ok(client)
 }
 
 fn unavailable(e: postgres::Error) -> DataPlaneError {
@@ -124,13 +168,6 @@ fn state_name(s: St) -> &'static str {
     }
 }
 
-/// How much of each object to load.
-#[derive(Clone, Copy, PartialEq)]
-enum Load {
-    Full,
-    MetaOnly,
-}
-
 impl PostgresDataPlane {
     /// Connects and creates the tables if needed.
     pub fn connect(
@@ -138,15 +175,7 @@ impl PostgresDataPlane {
         clock: Arc<dyn Clock>,
         limits: ImplementationLimits,
     ) -> DpResult<Self> {
-        let mut client = Client::connect(url, NoTls).map_err(unavailable)?;
-        client.batch_execute(DDL).map_err(unavailable)?;
-        Ok(Self {
-            clock,
-            limits,
-            client: Mutex::new(client),
-            cleanup: None,
-            location: (url.to_owned(), None),
-        })
+        Self::start(url, None, false, clock, limits)
     }
 
     /// Connects with `search_path` set to an existing PostgreSQL schema.
@@ -162,17 +191,7 @@ impl PostgresDataPlane {
         {
             return Err(DataPlaneError::InvalidRequest("schema name".into()));
         }
-        let mut cfg = postgres::Config::from_str(url).map_err(unavailable)?;
-        cfg.options(&format!("-c search_path={schema}"));
-        let mut client = cfg.connect(NoTls).map_err(unavailable)?;
-        client.batch_execute(DDL).map_err(unavailable)?;
-        Ok(Self {
-            clock,
-            limits,
-            client: Mutex::new(client),
-            cleanup: None,
-            location: (url.to_owned(), Some(schema.to_owned())),
-        })
+        Self::start(url, Some(schema.to_owned()), false, clock, limits)
     }
 
     /// Connects in a fresh, private PostgreSQL schema that is dropped when
@@ -185,64 +204,119 @@ impl PostgresDataPlane {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let schema = format!("fw_test_{}_{n}", std::process::id());
-        let mut admin = Client::connect(url, NoTls).map_err(unavailable)?;
-        admin
-            .batch_execute(&format!("CREATE SCHEMA {schema}"))
-            .map_err(unavailable)?;
-        let mut cfg = postgres::Config::from_str(url).map_err(unavailable)?;
-        cfg.options(&format!("-c search_path={schema}"));
-        let mut client = cfg.connect(NoTls).map_err(unavailable)?;
-        client.batch_execute(DDL).map_err(unavailable)?;
-        Ok(Self {
-            clock,
-            limits,
-            client: Mutex::new(client),
-            cleanup: Some((schema.clone(), url.to_owned())),
-            location: (url.to_owned(), Some(schema)),
-        })
+        Self::start(url, Some(schema), true, clock, limits)
     }
 
     /// Another instance on the same database and schema, with its own
     /// connection and clock. It does not drop an isolated schema.
     pub fn peer(&self, clock: Arc<dyn Clock>) -> DpResult<Self> {
-        match &self.location {
-            (url, Some(schema)) => Self::connect_in_schema(url, schema, clock, self.limits),
-            (url, None) => Self::connect(url, clock, self.limits),
+        let (url, schema) = &self.location;
+        Self::start(url, schema.clone(), false, clock, self.limits)
+    }
+
+    /// Starts the connection worker and waits for its first connection. An
+    /// `isolated` worker creates its schema first and drops it when it stops.
+    fn start(
+        url: &str,
+        schema: Option<String>,
+        isolated: bool,
+        clock: Arc<dyn Clock>,
+        limits: ImplementationLimits,
+    ) -> DpResult<Self> {
+        let (jobs, inbox) = mpsc::channel::<Job>();
+        let (ready, started) = mpsc::channel::<DpResult<()>>();
+        let mut conn = Conn {
+            url: url.to_owned(),
+            schema: schema.clone(),
+            client: None,
+        };
+        let cleanup = schema.clone().filter(|_| isolated);
+        let worker = std::thread::Builder::new()
+            .name("fireweed-postgres".into())
+            .spawn(move || {
+                let init = (|| {
+                    if let Some(s) = &cleanup {
+                        Client::connect(&conn.url, NoTls)
+                            .and_then(|mut admin| {
+                                admin.batch_execute(&format!("CREATE SCHEMA {s}"))
+                            })
+                            .map_err(unavailable)?;
+                    }
+                    conn.client().map(|_| ())
+                })();
+                let ok = init.is_ok();
+                let _ = ready.send(init);
+                if ok {
+                    for job in inbox {
+                        // A panicking request drops its reply, which the
+                        // caller sees as an error; the connection is reset.
+                        if catch_unwind(AssertUnwindSafe(|| job(&mut conn))).is_err() {
+                            conn.client = None;
+                        }
+                    }
+                }
+                drop(conn.client.take());
+                if let Some(s) = cleanup
+                    && let Ok(mut admin) = Client::connect(&conn.url, NoTls)
+                {
+                    let _ = admin.batch_execute(&format!("DROP SCHEMA IF EXISTS {s} CASCADE"));
+                }
+            })
+            .map_err(|e| DataPlaneError::Unavailable(format!("connection worker: {e}")))?;
+        started.recv().unwrap_or_else(|_| {
+            Err(DataPlaneError::Unavailable(
+                "connection worker stopped".into(),
+            ))
+        })?;
+        Ok(Self {
+            clock,
+            limits,
+            jobs: Some(jobs),
+            worker: Some(worker),
+            location: (url.to_owned(), schema),
+        })
+    }
+
+    /// Runs `f` on the connection worker; the future waits for its answer.
+    fn run<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Client) -> DpResult<T> + Send + 'static,
+    ) -> DpFuture<'static, T> {
+        let (reply, answer) = futures::channel::oneshot::channel();
+        let job: Job = Box::new(move |conn: &mut Conn| {
+            let _ = reply.send(conn.client().and_then(f));
+        });
+        if let Some(jobs) = &self.jobs {
+            let _ = jobs.send(job);
         }
+        Box::pin(async move {
+            answer.await.unwrap_or_else(|_| {
+                Err(DataPlaneError::Unavailable(
+                    "the connection worker dropped the request".into(),
+                ))
+            })
+        })
     }
 
-    fn ready<T: Send + 'static>(r: DpResult<T>) -> DpFuture<'static, T> {
-        Box::pin(std::future::ready(r))
-    }
-
-    fn now(&self) -> i64 {
-        self.clock.now().0
-    }
-
-    /// Loads the space row and the named objects. `lock` takes the space
-    /// row lock that serializes writers.
+    /// Loads the space row and the objects `objects` names from its schema.
+    /// The space row is locked `FOR UPDATE`, which serializes requests to the
+    /// space. `request` also loads that request's record.
     fn load(
         tx: &mut Transaction<'_>,
         key: &SpaceKey,
-        objects: &BTreeSet<ObjectName>,
-        load: Load,
+        objects: impl FnOnce(&SpaceSchema) -> BTreeSet<ObjectName>,
         request: Option<&RequestId>,
-        lock: bool,
     ) -> DpResult<Space> {
-        // Writers lock the space row FOR UPDATE; readers FOR SHARE, so a read
-        // and a write to one space are ordered and the read's time can be
-        // fixed after its lock (API-006 §Time rule 3).
-        let sql = if lock {
-            "SELECT schema, next_item_id, next_token, last_time FROM fw_spaces WHERE tenant=$1 AND space=$2 FOR UPDATE"
-        } else {
-            "SELECT schema, next_item_id, next_token, last_time FROM fw_spaces WHERE tenant=$1 AND space=$2 FOR SHARE"
-        };
         let (t, s) = (key.tenant_id.as_str(), key.space_id.as_str());
         let row = tx
-            .query_opt(sql, &[&t, &s])
+            .query_opt(
+                "SELECT schema, next_item_id, next_token, last_time FROM fw_spaces WHERE tenant=$1 AND space=$2 FOR UPDATE",
+                &[&t, &s],
+            )
             .map_err(unavailable)?
             .ok_or(DataPlaneError::SpaceNotFound)?;
         let schema: SpaceSchema = serde_json::from_str(row.get::<_, &str>(0)).map_err(corrupt)?;
+        let objects = objects(&schema);
         let mut space = Space {
             schema: schema.clone(),
             queues: BTreeMap::new(),
@@ -252,7 +326,7 @@ impl PostgresDataPlane {
             next_token: row.get::<_, i64>(2) as u64,
             last_time: row.get(3),
         };
-        for name in objects {
+        for name in &objects {
             if let Some(decl) = schema.queues.iter().find(|q| &q.name == name) {
                 let mut q = handlers::empty_queue(decl);
                 if let Some(m) = tx
@@ -269,19 +343,17 @@ impl PostgresDataPlane {
                     q.blocked = meta.blocked;
                     q.gate_epoch = meta.gate_epoch;
                 }
-                if load == Load::Full {
-                    for r in tx
-                        .query(
-                            "SELECT data FROM fw_items WHERE tenant=$1 AND space=$2 AND queue=$3 ORDER BY item_id",
-                            &[&t, &s, &name.as_str()],
-                        )
-                        .map_err(unavailable)?
-                    {
-                        let it: Item = serde_json::from_str(r.get::<_, &str>(0)).map_err(corrupt)?;
-                        q.items.insert(it.id, it);
-                    }
-                    handlers::rebuild_keys(&mut q);
+                for r in tx
+                    .query(
+                        "SELECT data FROM fw_items WHERE tenant=$1 AND space=$2 AND queue=$3 ORDER BY item_id",
+                        &[&t, &s, &name.as_str()],
+                    )
+                    .map_err(unavailable)?
+                {
+                    let it: Item = serde_json::from_str(r.get::<_, &str>(0)).map_err(corrupt)?;
+                    q.items.insert(it.id, it);
                 }
+                handlers::rebuild_keys(&mut q);
                 space.queues.insert(name.clone(), q);
             } else if let Some(decl) = schema.tables.iter().find(|tb| &tb.name == name) {
                 let mut tb = handlers::empty_table(decl);
@@ -294,30 +366,27 @@ impl PostgresDataPlane {
                 {
                     tb.next_seq = r.get::<_, i64>(0) as u64;
                 }
-                if load == Load::Full {
-                    for r in tx
-                        .query(
-                            "SELECT key, data FROM fw_rows WHERE tenant=$1 AND space=$2 AND tbl=$3",
-                            &[&t, &s, &name.as_str()],
-                        )
-                        .map_err(unavailable)?
-                    {
-                        let k: Vec<KeyVal> =
-                            serde_json::from_str(r.get::<_, &str>(0)).map_err(corrupt)?;
-                        let row: Row =
-                            serde_json::from_str(r.get::<_, &str>(1)).map_err(corrupt)?;
-                        tb.rows.insert(k, row);
-                    }
-                    for r in tx
-                        .query(
-                            "SELECT key, version, at FROM fw_row_hwm WHERE tenant=$1 AND space=$2 AND tbl=$3",
-                            &[&t, &s, &name.as_str()],
-                        )
-                        .map_err(unavailable)?
-                    {
-                        let k: Vec<KeyVal> = serde_json::from_str(r.get::<_, &str>(0)).map_err(corrupt)?;
-                        tb.hwm.insert(k, (r.get::<_, i64>(1) as u64, r.get(2)));
-                    }
+                for r in tx
+                    .query(
+                        "SELECT key, data FROM fw_rows WHERE tenant=$1 AND space=$2 AND tbl=$3",
+                        &[&t, &s, &name.as_str()],
+                    )
+                    .map_err(unavailable)?
+                {
+                    let k: Vec<KeyVal> =
+                        serde_json::from_str(r.get::<_, &str>(0)).map_err(corrupt)?;
+                    let row: Row = serde_json::from_str(r.get::<_, &str>(1)).map_err(corrupt)?;
+                    tb.rows.insert(k, row);
+                }
+                for r in tx
+                    .query(
+                        "SELECT key, version, at FROM fw_row_hwm WHERE tenant=$1 AND space=$2 AND tbl=$3",
+                        &[&t, &s, &name.as_str()],
+                    )
+                    .map_err(unavailable)?
+                {
+                    let k: Vec<KeyVal> = serde_json::from_str(r.get::<_, &str>(0)).map_err(corrupt)?;
+                    tb.hwm.insert(k, (r.get::<_, i64>(1) as u64, r.get(2)));
                 }
                 space.tables.insert(name.clone(), tb);
             }
@@ -345,9 +414,16 @@ impl PostgresDataPlane {
         t_now: i64,
     ) -> DpResult<()> {
         let (t, s) = (key.tenant_id.as_str(), key.space_id.as_str());
+        if before.schema != after.schema {
+            tx.execute(
+                "UPDATE fw_spaces SET schema=$3 WHERE tenant=$1 AND space=$2",
+                &[&t, &s, &ser(&after.schema)],
+            )
+            .map_err(unavailable)?;
+        }
         tx.execute(
-            "UPDATE fw_spaces SET schema=$3, next_item_id=$4, next_token=$5, last_time=$6 WHERE tenant=$1 AND space=$2",
-            &[&t, &s, &ser(&after.schema), &(after.next_item_id as i64), &(after.next_token as i64), &after.last_time],
+            "UPDATE fw_spaces SET next_item_id=$3, next_token=$4, last_time=$5 WHERE tenant=$1 AND space=$2",
+            &[&t, &s, &(after.next_item_id as i64), &(after.next_token as i64), &after.last_time],
         )
         .map_err(unavailable)?;
         for (name, q) in &after.queues {
@@ -386,56 +462,76 @@ impl PostgresDataPlane {
     }
 
     /// Runs a write request in one transaction under the space lock.
-    fn write<T>(
+    fn write<T: Send + 'static>(
         &self,
-        key: &SpaceKey,
+        header: &WriteHeader,
         objects: BTreeSet<ObjectName>,
-        request: Option<&RequestId>,
-        durability: Option<DurabilityLevel>,
-        f: impl FnOnce(&mut Space, i64) -> DpResult<T>,
-    ) -> DpResult<T> {
-        handlers::check_durability(&PROFILE, durability)?;
-        let mut client = self.client.lock().unwrap_or_else(|p| p.into_inner());
-        let mut tx = client.transaction().map_err(unavailable)?;
-        if PROFILE.level(durability) == DurabilityLevel::FireAndForget {
-            tx.batch_execute("SET LOCAL synchronous_commit = off")
-                .map_err(unavailable)?;
+        f: impl FnOnce(&mut Space, i64) -> DpResult<T> + Send + 'static,
+    ) -> DpFuture<'static, T> {
+        let durability = header.min_durability;
+        if let Err(e) = handlers::check_durability(&PROFILE, durability) {
+            return Self::ready(Err(e));
         }
-        let mut space = Self::load(&mut tx, key, &objects, Load::Full, request, true)?;
-        let before = space.clone();
-        let t = handlers::begin(&mut space, self.now());
-        let out = f(&mut space, t)?;
-        Self::store(&mut tx, key, &before, &space, t)?;
-        tx.commit().map_err(unavailable)?;
-        Ok(out)
+        let (key, request) = (header.space.clone(), header.request_id.clone());
+        let clock = self.clock.clone();
+        self.run(move |client| {
+            let mut tx = client.transaction().map_err(unavailable)?;
+            if PROFILE.level(durability) == DurabilityLevel::FireAndForget {
+                tx.batch_execute("SET LOCAL synchronous_commit = off")
+                    .map_err(unavailable)?;
+            }
+            let mut space = Self::load(&mut tx, &key, |_| objects, Some(&request))?;
+            let before = space.clone();
+            let t = handlers::begin(&mut space, clock.now().0);
+            let out = f(&mut space, t)?;
+            Self::store(&mut tx, &key, &before, &space, t)?;
+            tx.commit().map_err(unavailable)?;
+            Ok(out)
+        })
     }
 
-    /// Runs a read in a `REPEATABLE READ` read-only snapshot.
-    fn read_tx<T>(
+    /// Runs a read under the space lock (see the module documentation) and
+    /// stores its request time. Due transitions are applied to the loaded
+    /// copy only; the read writes nothing else.
+    fn read_tx<T: Send + 'static>(
         &self,
         key: &SpaceKey,
-        objects: impl FnOnce(&SpaceSchema) -> BTreeSet<ObjectName>,
-        request: Option<&RequestId>,
-        f: impl FnOnce(&Space, i64) -> DpResult<T>,
-    ) -> DpResult<T> {
-        let mut client = self.client.lock().unwrap_or_else(|p| p.into_inner());
-        // READ COMMITTED with the space row held FOR SHARE: no write to the
-        // space can commit while the read runs, so its statements see one
-        // state. (Not READ ONLY: PostgreSQL refuses row locks there; the read
-        // writes nothing.)
-        let mut tx = client
-            .build_transaction()
-            .isolation_level(postgres::IsolationLevel::ReadCommitted)
-            .start()
-            .map_err(unavailable)?;
-        let schema_only = Self::load(&mut tx, key, &BTreeSet::new(), Load::Full, None, false)?;
-        let objs = objects(&schema_only.schema);
-        let mut space = Self::load(&mut tx, key, &objs, Load::Full, request, false)?;
-        let t = handlers::begin(&mut space, self.now());
-        let out = f(&space, t)?;
-        tx.commit().map_err(unavailable)?;
-        Ok(out)
+        objects: impl FnOnce(&SpaceSchema) -> BTreeSet<ObjectName> + Send + 'static,
+        request: Option<RequestId>,
+        f: impl FnOnce(&Space, i64) -> DpResult<T> + Send + 'static,
+    ) -> DpFuture<'static, T> {
+        let key = key.clone();
+        let clock = self.clock.clone();
+        self.run(move |client| {
+            let mut tx = client.transaction().map_err(unavailable)?;
+            let mut space = Self::load(&mut tx, &key, objects, request.as_ref())?;
+            let stored = space.last_time;
+            let t = handlers::begin(&mut space, clock.now().0);
+            let out = f(&space, t)?;
+            if t > stored {
+                tx.execute(
+                    "UPDATE fw_spaces SET last_time=$3 WHERE tenant=$1 AND space=$2",
+                    &[&key.tenant_id.as_str(), &key.space_id.as_str(), &t],
+                )
+                .map_err(unavailable)?;
+            }
+            tx.commit().map_err(unavailable)?;
+            Ok(out)
+        })
     }
+
+    fn ready<T: Send + 'static>(r: DpResult<T>) -> DpFuture<'static, T> {
+        Box::pin(std::future::ready(r))
+    }
+}
+
+/// Every queue and table the schema declares.
+fn all_objects(s: &SpaceSchema) -> BTreeSet<ObjectName> {
+    s.queues
+        .iter()
+        .map(|q| q.name.clone())
+        .chain(s.tables.iter().map(|t| t.name.clone()))
+        .collect()
 }
 
 type Obj<'a> = (&'a str, &'a str, &'a str);
@@ -522,11 +618,12 @@ fn store_rows(
 }
 
 impl Drop for PostgresDataPlane {
+    /// Stops the connection worker after its queued requests; an isolated
+    /// instance's worker then drops its schema.
     fn drop(&mut self) {
-        if let Some((schema, url)) = self.cleanup.take()
-            && let Ok(mut admin) = Client::connect(&url, NoTls)
-        {
-            let _ = admin.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"));
+        drop(self.jobs.take());
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
         }
     }
 }
@@ -567,206 +664,179 @@ impl DataPlane for PostgresDataPlane {
     }
 
     fn apply_schema(&self, r: ApplySchemaRequest) -> DpFuture<'_, ApplySchemaResponse> {
-        Self::ready((|| {
-            let caps = self.capabilities();
-            let mut client = self.client.lock().unwrap_or_else(|p| p.into_inner());
+        let caps = self.capabilities();
+        let clock = self.clock.clone();
+        self.run(move |client| {
+            let now = clock.now().0;
             let mut tx = client.transaction().map_err(unavailable)?;
             let (t, s) = (r.space.tenant_id.as_str(), r.space.space_id.as_str());
             let exists = tx
                 .query_opt(
-                    "SELECT 1 FROM fw_spaces WHERE tenant=$1 AND space=$2 FOR UPDATE",
+                    "SELECT 1 FROM fw_spaces WHERE tenant=$1 AND space=$2",
                     &[&t, &s],
                 )
                 .map_err(unavailable)?
                 .is_some();
             if !exists {
-                let (resp, new) = handlers::apply_schema(None, &r, &caps, &PROFILE, self.now())?;
+                let (resp, new) = handlers::apply_schema(None, &r, &caps, &PROFILE, now)?;
                 let space = new.expect("new space");
-                tx.execute(
-                    "INSERT INTO fw_spaces (tenant, space, schema, next_item_id, next_token, last_time) VALUES ($1,$2,$3,0,0,$4)",
-                    &[&t, &s, &ser(&space.schema), &space.last_time],
-                )
-                .map_err(unavailable)?;
-                let empty = Space {
-                    queues: BTreeMap::new(),
-                    tables: BTreeMap::new(),
-                    ..space.clone()
-                };
-                Self::store(&mut tx, &r.space, &empty, &space, space.last_time)?;
-                tx.commit().map_err(unavailable)?;
-                return Ok(resp);
+                // If another process creates the space first, this insert
+                // waits for it and does nothing, and the request is applied
+                // to that space below.
+                let created = tx
+                    .execute(
+                        "INSERT INTO fw_spaces (tenant, space, schema, next_item_id, next_token, last_time) VALUES ($1,$2,$3,0,0,$4)
+                         ON CONFLICT (tenant, space) DO NOTHING",
+                        &[&t, &s, &ser(&space.schema), &space.last_time],
+                    )
+                    .map_err(unavailable)?
+                    == 1;
+                if created {
+                    let empty = Space {
+                        queues: BTreeMap::new(),
+                        tables: BTreeMap::new(),
+                        ..space.clone()
+                    };
+                    Self::store(&mut tx, &r.space, &empty, &space, space.last_time)?;
+                    tx.commit().map_err(unavailable)?;
+                    return Ok(resp);
+                }
             }
-            let names: BTreeSet<ObjectName> = {
-                let probe = Self::load(
-                    &mut tx,
-                    &r.space,
-                    &BTreeSet::new(),
-                    Load::MetaOnly,
-                    None,
-                    true,
-                )?;
-                probe
-                    .schema
-                    .queues
-                    .iter()
-                    .map(|q| q.name.clone())
-                    .chain(probe.schema.tables.iter().map(|t| t.name.clone()))
-                    .collect()
-            };
             // A schema change loads every object fully, so the handler can
             // apply expirations due under the old policy before installing
             // the new one; request records are expired here under the old
-            // retention for the same reason.
-            let old_retention = {
-                let probe = Self::load(
-                    &mut tx,
-                    &r.space,
-                    &BTreeSet::new(),
-                    Load::MetaOnly,
-                    None,
-                    true,
-                )?;
-                probe.schema.request_id_retention_ms as i64
-            };
-            let cutoff = self.now() - old_retention;
+            // retention, at the space's request time, for the same reason.
+            let mut space = Self::load(&mut tx, &r.space, all_objects, None)?;
+            let cutoff =
+                now.max(space.last_time) - space.schema.request_id_retention_ms as i64;
             tx.execute(
                 "DELETE FROM fw_requests WHERE tenant=$1 AND space=$2 AND recorded_at <= $3",
                 &[&t, &s, &cutoff],
             )
             .map_err(unavailable)?;
-            let mut space = Self::load(&mut tx, &r.space, &names, Load::Full, None, true)?;
             let before = space.clone();
-            let (resp, _) =
-                handlers::apply_schema(Some(&mut space), &r, &caps, &PROFILE, self.now())?;
+            let (resp, _) = handlers::apply_schema(Some(&mut space), &r, &caps, &PROFILE, now)?;
             Self::store(&mut tx, &r.space, &before, &space, space.last_time)?;
             tx.commit().map_err(unavailable)?;
             Ok(resp)
-        })())
+        })
     }
 
     fn get_schema(&self, space: SpaceKey) -> DpFuture<'_, Option<SchemaState>> {
-        Self::ready(
-            match self.read_tx(
-                &space,
-                |_| BTreeSet::new(),
-                None,
-                |s, _| Ok(handlers::schema_state(s)),
-            ) {
+        let read = self.read_tx(
+            &space,
+            |_| BTreeSet::new(),
+            None,
+            |s, _| Ok(handlers::schema_state(s)),
+        );
+        Box::pin(async move {
+            match read.await {
                 Ok(s) => Ok(Some(s)),
                 Err(DataPlaneError::SpaceNotFound) => Ok(None),
                 Err(e) => Err(e),
-            },
-        )
+            }
+        })
     }
 
     fn enqueue(&self, r: EnqueueRequest) -> DpFuture<'_, EnqueueResponse> {
-        Self::ready(self.write(
-            &r.header.space,
-            one(r.queue.clone()),
-            Some(&r.header.request_id),
-            r.header.min_durability,
-            |sp, t| handlers::enqueue(sp, t, &self.limits, &PROFILE, &r),
-        ))
+        let l = self.limits;
+        self.write(&r.header.clone(), one(r.queue.clone()), move |sp, t| {
+            handlers::enqueue(sp, t, &l, &PROFILE, &r)
+        })
     }
 
     fn claim(&self, r: ClaimRequest) -> DpFuture<'_, ClaimResponse> {
-        Self::ready(self.write(
-            &r.header.space,
-            one(r.queue.clone()),
-            Some(&r.header.request_id),
-            r.header.min_durability,
-            |sp, t| handlers::claim(sp, t, &self.limits, &PROFILE, &r),
-        ))
+        let l = self.limits;
+        self.write(&r.header.clone(), one(r.queue.clone()), move |sp, t| {
+            handlers::claim(sp, t, &l, &PROFILE, &r)
+        })
     }
 
     fn claim_by_item_ids(&self, r: ClaimByItemIdsRequest) -> DpFuture<'_, ClaimByItemIdsResponse> {
-        Self::ready(self.write(
-            &r.header.space,
-            one(r.queue.clone()),
-            Some(&r.header.request_id),
-            r.header.min_durability,
-            |sp, t| handlers::claim_by_item_ids(sp, t, &self.limits, &PROFILE, &r),
-        ))
+        let l = self.limits;
+        self.write(&r.header.clone(), one(r.queue.clone()), move |sp, t| {
+            handlers::claim_by_item_ids(sp, t, &l, &PROFILE, &r)
+        })
     }
 
     fn renew(&self, r: RenewRequest) -> DpFuture<'_, RenewResponse> {
-        Self::ready(self.write(
-            &r.header.space,
-            one(r.queue.clone()),
-            Some(&r.header.request_id),
-            r.header.min_durability,
-            |sp, t| handlers::renew(sp, t, &self.limits, &PROFILE, &r),
-        ))
+        let l = self.limits;
+        self.write(&r.header.clone(), one(r.queue.clone()), move |sp, t| {
+            handlers::renew(sp, t, &l, &PROFILE, &r)
+        })
     }
 
     fn finalize(&self, r: FinalizeRequest) -> DpFuture<'_, FinalizeResponse> {
-        Self::ready(self.write(
-            &r.header.space,
-            one(r.queue.clone()),
-            Some(&r.header.request_id),
-            r.header.min_durability,
-            |sp, t| handlers::finalize(sp, t, &self.limits, &PROFILE, &r),
-        ))
+        let l = self.limits;
+        self.write(&r.header.clone(), one(r.queue.clone()), move |sp, t| {
+            handlers::finalize(sp, t, &l, &PROFILE, &r)
+        })
     }
 
     fn commit(&self, r: CommitRequest) -> DpFuture<'_, CommitResponse> {
-        Self::ready(self.write(
-            &r.header.space,
+        let l = self.limits;
+        self.write(
+            &r.header.clone(),
             handlers::commit_objects(&r),
-            Some(&r.header.request_id),
-            r.header.min_durability,
-            |sp, t| handlers::commit(sp, t, &self.limits, &PROFILE, &r),
-        ))
+            move |sp, t| handlers::commit(sp, t, &l, &PROFILE, &r),
+        )
     }
 
     fn get_request(&self, r: GetRequestRequest) -> DpFuture<'_, Option<RequestRecord>> {
-        Self::ready(self.read_tx(
-            &r.space,
+        let request = Some(r.request_id.clone());
+        self.read_tx(
+            &r.space.clone(),
             |_| BTreeSet::new(),
-            Some(&r.request_id),
-            |sp, _| Ok(handlers::get_request(sp, &r)),
-        ))
+            request,
+            move |sp, _| Ok(handlers::get_request(sp, &r)),
+        )
     }
 
     fn get(&self, r: GetRequest) -> DpFuture<'_, GetResponse> {
-        Self::ready(self.read_tx(
-            &r.space,
-            |_| handlers::get_objects(&r),
+        let l = self.limits;
+        let objects = handlers::get_objects(&r);
+        self.read_tx(
+            &r.space.clone(),
+            move |_| objects,
             None,
-            |sp, t| handlers::get(sp, t, &self.limits, &r),
-        ))
+            move |sp, t| handlers::get(sp, t, &l, &r),
+        )
     }
 
     fn read(&self, r: ReadRequest) -> DpFuture<'_, ReadResponse> {
-        Self::ready(self.read_tx(
-            &r.space,
-            |s| handlers::read_objects(s, &r),
+        let l = self.limits;
+        let (key, r2) = (r.space.clone(), r.clone());
+        self.read_tx(
+            &key,
+            move |s| handlers::read_objects(s, &r2),
             None,
-            |sp, t| handlers::read(sp, t, &self.limits, &r),
-        ))
+            move |sp, t| handlers::read(sp, t, &l, &r),
+        )
     }
 
     fn metrics(&self, r: MetricsRequest) -> DpFuture<'_, QueueMetrics> {
-        Self::ready(self.read_tx(
-            &r.space,
-            |_| one(r.queue.clone()),
+        let objects = one(r.queue.clone());
+        self.read_tx(
+            &r.space.clone(),
+            move |_| objects,
             None,
-            |sp, t| handlers::metrics(sp, t, &r),
-        ))
+            move |sp, t| handlers::metrics(sp, t, &r),
+        )
     }
 
     fn discover_active_scopes(&self, r: DiscoverRequest) -> DpFuture<'_, DiscoverResponse> {
-        Self::ready(self.read_tx(
-            &r.space,
-            |s| {
+        let queues = r.queues.clone();
+        self.read_tx(
+            &r.space.clone(),
+            move |s| {
                 s.queues
                     .iter()
                     .map(|q| q.name.clone())
-                    .filter(|n| r.queues.as_ref().is_none_or(|a| a.contains(n)))
+                    .filter(|n| queues.as_ref().is_none_or(|a| a.contains(n)))
                     .collect()
             },
             None,
-            |sp, t| Ok(handlers::discover(sp, t, &r)),
-        ))
+            move |sp, t| Ok(handlers::discover(sp, t, &r)),
+        )
     }
 }
