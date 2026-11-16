@@ -30,11 +30,7 @@ pub enum DataPlaneError {
     ScanLimitExceeded,
     RequestIdConflict,
     RequestExpired,
-    CursorExpired {
-        earliest: Option<u64>,
-    },
     InvalidContinuation,
-    BlobNotFound,
     DurabilityPending {
         reached: DurabilityLevel,
     },
@@ -56,7 +52,6 @@ pub enum Unsupported {
     QueueFeature(QueueFeature),
     Durability(DurabilityLevel),
     Limit(LimitKind),
-    QueueHistory,
 }
 
 #[non_exhaustive]

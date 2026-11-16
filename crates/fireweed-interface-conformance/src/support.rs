@@ -36,6 +36,7 @@ pub const START: i64 = 1_700_000_000_000;
 pub struct Fixture {
     pub plane: Arc<dyn DataPlane>,
     pub clock: Arc<ManualClock>,
+    peer: Option<crate::Peer>,
     seq: AtomicU64,
 }
 
@@ -86,9 +87,9 @@ pub fn base_schema() -> SpaceSchema {
                 nullable: true,
                 source: FieldSource::BodyPointer(JsonPointer::new("/id")),
                 index: IndexHint::Unique,
+                merge: MergeRule::Any,
             },
         ],
-        history: None,
     };
     let kv = TableDecl {
         name: o("kv"),
@@ -106,6 +107,7 @@ pub fn base_schema() -> SpaceSchema {
             FieldDecl::stored("u", Text, true, IndexHint::Unique),
         ],
         expiry: None,
+        key_assignment: KeyAssignment::Caller,
     };
     let strict = TableDecl {
         name: o("strict"),
@@ -115,6 +117,7 @@ pub fn base_schema() -> SpaceSchema {
             FieldDecl::stored("req", Text, false, IndexHint::None),
         ],
         expiry: Some(RowExpiry::AfterWrite { ttl_ms: 10_000 }),
+        key_assignment: KeyAssignment::Caller,
     };
     let timed = TableDecl {
         name: o("timed"),
@@ -124,6 +127,7 @@ pub fn base_schema() -> SpaceSchema {
             FieldDecl::stored("at", Timestamp, true, IndexHint::None),
         ],
         expiry: Some(RowExpiry::AtField(f("at"))),
+        key_assignment: KeyAssignment::Caller,
     };
     // Suppression (Cayce): key (account, channel, address); reasons only
     // grow, except through an explicit lift.
@@ -134,11 +138,14 @@ pub fn base_schema() -> SpaceSchema {
             FieldDecl::stored("account", Text, false, IndexHint::None),
             FieldDecl::stored("channel", Text, false, IndexHint::None),
             FieldDecl::stored("address", Text, false, IndexHint::Lookup),
-            FieldDecl::stored("reasons", TextSet, true, IndexHint::None),
+            FieldDecl::stored("reasons", TextSet, true, IndexHint::None)
+                .with_merge(MergeRule::AddOnly),
             FieldDecl::stored("lifted_at", Timestamp, true, IndexHint::None),
         ],
         expiry: None,
+        key_assignment: KeyAssignment::Caller,
     };
+    let (counters, timeline) = merge_tables();
     let nums = TableDecl {
         name: o("nums"),
         key: vec![f("id")],
@@ -149,6 +156,7 @@ pub fn base_schema() -> SpaceSchema {
             FieldDecl::stored("x", Float, true, IndexHint::None),
         ],
         expiry: None,
+        key_assignment: KeyAssignment::Caller,
     };
     let by_g = |name: &str,
                 values: Vec<(FieldName, Aggregate)>,
@@ -219,6 +227,18 @@ pub fn base_schema() -> SpaceSchema {
             max_rows: 10,
         },
         ReadDecl {
+            name: ReadName::new("timeline_after"),
+            version: 1,
+            source: o("timeline"),
+            params: vec![(ParamName::new("after"), Int)],
+            filter: Expr::cmp(CmpOp::Gt, Expr::field("seq"), Expr::param("after")),
+            output: ReadOutput::Rows {
+                fields: vec![f("seq"), f("run"), f("item"), f("what")],
+            },
+            order: vec![(f("seq"), Direction::Asc)],
+            max_rows: 3,
+        },
+        ReadDecl {
             name: ReadName::new("rows_sparse"),
             version: 1,
             source: o("kv"),
@@ -251,29 +271,79 @@ pub fn base_schema() -> SpaceSchema {
         version: 1,
         request_id_retention_ms: 600_000,
         queues: vec![work],
-        tables: vec![kv, strict, timed, supp, nums],
-        event_logs: vec![],
-        blobs: None,
+        tables: vec![kv, strict, timed, supp, nums, counters, timeline],
         reads,
     }
 }
 
+/// Fields with merge rules (MERGE-*), and a per-contact, per-window send
+/// counter (DSL rate cap).
+fn merge_tables() -> (TableDecl, TableDecl) {
+    use ScalarType::*;
+    let counters = TableDecl {
+        name: o("counters"),
+        key: vec![f("k")],
+        fields: vec![
+            FieldDecl::stored("k", Text, false, IndexHint::None),
+            FieldDecl::stored("window", Int, true, IndexHint::None),
+            FieldDecl::stored("count", Int, true, IndexHint::None)
+                .with_merge(MergeRule::NonDecreasing),
+            FieldDecl::stored("hi", Timestamp, true, IndexHint::None)
+                .with_merge(MergeRule::NonDecreasing),
+            FieldDecl::stored("fl", Float, true, IndexHint::None)
+                .with_merge(MergeRule::NonDecreasing),
+            FieldDecl::stored("tags", TextSet, true, IndexHint::None)
+                .with_merge(MergeRule::AddOnly),
+            FieldDecl::stored("free", Int, true, IndexHint::None),
+        ],
+        expiry: None,
+        key_assignment: KeyAssignment::Caller,
+    };
+    let timeline = TableDecl {
+        name: o("timeline"),
+        key: vec![f("seq")],
+        fields: vec![
+            FieldDecl::stored("seq", Int, false, IndexHint::Range),
+            FieldDecl::stored("run", Text, true, IndexHint::Lookup),
+            FieldDecl::stored("item", Int, true, IndexHint::None),
+            FieldDecl::stored("what", Text, true, IndexHint::None),
+        ],
+        expiry: None,
+        key_assignment: KeyAssignment::Sequence,
+    };
+    (counters, timeline)
+}
+
 impl Fixture {
     pub fn new(factory: crate::Factory<'_>) -> Result<Self, DataPlaneError> {
+        Self::with_schema(factory, base_schema())
+    }
+
+    pub fn with_schema(
+        factory: crate::Factory<'_>,
+        schema: SpaceSchema,
+    ) -> Result<Self, DataPlaneError> {
         let clock = Arc::new(ManualClock::new(START));
-        let plane = factory(clock.clone());
+        let inst = factory(clock.clone());
         let fx = Fixture {
-            plane,
+            plane: inst.plane,
             clock,
+            peer: inst.peer,
             seq: AtomicU64::new(0),
         };
         block_on(fx.plane.apply_schema(ApplySchemaRequest {
             space: sp(),
-            schema: base_schema(),
+            schema,
             expected_version: None,
             min_durability: None,
         }))?;
         Ok(fx)
+    }
+
+    /// Another instance on the same storage and clock, if the harness can
+    /// open one.
+    pub fn open_peer(&self) -> Option<Arc<dyn DataPlane>> {
+        self.peer.as_ref().map(|p| p(self.clock.clone()))
     }
 
     pub fn rid(&self) -> String {
@@ -524,4 +594,128 @@ pub fn lease_of(c: &ClaimedItem) -> LeaseTarget {
         item_id: c.item_id,
         lease_token: c.lease_token.clone().expect("token"),
     })
+}
+
+/// The failure reason of a rejected commit.
+pub fn failure_of(r: &CommitResponse) -> Option<&FailureReason> {
+    r.failure.as_ref().map(|x| &x.reason)
+}
+
+/// True if `r` was rejected for `reason`.
+pub fn rejected_for(r: &DpResult<CommitResponse>, pred: impl Fn(&FailureReason) -> bool) -> bool {
+    matches!(r, Ok(x) if x.status == CommitStatus::Rejected && failure_of(x).is_some_and(&pred))
+}
+
+pub fn committed(r: &DpResult<CommitResponse>) -> bool {
+    matches!(r, Ok(x) if x.status == CommitStatus::Committed)
+}
+
+/// A one-key row selection.
+pub fn row_sel(key: Vec<Value>, filter: Option<Expr>) -> Selection {
+    Selection::Keys {
+        keys: vec![Keyed {
+            key: KeyRef::Row(key),
+            expected_version: None,
+        }],
+        filter,
+    }
+}
+
+/// A one-item selection.
+pub fn item_sel(id: ItemId, filter: Option<Expr>) -> Selection {
+    Selection::Keys {
+        keys: vec![Keyed {
+            key: KeyRef::Item(ItemRef::Id(id)),
+            expected_version: None,
+        }],
+        filter,
+    }
+}
+
+pub fn assert_op(target: &str, selection: Selection, min: u64, max: u64) -> WriteOp {
+    WriteOp::Assert {
+        target: o(target),
+        selection,
+        expect: MatchExpect { min, max },
+    }
+}
+
+pub fn row_of(fields: Vec<(&str, Value)>) -> BTreeMap<FieldName, Value> {
+    fields.into_iter().map(|(n, v)| (f(n), v)).collect()
+}
+
+pub fn put_rows(table: &str, rows: Vec<BTreeMap<FieldName, Value>>, c: RowConflict) -> WriteOp {
+    WriteOp::PutRows {
+        table: o(table),
+        rows,
+        on_conflict: c,
+    }
+}
+
+pub fn params(ps: Vec<(&str, Value)>) -> Params {
+    ps.into_iter()
+        .map(|(k, v)| (ParamName::new(k), v))
+        .collect()
+}
+
+impl Fixture {
+    pub fn get_row_key(&self, table: &str, key: Vec<Value>) -> Option<RowView> {
+        let r = block_on(self.plane.get(GetRequest {
+            space: sp(),
+            targets: vec![GetTarget::Row {
+                table: o(table),
+                key,
+            }],
+        }))
+        .expect("get");
+        match r.results.into_iter().next().flatten() {
+            Some(GetResult::Row(v)) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn get_in(&self, queue: &str, id: ItemId) -> Option<ItemView> {
+        let r = block_on(self.plane.get(GetRequest {
+            space: sp(),
+            targets: vec![GetTarget::Item {
+                queue: o(queue),
+                item: ItemRef::Id(id),
+                include_terminal: true,
+            }],
+        }))
+        .expect("get");
+        match r.results.into_iter().next().flatten() {
+            Some(GetResult::Item(v)) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn read_page(
+        &self,
+        name: &str,
+        params: Params,
+        page_token: Option<PageToken>,
+    ) -> DpResult<ReadResponse> {
+        block_on(self.plane.read(ReadRequest {
+            space: sp(),
+            name: ReadName::new(name),
+            version: 1,
+            params,
+            page_token,
+        }))
+    }
+
+    /// Applies `schema` as the next version.
+    pub fn upgrade(&self, mut schema: SpaceSchema) -> DpResult<ApplySchemaResponse> {
+        let cur = block_on(self.plane.get_schema(sp()))?
+            .map(|s| s.schema.version)
+            .unwrap_or(0);
+        schema.version = cur + 1;
+        block_on(self.plane.apply_schema(ApplySchemaRequest {
+            space: sp(),
+            schema,
+            expected_version: Some(cur),
+            min_durability: None,
+        }))
+    }
 }

@@ -6,13 +6,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::schema::{OrderingMode, PriorityKind};
 
-/// Ordered: `Process < Local < Replicated`.
+/// Niflheim's write modes (Niflheim ADR-002), used as levels a commit
+/// reaches. Ordered: `FireAndForget < Tracked < Durable`.
+///
+/// - `FireAndForget`: visible; may be lost if the process or machine fails.
+/// - `Tracked`: survives a process crash and a reopen of the
+///   implementation's own storage (fsynced locally).
+/// - `Durable`: also survives loss of that storage (in S3, or confirmed by a
+///   synchronous standby).
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum DurabilityLevel {
-    Process,
-    Local,
-    Replicated,
+    FireAndForget,
+    Tracked,
+    Durable,
 }
 
 #[non_exhaustive]
@@ -42,8 +49,6 @@ pub struct Guarantees {
 pub enum ShapeKind {
     Queue,
     Table,
-    EventLog,
-    Blob,
 }
 
 #[non_exhaustive]
@@ -62,7 +67,6 @@ pub struct Capabilities {
     /// Queue and Table always.
     pub shapes: BTreeSet<ShapeKind>,
     pub queue_features: BTreeSet<QueueFeature>,
-    pub queue_history: bool,
     pub priority_kinds: BTreeSet<PriorityKind>,
     pub ordering_modes: BTreeSet<OrderingMode>,
     pub limits: ImplementationLimits,
@@ -81,7 +85,6 @@ pub struct ImplementationLimits {
     pub max_body_bytes: u64,
     pub max_value_bytes: u64,
     pub max_set_values: u32,
-    pub max_blob_bytes: u64,
     pub max_dry_run_count: u64,
     pub max_read_rows: u32,
     pub max_claim_batch_size: u32,

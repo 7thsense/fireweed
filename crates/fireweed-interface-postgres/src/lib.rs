@@ -22,15 +22,13 @@
 //! tables), pushing access terms and claims into indexed SQL (`FOR UPDATE
 //! SKIP LOCKED`), the `SERIALIZABLE` group-commit protocol of API-006
 //! §PostgreSQL in place of the per-space lock, database time as the
-//! production authority, and `Replicated` durability. Event logs, blobs,
-//! cohorts, group batching and queue history are reported unsupported
-//! pending the owner's rulings.
+//! production authority. Cohorts and group batching are reported
+//! unsupported.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-use bytes::Bytes;
 use fireweed_interface::*;
 use fireweed_interface_engine::handlers::{self, Profile};
 use fireweed_interface_engine::{Item, KeyVal, Queue, Record, Row, Space, St, Table};
@@ -58,11 +56,18 @@ CREATE TABLE IF NOT EXISTS fw_requests (
   tenant text NOT NULL, space text NOT NULL, request_id text COLLATE "C" NOT NULL,
   recorded_at bigint NOT NULL, data text NOT NULL,
   PRIMARY KEY (tenant, space, request_id));
+CREATE TABLE IF NOT EXISTS fw_table_seq (
+  tenant text NOT NULL, space text NOT NULL, tbl text NOT NULL, last bigint NOT NULL,
+  PRIMARY KEY (tenant, space, tbl));
 "#;
 
+/// PostgreSQL is assumed fully replicated (owner, 2026-11-15): a committed
+/// transaction is `Durable`, and keeping it so is the operator's job. A
+/// `FireAndForget` request commits with `synchronous_commit = off`. A
+/// `Tracked` request is acknowledged at `Durable`, the next level offered.
 const PROFILE: Profile = Profile {
-    durability: DurabilityLevel::Local,
-    max_durability: DurabilityLevel::Local,
+    offered: &[DurabilityLevel::FireAndForget, DurabilityLevel::Durable],
+    default_durability: DurabilityLevel::Durable,
 };
 
 pub struct PostgresDataPlane {
@@ -71,6 +76,8 @@ pub struct PostgresDataPlane {
     client: Mutex<Client>,
     /// For isolated test instances: the schema to drop, and how to connect.
     cleanup: Option<(String, String)>,
+    /// How this instance connected: the URL and the schema, if any.
+    location: (String, Option<String>),
 }
 
 fn unavailable(e: postgres::Error) -> DataPlaneError {
@@ -138,6 +145,7 @@ impl PostgresDataPlane {
             limits,
             client: Mutex::new(client),
             cleanup: None,
+            location: (url.to_owned(), None),
         })
     }
 
@@ -163,6 +171,7 @@ impl PostgresDataPlane {
             limits,
             client: Mutex::new(client),
             cleanup: None,
+            location: (url.to_owned(), Some(schema.to_owned())),
         })
     }
 
@@ -188,8 +197,18 @@ impl PostgresDataPlane {
             clock,
             limits,
             client: Mutex::new(client),
-            cleanup: Some((schema, url.to_owned())),
+            cleanup: Some((schema.clone(), url.to_owned())),
+            location: (url.to_owned(), Some(schema)),
         })
+    }
+
+    /// Another instance on the same database and schema, with its own
+    /// connection and clock. It does not drop an isolated schema.
+    pub fn peer(&self, clock: Arc<dyn Clock>) -> DpResult<Self> {
+        match &self.location {
+            (url, Some(schema)) => Self::connect_in_schema(url, schema, clock, self.limits),
+            (url, None) => Self::connect(url, clock, self.limits),
+        }
     }
 
     fn ready<T: Send + 'static>(r: DpResult<T>) -> DpFuture<'static, T> {
@@ -266,6 +285,15 @@ impl PostgresDataPlane {
                 space.queues.insert(name.clone(), q);
             } else if let Some(decl) = schema.tables.iter().find(|tb| &tb.name == name) {
                 let mut tb = handlers::empty_table(decl);
+                if let Some(r) = tx
+                    .query_opt(
+                        "SELECT last FROM fw_table_seq WHERE tenant=$1 AND space=$2 AND tbl=$3",
+                        &[&t, &s, &name.as_str()],
+                    )
+                    .map_err(unavailable)?
+                {
+                    tb.next_seq = r.get::<_, i64>(0) as u64;
+                }
                 if load == Load::Full {
                     for r in tx
                         .query(
@@ -363,10 +391,16 @@ impl PostgresDataPlane {
         key: &SpaceKey,
         objects: BTreeSet<ObjectName>,
         request: Option<&RequestId>,
+        durability: Option<DurabilityLevel>,
         f: impl FnOnce(&mut Space, i64) -> DpResult<T>,
     ) -> DpResult<T> {
+        handlers::check_durability(&PROFILE, durability)?;
         let mut client = self.client.lock().unwrap_or_else(|p| p.into_inner());
         let mut tx = client.transaction().map_err(unavailable)?;
+        if PROFILE.level(durability) == DurabilityLevel::FireAndForget {
+            tx.batch_execute("SET LOCAL synchronous_commit = off")
+                .map_err(unavailable)?;
+        }
         let mut space = Self::load(&mut tx, key, &objects, Load::Full, request, true)?;
         let before = space.clone();
         let t = handlers::begin(&mut space, self.now());
@@ -440,6 +474,14 @@ fn store_rows(
     old: Option<&Table>,
     new: &Table,
 ) -> DpResult<()> {
+    if old.is_none_or(|o| o.next_seq != new.next_seq) {
+        tx.execute(
+            "INSERT INTO fw_table_seq (tenant, space, tbl, last) VALUES ($1,$2,$3,$4)
+             ON CONFLICT (tenant, space, tbl) DO UPDATE SET last = EXCLUDED.last",
+            &[&t, &s, &tbl, &(new.next_seq as i64)],
+        )
+        .map_err(unavailable)?;
+    }
     for (k, row) in &new.rows {
         if old.and_then(|o| o.rows.get(k)) != Some(row) {
             tx.execute(
@@ -499,7 +541,7 @@ where
 impl DataPlane for PostgresDataPlane {
     fn guarantees(&self) -> Guarantees {
         Guarantees {
-            durability: DurabilityLevel::Local,
+            durability: DurabilityLevel::FireAndForget,
             new_work_visibility: Visibility::Immediate,
             sharing: Sharing::MultiProcess,
         }
@@ -507,7 +549,7 @@ impl DataPlane for PostgresDataPlane {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            max_durability: DurabilityLevel::Local,
+            max_durability: DurabilityLevel::Durable,
             shapes: [ShapeKind::Queue, ShapeKind::Table].into_iter().collect(),
             queue_features: [
                 QueueFeature::DynamicGates,
@@ -516,7 +558,6 @@ impl DataPlane for PostgresDataPlane {
             ]
             .into_iter()
             .collect(),
-            queue_history: false,
             priority_kinds: [PriorityKind::Int64, PriorityKind::Timestamp]
                 .into_iter()
                 .collect(),
@@ -623,6 +664,7 @@ impl DataPlane for PostgresDataPlane {
             &r.header.space,
             one(r.queue.clone()),
             Some(&r.header.request_id),
+            r.header.min_durability,
             |sp, t| handlers::enqueue(sp, t, &self.limits, &PROFILE, &r),
         ))
     }
@@ -632,6 +674,7 @@ impl DataPlane for PostgresDataPlane {
             &r.header.space,
             one(r.queue.clone()),
             Some(&r.header.request_id),
+            r.header.min_durability,
             |sp, t| handlers::claim(sp, t, &self.limits, &PROFILE, &r),
         ))
     }
@@ -641,6 +684,7 @@ impl DataPlane for PostgresDataPlane {
             &r.header.space,
             one(r.queue.clone()),
             Some(&r.header.request_id),
+            r.header.min_durability,
             |sp, t| handlers::claim_by_item_ids(sp, t, &self.limits, &PROFILE, &r),
         ))
     }
@@ -650,6 +694,7 @@ impl DataPlane for PostgresDataPlane {
             &r.header.space,
             one(r.queue.clone()),
             Some(&r.header.request_id),
+            r.header.min_durability,
             |sp, t| handlers::renew(sp, t, &self.limits, &PROFILE, &r),
         ))
     }
@@ -659,6 +704,7 @@ impl DataPlane for PostgresDataPlane {
             &r.header.space,
             one(r.queue.clone()),
             Some(&r.header.request_id),
+            r.header.min_durability,
             |sp, t| handlers::finalize(sp, t, &self.limits, &PROFILE, &r),
         ))
     }
@@ -668,6 +714,7 @@ impl DataPlane for PostgresDataPlane {
             &r.header.space,
             handlers::commit_objects(&r),
             Some(&r.header.request_id),
+            r.header.min_durability,
             |sp, t| handlers::commit(sp, t, &self.limits, &PROFILE, &r),
         ))
     }
@@ -699,12 +746,6 @@ impl DataPlane for PostgresDataPlane {
         ))
     }
 
-    fn read_log(&self, _r: ReadLogRequest) -> DpFuture<'_, ReadLogResponse> {
-        Self::ready(Err(DataPlaneError::FeatureUnsupported(Unsupported::Shape(
-            ShapeKind::EventLog,
-        ))))
-    }
-
     fn metrics(&self, r: MetricsRequest) -> DpFuture<'_, QueueMetrics> {
         Self::ready(self.read_tx(
             &r.space,
@@ -727,17 +768,5 @@ impl DataPlane for PostgresDataPlane {
             None,
             |sp, t| Ok(handlers::discover(sp, t, &r)),
         ))
-    }
-
-    fn put_blob(&self, _r: PutBlobRequest) -> DpFuture<'_, PutBlobResponse> {
-        Self::ready(Err(DataPlaneError::FeatureUnsupported(Unsupported::Shape(
-            ShapeKind::Blob,
-        ))))
-    }
-
-    fn get_blob(&self, _r: GetBlobRequest) -> DpFuture<'_, Bytes> {
-        Self::ready(Err(DataPlaneError::FeatureUnsupported(Unsupported::Shape(
-            ShapeKind::Blob,
-        ))))
     }
 }

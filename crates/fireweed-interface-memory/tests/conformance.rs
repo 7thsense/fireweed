@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use fireweed_interface::{DataPlane, ImplementationLimits, ManualClock};
-use fireweed_interface_conformance::{Status, run};
+use fireweed_interface_conformance::{Instance, Status, run};
 use fireweed_interface_memory::{MemoryDataPlane, default_limits};
 
 fn test_limits() -> ImplementationLimits {
@@ -19,8 +19,12 @@ fn test_limits() -> ImplementationLimits {
 
 #[test]
 fn rule_pinning_tests() {
-    let factory = |clock: Arc<ManualClock>| -> Arc<dyn DataPlane> {
-        Arc::new(MemoryDataPlane::with_limits(clock, test_limits()))
+    let factory = |clock: Arc<ManualClock>| -> Instance {
+        let plane = Arc::new(MemoryDataPlane::with_limits(clock, test_limits()));
+        let primary = plane.clone();
+        Instance::new(plane).with_peer(Arc::new(move |clock: Arc<ManualClock>| {
+            Arc::new(primary.peer(clock)) as Arc<dyn DataPlane>
+        }))
     };
     let report = run(&factory);
     println!("{}", report.summary());

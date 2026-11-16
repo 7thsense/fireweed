@@ -13,6 +13,8 @@
 
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
+mod features;
+mod scenarios;
 mod support;
 mod tests;
 
@@ -67,13 +69,35 @@ impl Report {
     }
 }
 
-/// Builds a fresh implementation for each test, attached to `clock`.
-pub type Factory<'a> = &'a dyn Fn(Arc<ManualClock>) -> Arc<dyn DataPlane>;
+/// Opens another instance on the same storage as the one it came from,
+/// attached to `clock`.
+pub type Peer = Arc<dyn Fn(Arc<ManualClock>) -> Arc<dyn DataPlane> + Send + Sync>;
 
-/// Runs every rule-pinning test.
+/// A fresh implementation on fresh storage, and optionally a way to open
+/// more instances on that storage (tests marked "needs a peer" use it).
+pub struct Instance {
+    pub plane: Arc<dyn DataPlane>,
+    pub peer: Option<Peer>,
+}
+
+impl Instance {
+    pub fn new(plane: Arc<dyn DataPlane>) -> Self {
+        Self { plane, peer: None }
+    }
+
+    pub fn with_peer(mut self, peer: Peer) -> Self {
+        self.peer = Some(peer);
+        self
+    }
+}
+
+/// Builds a fresh implementation for each test, attached to `clock`.
+pub type Factory<'a> = &'a dyn Fn(Arc<ManualClock>) -> Instance;
+
+/// Runs every rule-pinning test and every DSL scenario.
 pub fn run(factory: Factory<'_>) -> Report {
     let mut results = vec![];
-    for (id, test) in tests::ALL {
+    for (id, test) in tests::ALL.iter().chain(features::ALL).chain(scenarios::ALL) {
         let fx = match Fixture::new(factory) {
             Ok(fx) => fx,
             Err(e) => {

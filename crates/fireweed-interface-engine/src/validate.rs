@@ -144,7 +144,7 @@ fn name(s: &str, what: &str) -> R {
     Ok(())
 }
 
-fn fields(fs: &[FieldDecl], body: Option<BodyKind>) -> R {
+fn fields(fs: &[FieldDecl], body: Option<BodyKind>, table_key: Option<&[FieldName]>) -> R {
     let mut seen = BTreeSet::new();
     for f in fs {
         name(f.name.as_str(), "field")?;
@@ -157,13 +157,35 @@ fn fields(fs: &[FieldDecl], body: Option<BodyKind>) -> R {
         if f.index == IndexHint::Unique
             && matches!(
                 f.ty,
-                ScalarType::TextSet | ScalarType::BlobRefSet | ScalarType::Json | ScalarType::Float
+                ScalarType::TextSet | ScalarType::Json | ScalarType::Float
             )
         {
             return invalid(format!("{:?} cannot be Unique", f.ty));
         }
-        if f.ty == ScalarType::BlobRefSet && f.index != IndexHint::None {
-            return invalid("BlobRefSet cannot be indexed");
+        match f.merge {
+            MergeRule::Any => {}
+            rule => {
+                let Some(key) = table_key else {
+                    return invalid("merge rules apply to table fields only");
+                };
+                if key.contains(&f.name) || f.source != FieldSource::Stored {
+                    return invalid(format!(
+                        "merge rule on {}: only stored, non-key fields",
+                        f.name
+                    ));
+                }
+                let ok = match rule {
+                    MergeRule::AddOnly => f.ty == ScalarType::TextSet,
+                    MergeRule::NonDecreasing => matches!(
+                        f.ty,
+                        ScalarType::Int | ScalarType::Float | ScalarType::Timestamp
+                    ),
+                    _ => false,
+                };
+                if !ok {
+                    return invalid(format!("merge rule {rule:?} does not apply to {:?}", f.ty));
+                }
+            }
         }
     }
     Ok(())
@@ -188,13 +210,7 @@ pub fn schema(s: &SpaceSchema, limits: &ImplementationLimits, caps: &Capabilitie
             LimitKind::RequestIdRetention,
         )));
     }
-    if !s.event_logs.is_empty() {
-        return unsupported(Unsupported::Shape(ShapeKind::EventLog));
-    }
-    if s.blobs.is_some() {
-        return unsupported(Unsupported::Shape(ShapeKind::Blob));
-    }
-    let count = s.queues.len() + s.tables.len() + s.event_logs.len();
+    let count = s.queues.len() + s.tables.len();
     if count > limits.max_objects_per_space as usize {
         return Err(DataPlaneError::FeatureUnsupported(Unsupported::Limit(
             LimitKind::Objects,
@@ -218,9 +234,6 @@ pub fn schema(s: &SpaceSchema, limits: &ImplementationLimits, caps: &Capabilitie
         if q.spec.group_batching {
             return unsupported(Unsupported::QueueFeature(QueueFeature::GroupBatching));
         }
-        if q.history.is_some() {
-            return unsupported(Unsupported::QueueHistory);
-        }
         span_ok(
             q.spec.client_item_key_retention_ms,
             "client_item_key_retention_ms",
@@ -242,16 +255,25 @@ pub fn schema(s: &SpaceSchema, limits: &ImplementationLimits, caps: &Capabilitie
                 LimitKind::LeaseDuration,
             )));
         }
-        fields(&q.fields, Some(q.body))?;
+        fields(&q.fields, Some(q.body), None)?;
     }
     for t in &s.tables {
         name(t.name.as_str(), "table")?;
         if !names.insert(&t.name) {
             return invalid(format!("duplicate object {}", t.name));
         }
-        fields(&t.fields, None)?;
+        fields(&t.fields, None, Some(&t.key))?;
         if t.key.is_empty() || t.key.len() > 4 {
             return invalid("a table key has 1 to 4 fields");
+        }
+        if t.key_assignment == KeyAssignment::Sequence {
+            let int_key = t.key.len() == 1
+                && t.fields
+                    .iter()
+                    .any(|f| f.name == t.key[0] && f.ty == ScalarType::Int);
+            if !int_key {
+                return invalid("a Sequence table's key is one non-null Int field");
+            }
         }
         for k in &t.key {
             let Some(d) = t.fields.iter().find(|f| &f.name == k) else {
@@ -379,6 +401,7 @@ pub fn additive(old: &SpaceSchema, new: &SpaceSchema) -> R {
             && o.ty == n.ty
             && o.nullable == n.nullable
             && o.source == n.source
+            && o.merge == n.merge
             && (o.index == n.index || (o.index == IndexHint::None && n.index != IndexHint::Unique))
     };
     let fields_ok = |o: &[FieldDecl], n: &[FieldDecl]| {
@@ -403,7 +426,6 @@ pub fn additive(old: &SpaceSchema, new: &SpaceSchema) -> R {
             Some(n)
                 if spec_ok(&q.spec, &n.spec)
                     && n.body == q.body
-                    && n.history == q.history
                     && fields_ok(&q.fields, &n.fields) => {}
             _ => return conflict(),
         }
@@ -411,7 +433,10 @@ pub fn additive(old: &SpaceSchema, new: &SpaceSchema) -> R {
     for t in &old.tables {
         match new.tables.iter().find(|n| n.name == t.name) {
             Some(n)
-                if n.key == t.key && n.expiry == t.expiry && fields_ok(&t.fields, &n.fields) => {}
+                if n.key == t.key
+                    && n.expiry == t.expiry
+                    && n.key_assignment == t.key_assignment
+                    && fields_ok(&t.fields, &n.fields) => {}
             _ => return conflict(),
         }
     }
@@ -650,11 +675,12 @@ fn entries_of(op: &WriteOp) -> usize {
         WriteOp::Reassign { leases, .. } => leases.len(),
         WriteOp::SetGates { gates, .. } => gates.len(),
         WriteOp::PutRows { rows, .. } => rows.len(),
-        WriteOp::Append { entries, .. } => entries.len(),
-        WriteOp::Mutate(m) => match &m.selection {
-            Selection::Keys { keys, .. } => keys.len(),
-            _ => 0,
-        },
+        WriteOp::Mutate(Mutate { selection, .. }) | WriteOp::Assert { selection, .. } => {
+            match selection {
+                Selection::Keys { keys, .. } => keys.len(),
+                _ => 0,
+            }
+        }
         _ => 1,
     }
 }
@@ -739,12 +765,26 @@ pub fn commit(space: &Space, r: &CommitRequest, limits: &ImplementationLimits) -
                     }
                 }
             }
-            WriteOp::Append { .. } => {
-                return Err(DataPlaneError::FeatureUnsupported(Unsupported::Shape(
-                    ShapeKind::EventLog,
-                )));
-            }
             WriteOp::Mutate(m) => mutate(space, r, m, limits)?,
+            WriteOp::Assert {
+                target,
+                selection,
+                expect,
+            } => {
+                if expect.min > expect.max {
+                    return invalid("expect min above max");
+                }
+                // The selection rules are Mutate's; `Retire` stands in for
+                // the absent action, which Assert never applies.
+                let mut m = Mutate::new(
+                    target.as_str(),
+                    selection.clone(),
+                    Action::Retire,
+                    limits.max_selector_affected,
+                );
+                m.expect = Some(*expect);
+                mutate(space, r, &m, limits)?;
+            }
             _ => return invalid("unknown operation"),
         }
     }
@@ -841,6 +881,15 @@ fn mutate(space: &Space, r: &CommitRequest, m: &Mutate, limits: &ImplementationL
             access = Some(at.ok_or(DataPlaneError::SelectorNotIndexed)?);
         }
         _ => return invalid("selection"),
+    }
+    if m.override_merge_rules && is_queue {
+        return invalid("override_merge_rules applies to tables only");
+    }
+    if !is_queue
+        && matches!(m.action, Action::Set(_))
+        && space.tables[&m.target].decl.key_assignment == KeyAssignment::Sequence
+    {
+        return invalid("rows of a Sequence table are immutable");
     }
     // Action validity.
     match (&m.action, is_queue) {

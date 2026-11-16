@@ -108,7 +108,6 @@ pub fn check_item(q: &Queue, it: &Item, limits: &ImplementationLimits) -> Result
 fn set_len(v: &Value) -> usize {
     match v {
         Value::TextSet(s) => s.len(),
-        Value::BlobRefSet(s) => s.len(),
         _ => 0,
     }
 }
@@ -424,6 +423,7 @@ pub fn enqueue_item(
                         superseded_item_id: None,
                         version: Some(existing.version),
                         lease: None,
+                        row_key: None,
                     },
                 });
             }
@@ -505,6 +505,7 @@ pub fn enqueue_item(
             superseded_item_id: superseded.map(ItemId),
             version: Some(1),
             lease: None,
+            row_key: None,
         },
     })
 }
@@ -601,6 +602,7 @@ pub fn renew_one(
                     lease_expires_at: UtcMillis(cx.t + duration_ms as i64),
                     item_version: it.version,
                 }),
+                row_key: None,
             }
         }
     }
@@ -628,6 +630,7 @@ pub fn reassign_one(
                     lease_expires_at: c.lease_expires_at,
                     item_version: c.item_version,
                 }),
+                row_key: None,
             }
         }
     }
@@ -731,6 +734,7 @@ pub fn finalize_one(q: &mut Queue, e: &FinalizeEntry, cx: &mut Cx<'_>) -> EntryR
                 superseded_item_id: None,
                 version: Some(version),
                 lease: None,
+                row_key: None,
             }
         }
     }
@@ -777,7 +781,20 @@ pub fn put_row(
     policy: RowConflict,
     cx: &mut Cx<'_>,
 ) -> Result<EntryResult, EntryStatus> {
-    let fields = &normalize_fields(fields)?;
+    let mut fields = normalize_fields(fields)?;
+    let mut assigned = None;
+    if tb.decl.key_assignment == KeyAssignment::Sequence {
+        let kf = tb.decl.key[0].clone();
+        if fields.contains_key(&kf) {
+            return Err(EntryStatus::Invalid {
+                reason: format!("{kf} is assigned by the implementation"),
+            });
+        }
+        let n = tb.next_seq + 1;
+        fields.insert(kf, Value::Int(n as i64));
+        assigned = Some(n);
+    }
+    let fields = &fields;
     let key = row_key(&tb.decl, fields).ok_or(EntryStatus::MissingField {
         field: tb.decl.key[0].clone(),
     })?;
@@ -791,9 +808,11 @@ pub fn put_row(
                     superseded_item_id: None,
                     version: Some(existing.version),
                     lease: None,
+                    row_key: None,
                 });
             }
             RowConflict::Replace => {
+                merge_ok(&tb.decl, &existing.fields, fields)?;
                 let mut r = existing.clone();
                 r.fields = fields.clone();
                 if cx.bumped_rows.insert((tb.decl.name.clone(), key.clone())) {
@@ -819,8 +838,10 @@ pub fn put_row(
                         superseded_item_id: None,
                         version: Some(existing.version),
                         lease: None,
+                        row_key: None,
                     });
                 }
+                merge_ok(&tb.decl, &existing.fields, &r.fields)?;
                 if cx.bumped_rows.insert((tb.decl.name.clone(), key.clone())) {
                     r.version += 1;
                 }
@@ -845,13 +866,48 @@ pub fn put_row(
     check_row(tb, &key, &row, cx.limits)?;
     let version = row.version;
     store_row(tb, key, row, cx.t);
+    if let Some(n) = assigned {
+        tb.next_seq = n;
+    }
     Ok(EntryResult {
         status,
         item_id: None,
         superseded_item_id: None,
         version: Some(version),
         lease: None,
+        row_key: assigned.map(|n| vec![Value::Int(n as i64)]),
     })
+}
+
+/// Checks declared merge rules for a change from `old` to `new` fields.
+pub fn merge_ok(
+    decl: &TableDecl,
+    old: &BTreeMap<FieldName, Value>,
+    new: &BTreeMap<FieldName, Value>,
+) -> Result<(), EntryStatus> {
+    for f in &decl.fields {
+        if f.merge == MergeRule::Any {
+            continue;
+        }
+        let Some(o) = old.get(&f.name).filter(|v| !v.is_null()) else {
+            continue;
+        };
+        let n = new.get(&f.name).filter(|v| !v.is_null());
+        let ok = match (f.merge, o, n) {
+            (_, _, None) => false,
+            (MergeRule::AddOnly, Value::TextSet(os), Some(Value::TextSet(ns))) => os.is_subset(ns),
+            (MergeRule::NonDecreasing, o, Some(n)) => {
+                compare(n, o).is_some_and(|c| c != Ordering::Less)
+            }
+            _ => false,
+        };
+        if !ok {
+            return Err(EntryStatus::MergeRuleViolated {
+                field: f.name.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 // ----------------------------------------------------------------- mutate
@@ -1097,8 +1153,30 @@ pub fn exec_mutate(
         evaluated: true,
         ..Default::default()
     };
-    match exec_mutate_inner(space, m, cx, &mut res) {
+    match exec_mutate_inner(space, m, cx, &mut res, false) {
         Ok(c) => Ok((res, c)),
+        Err(MutateFail::Reason(r, e)) => Err((r, e, res)),
+    }
+}
+
+/// `WriteOp::Assert`: Mutate's selection and `expect`, and nothing else.
+/// Leased items count whatever their lease; nothing is written.
+pub fn exec_assert(
+    space: &mut Space,
+    target: &ObjectName,
+    selection: &Selection,
+    expect: MatchExpect,
+    cx: &mut Cx<'_>,
+) -> Result<OpResult, MutateRejection> {
+    let mut m = Mutate::new(target.as_str(), selection.clone(), Action::Retire, u32::MAX);
+    m.expect = Some(expect);
+    m.lease_policy = LeasePolicy::Preserve;
+    let mut res = OpResult {
+        evaluated: true,
+        ..Default::default()
+    };
+    match exec_mutate_inner(space, &m, cx, &mut res, true) {
+        Ok(_) => Ok(res),
         Err(MutateFail::Reason(r, e)) => Err((r, e, res)),
     }
 }
@@ -1119,6 +1197,7 @@ fn exec_mutate_inner(
     m: &Mutate,
     cx: &mut Cx<'_>,
     res: &mut OpResult,
+    select_only: bool,
 ) -> Result<Option<Continuation>, MutateFail> {
     let is_queue = space.queues.contains_key(&m.target);
     // Selection.
@@ -1256,7 +1335,7 @@ fn exec_mutate_inner(
     }
     // Lease policy, counting.
     res.matched = selected.len() as u64;
-    if !chunked && res.matched > m.limit as u64 {
+    if !select_only && !chunked && res.matched > m.limit as u64 {
         return Err(fail(FailureReason::LimitExceeded {
             matched_at_least: res.matched,
         }));
@@ -1267,6 +1346,9 @@ fn exec_mutate_inner(
         return Err(fail(FailureReason::MatchExpectUnmet {
             matched: res.matched,
         }));
+    }
+    if select_only {
+        return Ok(None);
     }
     // One entry per slot, in key order; a failure names the slot.
     for (i, slot) in slots.iter().enumerate() {
@@ -1487,6 +1569,7 @@ fn apply_item_action(
         superseded_item_id: None,
         version: Some(version),
         lease: None,
+        row_key: None,
     }))
 }
 
@@ -1509,6 +1592,7 @@ fn apply_row_action(
     let mut row = tb.rows[key].clone();
     let status = match &m.action {
         Action::Set(sets) => {
+            let old = row.fields.clone();
             let mut out = Vec::new();
             {
                 let view = TableRow {
@@ -1523,6 +1607,9 @@ fn apply_row_action(
             }
             for (f, v) in out {
                 row.fields.insert(f, normalize_value(v)?);
+            }
+            if !m.override_merge_rules {
+                merge_ok(&tb.decl, &old, &row.fields)?;
             }
             if cx.bumped_rows.insert((target.clone(), key.to_vec())) {
                 row.version += 1;
@@ -1556,5 +1643,6 @@ fn apply_row_action(
         superseded_item_id: None,
         version: Some(version),
         lease: None,
+        row_key: None,
     }))
 }

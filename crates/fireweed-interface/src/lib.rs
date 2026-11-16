@@ -19,7 +19,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use bytes::Bytes;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -53,12 +52,8 @@ pub trait DataPlane: Send + Sync {
 
     fn get(&self, r: GetRequest) -> DpFuture<'_, GetResponse>;
     fn read(&self, r: ReadRequest) -> DpFuture<'_, ReadResponse>;
-    fn read_log(&self, r: ReadLogRequest) -> DpFuture<'_, ReadLogResponse>;
     fn metrics(&self, r: MetricsRequest) -> DpFuture<'_, QueueMetrics>;
     fn discover_active_scopes(&self, r: DiscoverRequest) -> DpFuture<'_, DiscoverResponse>;
-
-    fn put_blob(&self, r: PutBlobRequest) -> DpFuture<'_, PutBlobResponse>;
-    fn get_blob(&self, r: GetBlobRequest) -> DpFuture<'_, Bytes>;
 }
 
 /// The time authority. It never moves backward (API-006 §Time rule 1).
@@ -91,7 +86,7 @@ impl Clock for ManualClock {
 
 fn strip_min_durability(v: &mut serde_json::Value) {
     // Only the request's own durability requirement: `header.min_durability`
-    // and, for schema and blob requests, a top-level `min_durability`.
+    // and, for schema requests, a top-level `min_durability`.
     if let serde_json::Value::Object(map) = v {
         map.remove("min_durability");
         if let Some(serde_json::Value::Object(h)) = map.get_mut("header") {
@@ -148,14 +143,6 @@ pub fn redact_tokens(r: &mut RecordedResponse) {
     }
 }
 
-/// Content address of blob bytes.
-pub fn blob_ref(bytes: &[u8]) -> BlobRef {
-    BlobRef {
-        sha256: Sha256::digest(bytes).into(),
-        size: bytes.len() as u64,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,7 +160,7 @@ mod tests {
     fn fingerprint_ignores_min_durability() {
         let mut h = WriteHeader::new(SpaceKey::new("t", "s"), "r1");
         let a = fingerprint(&h);
-        h.min_durability = Some(DurabilityLevel::Replicated);
+        h.min_durability = Some(DurabilityLevel::Durable);
         assert_eq!(a, fingerprint(&h));
         h.actor = Some("x".into());
         assert_ne!(a, fingerprint(&h));

@@ -221,7 +221,7 @@ pub const MAX_BUCKET_WIDTH_MS: u64 = 315_576_000_000;
 
 fn eq_comparable(t: ScalarType) -> bool {
     use ScalarType::*;
-    matches!(t, Bool | Int | Float | Text | Bytes | Timestamp | BlobRef)
+    matches!(t, Bool | Int | Float | Text | Bytes | Timestamp)
 }
 
 fn orderable(t: ScalarType) -> bool {
@@ -243,7 +243,7 @@ pub fn cast_allowed(from: ScalarType, to: ScalarType) -> bool {
             | (Text, Bool | Int | Float | Timestamp | Json)
             | (Timestamp, Int | Text | Json)
             | (Json, Bool | Int | Float | Text | Timestamp)
-            | (Bytes | TextSet | BlobRef | BlobRefSet, Json)
+            | (Bytes | TextSet, Json)
     )
 }
 
@@ -324,14 +324,13 @@ pub fn type_of(e: &Expr, env: &dyn TypeEnv) -> Result<ScalarType, TypeError> {
             Ok(Bool)
         }
         Expr::Contains { set, value } => match (type_of(set, env)?, type_of(value, env)?) {
-            (TextSet, Text) | (BlobRefSet, BlobRef) => Ok(Bool),
+            (TextSet, Text) => Ok(Bool),
             (a, b) => terr(format!("Contains on {a:?} with {b:?}")),
         },
         Expr::SetAdd { set, values } | Expr::SetRemove { set, values } => {
             let st = type_of(set, env)?;
             let et = match st {
                 TextSet => Text,
-                BlobRefSet => BlobRef,
                 _ => return terr(format!("set operation on {st:?}")),
             };
             for v in values {
@@ -570,7 +569,6 @@ pub fn eval(e: &Expr, cx: &EvalCtx<'_>) -> Result<Value, EvalError> {
             let (s, v) = (eval(set, cx)?, eval(value, cx)?);
             Ok(match (s, v) {
                 (Value::TextSet(s), Value::Text(t)) => Value::Bool(s.contains(&t)),
-                (Value::BlobRefSet(s), Value::BlobRef(b)) => Value::Bool(s.contains(&b)),
                 _ => Value::Null(Bool),
             })
         }
@@ -598,27 +596,10 @@ pub fn eval(e: &Expr, cx: &EvalCtx<'_>) -> Result<Value, EvalError> {
                     }
                     Value::TextSet(s)
                 }
-                Value::BlobRefSet(_) | Value::Null(BlobRefSet) => {
-                    let mut s = match base {
-                        Value::BlobRefSet(s) => s,
-                        _ => BTreeSet::new(),
-                    };
-                    for v in vals {
-                        if let Value::BlobRef(b) = v {
-                            if add {
-                                s.insert(b);
-                            } else {
-                                s.remove(&b);
-                            }
-                        }
-                    }
-                    Value::BlobRefSet(s)
-                }
                 other => other,
             };
             let len = match &out {
                 Value::TextSet(s) => s.len(),
-                Value::BlobRefSet(s) => s.len(),
                 _ => 0,
             };
             if len > cx.max_set_values as usize {
@@ -724,7 +705,6 @@ pub fn compare(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Text(x), Value::Text(y)) => Some(x.as_bytes().cmp(y.as_bytes())),
         (Value::Bytes(x), Value::Bytes(y)) => Some(x.as_ref().cmp(y.as_ref())),
         (Value::Timestamp(x), Value::Timestamp(y)) => Some(x.cmp(y)),
-        (Value::BlobRef(x), Value::BlobRef(y)) => Some(x.cmp(y)),
         _ => None,
     }
 }

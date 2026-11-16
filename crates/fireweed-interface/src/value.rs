@@ -19,15 +19,6 @@ pub enum ScalarType {
     Timestamp,
     Json,
     TextSet,
-    BlobRef,
-    BlobRefSet,
-}
-
-/// Content address of an immutable blob.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct BlobRef {
-    pub sha256: [u8; 32],
-    pub size: u64,
 }
 
 #[non_exhaustive]
@@ -43,8 +34,6 @@ pub enum Value {
     Timestamp(UtcMillis),
     Json(serde_json::Value),
     TextSet(BTreeSet<String>),
-    BlobRef(BlobRef),
-    BlobRefSet(BTreeSet<BlobRef>),
 }
 
 /// Largest magnitude of a `Float` value.
@@ -66,8 +55,6 @@ impl Value {
             Value::Timestamp(_) => ScalarType::Timestamp,
             Value::Json(_) => ScalarType::Json,
             Value::TextSet(_) => ScalarType::TextSet,
-            Value::BlobRef(_) => ScalarType::BlobRef,
-            Value::BlobRefSet(_) => ScalarType::BlobRefSet,
         }
     }
 
@@ -90,8 +77,6 @@ impl Value {
                 .map(|v| v.len() as u64)
                 .unwrap_or(u64::MAX),
             Value::TextSet(s) => s.iter().map(|x| x.len() as u64 + 1).sum(),
-            Value::BlobRef(_) => 40,
-            Value::BlobRefSet(s) => 40 * s.len() as u64,
         }
     }
 }
@@ -206,10 +191,6 @@ pub fn to_hex(bytes: &[u8]) -> String {
     hex(bytes)
 }
 
-fn blob_json(b: &BlobRef) -> serde_json::Value {
-    serde_json::json!({ "sha256": hex(&b.sha256), "size": b.size })
-}
-
 /// Encodes a value as JSON (API-006 §Canonical JSON, last paragraph).
 pub fn value_to_json(v: &Value) -> serde_json::Value {
     use base64::Engine as _;
@@ -226,8 +207,6 @@ pub fn value_to_json(v: &Value) -> serde_json::Value {
         Value::Timestamp(t) => J::String(format_rfc3339(t.0)),
         Value::Json(j) => j.clone(),
         Value::TextSet(s) => J::Array(s.iter().cloned().map(J::String).collect()),
-        Value::BlobRef(b) => blob_json(b),
-        Value::BlobRefSet(s) => J::Array(s.iter().map(blob_json).collect()),
     }
 }
 

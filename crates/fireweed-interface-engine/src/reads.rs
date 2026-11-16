@@ -195,11 +195,7 @@ pub fn get(space: &Space, r: &GetRequest, t: i64) -> DpResult<GetResponse> {
                     blocked_gates: q.blocked.iter().map(|(k, e)| (k.clone(), *e)).collect(),
                 }))
             }
-            _ => {
-                return Err(DataPlaneError::FeatureUnsupported(Unsupported::Shape(
-                    ShapeKind::Blob,
-                )));
-            }
+            _ => return Err(DataPlaneError::InvalidRequest("get target".into())),
         });
     }
     Ok(GetResponse {

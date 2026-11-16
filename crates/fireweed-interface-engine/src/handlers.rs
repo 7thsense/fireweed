@@ -11,18 +11,42 @@ use crate::reads;
 use crate::state::*;
 use crate::validate;
 
-/// What an implementation reports for durability.
+/// The durability levels an implementation acknowledges at.
 #[derive(Clone, Copy, Debug)]
 pub struct Profile {
-    pub durability: DurabilityLevel,
-    pub max_durability: DurabilityLevel,
+    /// Ascending, non-empty: the levels a commit can be acknowledged at.
+    pub offered: &'static [DurabilityLevel],
+    /// The level used when a request names none.
+    pub default_durability: DurabilityLevel,
+}
+
+impl Profile {
+    pub fn min(&self) -> DurabilityLevel {
+        self.offered[0]
+    }
+
+    pub fn max(&self) -> DurabilityLevel {
+        self.offered[self.offered.len() - 1]
+    }
+
+    /// The level a commit is acknowledged at: the lowest offered level at or
+    /// above the request's (or the default). A level above the maximum is
+    /// refused by `check_durability` before this is used.
+    pub fn level(&self, requested: Option<DurabilityLevel>) -> DurabilityLevel {
+        let want = requested.unwrap_or(self.default_durability);
+        self.offered
+            .iter()
+            .copied()
+            .find(|l| *l >= want)
+            .unwrap_or(self.max())
+    }
 }
 
 pub fn check_durability(p: &Profile, min: Option<DurabilityLevel>) -> DpResult<()> {
     match min {
-        Some(l) if l > p.max_durability => Err(DataPlaneError::InvalidRequest(format!(
+        Some(l) if l > p.max() => Err(DataPlaneError::InvalidRequest(format!(
             "min_durability {l:?} above this implementation's maximum ({:?})",
-            p.max_durability
+            p.max()
         ))),
         _ => Ok(()),
     }
@@ -124,7 +148,7 @@ pub fn apply_schema(
 ) -> DpResult<(ApplySchemaResponse, Option<Space>)> {
     check_durability(p, r.min_durability)?;
     validate::schema(&r.schema, &caps.limits, caps)?;
-    let durability = p.durability;
+    let durability = p.level(r.min_durability);
     match existing {
         None => {
             if r.expected_version.is_some() {
@@ -230,6 +254,7 @@ pub fn empty_table(decl: &TableDecl) -> Table {
         decl: decl.clone(),
         rows: BTreeMap::new(),
         hwm: BTreeMap::new(),
+        next_seq: 0,
     }
 }
 
@@ -274,7 +299,7 @@ pub fn enqueue(
     space.next_item_id = next;
     let resp = EnqueueResponse {
         entries,
-        durability: p.durability,
+        durability: p.level(r.header.min_durability),
     };
     record(
         space,
@@ -318,7 +343,7 @@ pub fn claim(
         queue_paused: q.paused,
         scan_limited: false,
         as_of: UtcMillis(t),
-        durability: p.durability,
+        durability: p.level(r.header.min_durability),
     };
     if !q.paused {
         let elig_t = r.eligibility_time.map(|e| e.0).unwrap_or(t);
@@ -426,7 +451,7 @@ pub fn claim_by_item_ids(
     space.next_token = tok;
     let resp = ClaimByItemIdsResponse {
         results,
-        durability: p.durability,
+        durability: p.level(r.header.min_durability),
     };
     record(
         space,
@@ -468,7 +493,7 @@ pub fn renew(
         .collect();
     let resp = RenewResponse {
         entries,
-        durability: p.durability,
+        durability: p.level(r.header.min_durability),
     };
     record(
         space,
@@ -504,7 +529,7 @@ pub fn finalize(
         .collect();
     let resp = FinalizeResponse {
         entries,
-        durability: p.durability,
+        durability: p.level(r.header.min_durability),
     };
     record(
         space,
@@ -576,7 +601,11 @@ pub fn commit(
     let resp = CommitResponse {
         status,
         as_of: UtcMillis(t),
-        durability: if r.dry_run { None } else { Some(p.durability) },
+        durability: if r.dry_run {
+            None
+        } else {
+            Some(p.level(r.header.min_durability))
+        },
         ops,
         failure,
         continuation: if status == CommitStatus::Committed {
@@ -658,8 +687,8 @@ pub fn commit_objects(r: &CommitRequest) -> BTreeSet<ObjectName> {
             | WriteOp::SetGates { queue, .. }
             | WriteOp::SetQueueState { queue, .. } => Some(queue.clone()),
             WriteOp::PutRows { table, .. } => Some(table.clone()),
-            WriteOp::Append { log, .. } => Some(log.clone()),
             WriteOp::Mutate(m) => Some(m.target.clone()),
+            WriteOp::Assert { target, .. } => Some(target.clone()),
             _ => None,
         })
         .collect()
@@ -851,6 +880,14 @@ fn run_op(
         }
         WriteOp::Mutate(m) => match exec_mutate(space, m, cx) {
             Ok((res, cont)) => Ok((res, cont)),
+            Err((reason, entry, partial)) => Err((partial, reason, entry)),
+        },
+        WriteOp::Assert {
+            target,
+            selection,
+            expect,
+        } => match exec_assert(space, target, selection, *expect, cx) {
+            Ok(res) => Ok((res, None)),
             Err((reason, entry, partial)) => Err((partial, reason, entry)),
         },
         _ => Err((

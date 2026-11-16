@@ -1,7 +1,7 @@
 //! In-memory implementation of the Fireweed data-plane interface (API-006).
 //!
-//! `Process` durability, `Immediate` visibility, `SingleProcess` sharing.
-//! Shapes: queues and tables. Event logs, blobs, queue history, cohorts and
+//! `FireAndForget` durability, `Immediate` visibility, `SingleProcess` sharing.
+//! Shapes: queues and tables (including `Sequence` tables). Cohorts and
 //! group batching are reported unsupported (`capabilities()`, and
 //! `apply_schema` fails with `FeatureUnsupported`).
 //!
@@ -12,20 +12,19 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use bytes::Bytes;
 use fireweed_interface::*;
 use fireweed_interface_engine::Space;
 use fireweed_interface_engine::handlers::{self, Profile};
 
 const PROFILE: Profile = Profile {
-    durability: DurabilityLevel::Process,
-    max_durability: DurabilityLevel::Process,
+    offered: &[DurabilityLevel::FireAndForget],
+    default_durability: DurabilityLevel::FireAndForget,
 };
 
 pub struct MemoryDataPlane {
     clock: Arc<dyn Clock>,
     limits: ImplementationLimits,
-    spaces: Mutex<BTreeMap<SpaceKey, Space>>,
+    spaces: Arc<Mutex<BTreeMap<SpaceKey, Space>>>,
 }
 
 pub fn default_limits() -> ImplementationLimits {
@@ -41,7 +40,6 @@ pub fn default_limits() -> ImplementationLimits {
         max_body_bytes: 2 << 20,
         max_value_bytes: 256 << 10,
         max_set_values: 128,
-        max_blob_bytes: 0,
         max_dry_run_count: 100_000,
         max_read_rows: 1000,
         max_claim_batch_size: 1000,
@@ -60,7 +58,17 @@ impl MemoryDataPlane {
         Self {
             clock,
             limits,
-            spaces: Mutex::new(BTreeMap::new()),
+            spaces: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    /// Another handle on the same in-memory storage, with its own clock.
+    /// Requests from both handles are serialized on one lock.
+    pub fn peer(&self, clock: Arc<dyn Clock>) -> Self {
+        Self {
+            clock,
+            limits: self.limits,
+            spaces: self.spaces.clone(),
         }
     }
 
@@ -102,7 +110,7 @@ impl MemoryDataPlane {
 impl DataPlane for MemoryDataPlane {
     fn guarantees(&self) -> Guarantees {
         Guarantees {
-            durability: DurabilityLevel::Process,
+            durability: DurabilityLevel::FireAndForget,
             new_work_visibility: Visibility::Immediate,
             sharing: Sharing::SingleProcess,
         }
@@ -110,7 +118,7 @@ impl DataPlane for MemoryDataPlane {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            max_durability: DurabilityLevel::Process,
+            max_durability: DurabilityLevel::FireAndForget,
             shapes: [ShapeKind::Queue, ShapeKind::Table].into_iter().collect(),
             queue_features: [
                 QueueFeature::DynamicGates,
@@ -119,7 +127,6 @@ impl DataPlane for MemoryDataPlane {
             ]
             .into_iter()
             .collect(),
-            queue_history: false,
             priority_kinds: [PriorityKind::Int64, PriorityKind::Timestamp]
                 .into_iter()
                 .collect(),
@@ -199,29 +206,11 @@ impl DataPlane for MemoryDataPlane {
         Self::ready(self.read_only(&r.space, |sp, t| handlers::read(sp, t, &self.limits, &r)))
     }
 
-    fn read_log(&self, _r: ReadLogRequest) -> DpFuture<'_, ReadLogResponse> {
-        Self::ready(Err(DataPlaneError::FeatureUnsupported(Unsupported::Shape(
-            ShapeKind::EventLog,
-        ))))
-    }
-
     fn metrics(&self, r: MetricsRequest) -> DpFuture<'_, QueueMetrics> {
         Self::ready(self.read_only(&r.space, |sp, t| handlers::metrics(sp, t, &r)))
     }
 
     fn discover_active_scopes(&self, r: DiscoverRequest) -> DpFuture<'_, DiscoverResponse> {
         Self::ready(self.read_only(&r.space, |sp, t| Ok(handlers::discover(sp, t, &r))))
-    }
-
-    fn put_blob(&self, _r: PutBlobRequest) -> DpFuture<'_, PutBlobResponse> {
-        Self::ready(Err(DataPlaneError::FeatureUnsupported(Unsupported::Shape(
-            ShapeKind::Blob,
-        ))))
-    }
-
-    fn get_blob(&self, _r: GetBlobRequest) -> DpFuture<'_, Bytes> {
-        Self::ready(Err(DataPlaneError::FeatureUnsupported(Unsupported::Shape(
-            ShapeKind::Blob,
-        ))))
     }
 }

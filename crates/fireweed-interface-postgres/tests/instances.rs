@@ -22,11 +22,8 @@ fn schema() -> SpaceSchema {
             spec: QueueSpec::basic(PriorityKind::Int64),
             body: BodyKind::Json,
             fields: vec![],
-            history: None,
         }],
         tables: vec![],
-        event_logs: vec![],
-        blobs: None,
         reads: vec![],
     }
 }
@@ -70,7 +67,6 @@ fn fireweed_interface_memory_limits() -> ImplementationLimits {
         max_body_bytes: 1 << 20,
         max_value_bytes: 256 << 10,
         max_set_values: 128,
-        max_blob_bytes: 0,
         max_dry_run_count: 100_000,
         max_read_rows: 1000,
         max_claim_batch_size: 1000,
@@ -105,7 +101,7 @@ fn committed_state_survives_a_new_instance() {
             on_key_conflict: KeyConflict::Duplicate,
         }))
         .unwrap();
-        assert_eq!(r.durability, DurabilityLevel::Local);
+        assert_eq!(r.durability, DurabilityLevel::Durable);
     }
     let b = open(&url, &name, &clock);
     let c = block_on(b.claim(ClaimRequest::new(

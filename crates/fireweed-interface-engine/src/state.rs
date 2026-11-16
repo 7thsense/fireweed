@@ -116,6 +116,8 @@ pub struct Table {
     pub rows: BTreeMap<Vec<KeyVal>, Row>,
     /// Per-key version high-water mark and deletion time.
     pub hwm: BTreeMap<Vec<KeyVal>, (u64, i64)>,
+    /// `KeyAssignment::Sequence`: the last key assigned (0 before the first).
+    pub next_seq: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -216,7 +218,13 @@ pub fn queue_index(decl: &QueueDecl, f: &FieldName) -> Option<IndexKind> {
 
 pub fn table_index(decl: &TableDecl, f: &FieldName) -> Option<IndexKind> {
     if decl.key.first() == Some(f) {
-        return Some(if decl.key.len() == 1 {
+        // A single-field key is unique; declaring it `Range` (as a
+        // `Sequence` table's key usually is) also allows range access.
+        let declared_range = decl
+            .fields
+            .iter()
+            .any(|d| &d.name == f && d.index == IndexHint::Range);
+        return Some(if decl.key.len() == 1 && !declared_range {
             IndexKind::Unique
         } else {
             IndexKind::Range
@@ -326,9 +334,19 @@ pub fn settle(space: &mut Space, t: i64) {
                 && let Some(l) = &it.lease
                 && l.expires_at <= t
             {
-                // Lease expiry: pending, token stale, item_version unchanged.
-                it.state = St::Pending;
+                // Lease expiry: token stale, item_version unchanged. The
+                // item returns to pending, unless its claims have used up
+                // `max_attempts`: then it fails at the expiry instant, so a
+                // worker that crashes on it every time cannot loop forever.
+                let at = l.expires_at;
                 it.lease = None;
+                if it.attempts >= spec.max_attempts {
+                    it.state = St::Failed;
+                    it.terminal_at = Some(at);
+                    it.code = Some("attempts-exhausted".into());
+                } else {
+                    it.state = St::Pending;
+                }
             }
             if let Some(ta) = it.terminal_at {
                 // Terminal retention ends addressability; the item becomes a

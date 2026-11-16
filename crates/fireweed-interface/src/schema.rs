@@ -15,9 +15,6 @@ pub struct SpaceSchema {
     pub request_id_retention_ms: u64,
     pub queues: Vec<QueueDecl>,
     pub tables: Vec<TableDecl>,
-    pub event_logs: Vec<EventLogDecl>,
-    /// `None`: the space has no blob store.
-    pub blobs: Option<BlobPolicy>,
     pub reads: Vec<ReadDecl>,
 }
 
@@ -28,6 +25,9 @@ pub struct FieldDecl {
     pub nullable: bool,
     pub source: FieldSource,
     pub index: IndexHint,
+    /// How a write may change the field on an existing row (tables only).
+    #[serde(default)]
+    pub merge: MergeRule,
 }
 
 impl FieldDecl {
@@ -38,8 +38,29 @@ impl FieldDecl {
             nullable,
             source: FieldSource::Stored,
             index,
+            merge: MergeRule::Any,
         }
     }
+
+    pub fn with_merge(mut self, merge: MergeRule) -> Self {
+        self.merge = merge;
+        self
+    }
+}
+
+/// A declared merge rule on a stored, non-key table field. A write that
+/// breaks it rejects with `MergeRuleViolated`, unless it is a `Mutate` with
+/// `override_merge_rules` (an explicit lift).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MergeRule {
+    /// Any change.
+    #[default]
+    Any,
+    /// Sets (`TextSet`): the new value contains the old one.
+    AddOnly,
+    /// `Int`, `Float`, `Timestamp`: the new value is not less than the old.
+    NonDecreasing,
 }
 
 #[non_exhaustive]
@@ -72,8 +93,6 @@ pub struct QueueDecl {
     pub spec: QueueSpec,
     pub body: BodyKind,
     pub fields: Vec<FieldDecl>,
-    /// An event log receiving transition history.
-    pub history: Option<ObjectName>,
 }
 
 #[non_exhaustive]
@@ -159,6 +178,24 @@ pub struct TableDecl {
     /// Includes the key fields.
     pub fields: Vec<FieldDecl>,
     pub expiry: Option<RowExpiry>,
+    /// Who chooses the key. `Sequence` makes an append-only table.
+    #[serde(default)]
+    pub key_assignment: KeyAssignment,
+}
+
+/// Who chooses a table's key.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyAssignment {
+    /// Writers supply every key field.
+    #[default]
+    Caller,
+    /// The key is one non-nullable `Int` field that the implementation
+    /// assigns: 1, 2, 3, ... per table, gapless in commit order, never
+    /// reused. Writers omit it. Rows are immutable (no `Set`); `Retire` and
+    /// row expiry remove them. Readers page with a declared read ranged on
+    /// the key.
+    Sequence,
 }
 
 #[non_exhaustive]
@@ -169,24 +206,10 @@ pub enum RowExpiry {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct EventLogDecl {
-    pub name: ObjectName,
-    pub partition_key: FieldName,
-    pub fields: Vec<FieldDecl>,
-    pub body: BodyKind,
-    pub retention_ms: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BlobPolicy {
-    pub orphan_grace_ms: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReadDecl {
     pub name: ReadName,
     pub version: u32,
-    /// A queue, table or event log.
+    /// A queue or table.
     pub source: ObjectName,
     pub params: Vec<(ParamName, ScalarType)>,
     /// The index rule applies.

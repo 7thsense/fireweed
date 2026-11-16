@@ -12,7 +12,7 @@ use crate::ids::{
     ObjectName, PageToken, ParamName, ReadName, RequestId, SpaceKey, UtcMillis, WorkerId,
 };
 use crate::schema::SpaceSchema;
-use crate::value::{BlobRef, Value};
+use crate::value::Value;
 
 pub type Params = BTreeMap<ParamName, Value>;
 /// Canonical JSON scalars by key.
@@ -134,6 +134,9 @@ pub struct EntryResult {
     pub version: Option<u64>,
     /// Claim, renew, reassign.
     pub lease: Option<NewLease>,
+    /// `PutRows` into a `Sequence` table: the key the implementation assigned.
+    #[serde(default)]
+    pub row_key: Option<Vec<Value>>,
 }
 
 impl EntryResult {
@@ -144,6 +147,7 @@ impl EntryResult {
             superseded_item_id: None,
             version: None,
             lease: None,
+            row_key: None,
         }
     }
 }
@@ -173,12 +177,13 @@ pub enum EntryStatus {
     Purged,
     Inserted,
     Deleted,
-    Appended,
     Skipped,
     Inapplicable,
     NotFound,
     Conflict,
-    UniqueViolation { field: FieldName },
+    UniqueViolation {
+        field: FieldName,
+    },
     StaleLease,
     VersionMismatch,
     Terminal,
@@ -186,11 +191,18 @@ pub enum EntryStatus {
     NotEligible,
     Leased,
     CohortFailed,
-    MissingField { field: FieldName },
+    MissingField {
+        field: FieldName,
+    },
     ValueTooLarge,
-    BlobMissing,
+    /// A write breaks the field's declared merge rule.
+    MergeRuleViolated {
+        field: FieldName,
+    },
     EvaluationFault(EvalError),
-    Invalid { reason: String },
+    Invalid {
+        reason: String,
+    },
 }
 
 impl EntryStatus {
@@ -207,7 +219,7 @@ impl EntryStatus {
                 | EntryStatus::CohortFailed
                 | EntryStatus::MissingField { .. }
                 | EntryStatus::ValueTooLarge
-                | EntryStatus::BlobMissing
+                | EntryStatus::MergeRuleViolated { .. }
                 | EntryStatus::EvaluationFault(_)
                 | EntryStatus::Invalid { .. }
         )
@@ -508,11 +520,15 @@ pub enum WriteOp {
         rows: Vec<BTreeMap<FieldName, Value>>,
         on_conflict: RowConflict,
     },
-    Append {
-        log: ObjectName,
-        entries: Vec<LogEntry>,
-    },
     Mutate(Mutate),
+    /// A guard: counts the records `selection` matches and rejects the group
+    /// with `MatchExpectUnmet` if the count is outside `expect`. Never writes
+    /// and never changes a version or an expiry.
+    Assert {
+        target: ObjectName,
+        selection: Selection,
+        expect: MatchExpect,
+    },
 }
 
 #[non_exhaustive]
@@ -522,12 +538,6 @@ pub enum RowConflict {
     Skip,
     Replace,
     Merge,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LogEntry {
-    pub fields: BTreeMap<FieldName, Value>,
-    pub body: Option<Body>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -542,6 +552,10 @@ pub struct Mutate {
     /// Queues only.
     pub lease_policy: LeasePolicy,
     pub chunk: Option<Chunk>,
+    /// Tables only: this `Mutate` may break declared merge rules (an
+    /// explicit lift).
+    #[serde(default)]
+    pub override_merge_rules: bool,
 }
 
 impl Mutate {
@@ -554,6 +568,7 @@ impl Mutate {
             expect: None,
             lease_policy: LeasePolicy::Skip,
             chunk: None,
+            override_merge_rules: false,
         }
     }
 }
@@ -772,9 +787,6 @@ pub enum GetTarget {
     QueueState {
         queue: ObjectName,
     },
-    Blob {
-        blob: BlobRef,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -789,7 +801,6 @@ pub enum GetResult {
     Item(ItemView),
     Row(RowView),
     QueueState(QueueStateView),
-    Blob { size: u64, media_type: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -856,38 +867,6 @@ pub struct ReadResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ReadLogRequest {
-    pub space: SpaceKey,
-    pub log: ObjectName,
-    pub from: LogCursor,
-    pub max_entries: u32,
-}
-
-#[non_exhaustive]
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum LogCursor {
-    Start,
-    After(u64),
-    Partition { key: Value, after: Option<u64> },
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ReadLogResponse {
-    pub entries: Vec<LogEntryView>,
-    pub next: LogCursor,
-    pub earliest_retained: Option<u64>,
-    pub as_of: UtcMillis,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LogEntryView {
-    pub seq: u64,
-    pub appended_at: UtcMillis,
-    pub fields: BTreeMap<FieldName, Value>,
-    pub body: Option<Body>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MetricsRequest {
     pub space: SpaceKey,
     pub queue: ObjectName,
@@ -940,24 +919,4 @@ pub struct ActiveScope {
     pub oldest_eligible_age_ms: u64,
     pub eligible_count: Option<u64>,
     pub observed_at: UtcMillis,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PutBlobRequest {
-    pub space: SpaceKey,
-    pub bytes: Bytes,
-    pub media_type: String,
-    pub min_durability: Option<DurabilityLevel>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PutBlobResponse {
-    pub blob: BlobRef,
-    pub durability: DurabilityLevel,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct GetBlobRequest {
-    pub space: SpaceKey,
-    pub blob: BlobRef,
 }

@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use fireweed_interface::{DataPlane, ImplementationLimits, ManualClock};
-use fireweed_interface_conformance::{Status, run};
+use fireweed_interface_conformance::{Instance, Status, run};
 use fireweed_interface_postgres::PostgresDataPlane;
 
 fn test_limits() -> ImplementationLimits {
@@ -23,7 +23,6 @@ fn test_limits() -> ImplementationLimits {
         max_body_bytes: 4096,
         max_value_bytes: 256 << 10,
         max_set_values: 128,
-        max_blob_bytes: 0,
         max_dry_run_count: 100_000,
         max_read_rows: 1000,
         max_claim_batch_size: 1000,
@@ -39,8 +38,13 @@ fn rule_pinning_tests() {
         eprintln!("FIREWEED_PG_TEST_URL is not set; skipping the PostgreSQL conformance run");
         return;
     };
-    let factory = |clock: Arc<ManualClock>| -> Arc<dyn DataPlane> {
-        Arc::new(PostgresDataPlane::isolated(&url, clock, test_limits()).expect("connect"))
+    let factory = |clock: Arc<ManualClock>| -> Instance {
+        let plane =
+            Arc::new(PostgresDataPlane::isolated(&url, clock, test_limits()).expect("connect"));
+        let primary = plane.clone();
+        Instance::new(plane).with_peer(Arc::new(move |clock: Arc<ManualClock>| {
+            Arc::new(primary.peer(clock).expect("connect a peer")) as Arc<dyn DataPlane>
+        }))
     };
     let report = run(&factory);
     println!("{}", report.summary());

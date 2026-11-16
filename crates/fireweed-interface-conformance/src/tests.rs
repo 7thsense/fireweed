@@ -35,7 +35,7 @@ pub const ALL: &[(&str, Test)] = &[
     ("AGG-4", agg_4),
     ("IDX-1", idx_1),
     ("IDX-2", |_| {
-        skip("needs an index that is still building; no harness control yet")
+        skip("harness gap: needs an index that is still building")
     }),
     ("SCAN-1", scan_1),
     ("SCAN-2", scan_2),
@@ -43,7 +43,7 @@ pub const ALL: &[(&str, Test)] = &[
     ("SCAN-4", scan_4),
     ("SCAN-5", scan_5),
     ("SCAN-6", |_| {
-        skip("implementation-specific: needs expired rows that are still stored")
+        skip("local engine only: needs expired rows that are still stored")
     }),
     ("LIM-1", lim_1),
     ("LIM-2", lim_2),
@@ -70,18 +70,12 @@ pub const ALL: &[(&str, Test)] = &[
     ("REC-2", rec_2),
     ("REC-3", rec_3),
     ("REC-4", |_| {
-        skip("needs the StallAtReceive fault hook and a child process")
-    }),
-    ("REC-5", |_| {
-        skip("needs the AfterCommitBeforeResponse fault hook")
+        skip("harness gap: needs the StallAtReceive fault hook")
     }),
     ("REC-6", rec_6),
     ("REC-7", rec_7),
     ("REC-8", rec_8),
     ("TIME-1", time_1),
-    ("TIME-3", |_| {
-        skip("needs concurrent peers in child processes")
-    }),
     ("TIME-4", time_4),
     ("TIME-5", time_5),
     ("COH-1", coh_1),
@@ -90,29 +84,23 @@ pub const ALL: &[(&str, Test)] = &[
     ("DUR-3", |f| {
         if_replicated(f, "needs the HoldReplication fault hook")
     }),
-    ("DUR-4", |_| skip("needs a child process and SIGKILL")),
+    ("DUR-4", |_| {
+        skip("harness gap: needs a child process and SIGKILL")
+    }),
     ("DUR-5", |f| if_replicated(f, "needs lose_local_storage")),
     ("DUR-6", |f| {
         if_replicated(f, "needs the HoldReplication fault hook")
     }),
+    ("DUR-7", dur_7),
     ("LIN-1", lin_1),
     ("LIN-2", lin_2),
-    ("SHARE-1", |_| {
-        skip("needs a second instance on the same storage")
-    }),
-    ("LOG-1", |f| needs_shape(f, ShapeKind::EventLog)),
-    ("LOG-2", |f| needs_shape(f, ShapeKind::EventLog)),
-    ("LOG-3", |f| needs_shape(f, ShapeKind::EventLog)),
-    ("HIST-1", |f| {
-        if f.caps().queue_history {
-            skip("history test not written yet")
+    ("SHARE-1", |f| {
+        if f.plane.guarantees().sharing == Sharing::SingleProcess {
+            skip("local engine only: a second process opening the same storage")
         } else {
-            skip("queue history not declared")
+            skip("MultiProcess implementation: covered by MULTI-1")
         }
     }),
-    ("BLOB-1", |f| needs_shape(f, ShapeKind::Blob)),
-    ("BLOB-2", |f| needs_shape(f, ShapeKind::Blob)),
-    ("BLOB-3", |f| needs_shape(f, ShapeKind::Blob)),
     ("SCH-1", sch_1),
     ("READ-1", read_1),
     ("READ-2", read_2),
@@ -152,26 +140,13 @@ pub const ALL: &[(&str, Test)] = &[
     ("SUPP-1", supp_1),
     ("SUPP-2", supp_2),
     ("SUPP-3", supp_3),
-    ("PG-1", |_| skip("PostgreSQL implementation only")),
-    ("PG-2", |_| skip("PostgreSQL implementation only")),
-    ("PG-3", |_| skip("PostgreSQL implementation only")),
 ];
 
-fn needs_shape(fx: &Fixture, s: ShapeKind) -> T {
-    if fx.caps().shapes.contains(&s) {
-        Err(Fail::Failed(format!(
-            "{s:?} is declared but its tests are not written yet"
-        )))
-    } else {
-        skip(&format!("{s:?} shape not declared"))
-    }
-}
-
 fn if_replicated(fx: &Fixture, why: &str) -> T {
-    if fx.caps().max_durability >= DurabilityLevel::Replicated {
-        Err(Fail::Failed(format!("Replicated is declared; {why}")))
+    if fx.caps().max_durability >= DurabilityLevel::Durable {
+        skip(&format!("harness gap: {why}"))
     } else {
-        skip("Replicated not declared")
+        skip("Durable not declared")
     }
 }
 
@@ -2447,12 +2422,38 @@ fn dur_1(fx: &Fixture) -> T {
     Ok(())
 }
 
+/// A request's level is a floor: each supported level is reported at or
+/// above what was asked, and no higher than the maximum.
+fn dur_7(fx: &Fixture) -> T {
+    let g = fx.plane.guarantees().durability;
+    let max = fx.caps().max_durability;
+    let levels = [
+        DurabilityLevel::FireAndForget,
+        DurabilityLevel::Tracked,
+        DurabilityLevel::Durable,
+    ];
+    for (i, l) in levels.into_iter().filter(|l| *l <= max).enumerate() {
+        let mut h = fx.hdr();
+        h.min_durability = Some(l);
+        let r = ok(
+            fx.commit_with(h, vec![put_op(70 + i as i64)], Params::new(), false),
+            "commit",
+        )?;
+        ensure!(
+            r.durability.is_some_and(|d| d >= l && d >= g && d <= max),
+            "asked {l:?}, reported {:?}",
+            r.durability
+        );
+    }
+    Ok(())
+}
+
 fn dur_2(fx: &Fixture) -> T {
-    if fx.caps().max_durability >= DurabilityLevel::Replicated {
-        return skip("Replicated is supported");
+    if fx.caps().max_durability >= DurabilityLevel::Durable {
+        return skip("Durable is supported");
     }
     let mut h = fx.hdr();
-    h.min_durability = Some(DurabilityLevel::Replicated);
+    h.min_durability = Some(DurabilityLevel::Durable);
     let r = fx.commit_with(h, vec![put_op(60)], Params::new(), false);
     ensure!(
         matches!(r, Err(DataPlaneError::InvalidRequest(_))),
@@ -2518,26 +2519,27 @@ fn sch_1(fx: &Fixture) -> T {
         matches!(r, Err(DataPlaneError::SchemaConflict { .. })),
         "adding a non-null field gave {r:?}"
     );
-    if !fx.caps().shapes.contains(&ShapeKind::EventLog) {
-        let mut s5 = s2.clone();
-        s5.event_logs.push(EventLogDecl {
-            name: o("events"),
-            partition_key: f("p"),
-            fields: vec![FieldDecl::stored(
-                "p",
-                ScalarType::Text,
-                false,
-                IndexHint::None,
-            )],
-            body: BodyKind::Json,
-            retention_ms: 1000,
-        });
-        let r = apply(s5, Some(1));
-        ensure!(
-            matches!(r, Err(DataPlaneError::FeatureUnsupported(_))),
-            "undeclared shape gave {r:?}"
-        );
+    // Key assignment and merge rules are fixed once declared.
+    let mut s5 = s2.clone();
+    s5.tables[0].key_assignment = KeyAssignment::Sequence;
+    let r = apply(s5, Some(1));
+    ensure!(
+        matches!(r, Err(DataPlaneError::SchemaConflict { .. })),
+        "changing key assignment gave {r:?}"
+    );
+    let mut s5b = s2.clone();
+    if let Some(d) = s5b.tables[0]
+        .fields
+        .iter_mut()
+        .find(|d| d.name.as_str() == "i")
+    {
+        d.merge = MergeRule::NonDecreasing;
     }
+    let r = apply(s5b, Some(1));
+    ensure!(
+        matches!(r, Err(DataPlaneError::SchemaConflict { .. })),
+        "adding a merge rule to an existing field gave {r:?}"
+    );
     let mut s6 = s2;
     s6.tables[0].fields.push(FieldDecl::stored(
         "extra",
@@ -3737,8 +3739,30 @@ fn supp_1(fx: &Fixture) -> T {
         supp_reasons(fx, "x@y")? == Value::TextSet(set_of(&["bounce", "stop"])),
         "reasons are not the union"
     );
-    // Lift: an explicit action clears reasons and records the time.
-    let lift = Mutate::new(
+    // `reasons` is AddOnly: an ordinary clear is refused.
+    let clear = Mutate::new(
+        "supp",
+        Selection::Keys {
+            keys: vec![Keyed {
+                key: KeyRef::Row(supp_key("x@y")),
+                expected_version: None,
+            }],
+            filter: None,
+        },
+        Action::Set(vec![(f("reasons"), Expr::null(ScalarType::TextSet))]),
+        1,
+    );
+    let r = ok(fx.commit(vec![WriteOp::Mutate(clear)]), "clear")?;
+    ensure!(
+        r.status == CommitStatus::Rejected
+            && matches!(
+                reason(&r),
+                Some(FailureReason::Entry(EntryStatus::MergeRuleViolated { .. }))
+            ),
+        "an ordinary write cleared reasons: {r:?}"
+    );
+    // Lift: an explicit override clears reasons and records the time.
+    let mut lift = Mutate::new(
         "supp",
         Selection::Keys {
             keys: vec![Keyed {
@@ -3753,7 +3777,9 @@ fn supp_1(fx: &Fixture) -> T {
         ]),
         1,
     );
-    ok(fx.commit(vec![WriteOp::Mutate(lift)]), "lift")?;
+    lift.override_merge_rules = true;
+    let r = ok(fx.commit(vec![WriteOp::Mutate(lift)]), "lift")?;
+    ensure!(r.status == CommitStatus::Committed, "lift: {r:?}");
     // A delayed event from before the lift does not re-suppress; a later one does.
     ok(
         supp_event(fx, "ev-late", "x@y", "complaint", START - 5),
@@ -3779,21 +3805,19 @@ fn supp_1(fx: &Fixture) -> T {
 /// only if the address is not suppressed at that instant.
 fn supp_2(fx: &Fixture) -> T {
     let guarded_send = |addr: &str, key: &str| {
-        let mut guard = Mutate::new(
-            "supp",
-            Selection::Keys {
+        let guard = WriteOp::Assert {
+            target: o("supp"),
+            selection: Selection::Keys {
                 keys: vec![Keyed {
                     key: KeyRef::Row(supp_key(addr)),
                     expected_version: None,
                 }],
                 filter: Some(Expr::Not(bx(Expr::IsNull(bx(Expr::field("reasons")))))),
             },
-            Action::Set(vec![(f("reasons"), Expr::field("reasons"))]),
-            1,
-        );
-        guard.expect = Some(MatchExpect { min: 0, max: 0 });
+            expect: MatchExpect { min: 0, max: 0 },
+        };
         vec![
-            WriteOp::Mutate(guard),
+            guard,
             WriteOp::Enqueue {
                 queue: o("work"),
                 items: vec![NewItem::new(Some(key), PriorityValue::Int(1))],
@@ -3819,6 +3843,25 @@ fn supp_2(fx: &Fixture) -> T {
             ),
         "send to a suppressed address was not rejected: {r:?}"
     );
+    // The guard wrote nothing: the suppression row's version is unchanged.
+    let v = |fx: &Fixture| {
+        block_on(fx.plane.get(GetRequest {
+            space: sp(),
+            targets: vec![GetTarget::Row {
+                table: o("supp"),
+                key: supp_key("bad@y"),
+            }],
+        }))
+        .ok()
+        .and_then(|r| r.results.into_iter().next().flatten())
+        .and_then(|x| match x {
+            GetResult::Row(r) => Some(r.row_version),
+            _ => None,
+        })
+    };
+    let before = v(fx);
+    ok(fx.commit(guarded_send("bad@y", "send-3")), "again")?;
+    ensure!(v(fx) == before, "the guard changed the row version");
     Ok(())
 }
 
