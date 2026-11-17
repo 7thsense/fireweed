@@ -18,10 +18,11 @@ This is the target design and its acceptance contract. The public PostgreSQL pat
 
 ## Scope
 
-One queue interface supports PostgreSQL as the durable baseline and S3 object-log
-with stock Turso as the derived projection. API-007 governs all operations.
-Workflow state and new work commit with claimed updates. Snorri has one adapter;
-storage choice affects construction, durability mechanisms and measured cost.
+ADR-027 and API-008 govern. Consumers declare queues and tables in a
+schema document and change them with programs of typed statements, one
+transaction each. An executor creates real tables and indexes and runs each
+statement as plain SQL; PostgreSQL 18 is first, the local engine follows.
+Workflow state and new work commit with claimed updates.
 
 ## Level 1: System Context
 
@@ -48,6 +49,8 @@ storage choice affects construction, durability mechanisms and measured cost.
 
 | Module | Responsibility / Owned Types | Public API | Allowed Dependencies | Forbidden Dependencies |
 |---|---|---|---|---|
+| `fireweed-dsl` | API-008 schema and program documents, checks against the schema, limits and fingerprints | API-008 types, `check` | Serialization, hashing, YAML/JSON parsing | Database drivers and executors |
+| `fireweed-dsl-postgres` | The PostgreSQL executor: DDL from a schema, one SQL statement per DSL statement, request records, sweep | `apply_schema`, `get_schema`, `execute`, `execute_batch`, `sweep` | `fireweed-dsl`, PostgreSQL driver | In-process state between calls; the queue crates below |
 | `fireweed-core` | Queue values, schemas, limits, validation and fingerprints | API-007 DTOs | Serialization, bytes, hashing, pure schema libraries | Backend crates, SQL/object-store SDKs, facade and conformance |
 | `fireweed-engine` | Pure planners, resolved deltas, wire codecs, admission invariants and internal ports | Backend-neutral internal queue port | Core and pure computational/protocol libraries | Facade, PostgreSQL/Turso/S3 drivers and persistence adapters |
 | `fireweed-queue-spool` | Bounded scratch storage and whole-worker ownership | Internal admitted spool/worker primitives | Core, engine and local execution/filesystem primitives | Consumer business rules and backend SDKs |
@@ -112,7 +115,8 @@ code does not poll it to obtain the promised result.
 
 ## Decisions and Tradeoffs
 
-ADR-026 establishes the simple atomic interface and PostgreSQL baseline.
+ADR-027 makes the data-plane DSL (API-008) the interface, with PostgreSQL
+as the first executor.
 A shared semantic planner avoids duplicated business rules; native SQL and log
 mechanisms remain backend-owned. A derived Turso projection is replaceable cache
 state, while S3 publication is authority. Both constructors must satisfy the same

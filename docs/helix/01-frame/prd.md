@@ -82,10 +82,10 @@ queue with timestamp ordering as a first-class validation case.
 6. Operators can configure a commit-latency bound for applicable Class A logs and
    understand the resulting tradeoff between latency, batch density, and backing
    store request cost.
-7. Callers can depend on one transaction contract on the public cell
-   (PostgreSQL and S3/object-log × Turso, API-007) without
-   backend-specific choreography. Success commits durable atomic effects on the
-   selected backend; successful later reads and claims cover those acknowledgements.
+7. Callers can depend on one transaction contract, the data-plane DSL
+   (API-008, ADR-027), on every executor without backend-specific
+   choreography. A program commits durable atomic effects; later programs
+   see them.
 
 ### Success Metrics
 
@@ -230,10 +230,12 @@ priority, retry, claim, and state logic with different table shapes.
     connection per queue.
     Aggregate single-node throughput is reported for the declared node;
     multi-node deployment provides aggregate headroom.
-15. API-007 applies identically to PostgreSQL and S3/object-log with Turso.
-    Successful group commits durably and atomically update claimed work, workflow
-    state and next work. Rejected groups have zero effects. Ambiguity resolves
-    through original identity; expired identities cannot authorize reuse.
+15. API-008 applies identically on every executor: PostgreSQL first, then
+    the local engine, which runs the same conformance documents. A program
+    durably and atomically settles claimed work, updates workflow state and
+    inserts next work. Rejected programs have zero effects. Ambiguity resolves
+    through the original request id; requests issued before the horizon are
+    refused (ADR-027 D61).
     Successful later reads and claims cover acknowledgements, including after
     restart/recovery. No consumer transaction or stale-empty polling escape exists.
 16. Applicable Class A log configurations MUST expose an

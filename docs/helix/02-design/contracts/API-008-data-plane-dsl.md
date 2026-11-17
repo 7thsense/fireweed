@@ -8,18 +8,17 @@ ddx:
     - api-operator-repair-contract
     - api-workload-integration-profiles
     - td-resp-wire-adapter
-  status: draft
+  status: accepted
 ---
 
 # API-008: The Fireweed data-plane DSL
 
 **Type**: Document language (schemas and programs) and its PostgreSQL executor
-**Version**: v0 (draft, revision 9)
-**Status**: draft. Proposed by ADR-027. Not normative until ADR-027 is accepted.
+**Version**: v1
+**Status**: accepted (ADR-027 D64).
 **Related**: API-001, API-002, ADR-027, TD-002
 
-Revision 9 replaces revisions 3 to 8. A consumer works with Fireweed in two
-kinds of documents:
+A consumer works with Fireweed in two kinds of documents:
 - a **schema** declares a space's queues, tables and reads, and the
   executor creates real tables and indexes from it;
 - a **program** is a list of typed statements that run against those tables

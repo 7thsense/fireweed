@@ -5,11 +5,11 @@
   "governed_documents": [
     {
       "path": "docs/helix/00-discover/product-vision.md",
-      "sha256": "fc65a815569b4842ea3c7ddf31be51f5e15da51454dbd626502669712afdaf20"
+      "sha256": "30b70d3cf1091db7f59898fc5ef3cfbf1b20ae3d73aa405e18caee8ffce0eb85"
     },
     {
       "path": "docs/helix/01-frame/prd.md",
-      "sha256": "cce11f0a6ede56acc076a3159365e6fb728ce6555017d5122cc828f97da03611"
+      "sha256": "896731c5affc65b6df4a0f43c3cddc16822173b3826d5d628306db92480adefa"
     },
     {
       "path": "docs/helix/02-design/orthogonal-storage-matrix-brief.md",

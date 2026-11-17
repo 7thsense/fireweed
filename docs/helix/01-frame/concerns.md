@@ -65,7 +65,7 @@ These concerns are intentionally not active yet:
 |---------|----------|----------|-----------|
 | `auth` | Real signup/login/session surface | fireweed may first ship as a library or machine-facing service, so human signup/login is not assumed. Service mode uses provider-neutral principal resolution and operation-scoped authorization. | ADR-002 |
 | `multi-tenancy` | Tenant identity derived from authenticated principal | Queue namespace and tenant/account identity may be distinct. The v1 model maps principal -> tenant -> queue -> shard, with tenant keys carried into storage. | ADR-002 |
-| `deployment-topology` | Library-first composition with explicit host ownership | PostgreSQL and S3/Turso share API-007. Hosts own placement; storage publication authority is backend-local. No mandatory PostgreSQL control plane or consumer owner-session protocol. | Architecture, ADR-026 |
+| `deployment-topology` | Library-first composition with explicit host ownership | Every executor runs API-008: PostgreSQL first, then the local engine. Hosts own placement; on the local engine the embedder's control plane grants a space's writer. No consumer owner-session protocol. | Architecture, ADR-027 |
 | `rust-cargo` | Latest stable Rust, Cargo workspace, and strict lint/tooling policy | Rust is selected with a pinned stable toolchain, Cargo workspace boundaries, Tokio service/backend runtime, strict linting, dependency checks, and unsafe denied by default. | ADR-003 |
 | `verification` | Whole-stack evidence for buildable products | For docs-only and pre-implementation artifacts, evidence is document review plus `git diff --check`/placeholder checks. Implementation work must use running-system evidence or a recorded exception. | HELIX verification exception |
 
@@ -107,11 +107,11 @@ Concern adoption defines requirements, not completed qualification. The Architec
 
 | Question | Decision and remaining gate | Governing artifact |
 | --- | --- | --- |
-| One simple consumer boundary? | API-007 atomic claim-group commit includes state/audit/new work. PostgreSQL public path exists; full S3/Turso construction and one Snorri adapter cutover remain pending. | API-007, Snorri contract, current refactor plan |
-| Native eligibility and priority? | Backend filtering precedes selection, with full typed names/keys and collision separation. Wide selectors, whole-claim replay, current renewal and numeric progress require both public suites. | API-007, TP-004 |
+| One simple consumer boundary? | An API-008 program settles claimed work, writes state and audit, and inserts new work in one transaction. The PostgreSQL executor exists; the facade cutover, the local engine and Snorri's and Cayce's adoption remain. | ADR-027, API-008, Snorri contract |
+| Native eligibility and priority? | A claim filters in SQL under the index rule and takes items in due-time, then priority, order with `SKIP LOCKED`. Replay re-reads claimed items. | API-008, ADR-027 |
 | Module ownership? | Pure shared policy, bounded spool, independent native adapters and facade-only composition; explicit legacy exceptions and real manifest/compiler rejection controls. | Architecture, TD-001 |
 | Configuration ownership? | Caller-resolved typed configuration, checked defaults/ranges before I/O, explicit resource caps, independent operational clock and redacted secret handling. Several enforcement/capacity surfaces remain implementation gates. | Construction contract |
 | Telemetry and logs? | Caller-owned export, one route, structured correlation, bounded records/capture/retrieval, redaction/loss disclosure and real receiver tests. OTel pins are explicit; an SDK bridge is not presumed implemented. | Diagnostics contract |
-| Critical protocol assurance? | Backend-neutral abstract history with PostgreSQL transaction and S3 log refinements; positive witnesses, rejecting controls, bounds and code correspondence. Old stale-read/reused-identity models are superseded for API-007. | CONTRACT-006/007, TP-006 |
+| Critical protocol assurance? | Formal obligations for API-008 are not yet written. | ADR-027 |
 | Reliability and scale? | Durable ACK, fresh successful observations, original-genesis recovery and exact counts are mandatory. Full manifest memory/rewrite bounds, live provider faults, settled 10M scale and 1,000 cold plus hot density are outstanding qualification gates. | PRD, TP-002/004/005 |
 | Application migration? | Preserve arbitrary JSON/pins, account/connector/job/campaign filters, pause/suppression/preview, per-item outcomes, visibility and state-version rules in one adapter. Actual consumer acceptance precedes cutover. | Snorri contract, TP-004 |

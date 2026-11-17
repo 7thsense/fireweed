@@ -764,8 +764,8 @@ async fn seq_scans(c: &Client, schema: &str) -> i64 {
 }
 
 /// A claim reads only a handful of claim-index entries, whether the queue is
-/// mostly sleeping or mostly due (review finding: the scan must stop after
-/// `limit` claimable items).
+/// mostly sleeping or mostly due: the scan stops after `limit` claimable
+/// items.
 #[tokio::test]
 async fn claims_read_few_index_entries() {
     let Some((mut c, sp)) = setup("sleepy").await else {
