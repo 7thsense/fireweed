@@ -742,4 +742,5 @@ the resulting rows. They cover:
 - that a key's version after a delete and a reinsert exceeds its old one;
 - that programs in a batch commit, reject or fail independently, and
   replay;
+- that the microsite's example documents run as their pages describe.
 - that a replayed claim re-reads its items, and its record holds no bodies.

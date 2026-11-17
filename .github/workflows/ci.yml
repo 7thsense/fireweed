@@ -1,11 +1,11 @@
 name: ci
 
 # The DSL crates: format, lint, dependency policy, and the executor's tests
-# against PostgreSQL 18 (API-008 §Conformance).
+# against PostgreSQL 18 (API-008 §Conformance). The tests also run the
+# microsite's example documents, so site changes trigger this workflow.
 on:
   pull_request:
     paths-ignore:
-      - docs/site/**
       - SECURITY.md
       - SUPPORT.md
       - CODE_OF_CONDUCT.md
@@ -14,7 +14,6 @@ on:
     branches:
       - main
     paths-ignore:
-      - docs/site/**
       - SECURITY.md
       - SUPPORT.md
       - CODE_OF_CONDUCT.md

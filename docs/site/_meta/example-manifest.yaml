@@ -7,6 +7,10 @@
 # The check parses every document, validates it against API-008's grammar and
 # the shared schema, and fails if a page doesn't match what render_site.py
 # produces from these files.
+#
+# crates/fireweed-dsl-postgres/tests/site_examples.rs runs every document against
+# PostgreSQL 18 and checks the results the notes below describe. Change both
+# together.
 
 schema: schema.yaml
 
