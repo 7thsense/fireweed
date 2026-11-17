@@ -180,6 +180,7 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D54 | Asked "suppression: (a) copies into each workflow space or (b) Cayce-side check at dispatch?": "copies in for performance with a background update of some variety" | Owner via the Cayce session, 2026-11-16 | Adopted. Resolves question 25 as (a). Copies live in each workflow space as Fireweed tables, and Cayce keeps them current from its authoritative list with the propagation in §14. |
 | D55 | Asked "do per-account caps stay in Cayce's Dragonfly (your D45/D49)?": "the configuratino should be in the control plane, so I think that means no." | Owner via the Cayce session, 2026-11-16 | Resolved by D56: only the configuration moves; the counters stay in Dragonfly. |
 | D56 | Asked whether D55 means only the configuration leaves Dragonfly, or the counters too: "Config only, counters stay" | Owner, 2026-11-16 | Adopted. Resolves question 43 as (A). Cap configuration (limits and windows) lives in the control plane. The counters stay in Dragonfly (D45, Cayce ADR-015), outside Fireweed (D49). |
+| D57 | "Fireweed is not really appropriate for a tenant data plane, it's designed for short lifecycle scale-out data (lots of workflows with lots of runs) not a large scale centralized data store. Niflheim is generally that -- entity resolution, profiles and enrichment are all tenant wide and managed by nifleheim." Then: "I think suppression list masters *could* be in the control plane, they aren't high rate of change and they aren't that large." | Owner, 2026-11-16 | Adopted. Fireweed has no tenant data plane. Entity resolution, profiles and enrichment are Niflheim's. The suppression master lives in the control plane, as the source of D54's propagation. |
 
 ## Decision
 
@@ -527,8 +528,9 @@ and ownership.
 
 ### 13. Account-level state
 
-Account-level state is not in any Fireweed space (D53). It lives in one of
-two places:
+Account-level state is not in any Fireweed space (D53). Fireweed holds
+short-lived, scale-out data, many workflows with many runs, and has no
+tenant data plane (D57). Account-level state lives in one of two places:
 - **the control plane**, for small, static state that's fast to read:
   tenants, configuration and campaign definitions;
 - **Niflheim**, for large state that can be slow and delayed: history,
@@ -542,16 +544,13 @@ own design, and each is drafted here for the owner:
    it neither static nor delayed. Decided (D54): copies live in each
    workflow space as a Fireweed table, kept current by a background update
    from Cayce's authoritative list (§14), so send guards read them inside
-   their own space. Where Cayce keeps the authoritative list and its event
-   log is Cayce's choice: its control plane, accepting that the list isn't
-   static.
-2. **Resolved entities, for dedupe.** Mapping a contact to its resolved
-   entity is account-level identity resolution: large, and built
-   elsewhere. Draft: Cayce resolves the entity when it admits a contact,
-   and stamps it on the item as an indexed `entity` field. The dedupe
-   guard then reads only its space, for example "no completed item with
-   this entity" (§14). Where the resolution graph itself lives, and how
-   fresh it must be at admission, is Cayce's design.
+   their own space. The master list, with its per-account event sequence,
+   lives in the control plane (D57). It changes rarely and isn't large.
+2. **Resolved entities, for dedupe.** Entity resolution, profiles and
+   enrichment are tenant-wide and Niflheim's (D57). Cayce resolves the
+   entity when it admits a contact, and stamps it on the item as an
+   indexed `entity` field. The dedupe guard then reads only its space,
+   for example "no completed item with this entity" (§14).
 3. **Per-contact send caps.** These are high-rate, real-time counters
    shared across a tenant's workflows. Their configuration (limits and
    windows) lives in the control plane, and the counters stay in Dragonfly
@@ -611,7 +610,7 @@ the space is created.
 keeps every workflow space's suppression copy current. Cayce runs it with
 ordinary programs; Fireweed needs nothing new.
 
-- **The source.** Cayce's authoritative list records each change
+- **The source.** The master list in the control plane (D57) records each change
   (suppress, lift) as an event with a per-account sequence number `seq`
   that only increases.
 - **The copy.** Each workflow space declares two tables:
@@ -783,6 +782,27 @@ Fireweed's: configuration in the control plane, counters in Dragonfly
 
     The run layout measurement (question 31) decides between bounded
     deletes and partitions.
+
+44. **Policies across workflows.** Rules such as "a contact is in at most
+    N campaigns at once", a global holdout group, or "don't enrol someone
+    already in a competing journey" need tenant-wide state that is current
+    at admission. No Snorri or Cayce need asks for them today. Draft: none
+    in v1. If the owner wants them, they are the one reason to design
+    live tenant-wide state, outside Fireweed (D57).
+45. **Routing contact-keyed inbound events.** A provider event about a
+    sent message reaches its space without lookups, because each send tags
+    the provider message with its workflow, space and instance. An inbound
+    reply or STOP, though, arrives keyed only by contact, and may be
+    awaited by instances in several workflows. The options:
+    - **(a) fan-out:** offer the event to each of the tenant's active
+      workflow spaces, where an indexed await field selects the instances.
+      There's no stored routing state, and the cost grows with the number
+      of active workflows.
+    - **(b) a routing index:** contact to spaces with live instances. It
+      changes with every enrolment and exit, and fits neither the control
+      plane nor Niflheim.
+
+    Draft: (a), measured before considering (b).
 
 ## Risks
 
