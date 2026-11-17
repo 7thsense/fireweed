@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "Fireweed's data-plane DSL (API-006): schema and program documents, and the checker that resolves a program against a schema."
+description = "Fireweed's data-plane DSL (API-008): schema and program documents, and the checker that resolves a program against a schema."
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

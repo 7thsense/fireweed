@@ -1,4 +1,4 @@
-//! PostgreSQL executor for Fireweed's data-plane DSL (API-006).
+//! PostgreSQL executor for Fireweed's data-plane DSL (API-008).
 //!
 //! [`apply_schema`] creates a space's tables and indexes from its schema.
 //! [`execute`] runs a program as one transaction of plain SQL statements
@@ -55,6 +55,7 @@ pub(crate) async fn rows(
 
 /// A space as stored in the catalog.
 pub(crate) struct Space {
+    pub id: i64,
     pub schema_name: String,
     pub schema: std::sync::Arc<Schema>,
 }
@@ -93,7 +94,7 @@ pub async fn get_schema(c: &Client, tenant: &str, space: &str) -> Result<Option<
     Ok(load(c, tenant, space).await?.map(|(_, s)| s))
 }
 
-/// Creates a space, or changes its schema (API-006 §Changing a schema).
+/// Creates a space, or changes its schema (API-008 §Changing a schema).
 /// `expected` is the version the caller expects to replace: `None` for a
 /// new space.
 pub async fn apply_schema(
@@ -181,17 +182,122 @@ pub async fn apply_schema(
     Ok(applied)
 }
 
-/// Runs a program as one transaction (API-006 §Transactions).
+/// Runs a program as one transaction (API-008 §Transactions).
 pub async fn execute(c: &mut Client, tenant: &str, space: &str, p: &Program) -> Result<Response> {
     let fingerprint = check::fingerprint(p)?;
+    let durability = durability(p);
     for _ in 0..RETRIES {
-        match attempt(c, tenant, space, p, &fingerprint).await {
+        let tx = c.transaction().await.map_err(db)?;
+        match program(
+            &tx,
+            tenant,
+            space,
+            p,
+            &fingerprint,
+            &setup(durability),
+            durability,
+        )
+        .await
+        {
+            Ok(r) => match tx.commit().await {
+                Ok(()) => return Ok(r),
+                Err(e) if retryable(&e) => continue,
+                Err(e) => return Err(db(e)),
+            },
             Err(Attempt::Retry) => continue,
             Err(Attempt::Failed(e)) => return Err(e),
-            Ok(r) => return Ok(r),
         }
     }
     Err(Error::Contention)
+}
+
+/// Runs independent programs in one space as one transaction with one
+/// commit (API-008 §Batches). Each program runs under its own savepoint, so
+/// one that fails or rejects leaves the others alone; each gets its own
+/// result, in order. A program that hits a deadlock is run again.
+pub async fn execute_batch(
+    c: &mut Client,
+    tenant: &str,
+    space: &str,
+    programs: &[Program],
+) -> Result<Vec<Result<Response>>> {
+    if programs.len() > check::MAX_BATCH {
+        return Err(Error::Invalid(format!(
+            "a batch has at most {} programs",
+            check::MAX_BATCH
+        )));
+    }
+    let mut out: Vec<Option<Result<Response>>> = programs
+        .iter()
+        .map(|p| check::fingerprint(p).err().map(Err))
+        .collect();
+    for _ in 0..RETRIES {
+        let pending: Vec<usize> = (0..programs.len()).filter(|&i| out[i].is_none()).collect();
+        if pending.is_empty() {
+            break;
+        }
+        // One commit for all, so it waits for the WAL flush unless every
+        // program is fire-and-forget.
+        let durability = if pending
+            .iter()
+            .all(|&i| durability(&programs[i]) == Durability::FireAndForget)
+        {
+            Durability::FireAndForget
+        } else {
+            Durability::Durable
+        };
+        let tx = c.transaction().await.map_err(db)?;
+        let mut setup = setup(durability);
+        let mut done = vec![];
+        for &i in &pending {
+            let p = &programs[i];
+            let fp = check::fingerprint(p)?;
+            let r = program(&tx, tenant, space, p, &fp, &setup, durability).await;
+            setup.clear();
+            let undo = if r.is_ok() {
+                "RELEASE SAVEPOINT open"
+            } else {
+                "ROLLBACK TO SAVEPOINT open; RELEASE SAVEPOINT open"
+            };
+            tx.batch_execute(undo).await.map_err(db)?;
+            match r {
+                Ok(resp) => done.push((i, Ok(resp))),
+                Err(Attempt::Failed(e)) => done.push((i, Err(e))),
+                Err(Attempt::Retry) => {}
+            }
+        }
+        match tx.commit().await {
+            Ok(()) => done.into_iter().for_each(|(i, r)| out[i] = Some(r)),
+            Err(e) if retryable(&e) => {}
+            Err(e) => return Err(db(e)),
+        }
+    }
+    Ok(out
+        .into_iter()
+        .map(|r| r.unwrap_or(Err(Error::Contention)))
+        .collect())
+}
+
+fn durability(p: &Program) -> Durability {
+    match p.durability {
+        Some(Durability::FireAndForget) => Durability::FireAndForget,
+        _ => Durability::Durable,
+    }
+}
+
+/// A transaction's settings. The timeouts come first, so even a wait on a
+/// duplicate request's record is bounded. The checker admits only
+/// statements with an index path (API-008 §Index rule), so the planner is
+/// told to take it rather than read a whole table it judges small.
+fn setup(durability: Durability) -> String {
+    let mut s = String::from(
+        "SET LOCAL TimeZone = 'UTC'; SET LOCAL statement_timeout = '5s'; \
+         SET LOCAL enable_seqscan = off;",
+    );
+    if durability == Durability::FireAndForget {
+        s.push_str(" SET LOCAL synchronous_commit = off;");
+    }
+    s
 }
 
 pub(crate) enum Attempt {
@@ -215,38 +321,35 @@ impl From<Error> for Attempt {
     }
 }
 
-/// One try at a program. Round trips: BEGIN; one pipelined flight of the
-/// settings, `fireweed.open_space` (the space's schema and its request
-/// record) and the savepoint; one per statement; the response; COMMIT.
-async fn attempt(
-    c: &mut Client,
+/// Runs one program inside `tx`, under savepoint `open`, which the caller
+/// releases or rolls back to. The caller commits. Round trips: one
+/// pipelined flight of `setup`, the savepoint, `fireweed.open_space` (the
+/// space's schema and its request record) and a second savepoint; one per
+/// statement; the response.
+async fn program(
+    tx: &Transaction<'_>,
     tenant: &str,
     space: &str,
     p: &Program,
     fingerprint: &str,
+    setup: &str,
+    durability: Durability,
 ) -> std::result::Result<Response, Attempt> {
-    let tx = c.transaction().await?;
-    let durability = match p.durability {
-        Some(Durability::FireAndForget) => Durability::FireAndForget,
-        _ => Durability::Durable,
-    };
-    // The timeouts come first, so even a wait on a duplicate request's
-    // record is bounded.
-    let mut setup = String::from("SET LOCAL TimeZone = 'UTC'; SET LOCAL statement_timeout = '5s';");
-    if durability == Durability::FireAndForget {
-        setup.push_str(" SET LOCAL synchronous_commit = off;");
-    }
     let rid = p.request_id.clone();
+    let issued = p.issued_at.clone();
     let fp = fingerprint.to_owned();
-    let open = "SELECT space_id, schema_doc, fingerprint, response, fresh FROM fireweed.open_space($1, $2, $3, $4)";
-    let open_params: [(&(dyn ToSql + Sync), Type); 4] = [
+    let open = "SELECT space_id, schema_doc, fingerprint, response, fresh, expired \
+                FROM fireweed.open_space($1, $2, $3, $4, $5::timestamptz)";
+    let open_params: [(&(dyn ToSql + Sync), Type); 5] = [
         (&tenant, Type::TEXT),
         (&space, Type::TEXT),
         (&rid, Type::TEXT),
         (&fp, Type::TEXT),
+        (&issued, Type::TEXT),
     ];
+    let first = format!("{setup} SAVEPOINT open;");
     let (_, row, _) = match futures::try_join!(
-        tx.batch_execute(&setup),
+        tx.batch_execute(&first),
         tx.query_typed_one(open, &open_params),
         tx.batch_execute("SAVEPOINT program"),
     ) {
@@ -263,9 +366,13 @@ async fn attempt(
     let Some(id) = row.get::<_, Option<i64>>(0) else {
         return Err(Attempt::Failed(Error::SpaceNotFound));
     };
+    if row.get::<_, bool>(5) {
+        return Err(Attempt::Failed(Error::RequestExpired));
+    }
     let schema: Schema = serde_json::from_str(row.get::<_, &str>(1))
         .map_err(|e| Attempt::Failed(Error::Unavailable(format!("stored schema: {e}"))))?;
     let sp = Space {
+        id,
         schema_name: ddl::schema_name(id),
         schema: schema.into(),
     };
@@ -278,15 +385,14 @@ async fn attempt(
             serde_json::from_str(row.get::<_, Option<&str>>(3).unwrap_or("null")).map_err(|e| {
                 Attempt::Failed(Error::Unavailable(format!("stored response: {e}")))
             })?;
-        run::rehydrate_claims(&tx, &sp, &r, &mut resp).await?;
+        run::rehydrate_claims(tx, &sp, &r, &mut resp).await?;
         resp.replayed = true;
-        tx.rollback().await?;
         return Ok(resp);
     }
     let mut results = vec![];
     let mut rejected = None;
     for (i, st) in r.statements.iter().enumerate() {
-        match run::statement(&tx, &sp, st).await? {
+        match run::statement(tx, &sp, st).await? {
             run::Outcome::Done(v) => results.push(v),
             run::Outcome::Rejected(reason) => {
                 rejected = Some(fireweed_dsl::Rejection {
@@ -310,18 +416,13 @@ async fn attempt(
         durability,
         replayed: false,
     };
-    let Some(rid) = &p.request_id else {
-        // No record to keep: a rejection just rolls back.
-        if is_rejected {
-            tx.rollback().await?;
-        } else {
-            tx.commit().await?;
-        }
-        return Ok(resp);
-    };
+    // A rejection undoes the statements but keeps the request record.
     if is_rejected {
         tx.batch_execute("ROLLBACK TO SAVEPOINT program").await?;
     }
+    let Some(rid) = &p.request_id else {
+        return Ok(resp);
+    };
     // Claims are recorded as ids and tokens; a replay re-reads the items.
     let recorded = run::compact_claims(&r, &resp);
     let mut q = Q::default();
@@ -335,8 +436,7 @@ async fn attempt(
         "UPDATE \"{}\".fw_requests SET response = {doc}::jsonb WHERE request_id = {id}",
         sp.schema_name
     );
-    rows(&tx, &q).await?;
-    tx.commit().await?;
+    rows(tx, &q).await?;
     Ok(resp)
 }
 
@@ -350,11 +450,12 @@ pub struct Swept {
 }
 
 /// Writes back time-driven state and deletes what retention has expired,
-/// at most `batch` rows per object (API-006 §Time). Rows other
+/// at most `batch` rows per object (API-008 §Time). Rows other
 /// transactions hold are skipped.
 pub async fn sweep(c: &mut Client, tenant: &str, space: &str, batch: u32) -> Result<Swept> {
     let (id, schema) = load(c, tenant, space).await?.ok_or(Error::SpaceNotFound)?;
     let sp = Space {
+        id,
         schema_name: ddl::schema_name(id),
         schema: schema.into(),
     };

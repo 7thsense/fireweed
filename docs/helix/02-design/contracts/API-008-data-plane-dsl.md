@@ -1,9 +1,9 @@
 ---
 ddx:
-  id: api-queue-implementation-interface
+  id: api-data-plane-dsl
   depends_on:
     - api-native-client-interface
-    - adr-queue-interface-implementation-boundary
+    - adr-data-plane-interface-implementation-boundary
     - api-hot-projection-query-surface
     - api-operator-repair-contract
     - api-workload-integration-profiles
@@ -11,12 +11,12 @@ ddx:
   status: draft
 ---
 
-# API-006: The Fireweed data-plane DSL
+# API-008: The Fireweed data-plane DSL
 
 **Type**: Document language (schemas and programs) and its PostgreSQL executor
 **Version**: v0 (draft, revision 9)
-**Status**: draft. Proposed by ADR-025. Not normative until ADR-025 is accepted.
-**Related**: API-001, API-002, ADR-025, TD-002
+**Status**: draft. Proposed by ADR-027. Not normative until ADR-027 is accepted.
+**Related**: API-001, API-002, ADR-027, TD-002
 
 Revision 9 replaces revisions 3 to 8. A consumer works with Fireweed in two
 kinds of documents:
@@ -32,7 +32,7 @@ is `fireweed-dsl-postgres`.
 
 ## Documents
 
-Both kinds of document are YAML or JSON (ADR-025 D37), read into the same
+Both kinds of document are YAML or JSON (ADR-027 D37), read into the same
 types. Unknown keys are refused.
 
 **Names.** Space ids are any non-empty text. Object, field, parameter and
@@ -116,7 +116,7 @@ that aren't leased:
 | `priority` | Integer; orders items due at the same instant. |
 | `due_at` | When the item next needs attention. For a pending item, when it becomes claimable. For a leased item, when its lease expires. |
 | `attempts` | Claims charged so far. |
-| `version` | Increases on every change to the item. |
+| `version` | A new value on every change to the item, from a sequence per space, so a key's versions never repeat, even after a delete and a reinsert (ADR-027 D61). |
 | `lease_owner` | The worker holding the lease. |
 | `created_at`, `updated_at`, `finished_at` | Times. |
 | `body` | Optional JSON document. |
@@ -128,29 +128,32 @@ The executor creates for each queue:
 - the table;
 - a unique index on `key`;
 - the claim index `(due_at, priority, id) WHERE state IN ('pending', 'leased')`,
-  which leads with due time (ADR-025 D39) and is the claim order;
+  which leads with due time (ADR-027 D39) and is the claim order;
 - an index on `finished_at` for retention;
-- an index on `due_at` over leased items, for the sweep;
+- an index on `(state, due_at, attempts)`, from which the sweep finds
+  expired leases and a count by state computes each item's effective
+  state;
 - one index per indexed field: `(field, id)` for a btree, so stepping
   through a field's matches with one `eq` is a range scan.
 
 A queue table is created with `fillfactor = 80`. That keeps updates of
 unindexed fields on their page. Claims, settles and renews change indexed
-columns, so they write every index (ADR-025 question 40).
+columns, so they write every index (ADR-027 question 40).
 
 `max_attempts: unlimited` turns off the store's redelivery bound
-(ADR-025 D30).
+(ADR-027 D30).
 
 ### Tables
 
-A table holds rows. Every row has `id` (assigned), `version`,
+A table holds rows. Every row has `id` (assigned), `version` (as for
+queue items),
 `created_at`, `updated_at` and, with `expire_after_write`, `expires_at`.
 `key` lists the fields that identify a row; they must be non-null and get
 a unique index. A **sequenced** table has no `key`: `id` is assigned from a
 counter row in the same transaction, so ids are gapless and in commit
-order (ADR-025 D16). Rows of a sequenced table are never updated.
+order (ADR-027 D16). Rows of a sequenced table are never updated.
 
-`merge` on a field (ADR-025 D20):
+`merge` on a field (ADR-027 D20):
 - `add_only` (a `text_set`): an update may add values, never remove them;
 - `non_decreasing` (an `int`, `float` or `timestamp`): an update may not
   lower it.
@@ -161,13 +164,13 @@ sets `override_merge: true`.
 ### Reads
 
 A declared read is a named, versioned `select` (below) with typed
-parameters (ADR-025 D10). A name and version, once declared, never change;
+parameters (ADR-027 D10). A name and version, once declared, never change;
 a new version is a new entry.
 
 ### Changing a schema
 
 `apply_schema` takes a schema and the version the caller expects to
-replace (none for a new space). Changes may only add (ADR-025 D22). They
+replace (none for a new space). Changes may only add (ADR-027 D22). They
 can add:
 - queues and tables, with any indexes;
 - unindexed fields on existing queues and tables;
@@ -184,6 +187,7 @@ unchanged.
 
 ```yaml
 request_id: transition-r1-7      # required if any statement writes
+issued_at: 2026-11-16T09:30:00Z  # required with request_id
 durability: durable              # optional: fire_and_forget or durable
 params:
   inst: 41
@@ -250,7 +254,7 @@ where:
 its own `where`. A `match` value is a literal, a `{param}` or a `{field}`
 of the statement's own object. One `match` field must be indexed in the
 other object. A lookup tests existence only: it returns no columns, and
-there are no joins (ADR-025 §14).
+there are no joins (ADR-027 §14).
 
 A claim's `where` made only of `not exists` exclusions needs no access
 term. Its claim reads past the few items it excludes.
@@ -267,13 +271,27 @@ parameter or `now`). The indexed columns are:
 
 Ranges are not access terms, because a range alone can match the whole
 object. They can still narrow an access term, as in a stepped update. Nor
-is `due_at`, whose only index is the partial claim index. Selecting by
+is `due_at`, which leads only the partial claim index. Selecting by
 `ids` or `keys` needs no `where`. A program that breaks the rule is
 refused.
 
-A `select` with `order_by` or `aggregate` reads at most 100,000 matching
-rows; past that it rejects with `limit_exceeded`. Without them, its `limit`
-bounds the rows read.
+A `select` with `aggregate` needs no access term, and no `where` at all,
+when one btree index holds every column it reads: its `where`, its
+`group_by` and its aggregate arguments. The database then reads that
+index, not the table. The btree indexes are:
+- `id`, and `key` on a queue;
+- a queue's `(state, due_at, attempts)`, which serves `state`, because an
+  item's effective state is computed from those three;
+- a table's key fields;
+- `(field, id)` for each indexed field that isn't a `text_set`.
+
+An expiring table has no such index, because every read of it also tests
+the row's expiry. So a queue's depth by state, or its items per campaign,
+is one indexed aggregate, with no cap on the rows counted.
+
+A `select` with `order_by` or `aggregate` reads every row its `where`
+matches, and its `limit` bounds the rows returned. Without them, its
+`limit` also bounds the rows read. The statement timeout bounds both.
 
 ### Assignments (`set`)
 
@@ -336,7 +354,7 @@ claim: {from: <queue>, limit: 10, lease: 30s, worker: w1, where: <pred>, eligibl
 Leases up to `limit` claimable items in claim order: `due_at`, then
 priority, then `id`. This is the claim index's order, so a claim reads about
 `limit` index entries whether most items are due or most are sleeping.
-Priority breaks ties among items due at the same instant (ADR-025 D42). Each one becomes `leased`, gets a new random lease
+Priority breaks ties among items due at the same instant (ADR-027 D42). Each one becomes `leased`, gets a new random lease
 token, `due_at` = now + `lease`, one more attempt, and a new version.
 Items that other transactions hold are skipped, not waited for. `where`
 filters further and follows the index rule, so a rare value narrows
@@ -354,7 +372,7 @@ settle: {queue: <queue>, outcome: retry, items: [{id, token}, …], after: 1m, s
 ```
 
 Each item must be leased with that token and an unexpired lease;
-otherwise it is reported `stale` and left alone (ADR-025 D6). With
+otherwise it is reported `stale` and left alone (ADR-027 D6). With
 `require_all: true`, a stale item rejects the program with `stale_lease`.
 The lease ends and the item's version increases.
 
@@ -363,7 +381,7 @@ The lease ends and the item's version increases.
 | `complete` | `complete`, `finished_at` = now |
 | `fail` | `failed`, `finished_at` = now |
 | `retry` | `pending`, due after `after` (default now); `failed` instead if attempts are used up |
-| `release` | `pending`, due after `after`, with the claim's attempt given back (a timer that charges nothing, ADR-025 D39) |
+| `release` | `pending`, due after `after`, with the claim's attempt given back (a timer that charges nothing, ADR-027 D39) |
 
 `set` and `body` apply in the same step. Result: `[{id, status: ok | stale}]`.
 
@@ -374,7 +392,7 @@ renew: {queue: <queue>, items: [{id, token}, …], lease: 30s, require_all: fals
 ```
 
 Extends unexpired leases to now + `lease`, and increases the version
-(ADR-025 D18). Result as above.
+(ADR-027 D18). Result as above.
 
 ### `update`
 
@@ -438,7 +456,7 @@ assert: {target: …, where | ids | keys, expect: {min: 0, max: 0}}
 ```
 
 Counts matching rows and rejects with `expect_unmet` outside `expect`,
-or reports `met: false` with `on_unmet: report`. Writes nothing (ADR-025
+or reports `met: false` with `on_unmet: report`. Writes nothing (ADR-027
 D20). Result: `{matched, met}`.
 
 ### `select`
@@ -496,9 +514,21 @@ A program runs in one database transaction:
   - A claim's items are recorded as ids and tokens. A replay re-reads
     their current fields and returns them with the tokens the claim
     granted.
-  - Records older than `request_retention` are forgotten.
+  - `issued_at` is when the caller created the request id. The caller
+    takes it once, keeps it with the id, and resends both unchanged on
+    every retry. It is part of the fingerprint, so the same id with a
+    different `issued_at` is `request_id_conflict` while the record exists.
+  - An `issued_at` more than 5 minutes ahead of the database clock is
+    `invalid`, and the same id may be sent again later.
+  - Each space has a **horizon**, which only moves forward. The sweep moves
+    it to `now - request_retention` and deletes the records issued before
+    it. A request issued before the horizon, or before
+    `now - request_retention`, fails with `request_expired`, with no
+    effect. So a request whose record may be gone is refused, never run a
+    second time, even if the clock goes back (ADR-027 D61).
+  - A record is never taken over by a new run.
 - **Rejections.** A rejection rolls back every statement but keeps the
-  request record, so a replay returns the same rejection (ADR-025 D19).
+  request record, so a replay returns the same rejection (ADR-027 D19).
   Rejection reasons: `key_conflict`, `stale_lease`, `limit_exceeded`,
   `expect_unmet` and `merge_violation`.
 
@@ -516,29 +546,46 @@ replayed: false
 Errors are not recorded and change nothing:
 - `invalid` (the program doesn't check against the schema; carries the
   reason);
-- `space_not_found`, `schema_conflict`, `request_id_conflict` and
-  `contention`;
+- `space_not_found`, `schema_conflict`, `request_id_conflict`,
+  `request_expired` and `contention`;
 - `unavailable` (database errors).
+
+### Batches
+
+`execute_batch(tenant, space, programs)` runs up to 64 independent
+programs in one space as one transaction with one commit (ADR-027 D62).
+Each program runs under its own savepoint:
+- a program that commits, rejects or replays gets its response;
+- a program that fails (`invalid`, `request_id_conflict`,
+  `request_expired`) is rolled back to its savepoint and gets its error;
+- a program that hits a deadlock is rolled back and run again in a new
+  transaction, up to 5 times.
+
+The others are unaffected, and results come back in order. The commit
+waits for the WAL flush unless every program is `fire_and_forget`. A
+program holds its locks until the batch commits, so a batch should hold
+programs that don't wait on each other.
 
 ## Time
 
 The request time is the database's: `fireweed.now()`, which returns the
 transaction's start time (`now()`). Tests set the session setting
 `fireweed.now` to an instant to fix it. There is one time authority per
-database (ADR-025 D2).
+database (ADR-027 D2).
 
 Time-driven changes are conditions on stored times, so no caller drives a
-clock (ADR-025 D1):
+clock (ADR-027 D1):
 
 - A `pending` item is claimable when `due_at <= now`.
 - A `leased` item whose `due_at` (its lease expiry) is past is claimable
   again if it has attempts left. If it has none, it counts as `failed`
-  (ADR-025 D17).
+  (ADR-027 D17).
 - Every statement that reads `state` sees this effective state.
   `fireweed.sweep(space)` writes it back and deletes three things:
   - finished items past `retention`;
   - table rows past `expires_at`;
-  - request records past `request_retention`.
+  - request records issued before the space's horizon, after moving
+    the horizon to `now - request_retention`.
   It works in bounded batches. Results don't depend on when it runs:
   every statement already applies these conditions.
 
@@ -546,10 +593,10 @@ clock (ADR-025 D1):
 
 | Level | PostgreSQL |
 |-------|------------|
-| `durable` (default) | A normal commit. The server is assumed fully replicated (ADR-025 D14). |
+| `durable` (default) | A normal commit. The server is assumed fully replicated (ADR-027 D14). |
 | `fire_and_forget` | `SET LOCAL synchronous_commit = off`. |
 
-The response reports the level. ADR-025 §Durability gives the local
+The response reports the level. ADR-027 §Durability gives the local
 engine's levels.
 
 ## Limits
@@ -562,17 +609,18 @@ engine's levels.
 | `update` and `delete` limit | 10,000 |
 | `select` limit | 10,000 |
 | Program size | 8 MiB |
-| Rows read by a sorted or aggregating `select` | 100,000 |
+| Programs per `execute_batch` | 64 |
 | Statement timeout | 5 s |
 
 ## The PostgreSQL executor
 
-The target is PostgreSQL 18 (ADR-025 D44).
+The target is PostgreSQL 18 (ADR-027 D44).
 
 The executor is a set of functions over a PostgreSQL connection:
 - `apply_schema(tenant, space, schema, expected_version)`;
 - `get_schema(tenant, space)`;
 - `execute(tenant, space, program)`;
+- `execute_batch(tenant, space, programs)`;
 - `sweep(tenant, space, batch)`.
 
 They hold no state between calls. Each call reads what it needs from the
@@ -580,28 +628,33 @@ database.
 
 **Layout.**
 - **Catalog.** `fireweed.spaces` maps (tenant, space) to the PostgreSQL
-  schema holding the space and the stored schema document.
+  schema holding the space, the stored schema document and the space's
+  request horizon.
 - **One PostgreSQL schema per space.** It holds:
   - one table per queue (`q_<name>`) and per table (`t_<name>`), with
     declared fields as columns named `f_<name>`;
-  - `fw_requests`;
+  - `fw_requests` (request records, indexed by `issued_at`);
   - `fw_queue_state` (paused flags);
-  - `fw_sequences` (sequenced-table counters).
+  - `fw_sequences` (sequenced-table counters);
+  - the sequence `fw_versions`, from which every write takes a version.
 
-  Whether spaces should instead share tables is ADR-025 question 31.
+  Whether spaces should instead share tables is ADR-027 question 31.
 
 **Running a program.**
 1. BEGIN.
-2. In one pipelined flight, set the timeouts, call
-   `fireweed.open_space(tenant, space, request_id, fingerprint)`, which
-   reads the schema row and writes the request record, and set the
-   savepoint.
+2. In one pipelined flight, set the timeouts, set a savepoint, call
+   `fireweed.open_space(tenant, space, request_id, fingerprint,
+   issued_at)`, which reads the schema row, refuses an expired request
+   and writes the request record, and set a second savepoint.
 3. Check the program against the schema in Rust.
 4. Run each statement as one SQL statement.
 5. Write the response, and commit.
 
 Queries are sent unprepared, with every parameter typed `text`, so each
-is one round trip and nothing is cached per connection. `apply_schema`
+is one round trip and nothing is cached per connection. A program's
+transaction sets `enable_seqscan = off`: the checker admits only
+statements with an index path, and the planner must take it even where
+it judges a small table cheaper to read whole. `apply_schema`
 sets a 5 s lock timeout, so an `ALTER TABLE` never leaves claims queued
 behind an unbounded lock wait.
 
@@ -615,7 +668,7 @@ Each statement's SQL:
 | `update` | `WITH m AS (SELECT id, <old merge fields> … ORDER BY id LIMIT $limit + 1 FOR UPDATE), total AS (…), u AS (UPDATE … FROM <first $limit of m> WHERE <count passes> RETURNING <merge checks>) SELECT …` |
 | `delete` | The same shape with `DELETE … USING` |
 | `assert` | `SELECT count(*) FROM (SELECT 1 … LIMIT $max + 1 FOR SHARE)` |
-| `select`, `read` | `SELECT jsonb_build_object(…) FROM … WHERE … LIMIT $n`; with `order_by` or `aggregate`, over a CTE capped at 100,001 rows |
+| `select`, `read` | `SELECT jsonb_build_object(…) FROM … WHERE … [GROUP BY …] [ORDER BY …] LIMIT $n` |
 
 Literals and parameters are always bound, never spliced into SQL text.
 Names in SQL are validated object and field names, and quoted.
@@ -635,11 +688,11 @@ Names in SQL are validated object and field names, and quoted.
 | 7 | Timeline | A sequenced table, inserted last in each transition's program. Full history goes to Niflheim. |
 | 8 | Definitions (up to 256 KiB, D31) | Table row keyed by digest, with a `text` field. |
 | 9 | Admission chunk | Table row keyed by run and chunk: `insert` with `on_conflict: reject`, then `update` by keys with `where: {eq: [version, v]}` and `expect: {min: 1, max: 1}`. |
-| 10 | Send-rate counters | Not Fireweed's (ADR-025 D49). |
-| 11 | Re-entry across runs (D29) | Table in the workflow's space, keyed by subject, with `non_decreasing` timestamps, updated with `expect`. Admission and the re-entry check share one program, so one transaction (ADR-025 D51). |
+| 10 | Send-rate counters | Not Fireweed's (ADR-027 D49). |
+| 11 | Re-entry across runs (D29) | Table in the workflow's space, keyed by subject, with `non_decreasing` timestamps, updated with `expect`. Admission and the re-entry check share one program, so one transaction (ADR-027 D51). |
 
 Snorri's queues declare `max_attempts: unlimited` (D30). A Snorri space is one
-workflow with all its runs (ADR-025 D50). Its queues and tables carry an
+workflow with all its runs (ADR-027 D50). Its queues and tables carry an
 indexed `run` field, so run-scoped selects, cancels and retirement meet the
 index rule and step through `(run, id)`.
 
@@ -648,16 +701,16 @@ index rule and step through `(run, id)`.
 | State | In the DSL |
 |-------|-----------|
 | Per-recipient lifecycle | Queue items with indexed fields (campaign, step, domain, status) |
-| Suppression | A copy in each workflow space (ADR-025 D54): a `suppression` table (`reasons` add_only, `lifted_at`, `seq` non_decreasing) and a `host_cursors` table, kept current by Cayce's background propagation (ADR-025 §14). A send's claim excludes suppressed contacts with `not exists`, or a send's program runs `assert` on the address with `expect: {max: 0}`. |
-| Dedupe by resolved entity | Cayce stamps an indexed `entity` field at admission. Guard: `not exists` an item with the same entity in a done state (ADR-025 §14). |
-| Caps and rate windows | Not Fireweed's (ADR-025 D49) |
+| Suppression | A copy in each workflow space (ADR-027 D54): a `suppression` table (`reasons` add_only, `lifted_at`, `seq` non_decreasing) and a `host_cursors` table, kept current by Cayce's background propagation (ADR-027 §14). A send's claim excludes suppressed contacts with `not exists`, or a send's program runs `assert` on the address with `expect: {max: 0}`. |
+| Dedupe by resolved entity | Cayce stamps an indexed `entity` field at admission. Guard: `not exists` an item with the same entity in a done state (ADR-027 §14). |
+| Caps and rate windows | Not Fireweed's (ADR-027 D49) |
 | Delivery and engagement events | Queue items keyed by provider id; a sequenced table for timelines |
 | UI counts and lists | Declared reads |
 
 ## Not in v1
 
 These are left out of v1:
-- cohorts (ADR-025 question 37);
+- cohorts (ADR-027 question 37);
 - group keys and per-group ordering;
 - dynamic gates and metadata blockers;
 - recurrence beyond `release` with `after`;
@@ -687,4 +740,12 @@ the resulting rows. They cover:
   sequential scans;
 - that an update leaves no matched item holding a lapsed lease;
 - that an insert waiting on a same-key insert reports the winner's id;
+- that counts by state and by an indexed field over 5,000 items read an
+  index, with expired leases counted as pending;
+- that a request issued before the horizon is refused, also after its
+  record is swept and the clock goes back, and one issued far ahead is
+  invalid;
+- that a key's version after a delete and a reinsert exceeds its old one;
+- that programs in a batch commit, reject or fail independently, and
+  replay;
 - that a replayed claim re-reads its items, and its record holds no bodies.

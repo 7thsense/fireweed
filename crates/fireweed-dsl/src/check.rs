@@ -1,4 +1,4 @@
-//! Checks schemas and resolves programs against them (API-006).
+//! Checks schemas and resolves programs against them (API-008).
 //!
 //! [`schema`] validates a schema, [`change`] checks that a new schema only
 //! adds to an old one, and [`resolve`] checks a program and returns typed
@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::*;
 
-/// Program limits (API-006 §Limits).
+/// Program limits (API-008 §Limits).
 pub const MAX_STATEMENTS: usize = 64;
 pub const MAX_ROWS: usize = 1_000;
 pub const MAX_CLAIM: u32 = 1_000;
@@ -18,8 +18,8 @@ pub const MAX_UPDATE: u32 = 10_000;
 pub const MAX_SELECT: u32 = 10_000;
 pub const DEFAULT_UPDATE_LIMIT: u32 = 1_000;
 pub const MAX_PROGRAM_BYTES: usize = 8 << 20;
-/// Rows a sorted or aggregating `select` may read (API-006 §Limits).
-pub const MAX_SCAN: u32 = 100_000;
+/// Programs per `execute_batch` (API-008 §Limits).
+pub const MAX_BATCH: usize = 64;
 
 // ------------------------------------------------------------------ names
 
@@ -150,7 +150,7 @@ fn sample(t: FieldType) -> Value {
     }
 }
 
-/// Checks that `new` only adds to `old` (API-006 §Changing a schema).
+/// Checks that `new` only adds to `old` (API-008 §Changing a schema).
 pub fn change(old: &Schema, new: &Schema) -> Result<()> {
     if new.version <= old.version {
         return invalid("a changed schema needs a higher version");
@@ -462,6 +462,9 @@ pub fn resolve(s: &Schema, p: &Program) -> Result<Resolved> {
     if writes && p.request_id.as_deref().is_none_or(str::is_empty) {
         return invalid("a program that writes needs a request_id");
     }
+    if p.request_id.is_some() && p.issued_at.is_none() {
+        return invalid("a request_id needs issued_at");
+    }
     let mut statements = vec![];
     let mut sequenced = false;
     for (i, st) in p.statements.iter().enumerate() {
@@ -470,7 +473,7 @@ pub fn resolve(s: &Schema, p: &Program) -> Result<Resolved> {
             other => other,
         })?;
         // A sequenced insert holds its table's counter row until commit, so it
-        // comes after every other write (API-006 §Tables).
+        // comes after every other write (API-008 §Tables).
         let is_seq =
             matches!(&r, RStatement::InsertTable { obj, .. } if s.tables[&obj.name].sequenced);
         if sequenced && st.writes() && !is_seq {
@@ -564,7 +567,7 @@ impl Ctx<'_> {
             .ok_or_else(|| Error::Invalid(format!("{} is not a queue", self.obj.name)))
     }
 
-    /// Columns with an index (API-006 §Index rule).
+    /// Columns with an index (API-008 §Index rule).
     fn indexed(&self, c: &Column) -> bool {
         match self.obj.kind {
             Kind::Queue => {
@@ -735,7 +738,7 @@ impl Ctx<'_> {
                 // The lookup itself must use an index of the inner object.
                 if !matches.iter().any(|(c, _)| inner.indexed(c)) {
                     return invalid(format!(
-                        "exists in {}: match an indexed field (API-006 §Index rule)",
+                        "exists in {}: match an indexed field (API-008 §Index rule)",
                         l.object
                     ));
                 }
@@ -781,7 +784,7 @@ impl Ctx<'_> {
 
     /// `set` assignments to declared fields.
     /// `set` assignments. `schedule` lets an `update` on unleased queue items
-    /// set `priority`, `due_at` and `state` (API-006 §update).
+    /// set `priority`, `due_at` and `state` (API-008 §update).
     fn assignments(
         &self,
         set: &BTreeMap<String, Value>,
@@ -959,7 +962,7 @@ impl Ctx<'_> {
                 None => return invalid("select rows with where, ids or keys"),
                 Some(p) if !self.has_access(p) => {
                     return invalid(
-                        "where needs a condition on an indexed column (API-006 §Index rule)",
+                        "where needs a condition on an indexed column (API-008 §Index rule)",
                     );
                 }
                 _ => {}
@@ -969,7 +972,7 @@ impl Ctx<'_> {
     }
 
     /// True if `p` has an access term: equality, `in` or `contains` between
-    /// an indexed column and a value (API-006 §Index rule). Ranges don't
+    /// an indexed column and a value (API-008 §Index rule). Ranges don't
     /// count: a range alone can match the whole object.
     fn has_access(&self, p: &RPred) -> bool {
         let on_index = |o: &Operand| matches!(o, Operand::Column(c) if self.indexed(c));
@@ -981,6 +984,84 @@ impl Ctx<'_> {
             RPred::Contains(a, v) => on_index(a) && value(v),
             _ => false,
         }
+    }
+}
+
+impl Ctx<'_> {
+    /// True if one btree index holds every column in `cols`, so an aggregate
+    /// over them reads only that index (API-008 §Index rule). A queue's
+    /// `state` is computed from `state`, `due_at` and `attempts`.
+    fn covered(&self, cols: &[&Column]) -> bool {
+        let mut need = BTreeSet::new();
+        for c in cols {
+            match (self.obj.kind, c.system) {
+                (Kind::Queue, true) if c.name == "state" => {
+                    need.extend(["state", "due_at", "attempts"].map(String::from))
+                }
+                (_, true) => {
+                    need.insert(c.name.clone());
+                }
+                (_, false) => {
+                    need.insert(format!("f_{}", c.name));
+                }
+            }
+        }
+        self.btree_indexes()
+            .iter()
+            .any(|ix| need.iter().all(|c| ix.contains(c)))
+    }
+
+    /// The columns of each full btree index on the object (API-008
+    /// §PostgreSQL executor). An expiring table has none that cover its
+    /// rows, because every read also tests `expires_at`.
+    fn btree_indexes(&self) -> Vec<Vec<String>> {
+        let mut out = vec![vec!["id".to_string()]];
+        let skip = match (self.queue, self.table) {
+            (Some(_), _) => {
+                out.push(vec!["key".into()]);
+                out.push(["state", "due_at", "attempts"].map(String::from).to_vec());
+                None
+            }
+            (_, Some(t)) => {
+                if t.expire_after_write.is_some() {
+                    return vec![];
+                }
+                if !t.key.is_empty() {
+                    out.push(t.key.iter().map(|k| format!("f_{k}")).collect());
+                }
+                t.key.first()
+            }
+            _ => unreachable!(),
+        };
+        for (f, d) in self.declared() {
+            if d.index && d.ty != FieldType::TextSet && Some(f) != skip {
+                out.push(vec![format!("f_{f}"), "id".into()]);
+            }
+        }
+        out
+    }
+}
+
+/// Adds the columns `p` reads to `out`. False if it reads something no index
+/// can hold: a body path or another object.
+fn pred_columns<'p>(p: &'p RPred, out: &mut Vec<&'p Column>) -> bool {
+    fn op<'p>(o: &'p Operand, out: &mut Vec<&'p Column>) -> bool {
+        match o {
+            Operand::Column(c) => {
+                out.push(c);
+                true
+            }
+            Operand::Path(..) => false,
+            Operand::Literal(..) | Operand::Now(_) => true,
+        }
+    }
+    match p {
+        RPred::And(ps) | RPred::Or(ps) => ps.iter().all(|p| pred_columns(p, out)),
+        RPred::Not(b) => pred_columns(b, out),
+        RPred::Cmp(_, a, b) | RPred::Contains(a, b) => op(a, out) && op(b, out),
+        RPred::In(a, vs) => op(a, out) && vs.iter().all(|v| op(v, out)),
+        RPred::IsNull(a) | RPred::NotNull(a) => op(a, out),
+        RPred::Exists { .. } => false,
     }
 }
 
@@ -1156,7 +1237,7 @@ fn statement(s: &Schema, st: &Statement, params: &Params) -> Result<RStatement> 
                         // a rare value walks the whole claim index.
                         if !c.has_access(&p) && !exclusion_only(&p) {
                             return invalid(
-                                "a claim's where needs an access term (API-006 §Index rule)",
+                                "a claim's where needs an access term (API-008 §Index rule)",
                             );
                         }
                         Some(p)
@@ -1309,13 +1390,7 @@ fn queue_row(c: &Ctx<'_>, r: &BTreeMap<String, Value>) -> Result<QueueRow> {
 /// Resolves a `select` (also used for declared reads).
 pub fn resolve_select(s: &Schema, sel: &Select, params: &Params) -> Result<RSelect> {
     let c = ctx(s, &sel.from, params)?;
-    let filter = match &sel.filter {
-        None => return invalid("select needs a where (API-006 §Index rule)"),
-        Some(p) => c.pred(p)?,
-    };
-    if !c.has_access(&filter) {
-        return invalid("where needs a condition on an indexed column (API-006 §Index rule)");
-    }
+    let filter = sel.filter.as_ref().map(|p| c.pred(p)).transpose()?;
     let output = match (sel.fields.is_empty(), sel.aggregate.is_empty()) {
         (false, true) => {
             if !sel.group_by.is_empty() {
@@ -1366,9 +1441,34 @@ pub fn resolve_select(s: &Schema, sel: &Select, params: &Params) -> Result<RSele
             }
         })
         .collect::<Result<_>>()?;
+    // An access term bounds the rows read. Without one, an aggregate may
+    // still run if a single index holds every column it reads.
+    let access = filter.as_ref().is_some_and(|p| c.has_access(p));
+    if !access {
+        let mut cols = vec![];
+        let readable = filter.as_ref().is_none_or(|p| pred_columns(p, &mut cols));
+        let covered = match &output {
+            Output::Aggregate { aggs, group_by } if readable => {
+                cols.extend(group_by);
+                cols.extend(aggs.iter().filter_map(|(_, a)| match a {
+                    Agg::Count => None,
+                    Agg::Sum(c) | Agg::Min(c) | Agg::Max(c) | Agg::Avg(c) => Some(c),
+                    Agg::Percentile(c, _) => Some(c),
+                }));
+                c.covered(&cols)
+            }
+            _ => false,
+        };
+        if !covered {
+            return invalid(
+                "where needs a condition on an indexed column, or the aggregate must read only \
+                 the columns of one index (API-008 §Index rule)",
+            );
+        }
+    }
     Ok(RSelect {
         obj: c.obj.clone(),
-        filter: Some(filter),
+        filter,
         output,
         order_by,
         limit: limit(Some(sel.limit), 1, MAX_SELECT)?,

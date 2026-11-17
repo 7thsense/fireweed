@@ -1,6 +1,6 @@
 ---
 ddx:
-  id: adr-queue-interface-implementation-boundary
+  id: adr-data-plane-interface-implementation-boundary
   depends_on:
     - api-native-client-interface
     - adr-hexagonal-architecture-and-two-interfaces
@@ -19,17 +19,17 @@ ddx:
   status: proposed
 ---
 
-# ADR-025: Fireweed's data-plane interface is the implementation boundary
+# ADR-027: Fireweed's data-plane interface is the implementation boundary
 
 | Date | Status | Deciders | Related | Confidence |
 |------|--------|----------|---------|------------|
-| 2026-11-13, revised 2026-11-16 | Proposed | Project owner | API-001, API-002, API-003, API-004, API-005, API-006, ADR-007, ADR-008, ADR-009, ADR-010, ADR-011, ADR-012, ADR-013, ADR-014, ADR-018, ADR-022, ADR-024, TD-002, TD-003, TD-006, TD-007, TD-008 | Medium |
+| 2026-11-13, revised 2026-11-16 | Proposed | Project owner | API-001, API-002, API-003, API-004, API-005, API-008, ADR-007, ADR-008, ADR-009, ADR-010, ADR-011, ADR-012, ADR-013, ADR-014, ADR-018, ADR-022, ADR-024, TD-002, TD-003, TD-006, TD-007, TD-008 | Medium |
 
 Revision 9 (2026-11-16) puts the DSL first and makes the executor plain
 SQL. Consumers describe their data in a **schema** document: queues,
 tables, fields, indexes and named reads. They change it with **programs**:
 lists of typed statements, such as claim, settle, update and select, that
-run as one transaction. Both are YAML or JSON documents (API-006).
+run as one transaction. Both are YAML or JSON documents (API-008).
 
 An executor creates real tables and indexes from the schema, and runs each
 statement as a few SQL statements over them. The database does the work:
@@ -48,7 +48,7 @@ Revisions 5 to 8 went the other way, and revision 9 removes that design:
   boundary.
 
 The owner's rulings D1 to D40 stand except where the table below says
-revision 9 changes them. API-006 revision 9 is the DSL reference.
+revision 9 changes them. API-008 revision 9 is the DSL reference.
 
 A fresh-eyes review of the first revision 9 code found the following
 (D42). Every one is fixed in the same PR:
@@ -150,7 +150,7 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D24 | "object-log can be deprecated assuming we can implement the logs-to-s3 without it." | Owner, 2026-11-15 | Kept (§10). |
 | D25 | "deprecate RESP for now in favor of the DSL"; "drop protubuf unless required for the DSL". | Owner, 2026-11-15 | Kept. |
 | D26 | "no need to migrate spaces"; "we don't need a migration path". | Owner, 2026-11-15 | Kept. |
-| D27 | "we do need to ensure that the dsl can be fully implemented on this model". | Owner via the Turso-queue session, 2026-11-15 | Kept: API-006's Snorri inventory maps each construct to a statement. |
+| D27 | "we do need to ensure that the dsl can be fully implemented on this model". | Owner via the Turso-queue session, 2026-11-15 | Kept: API-008's Snorri inventory maps each construct to a statement. |
 | D28 | "crashes can be handled by the control plane via the embedder (snorri/cayce)". | Owner via the Turso-queue session, 2026-11-15 | Kept. |
 | D29 | "use the family space record" for re-entry across runs. | Owner, 2026-11-16 | Kept as one record per (family, subject), now in the workflow's own space; no family space (D51). |
 | D30 | "accept Snorri's max_attempts opt-out". | Owner, 2026-11-16 | Kept (§8). |
@@ -176,13 +176,17 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D50 | Asked "Did you rule that Snorri has no shards, with one space per workflow?" (relayed from the Snorri session): "Yes, per workflow". | Owner, 2026-11-16 | Adopted; supersedes D32. A Snorri space is one workflow, holding every run. The run is an indexed field on items and rows, and there are no shards. D13 is unchanged: a space is still never wider than one workflow or one campaign. |
 | D51 | Asked "Can a Snorri re-entry family span more than one workflow?": "No, one workflow". | Owner, 2026-11-16 | Adopted. Resolves question 41. The re-entry record lives in the workflow's space, so admission and the re-entry check are one transaction, and there are no family spaces. |
 | D52 | "it's definitely not one space per run, shard. Snorri doesn't need to know about shards. Shards are only necessary from a tenant / workflow load balancing standpoint across nodes, which means they are a cayce level concern, not snorri (single workflow) and fireweed (single space)" | Owner via the Cayce session, 2026-11-16 | Adopted with D50. Fireweed sees one space at a time and Snorri one workflow; neither has shards. Placing workflows' spaces onto nodes is Cayce's load balancing, done through the control plane that grants a space's writer (D15). Rechecked against shards: D13 (atomicity per workflow or campaign), D29 (now D51), D30 and D31 assume none. |
-| D53 | "Fix up *all* the relevant specs, comments, and implementatinos so we stop getting wound around this axle. a) i think we can debate workflow per space vs. run per space. Given there are workflow specific tables to be stored, I think we can get away with per-workflow until proven otherwise, and put some constraint on number of runs, etc. b) account level state is in the control plane (fast, small, static) / niflheim (large, slow, delayed). If we need state that fits neither model we must design for it carefully. c) A guard should be able to access anything in the space it needs. But if there are technical constraints or limitations, we can address them. We will definitely need guards like "suppress contacts in the suppression list" and "dedupe by resolved entity" d) We need to figure this out, it should be part of the direct snorri AND OR fireweed DSL" | Owner via the Cayce session, 2026-11-16 | Adopted:<br>(a) one space per workflow until measurement shows otherwise, with a limit on open runs (§3);<br>(b) account-level state lives in the control plane or Niflheim, never in a Fireweed space, and §13 lists what fits neither;<br>(c) guards read any object in their space through indexed `exists` lookups (§14, API-006 §Lookups);<br>(d) host-supplied facts are written with ordinary DSL programs into the workflow space (§14). |
+| D53 | "Fix up *all* the relevant specs, comments, and implementatinos so we stop getting wound around this axle. a) i think we can debate workflow per space vs. run per space. Given there are workflow specific tables to be stored, I think we can get away with per-workflow until proven otherwise, and put some constraint on number of runs, etc. b) account level state is in the control plane (fast, small, static) / niflheim (large, slow, delayed). If we need state that fits neither model we must design for it carefully. c) A guard should be able to access anything in the space it needs. But if there are technical constraints or limitations, we can address them. We will definitely need guards like "suppress contacts in the suppression list" and "dedupe by resolved entity" d) We need to figure this out, it should be part of the direct snorri AND OR fireweed DSL" | Owner via the Cayce session, 2026-11-16 | Adopted:<br>(a) one space per workflow until measurement shows otherwise, with a limit on open runs (§3);<br>(b) account-level state lives in the control plane or Niflheim, never in a Fireweed space, and §13 lists what fits neither;<br>(c) guards read any object in their space through indexed `exists` lookups (§14, API-008 §Lookups);<br>(d) host-supplied facts are written with ordinary DSL programs into the workflow space (§14). |
 | D54 | Asked "suppression: (a) copies into each workflow space or (b) Cayce-side check at dispatch?": "copies in for performance with a background update of some variety" | Owner via the Cayce session, 2026-11-16 | Adopted. Resolves question 25 as (a). Copies live in each workflow space as Fireweed tables, and Cayce keeps them current from its authoritative list with the propagation in §14. |
 | D55 | Asked "do per-account caps stay in Cayce's Dragonfly (your D45/D49)?": "the configuratino should be in the control plane, so I think that means no." | Owner via the Cayce session, 2026-11-16 | Resolved by D56: only the configuration moves; the counters stay in Dragonfly. |
 | D56 | Asked whether D55 means only the configuration leaves Dragonfly, or the counters too: "Config only, counters stay" | Owner, 2026-11-16 | Adopted. Resolves question 43 as (A). Cap configuration (limits and windows) lives in the control plane. The counters stay in Dragonfly (D45, Cayce ADR-015), outside Fireweed (D49). |
 | D57 | "Fireweed is not really appropriate for a tenant data plane, it's designed for short lifecycle scale-out data (lots of workflows with lots of runs) not a large scale centralized data store. Niflheim is generally that -- entity resolution, profiles and enrichment are all tenant wide and managed by nifleheim." Then: "I think suppression list masters *could* be in the control plane, they aren't high rate of change and they aren't that large." | Owner, 2026-11-16 | Adopted. Fireweed has no tenant data plane. Entity resolution, profiles and enrichment are Niflheim's. The suppression master lives in the control plane, as the source of D54's propagation. |
 | D58 | "Policies across workflows are the definition of what the dragonfly data plane is used to enforce. The policy values themselves should come from the control plane." | Owner, 2026-11-16 | Adopted. Resolves question 44. Cross-workflow policies, such as send caps and any concurrency or holdout rules, are enforced in Dragonfly, with their values from the control plane. All of it is outside Fireweed (D49, D57). |
 | D59 | "inbound events that arrived keyed only by contact go to niflheim, not a workflow. if for some reason, there could be a workflow that receives \"default\" events but right now I don't even know what that would be." | Owner, 2026-11-16 | Adopted. Resolves question 45. Contact-keyed inbound events (a reply, a STOP) go to Niflheim and are routed to no workflow space, so there's no fan-out and no routing index. A suppression they imply reaches the control-plane master through Cayce, then the workflow spaces (D54, D57). A workflow for "default" events may come later. Events about a sent message still reach their space through the send's tag. |
+| D60 | Asked whether this ADR supersedes main's ADR-026 and API-007 (the claim/commit batch contract, 2026-10-10): "Yes, supersede" | Owner, 2026-11-16 | Adopted. This ADR is renumbered ADR-027 and its contract API-008, after main's ADR-025 to ADR-026 and API-006 to API-007. API-008 replaces API-007 as the interface Snorri and Cayce use. See §Supersession. |
+| D61 | Asked which API-007 guarantees carry over: "Carry both" | Owner, 2026-11-16 | Adopted. A program carries the caller's `issued_at`, and a request id older than the record retention is refused (`request_expired`) rather than run twice. An object's versions never repeat, even after a delete and a reinsert with the same key. |
+| D62 | Asked whether to keep API-007's batch of independent commits: "Add execute_batch" | Owner, 2026-11-16 | Adopted. `execute_batch` sends many independent programs in one round trip; each commits or rejects on its own and gets its own response. |
+| D63 | Asked how a consumer counts a queue: "Why can't we run an aggregate query on the table? Why can't we add indices on the necessary columns so it doesn't require a full table scan?" On the 100,000-row cap: "how in the hell would a count stop at 100k rows? That seems stupid." | Owner, 2026-11-16 | Adopted. No row cap. An aggregate whose columns one btree index holds needs no equality term and reads that index; queues get a `(state, due_at, attempts)` index for counts by state. Programs run with sequential scans off (§9, API-008 §Index rule). |
 
 ## Decision
 
@@ -207,7 +211,7 @@ cover live data: counts by state, lag and rate windows.
 
 ### 2. The DSL is the interface
 
-Consumers write two kinds of documents, in YAML or JSON (D37). API-006 is
+Consumers write two kinds of documents, in YAML or JSON (D37). API-008 is
 the reference for both.
 
 - A **schema** declares a space's queues and tables, their typed fields,
@@ -280,8 +284,9 @@ The executor creates for every queue:
 Queue tables leave 20% free space per page (`fillfactor = 80`). That helps
 only updates of unindexed fields, which can stay on their page. Claims,
 settles and renews always change `state` and `due_at`, so they write every
-index on the item (question 40). A second partial index, `(due_at) WHERE
-state = 'leased'`, lets the sweep find expired leases without a scan. Indexes come only
+index on the item (question 40). An index on `(state, due_at, attempts)`
+lets the sweep find expired leases without a scan, and lets a count by
+state read only the index. Indexes come only
 with new objects. A field added to a live object is unindexed, because an
 index build would block the object's writes.
 
@@ -320,7 +325,7 @@ A field updated with `{add: …}` holds a count within a space.
 | Crate | Role |
 |-------|------|
 | `fireweed-dsl` | The schema and program types, YAML and JSON reading, and the checker. No I/O. |
-| `fireweed-dsl-postgres` | The PostgreSQL executor: DDL from a schema, SQL for each statement, and the functions `apply_schema`, `get_schema`, `execute` and `sweep`. |
+| `fireweed-dsl-postgres` | The PostgreSQL executor: DDL from a schema, SQL for each statement, and the functions `apply_schema`, `get_schema`, `execute`, `execute_batch` and `sweep`. |
 
 A SQLite and Turso executor follows, with the same statement shapes
 without `FOR UPDATE SKIP LOCKED`, since one writer holds a space's
@@ -343,7 +348,7 @@ Each call reads the space's schema row, checks the program, and runs it.
 | `update` | One statement: a `FOR UPDATE` CTE of up to `limit + 1` rows in id order, their count, and `UPDATE … FROM` the first `limit` when the count allows, returning merge-rule checks |
 | `delete` | The same shape with `DELETE … USING` |
 | `assert` | `SELECT count(*) FROM (SELECT 1 FROM obj WHERE <where> LIMIT $max+1 FOR SHARE)` |
-| `select`, `read` | `SELECT jsonb_build_object(…) FROM obj WHERE … LIMIT $n`; sorted or aggregating selects read through a CTE capped at 100,000 rows |
+| `select`, `read` | `SELECT jsonb_build_object(…) FROM obj WHERE … LIMIT $n`; sorted or aggregating selects add `GROUP BY` and `ORDER BY` |
 | `pause`, `resume` | `INSERT … ON CONFLICT DO UPDATE` on the space's queue-state row |
 
 Only `claim`, `settle` and `renew` write an item's lease columns. An
@@ -357,9 +362,10 @@ Each statement is one round trip. Queries are sent unprepared with text
 parameters, so nothing is prepared or cached per connection. A program
 adds four fixed round trips:
 - BEGIN;
-- one pipelined flight of the settings (timeouts first), the SQL function
-  `fireweed.open_space`, and the savepoint. `open_space` reads the
-  space's schema row and writes or takes over the request record;
+- one pipelined flight of the settings (timeouts first), a savepoint, the
+  SQL function `fireweed.open_space`, and a second savepoint. `open_space`
+  reads the space's schema row, refuses an expired request and writes the
+  request record;
 - writing the response (with a request id);
 - the commit.
 
@@ -375,20 +381,33 @@ an unmet `expect`, a merge-rule break, a key conflict under `reject`, a
 statement rolls back and the response names the statement and reason.
 
 Request ids give idempotent replay. The space's `fw_requests` table holds
-(`request_id`, `fingerprint`, `response`, `recorded_at`):
+(`request_id`, `fingerprint`, `response`, `issued_at`). A program with a
+request id carries `issued_at`, the time the caller created the id, sent
+unchanged on every retry (D61).
 
-1. `fireweed.open_space` runs `INSERT INTO fw_requests … ON CONFLICT DO
-   UPDATE … WHERE recorded_at <= now - request_retention`. A record past
-   retention is taken over. Otherwise, if the row exists, the stored
-   response is returned, and a different fingerprint fails with
-   `request_id_conflict`. A concurrent program with the same id waits on
-   the row lock, under the statement timeout, then replays.
-2. The statements run inside a savepoint.
-3. On success, the response is written to the row and the transaction
+1. `fireweed.open_space` refuses a request issued more than 5 minutes
+   ahead of the clock (`invalid`), or before the space's horizon or
+   `now - request_retention` (`request_expired`). The sweep moves the
+   horizon forward and deletes only records issued before it, so a
+   request whose record may be gone is refused, never run twice.
+2. It runs `INSERT INTO fw_requests … ON CONFLICT DO NOTHING`. A record is
+   never taken over. If the row exists, the stored response is returned,
+   and a different fingerprint fails with `request_id_conflict`. A
+   concurrent program with the same id waits on the row lock, under the
+   statement timeout, then replays. After a fresh insert it reads the
+   horizon again, in case a sweep committed in between.
+3. The statements run inside a savepoint.
+4. On success, the response is written to the row and the transaction
    commits. A claim's items are recorded as ids and tokens only; a replay
    re-reads their current fields. On rejection, the savepoint is rolled back, the rejection is
    written to the row, and the transaction commits. A replay therefore
    returns the same rejection (D19).
+
+`execute_batch` runs many independent programs in one transaction, each
+under its own savepoint, with one commit (D62). A program that fails is
+rolled back to its savepoint; the others go on. Versions come from one
+sequence per space, so a key's versions never repeat after a delete and
+reinsert, and a stale compare-and-set can't match a new row (D61).
 
 Programs run at `READ COMMITTED`. Guards lock the rows they count:
 - `update` and `delete` lock them `FOR UPDATE`;
@@ -465,17 +484,19 @@ timer that charges nothing is a `release` settle with `after` (D39).
 
 ### 9. Every statement is bounded
 
-- Every statement that reads or writes rows has a `LIMIT`. API-006 fixes
+- Every statement that reads or writes rows has a `LIMIT`. API-008 fixes
   the caps on statements, rows and bytes per program, checked before any
   SQL runs.
 - Every `where` in `select`, `update`, `delete` and `assert` must compare
   an indexed column with a value by equality, `in` or `contains`. Ranges
   don't count, because a range alone can match everything. `due_at`
-  doesn't count either, because its only index is partial. The checker
-  refuses a program without such a term. A selection by ids or keys is
+  doesn't count either, because it leads only a partial index. The checker
+  refuses a program without such a term, except an aggregate whose
+  columns one index holds, which reads that index (D63). A selection by ids or keys is
   bounded by them, and `claim` uses the claim index.
-- A `select` that sorts or aggregates reads at most 100,000 rows and
-  rejects past that, so `limit` bounds rows read, not only rows returned.
+- A `select` that sorts or aggregates reads every row its `where`
+  matches, from an index; its `limit` bounds rows returned. There is no
+  row cap (D63).
 - Every transaction runs under a statement timeout.
 - An `update` larger than its limit either rejects, or runs as steps. Each
   step changes up to `limit` rows in id order, returns the last id it
@@ -570,7 +591,7 @@ send or admission commits:
 - Any `where`, including a claim's, can test another object of the same
   space with an indexed lookup:
   `{exists: {in: <object>, match: {<field>: <value or outer field>}, where: …}}`
-  (API-006 §Lookups).
+  (API-008 §Lookups).
 
 The two guards D53 names:
 - "suppress contacts in the suppression list":
@@ -676,19 +697,48 @@ ordinary programs; Fireweed needs nothing new.
 | Positive | Many processes can claim from one PostgreSQL queue at once, with `SKIP LOCKED`. |
 | Positive | Bulk changes, claims and live queries need no new methods, only DSL statements over declared fields. |
 | Positive | One SQL path per dialect. Nothing in memory has to agree with the database. |
-| Negative | Behaviour follows each database's SQL semantics. When the SQLite executor lands, API-006 must pin where it differs from PostgreSQL. |
+| Negative | Behaviour follows each database's SQL semantics. When the SQLite executor lands, API-008 must pin where it differs from PostgreSQL. |
 | Negative | Time ordering across conflicting programs is weaker than revisions 4 to 8 required. Tokens keep leases safe. |
 | Negative | Large payloads need a store outside Fireweed. |
 | Negative | Records scoped to an account can't be checked in the same transaction as a campaign's effects (question 25). |
 | Negative | Every selection needs an index-backed condition, which limits ad-hoc queries. |
 | Negative | The revision 5 to 8 crates (`fireweed-interface`, `-engine`, `-memory`, `-postgres`, `-conformance`) are replaced, and the Turso-queue session's local engine, written against them, must move to the DSL. |
-| Negative | v1 leaves out cohorts, group ordering, gates and recurrence (API-006 §Not in v1). |
+| Negative | v1 leaves out cohorts, group ordering, gates and recurrence (API-008 §Not in v1). |
+
+### Supersession
+
+Main accepted ADR-026 and API-007 on 2026-10-10, while this ADR was a
+proposal on a branch then numbered ADR-025 and API-006. ADR-026 kept
+PostgreSQL as the reference store and defined the queue boundary as four
+calls: insert a batch, claim a filtered priority batch, commit claimed
+updates with state writes and new work, and filtered stats. API-007 is
+that contract.
+
+This ADR replaces the interface and keeps the store (D60):
+
+| API-007 | API-008 |
+|---------|---------|
+| Insert batch | `insert` |
+| Filtered priority claim batch | `claim` with `where`, in due-time order (D39, D42) |
+| Commit claimed updates, with state writes and new work, atomically | A program: `settle`, `update`, `insert` and `assert` in one transaction |
+| Typed state reads and indexed queries | `select` and declared reads, under the index rule |
+| Filtered stats | `select` with `aggregate`, read from an index (D63) |
+| Request expiry by `issued_at` | Carried: `issued_at` and `request_expired` (D61) |
+| Version floor, no reuse after delete | Carried (D61) |
+| Batch of independent commit groups | `execute_batch` (D62) |
+
+API-007 fixes two record kinds, work and state, each with an opaque body
+and declared query fields. API-008 lets a schema declare the queues and
+tables a consumer needs, with typed fields, and an executor creates real
+tables and indexes for them.
 
 ### Documents this ADR changes on acceptance
 
 | Document | Change |
 |----------|--------|
-| API-006 | Rewritten in revision 9 as the DSL reference and the PostgreSQL executor's rules. |
+| API-008 | New: the DSL reference and the PostgreSQL executor's rules. |
+| ADR-026 | Superseded (D60). Its PostgreSQL baseline stands; its claim/commit interface is replaced by the DSL. |
+| API-007 | Superseded (D60). Its expiry and version guarantees and its batch carry over (D61, D62). The object-log runtime keeps it until that runtime is retired (D24). |
 | ADR-024 | Superseded. |
 | ADR-007 | The driven side is the data-plane interface. |
 | ADR-008, ADR-012, ADR-013, ADR-016, ADR-017 | Rescoped to the deprecated object-log runtime (D24). |
@@ -699,7 +749,7 @@ ordinary programs; Fireweed needs nothing new.
 | API-001 | Restated without storage or an owner node. Adds `eligible_at`, lease policies on `update`, lease expiry charging `max_attempts` (D17) and recorded rejections. Removes cohorts until question 37 is ruled. |
 | API-002 | Operator actions become statements: pause is `pause`; redrive and repair are `update` with `leased: break`; purge is `delete`. |
 | API-004 | Replaced by declared reads. |
-| API-005 | The binding of API-006 to `Fireweed`. |
+| API-005 | The binding of API-008 to `Fireweed`. |
 | TD-002 | Revised to §3 and §4: its tables and `SKIP LOCKED` claim, without the command log, `LeaseExpired` commands or epoch-fenced sweepers. |
 | TD-006 | Deprecated with RESP. |
 
@@ -792,7 +842,7 @@ contact-keyed inbound events) is resolved by D59: they go to Niflheim.
 
 | Risk | Prob | Impact | Mitigation |
 |------|------|--------|------------|
-| PostgreSQL and SQLite disagree on an expression result | M | H | API-006 pins each difference and the SQL that removes it; the suite runs on both. |
+| PostgreSQL and SQLite disagree on an expression result | M | H | API-008 pins each difference and the SQL that removes it; the suite runs on both. |
 | Every transition in a space waits on its sequenced table's counter row | M | M | Sequenced inserts come last in a program, so the row is held only for the final round trips. Question 31 measures it. |
 | An absence `assert` misses a concurrent insert of the same key | L | M | The two order as if the guard ran first. Copying suppression into each campaign space (question 25) keeps checks keyed. |
 | The interface grows into a general database | M | H | No joins, capped statements, index-backed selections, live data only. |
@@ -815,7 +865,7 @@ contact-keyed inbound events) is resolved by D59: they go to Niflheim.
 ## References
 
 - `docs/helix/02-design/contracts/API-001-native-client-interface.md`
-- `docs/helix/02-design/contracts/API-006-queue-implementation-interface.md`
+- `docs/helix/02-design/contracts/API-008-data-plane-dsl.md`
 - `docs/helix/02-design/adr/ADR-007-hexagonal-architecture-and-two-interfaces.md`
 - `docs/helix/02-design/adr/ADR-024-s3-turso-public-cell.md`
 - `docs/helix/02-design/technical-designs/TD-002-postgres-native-reference-mode.md`

@@ -52,8 +52,8 @@ target package names are intentionally identical.
 | fireweed-conformance | fireweed-conformance | private | - | - | test-only | Maintainer backend contract suite. |
 | fireweed-release | fireweed-release | private | - | - | release tooling only | Maintainer verification-ledger and evidence tools. |
 | fireweed-sim-support | fireweed-sim-support | private | - | - | test-only | Deterministic simulation support with no product API. |
-| fireweed-dsl | fireweed-dsl | repository-only | - | - | no public feature contract | Data-plane DSL documents and checker (API-006 revision 9, draft). |
-| fireweed-dsl-postgres | fireweed-dsl-postgres | repository-only | - | - | no public feature contract | PostgreSQL executor for the data-plane DSL (API-006 revision 9, draft). |
+| fireweed-dsl | fireweed-dsl | repository-only | - | - | no public feature contract | Data-plane DSL documents and checker (API-008 revision 9, draft). |
+| fireweed-dsl-postgres | fireweed-dsl-postgres | repository-only | - | - | no public feature contract | PostgreSQL executor for the data-plane DSL (API-008 revision 9, draft). |
 <!-- workspace-package-inventory:end -->
 <!-- markdownlint-enable MD013 -->
 

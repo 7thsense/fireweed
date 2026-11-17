@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "PostgreSQL executor for Fireweed's data-plane DSL (API-006): DDL from schemas and plain SQL for each statement."
+description = "PostgreSQL executor for Fireweed's data-plane DSL (API-008): DDL from schemas and plain SQL for each statement."
 
 [dependencies]
 fireweed-dsl = { path = "../fireweed-dsl" }

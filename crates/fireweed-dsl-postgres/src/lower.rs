@@ -88,6 +88,8 @@ pub struct Obj {
     pub max_attempts: MaxAttempts,
     /// A table's key fields.
     pub key: Vec<String>,
+    /// A table that declares `expire_after_write`.
+    pub expires: bool,
     pub alias: String,
     /// The space, for lookups into its other objects.
     pub schema_name: String,
@@ -101,23 +103,29 @@ impl Obj {
         o: &DslObj,
         alias: &str,
     ) -> Obj {
-        let (table, max_attempts, key) = match o.kind {
+        let (table, max_attempts, key, expires) = match o.kind {
             Kind::Queue => (
                 crate::ddl::queue_table(schema_name, &o.name),
                 schema.queues[&o.name].max_attempts,
                 vec![],
+                false,
             ),
-            Kind::Table => (
-                crate::ddl::table_table(schema_name, &o.name),
-                MaxAttempts::Unlimited,
-                schema.tables[&o.name].key.clone(),
-            ),
+            Kind::Table => {
+                let t = &schema.tables[&o.name];
+                (
+                    crate::ddl::table_table(schema_name, &o.name),
+                    MaxAttempts::Unlimited,
+                    t.key.clone(),
+                    t.expire_after_write.is_some(),
+                )
+            }
         };
         Obj {
             table,
             kind: o.kind,
             max_attempts,
             key,
+            expires,
             alias: alias.into(),
             schema_name: schema_name.into(),
             schema: schema.clone(),
@@ -127,7 +135,7 @@ impl Obj {
 
 pub const NOW: &str = "fireweed.now()";
 
-/// True when `new` keeps a field's merge rule against `old` (ADR-025 D20).
+/// True when `new` keeps a field's merge rule against `old` (ADR-027 D20).
 pub fn merge_ok(rule: MergeRule, old: &str, new: &str) -> String {
     match rule {
         MergeRule::AddOnly => format!("({old} IS NULL OR coalesce({new} @> {old}, false))"),
@@ -154,7 +162,7 @@ impl Obj {
     }
 
     /// A column read through alias `o`. A queue's `state` is its effective
-    /// state (API-006 §Time).
+    /// state (API-008 §Time).
     pub fn col(&self, c: &Column) -> String {
         let a = &self.alias;
         if self.kind == Kind::Queue && c.system && c.name == "state" {
@@ -166,14 +174,24 @@ impl Obj {
         format!("{a}.{}", Self::col_name(c))
     }
 
-    /// Rows that are live: a table row past its expiry is gone.
+    /// A new version for a written row. Versions come from one sequence
+    /// per space, so they never repeat, even after a delete and a reinsert
+    /// with the same key (ADR-027 D61).
+    pub fn next_version(&self) -> String {
+        format!("nextval('\"{}\".fw_versions')", self.schema_name)
+    }
+
+    /// Rows that are live: a row of an expiring table past its expiry is
+    /// gone. Other objects don't read `expires_at`, so a count over them can
+    /// be answered from an index.
     pub fn live(&self) -> String {
-        match self.kind {
-            Kind::Table => format!(
+        if self.expires {
+            format!(
                 "({a}.expires_at IS NULL OR {a}.expires_at > {NOW})",
                 a = self.alias
-            ),
-            Kind::Queue => "true".into(),
+            )
+        } else {
+            "true".into()
         }
     }
 

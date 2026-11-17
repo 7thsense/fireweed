@@ -1,4 +1,4 @@
-//! The document types: schemas, programs and responses (API-006).
+//! The document types: schemas, programs and responses (API-008).
 
 use std::collections::BTreeMap;
 
@@ -53,7 +53,7 @@ impl<'de> Deserialize<'de> for Duration {
     }
 }
 
-/// A field's type (API-006 §Documents).
+/// A field's type (API-008 §Documents).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldType {
@@ -199,6 +199,10 @@ pub struct ReadDecl {
 pub struct Program {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// When the caller created the request id, as RFC 3339. Taken once and
+    /// resent unchanged on every retry; required with a request id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durability: Option<Durability>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -338,7 +342,7 @@ pub enum OnLimit {
     Step,
 }
 
-/// What an unmet `expect` does (API-006 §update).
+/// What an unmet `expect` does (API-008 §update).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnUnmet {
@@ -463,7 +467,7 @@ pub struct QueueRef {
 
 /// A predicate. Comparison operands are raw values: the first is a column
 /// name or an operand object, the second a literal or an operand object
-/// (API-006 §Operands).
+/// (API-008 §Operands).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Pred {
@@ -480,7 +484,7 @@ pub enum Pred {
     Contains(Vec<Value>),
     IsNull(Value),
     NotNull(Value),
-    /// A row exists in another object of the same space (API-006 §Lookups).
+    /// A row exists in another object of the same space (API-008 §Lookups).
     Exists(Lookup),
 }
 
@@ -498,7 +502,7 @@ pub struct Lookup {
     pub filter: Option<Box<Pred>>,
 }
 
-/// A body patch (API-006 §Body patches).
+/// A body patch (API-008 §Body patches).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Patch {
@@ -562,7 +566,7 @@ pub struct Rejection {
     pub reason: RejectReason,
 }
 
-/// A program's response. Each result is the JSON API-006 gives for its
+/// A program's response. Each result is the JSON API-008 gives for its
 /// statement.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Response {

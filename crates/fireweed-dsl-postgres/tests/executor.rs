@@ -1,10 +1,12 @@
-//! Runs DSL documents against PostgreSQL (API-006 §Conformance). Needs
+//! Runs DSL documents against PostgreSQL (API-008 §Conformance). Needs
 //! `FIREWEED_PG_TEST_URL`; each test uses its own space.
 
+use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fireweed_dsl::{Error, Program, RejectReason, Response, Schema, Status, from_yaml};
-use fireweed_dsl_postgres::{apply_schema, execute, get_schema, sweep};
+use fireweed_dsl_postgres::{apply_schema, execute, execute_batch, get_schema, sweep};
 use serde_json::{Value, json};
 use tokio_postgres::{Client, NoTls};
 
@@ -84,8 +86,34 @@ async fn run(c: &mut Client, sp: &str, doc: &str) -> Response {
 }
 
 async fn try_run(c: &mut Client, sp: &str, doc: &str) -> Result<Response, Error> {
-    let p: Program = from_yaml(doc).unwrap();
+    let p = program(c, sp, doc).await;
     execute(c, "t", sp, &p).await
+}
+
+/// Parses a program. A request id without `issued_at` gets one the first
+/// time it is seen, from the database clock, and the same one after: the
+/// retry rule a caller follows (API-008 §Request ids).
+async fn program(c: &Client, sp: &str, doc: &str) -> Program {
+    static ISSUED: Mutex<BTreeMap<(String, String), String>> = Mutex::new(BTreeMap::new());
+    let mut p: Program = from_yaml(doc).unwrap();
+    if let (Some(rid), None) = (&p.request_id, &p.issued_at) {
+        let k = (sp.to_owned(), rid.clone());
+        let known = ISSUED.lock().unwrap().get(&k).cloned();
+        let at = match known {
+            Some(at) => at,
+            None => {
+                let at: String = c
+                    .query_one("SELECT fireweed.now()::text", &[])
+                    .await
+                    .unwrap()
+                    .get(0);
+                ISSUED.lock().unwrap().insert(k, at.clone());
+                at
+            }
+        };
+        p.issued_at = Some(at);
+    }
+    p
 }
 
 async fn set_now(c: &Client, at: &str) {
@@ -264,10 +292,14 @@ statements:
             json!({"state": "pending", "n": 1}),
         ]
     );
+    // Inserted, claimed, then settled: three writes, three new versions
+    // from the space's sequence, so the version is past the three inserts'.
+    let row = &rows(&r, 1)[0];
     assert_eq!(
-        rows(&r, 1),
-        vec![json!({"state": "complete", "step": 5, "version": 3})]
+        (&row["state"], &row["step"]),
+        (&json!("complete"), &json!(5))
     );
+    assert!(row["version"].as_i64().unwrap() > 3, "{row}");
 
     // A paused queue claims nothing.
     run(
@@ -650,7 +682,7 @@ async fn programs_that_break_the_rules_are_refused() {
 }
 
 /// Claims, indexed selects and keyed updates never scan a whole table
-/// (ADR-025 D41): PostgreSQL's per-table count of sequential scans doesn't
+/// (ADR-027 D41): PostgreSQL's per-table count of sequential scans doesn't
 /// move while they run over 5,000 items.
 #[tokio::test]
 async fn statements_use_indexes_not_table_scans() {
@@ -704,7 +736,7 @@ statements:
 "#,
     )
     .await;
-    // Leases expire; the sweep writes them back through the leased-only index.
+    // Leases expire; the sweep writes them back through the state index.
     c.batch_execute("SET fireweed.now = '2100-01-01T00:00:00Z'")
         .await
         .unwrap();
@@ -834,7 +866,7 @@ statements:
 }
 
 /// An update never leaves a matched item holding a lapsed lease: the old
-/// token can't settle afterwards (ADR-025 D6).
+/// token can't settle afterwards (ADR-027 D6).
 #[tokio::test]
 async fn update_retires_lapsed_leases() {
     let Some((mut c, sp)) = setup("lapsed").await else {
@@ -1059,4 +1091,211 @@ statements:
         ["a"]
     );
     assert_eq!(r.results[1], json!({"matched": 1, "met": false}));
+}
+
+/// Counts need no equality term when one index holds every column they read,
+/// and they count every row: no cap. Expired leases count as pending.
+#[tokio::test]
+async fn counts_read_an_index() {
+    let Some((mut c, sp)) = setup("counts").await else {
+        return;
+    };
+    for b in 0..5 {
+        let items: Vec<String> = (0..1000)
+            .map(|i| format!("{{key: k{b}-{i}, campaign: c{}}}", i % 4))
+            .collect();
+        run(
+            &mut c,
+            &sp,
+            &format!(
+                "request_id: f{b}\nstatements:\n  - insert: {{into: work, rows: [{}]}}\n",
+                items.join(", ")
+            ),
+        )
+        .await;
+    }
+    run(
+        &mut c,
+        &sp,
+        "request_id: l1\nstatements:\n  - claim: {from: work, limit: 300, lease: 30s, worker: w}\n",
+    )
+    .await;
+    let table: String = c
+        .query_one(
+            "SELECT 'fws_' || id FROM fireweed.spaces WHERE tenant = 't' AND space = $1",
+            &[&sp],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    c.batch_execute(&format!("VACUUM ANALYZE \"{table}\".q_work"))
+        .await
+        .unwrap();
+    let count = r#"
+statements:
+  - select: {from: work, aggregate: {n: count}, group_by: [state], order_by: [{field: state}], limit: 5}
+  - select: {from: work, aggregate: {n: count}, group_by: [campaign], order_by: [{field: campaign}], limit: 10}
+  - select: {from: work, where: {gt: [campaign, c1]}, aggregate: {n: count}, limit: 1}
+"#;
+    let before = seq_scans(&c, &table).await;
+    let r = run(&mut c, &sp, &format!("request_id: n1{count}")).await;
+    assert_eq!(
+        Value::Array(rows(&r, 0)),
+        json!([{"state": "leased", "n": 300}, {"state": "pending", "n": 4700}])
+    );
+    assert_eq!(rows(&r, 1).len(), 4);
+    assert_eq!(rows(&r, 1)[0], json!({"campaign": "c0", "n": 1250}));
+    assert_eq!(rows(&r, 2), vec![json!({"n": 2500})]);
+    // Once the leases lapse they count as pending, with nothing written.
+    set_now(&c, "2100-01-01T00:00:00Z").await;
+    let r = run(&mut c, &sp, &format!("request_id: n2{count}")).await;
+    assert_eq!(rows(&r, 0), vec![json!({"state": "pending", "n": 5000})]);
+    c.batch_execute("RESET fireweed.now").await.unwrap();
+    assert_eq!(
+        seq_scans(&c, &table).await,
+        before,
+        "a count scanned the whole queue table"
+    );
+    // A column outside the index needs an equality term.
+    let e = try_run(
+        &mut c,
+        &sp,
+        "request_id: n3\nstatements:\n  - select: {from: work, aggregate: {n: count}, group_by: [step], limit: 5}\n",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(e, Error::Invalid(_)), "{e}");
+}
+
+/// A request issued before the horizon is refused, not run again, even
+/// after its record is swept and the clock goes back; one issued far ahead
+/// of the clock is invalid (ADR-027 D61).
+#[tokio::test]
+async fn expired_requests_are_refused_not_rerun() {
+    let Some((mut c, sp)) = setup("expiry").await else {
+        return;
+    };
+    set_now(&c, "2030-01-01T00:00:00Z").await;
+    let insert = |rid: &str, at: &str| {
+        format!(
+            "request_id: {rid}\nissued_at: \"{at}\"\nstatements:\n  - insert: {{into: work, rows: [{{key: {rid}}}]}}\n"
+        )
+    };
+    let e = try_run(&mut c, &sp, &insert("old", "2029-12-30T00:00:00Z"))
+        .await
+        .unwrap_err();
+    assert_eq!(e, Error::RequestExpired);
+    let e = try_run(&mut c, &sp, &insert("ahead", "2030-01-01T00:10:00Z"))
+        .await
+        .unwrap_err();
+    assert!(matches!(e, Error::Invalid(_)), "{e}");
+
+    let doc = insert("once", "2030-01-01T00:00:00Z");
+    assert!(!run(&mut c, &sp, &doc).await.replayed);
+    assert!(run(&mut c, &sp, &doc).await.replayed);
+    // Past retention the record may be gone, so the id is refused.
+    set_now(&c, "2030-01-03T00:00:00Z").await;
+    assert_eq!(
+        try_run(&mut c, &sp, &doc).await.unwrap_err(),
+        Error::RequestExpired
+    );
+    let swept = sweep(&mut c, "t", &sp, 100).await.unwrap();
+    assert!(swept.deleted >= 1, "{swept:?}");
+    // The horizon is stored, so a clock that goes back can't let it run again.
+    set_now(&c, "2030-01-01T00:00:01Z").await;
+    assert_eq!(
+        try_run(&mut c, &sp, &doc).await.unwrap_err(),
+        Error::RequestExpired
+    );
+    let r = run(
+        &mut c,
+        &sp,
+        "statements:\n  - select: {from: work, where: {eq: [key, once]}, aggregate: {n: count}, limit: 1}\n",
+    )
+    .await;
+    assert_eq!(rows(&r, 0), vec![json!({"n": 1})]);
+}
+
+/// Versions never repeat for a key, even after a delete and a reinsert, so a
+/// stale compare-and-set can't match the new row (ADR-027 D61).
+#[tokio::test]
+async fn versions_never_repeat_after_reinsert() {
+    let Some((mut c, sp)) = setup("versions").await else {
+        return;
+    };
+    let version = |r: &Response| rows(r, 1)[0]["version"].as_i64().unwrap();
+    let get = "  - select: {from: work, where: {eq: [key, v]}, fields: [version], limit: 1}\n";
+    let r = run(
+        &mut c,
+        &sp,
+        &format!(
+            "request_id: v1\nstatements:\n  - insert: {{into: work, rows: [{{key: v}}]}}\n{get}"
+        ),
+    )
+    .await;
+    let first = version(&r);
+    run(
+        &mut c,
+        &sp,
+        "request_id: v2\nstatements:\n  - delete: {target: work, keys: [v]}\n",
+    )
+    .await;
+    let r = run(
+        &mut c,
+        &sp,
+        &format!(
+            "request_id: v3\nstatements:\n  - insert: {{into: work, rows: [{{key: v}}]}}\n{get}"
+        ),
+    )
+    .await;
+    assert!(version(&r) > first, "{} after {first}", version(&r));
+    // A compare-and-set holding the old version matches nothing.
+    let r = run(
+        &mut c,
+        &sp,
+        &format!(
+            "request_id: v4\nstatements:\n  - update: {{target: work, keys: [v], where: {{eq: [version, {first}]}}, set: {{step: 1}}, expect: {{min: 1, max: 1}}}}\n"
+        ),
+    )
+    .await;
+    assert_eq!(r.rejected.unwrap().reason, RejectReason::ExpectUnmet);
+}
+
+/// A batch commits once; each program succeeds, rejects or fails on its own
+/// (ADR-027 D62).
+#[tokio::test]
+async fn batch_programs_are_independent() {
+    let Some((mut c, sp)) = setup("batch").await else {
+        return;
+    };
+    let docs = [
+        "request_id: b1\nstatements:\n  - insert: {into: work, rows: [{key: k1}]}\n",
+        "request_id: b2\nstatements:\n  - insert: {into: work, rows: [{key: k1}], on_conflict: reject}\n",
+        "request_id: b3\nstatements:\n  - insert: {into: nowhere, rows: [{key: k3}]}\n",
+        "request_id: b4\nstatements:\n  - insert: {into: work, rows: [{key: k2}]}\n",
+    ];
+    let mut programs = vec![];
+    for d in docs {
+        programs.push(program(&c, &sp, d).await);
+    }
+    let out = execute_batch(&mut c, "t", &sp, &programs).await.unwrap();
+    assert_eq!(out[0].as_ref().unwrap().status, Status::Committed);
+    assert_eq!(
+        out[1].as_ref().unwrap().rejected.as_ref().unwrap().reason,
+        RejectReason::KeyConflict
+    );
+    assert!(matches!(out[2], Err(Error::Invalid(_))), "{:?}", out[2]);
+    assert_eq!(out[3].as_ref().unwrap().status, Status::Committed);
+    let r = run(
+        &mut c,
+        &sp,
+        "statements:\n  - select: {from: work, where: {in: [key, [k1, k2, k3]]}, aggregate: {n: count}, limit: 1}\n",
+    )
+    .await;
+    assert_eq!(rows(&r, 0), vec![json!({"n": 2})]);
+    // Sent again, every recorded program replays; the rejection too.
+    let again = execute_batch(&mut c, "t", &sp, &programs).await.unwrap();
+    assert!(again[0].as_ref().unwrap().replayed);
+    assert!(again[1].as_ref().unwrap().replayed);
+    assert!(again[3].as_ref().unwrap().replayed);
 }

@@ -1,5 +1,5 @@
 //! DDL: the catalog, and the tables and indexes a space schema needs
-//! (API-006 §The PostgreSQL executor).
+//! (API-008 §The PostgreSQL executor).
 
 use fireweed_dsl::{FieldDecl, FieldType, QueueDecl, Schema, TableDecl};
 
@@ -12,28 +12,47 @@ CREATE TABLE IF NOT EXISTS fireweed.spaces (
   space text NOT NULL,
   version bigint NOT NULL,
   schema_doc jsonb NOT NULL,
+  -- Request records issued before the horizon may be gone, so requests
+  -- issued before it are refused (API-008 §Request ids).
+  horizon timestamptz,
   UNIQUE (tenant, space));
+ALTER TABLE fireweed.spaces ADD COLUMN IF NOT EXISTS horizon timestamptz;
 CREATE OR REPLACE FUNCTION fireweed.open_space(p_tenant text, p_space text, p_request text, p_fingerprint text,
-  OUT space_id bigint, OUT schema_doc text, OUT fingerprint text, OUT response text, OUT fresh boolean)
+  p_issued timestamptz,
+  OUT space_id bigint, OUT schema_doc text, OUT fingerprint text, OUT response text, OUT fresh boolean,
+  OUT expired boolean)
 LANGUAGE plpgsql AS $$
-DECLARE retention bigint;
+DECLARE retention bigint; hz timestamptz;
 BEGIN
-  SELECT s.id, s.schema_doc::text, (s.schema_doc->>'request_retention')::bigint
-    INTO space_id, schema_doc, retention
+  expired := false;
+  SELECT s.id, s.schema_doc::text, (s.schema_doc->>'request_retention')::bigint, s.horizon
+    INTO space_id, schema_doc, retention, hz
     FROM fireweed.spaces s WHERE s.tenant = p_tenant AND s.space = p_space;
   IF NOT FOUND OR p_request IS NULL THEN
     fresh := true;
     RETURN;
   END IF;
-  -- Record the request, or take over a record past retention. A live record,
-  -- or a concurrent first run once it commits, means replay.
-  EXECUTE format('INSERT INTO %I.fw_requests AS t (request_id, fingerprint, response, recorded_at)
-      VALUES ($1, $2, NULL, fireweed.now())
-      ON CONFLICT (request_id) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, response = NULL,
-        recorded_at = EXCLUDED.recorded_at
-      WHERE t.recorded_at <= fireweed.now() - $3 * interval ''1 millisecond''
-      RETURNING true', 'fws_' || space_id)
-    INTO fresh USING p_request, p_fingerprint, retention;
+  IF p_issued > fireweed.now() + interval '5 minutes' THEN
+    RAISE EXCEPTION 'issued_at is more than 5 minutes ahead of the clock' USING ERRCODE = '22023';
+  END IF;
+  IF p_issued < greatest(hz, fireweed.now() - retention * interval '1 millisecond') THEN
+    expired := true;
+    RETURN;
+  END IF;
+  -- Record the request. An existing record, or a concurrent first run once
+  -- it commits, means replay. A record is never taken over.
+  EXECUTE format('INSERT INTO %I.fw_requests (request_id, fingerprint, response, issued_at)
+      VALUES ($1, $2, NULL, $3) ON CONFLICT (request_id) DO NOTHING RETURNING true', 'fws_' || space_id)
+    INTO fresh USING p_request, p_fingerprint, p_issued;
+  IF fresh THEN
+    -- A sweep may have advanced the horizon and removed this id's record
+    -- after the check above; the horizon commits with the removal.
+    SELECT s.horizon INTO hz FROM fireweed.spaces s WHERE s.id = space_id;
+    IF p_issued < hz THEN
+      expired := true;
+    END IF;
+    RETURN;
+  END IF;
   IF fresh IS NULL THEN
     fresh := false;
     EXECUTE format('SELECT fingerprint, response::text FROM %I.fw_requests WHERE request_id = $1', 'fws_' || space_id)
@@ -88,7 +107,7 @@ pub fn column_type(t: FieldType) -> &'static str {
 }
 
 /// A field's index. A btree index carries `id`, so a selection on the field
-/// steps through it in id order (API-006 §update).
+/// steps through it in id order (API-008 §update).
 fn index(table: &str, field: &str, f: &FieldDecl) -> String {
     if f.ty == FieldType::TextSet {
         format!("CREATE INDEX ON {table} USING gin (\"f_{field}\");\n")
@@ -127,7 +146,7 @@ fn queue(schema: &str, name: &str, q: &QueueDecl) -> String {
 CREATE UNIQUE INDEX ON {t} (key);
 CREATE INDEX ON {t} (due_at, priority{desc}, id) WHERE state IN ('pending', 'leased');
 CREATE INDEX ON {t} (finished_at) WHERE finished_at IS NOT NULL;
-CREATE INDEX ON {t} (due_at) WHERE state = 'leased';
+CREATE INDEX ON {t} (state, due_at, attempts);
 "
     );
     for (f, d) in q.fields.iter().filter(|(_, d)| d.index) {
@@ -183,8 +202,9 @@ CREATE TABLE \"{schema}\".fw_requests (
   request_id text COLLATE \"C\" PRIMARY KEY,
   fingerprint text NOT NULL,
   response jsonb,
-  recorded_at timestamptz NOT NULL);
-CREATE INDEX ON \"{schema}\".fw_requests (recorded_at);
+  issued_at timestamptz NOT NULL);
+CREATE INDEX ON \"{schema}\".fw_requests (issued_at);
+CREATE SEQUENCE \"{schema}\".fw_versions;
 CREATE TABLE \"{schema}\".fw_queue_state (queue text PRIMARY KEY, paused boolean NOT NULL);
 CREATE TABLE \"{schema}\".fw_sequences (tbl text PRIMARY KEY, last bigint NOT NULL);
 "

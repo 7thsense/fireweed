@@ -1,4 +1,4 @@
-//! Fireweed's data-plane DSL (API-006).
+//! Fireweed's data-plane DSL (API-008).
 //!
 //! A [`Schema`] declares a space's queues, tables and reads. A [`Program`]
 //! is a list of [`Statement`]s run as one transaction. Both are read from
@@ -10,7 +10,7 @@ mod doc;
 
 pub use doc::*;
 
-/// Errors that change nothing and are not recorded (API-006 §Transactions).
+/// Errors that change nothing and are not recorded (API-008 §Transactions).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The document doesn't parse, or the program doesn't check against the schema.
@@ -22,6 +22,9 @@ pub enum Error {
     },
     /// A request id reused with a different program.
     RequestIdConflict,
+    /// The request was issued before the space's horizon: its record may be
+    /// gone, so it is refused rather than run twice (ADR-027 D61).
+    RequestExpired,
     /// A guarded program kept failing to serialize.
     Contention,
     /// A database error.
@@ -37,6 +40,7 @@ impl std::fmt::Display for Error {
                 write!(f, "schema conflict (current version {current:?})")
             }
             Error::RequestIdConflict => write!(f, "request id reused with a different program"),
+            Error::RequestExpired => write!(f, "request expired"),
             Error::Contention => write!(f, "contention"),
             Error::Unavailable(m) => write!(f, "unavailable: {m}"),
         }

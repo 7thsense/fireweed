@@ -1,16 +1,17 @@
-//! Each resolved statement as one SQL statement (API-006 §Statements).
+//! Each resolved statement as one SQL statement (API-008 §Statements).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use fireweed_dsl::check::{
-    Agg, Column, Expr, Kind, MAX_SCAN, Obj as DslObj, Output, QueueRow, RPatch, RSelect,
-    RStatement, Selection,
+    Agg, Column, Expr, Kind, Obj as DslObj, Output, QueueRow, RPatch, RSelect, RStatement,
+    Selection,
 };
 use fireweed_dsl::{
     Expect, FieldType, LeasedPolicy, MergeRule, OnConflict, OnLimit, OnUnmet, Outcome as Settle,
     RejectReason,
 };
 use serde_json::{Value, json};
+use tokio_postgres::types::Type;
 use tokio_postgres::{Row, Transaction};
 
 use crate::ddl::{queue_table, table_table};
@@ -127,12 +128,13 @@ pub async fn statement(tx: &Transaction<'_>, sp: &Space, st: &RStatement) -> R {
                    FOR UPDATE SKIP LOCKED),
                  u AS (
                    UPDATE {t} o SET state = 'leased', lease_token = gen_random_uuid()::text, lease_owner = {worker},
-                     due_at = {NOW} + {lease}, attempts = o.attempts + 1, version = o.version + 1, updated_at = {NOW}
+                     due_at = {NOW} + {lease}, attempts = o.attempts + 1, version = {ver}, updated_at = {NOW}
                    FROM c WHERE o.id = c.id
                    RETURNING c.prev_due, c.priority, o.id, {item} AS j)
                  SELECT j::text FROM u ORDER BY prev_due, priority{desc}, id",
                 t = ob.table,
                 s = sp.schema_name,
+                ver = ob.next_version(),
                 exhausted = ob.exhausted("o"),
             );
             let items = query(tx, &q)
@@ -282,13 +284,13 @@ pub async fn statement(tx: &Transaction<'_>, sp: &Space, st: &RStatement) -> R {
 fn common_sets(ob: &Obj, q: &mut Q, set: &[(Column, Expr)], body: &[RPatch]) -> Vec<String> {
     let mut sets: Vec<String> = set.iter().map(|(c, e)| ob.assign(q, c, e)).collect();
     sets.extend(ob.patches(q, body));
-    sets.push("version = o.version + 1".into());
+    sets.push(format!("version = {}", ob.next_version()));
     sets.push(format!("updated_at = {NOW}"));
     sets
 }
 
 /// Settle and renew: one `UPDATE` over the items whose token matches an
-/// unexpired lease. Other items are reported `stale` (ADR-025 D6).
+/// unexpired lease. Other items are reported `stale` (ADR-027 D6).
 #[allow(clippy::too_many_arguments)]
 async fn lease_update(
     tx: &Transaction<'_>,
@@ -435,7 +437,7 @@ async fn update(
     }
     // Unless leases are preserved, no matched row keeps a lease: a live
     // lease is broken (`break`), and an expired one is written back as its
-    // effective state, so its old token can never settle (ADR-025 D6).
+    // effective state, so its old token can never settle (ADR-027 D6).
     if ob.kind == Kind::Queue && leased != LeasedPolicy::Preserve {
         let exhausted = ob.exhausted("o");
         let lapsed = format!("(o.state = 'leased' AND o.due_at <= {NOW})");
@@ -515,9 +517,9 @@ fn item_json(sp: &Space, queue: &str, ob: &Obj) -> String {
     ob.json_of(&cols)
 }
 
-/// A select. Without `order_by` or an aggregate, its `limit` bounds the rows
-/// read. Otherwise it reads through a CTE capped at `MAX_SCAN + 1` rows and
-/// rejects with `limit_exceeded` past the cap.
+/// A select: one `SELECT`, with its grouping, order and limit. A sorted or
+/// aggregating select reads every row its `where` matches; the statement
+/// timeout bounds it.
 async fn select(tx: &Transaction<'_>, sp: &Space, s: &RSelect) -> R {
     let ob = obj(sp, &s.obj);
     let mut q = Q::default();
@@ -579,63 +581,13 @@ async fn select(tx: &Transaction<'_>, sp: &Space, s: &RSelect) -> R {
         format!(" ORDER BY {}", keys.join(", "))
     };
     let n = q.bind_i64(s.limit as i64);
-    let bounded = matches!(s.output, Output::Fields(_)) && s.order_by.is_empty();
-    let json = ob.json_of(&cols);
-    let cond = cond.join(" AND ");
-    if bounded {
-        q.sql = format!(
-            "SELECT {json}::text, 0::bigint FROM {} o WHERE {cond} LIMIT {n}",
-            ob.table
-        );
-    } else {
-        // Read only the columns the output uses, so a count can be an
-        // index-only scan and no body is copied.
-        let mut used: BTreeSet<String> = BTreeSet::new();
-        let mut need = |c: &Column| {
-            if ob.kind == Kind::Queue && c.system && c.name == "state" {
-                used.extend(["state", "due_at", "attempts"].map(String::from));
-            } else {
-                used.insert(Obj::col_name(c));
-            }
-        };
-        match &s.output {
-            Output::Fields(cs) => cs.iter().for_each(&mut need),
-            Output::Aggregate { aggs, group_by } => {
-                group_by.iter().for_each(&mut need);
-                for (_, a) in aggs {
-                    match a {
-                        Agg::Count => {}
-                        Agg::Sum(c)
-                        | Agg::Min(c)
-                        | Agg::Max(c)
-                        | Agg::Avg(c)
-                        | Agg::Percentile(c, _) => need(c),
-                    }
-                }
-            }
-        }
-        let projection = if used.is_empty() {
-            "1 AS one".to_string()
-        } else {
-            used.iter()
-                .map(|c| format!("o.{c}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let cap = q.bind_i64(MAX_SCAN as i64 + 1);
-        q.sql = format!(
-            "WITH o AS (SELECT {projection} FROM {t} o WHERE {cond} LIMIT {cap})
-             SELECT {json}::text, (SELECT count(*) FROM o) FROM o{group}{order} LIMIT {n}",
-            t = ob.table
-        );
-    }
+    q.sql = format!(
+        "SELECT {}::text FROM {} o WHERE {}{group}{order} LIMIT {n}",
+        ob.json_of(&cols),
+        ob.table,
+        cond.join(" AND ")
+    );
     let rs = query(tx, &q).await?;
-    if rs
-        .first()
-        .is_some_and(|r| r.get::<_, i64>(1) > MAX_SCAN as i64)
-    {
-        return Ok(Outcome::Rejected(RejectReason::LimitExceeded));
-    }
     let out = rs
         .iter()
         .map(|r| parse(r.get(0)))
@@ -738,7 +690,7 @@ async fn insert_queue(
            INSERT INTO {t} AS t (id, key, state, priority, due_at, attempts, version, lease_owner, lease_token, created_at, updated_at, finished_at, body{cols})
            SELECT r.new_id, r.key, 'pending', coalesce(r.priority, 0),
                   coalesce(r.due, {NOW} + coalesce(r.after_ms, 0) * interval '1 millisecond'),
-                  0, 1, NULL, NULL, {NOW}, {NOW}, NULL, r.body{vals}
+                  0, {ver}, NULL, NULL, {NOW}, {NOW}, NULL, r.body{vals}
            FROM r ORDER BY r.ord
            ON CONFLICT (key) DO UPDATE SET {take_over}
              WHERE t.finished_at <= {NOW} - {retention}
@@ -749,6 +701,7 @@ async fn insert_queue(
         t = ob.table,
         defs = defs.join(", "),
         take_over = take_over.join(", "),
+        ver = ob.next_version(),
     );
     let mut out = vec![];
     for row in query(tx, &q).await? {
@@ -856,11 +809,12 @@ async fn insert_table(
             "WITH s AS (UPDATE \"{s}\".fw_sequences SET last = last + {n} WHERE tbl = {name} RETURNING last),
              r AS (SELECT * FROM jsonb_to_recordset({p}) AS r({defs}))
              INSERT INTO {t} (id, version, created_at, updated_at, expires_at, {cols})
-             SELECT (SELECT last FROM s) - {n} + r.ord, 1, {NOW}, {NOW}, {expires}, {vals} FROM r ORDER BY r.ord
+             SELECT (SELECT last FROM s) - {n} + r.ord, {ver}, {NOW}, {NOW}, {expires}, {vals} FROM r ORDER BY r.ord
              RETURNING id",
             s = sp.schema_name,
             cols = cols.join(", "),
             vals = vals.join(", "),
+            ver = ob.next_version(),
         );
         let mut ids: Vec<i64> = query(tx, &q).await?.iter().map(|r| r.get(0)).collect();
         ids.sort_unstable();
@@ -890,9 +844,7 @@ async fn insert_table(
                     ));
                 }
             }
-            sets.push(format!(
-                "version = CASE WHEN {expired} THEN 1 ELSE t.version + 1 END"
-            ));
+            sets.push("version = EXCLUDED.version".into());
             sets.push("updated_at = EXCLUDED.updated_at".into());
             sets.push("expires_at = EXCLUDED.expires_at".into());
             let rules: Vec<String> = given
@@ -939,7 +891,7 @@ async fn insert_table(
            FROM jsonb_to_recordset({p}) AS r({defs})),
          ins AS (
            INSERT INTO {t} AS t (id, version, created_at, updated_at, expires_at, {cols})
-           SELECT r.new_id, 1, {NOW}, {NOW}, {expires}, {vals} FROM r ORDER BY r.ord
+           SELECT r.new_id, {ver}, {NOW}, {NOW}, {expires}, {vals} FROM r ORDER BY r.ord
            ON CONFLICT ({key}) {conflict}
            RETURNING t.id, t.xmax = 0 AS fresh, {key})
          SELECT coalesce(ins.id, e.id), ins.id IS NOT NULL, coalesce(ins.fresh, false)
@@ -948,6 +900,7 @@ async fn insert_table(
         cols = cols.join(", "),
         vals = vals.join(", "),
         key = key.join(", "),
+        ver = ob.next_version(),
         on_ins = on("ins"),
         on_e = on("e"),
     );
@@ -1010,9 +963,10 @@ pub async fn sweep(
             format!(
                 "UPDATE {t} o SET state = CASE WHEN {exhausted} THEN 'failed' ELSE 'pending' END,
                    finished_at = CASE WHEN {exhausted} THEN o.due_at END,
-                   lease_token = NULL, lease_owner = NULL, version = o.version + 1
+                   lease_token = NULL, lease_owner = NULL, version = {ver}
                  FROM {s} s WHERE o.id = s.id AND {expired}",
                 s = pick(&t, &expired, "id"),
+                ver = ob.next_version(),
             ),
             None,
         ));
@@ -1041,15 +995,30 @@ pub async fn sweep(
             None,
         ));
     }
+    // Request records go once the space's horizon passes their issue time.
+    // The horizon only moves forward, and open_space refuses requests issued
+    // before it, so no request runs twice (ADR-027 D61).
+    tx.execute_typed(
+        "UPDATE fireweed.spaces SET horizon = greatest(horizon, fireweed.now() - $2::text::bigint * interval '1 millisecond') \
+         WHERE id = $1::text::bigint",
+        &[
+            (&sp.id.to_string(), Type::TEXT),
+            (&sp.schema.request_retention.0.to_string(), Type::TEXT),
+        ],
+    )
+    .await?;
     let r = format!("\"{}\".fw_requests", sp.schema_name);
-    let old = aged("recorded_at");
+    let old = format!(
+        "o.issued_at < (SELECT horizon FROM fireweed.spaces WHERE id = {})",
+        sp.id
+    );
     work.push((
         false,
         format!(
             "DELETE FROM {r} o USING {s} s WHERE o.request_id = s.request_id AND {old}",
             s = pick(&r, &old, "request_id")
         ),
-        Some(sp.schema.request_retention.0),
+        None,
     ));
     for (leases, sql, bound) in work {
         let mut params = vec![Some(batch.to_string())];
@@ -1069,7 +1038,7 @@ pub async fn sweep(
 }
 
 /// The response to record: claim results keep only ids and tokens, so a
-/// record never copies item bodies (ADR-025 §5).
+/// record never copies item bodies (ADR-027 §5).
 pub fn compact_claims(
     r: &fireweed_dsl::check::Resolved,
     resp: &fireweed_dsl::Response,
