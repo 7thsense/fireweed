@@ -177,6 +177,8 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D51 | Asked "Can a Snorri re-entry family span more than one workflow?": "No, one workflow". | Owner, 2026-11-16 | Adopted. Resolves question 41. The re-entry record lives in the workflow's space, so admission and the re-entry check are one transaction, and there are no family spaces. |
 | D52 | "it's definitely not one space per run, shard. Snorri doesn't need to know about shards. Shards are only necessary from a tenant / workflow load balancing standpoint across nodes, which means they are a cayce level concern, not snorri (single workflow) and fireweed (single space)" | Owner via the Cayce session, 2026-11-16 | Adopted with D50. Fireweed sees one space at a time and Snorri one workflow; neither has shards. Placing workflows' spaces onto nodes is Cayce's load balancing, done through the control plane that grants a space's writer (D15). Rechecked against shards: D13 (atomicity per workflow or campaign), D29 (now D51), D30 and D31 assume none. |
 | D53 | "Fix up *all* the relevant specs, comments, and implementatinos so we stop getting wound around this axle. a) i think we can debate workflow per space vs. run per space. Given there are workflow specific tables to be stored, I think we can get away with per-workflow until proven otherwise, and put some constraint on number of runs, etc. b) account level state is in the control plane (fast, small, static) / niflheim (large, slow, delayed). If we need state that fits neither model we must design for it carefully. c) A guard should be able to access anything in the space it needs. But if there are technical constraints or limitations, we can address them. We will definitely need guards like "suppress contacts in the suppression list" and "dedupe by resolved entity" d) We need to figure this out, it should be part of the direct snorri AND OR fireweed DSL" | Owner via the Cayce session, 2026-11-16 | Adopted:<br>(a) one space per workflow until measurement shows otherwise, with a limit on open runs (§3);<br>(b) account-level state lives in the control plane or Niflheim, never in a Fireweed space, and §13 lists what fits neither;<br>(c) guards read any object in their space through indexed `exists` lookups (§14, API-006 §Lookups);<br>(d) host-supplied facts are written with ordinary DSL programs into the workflow space (§14). |
+| D54 | Asked "suppression: (a) copies into each workflow space or (b) Cayce-side check at dispatch?": "copies in for performance with a background update of some variety" | Owner via the Cayce session, 2026-11-16 | Adopted. Resolves question 25 as (a). Copies live in each workflow space as Fireweed tables, and Cayce keeps them current from its authoritative list with the propagation in §14. |
+| D55 | Asked "do per-account caps stay in Cayce's Dragonfly (your D45/D49)?": "the configuratino should be in the control plane, so I think that means no." | Owner via the Cayce session, 2026-11-16 | Cap configuration (limits and windows) lives in the control plane. Whether the counters also leave Dragonfly is unclear. D45 and D49 stand until the owner says which is meant (question 43). |
 
 ## Decision
 
@@ -536,10 +538,12 @@ own design, and each is drafted here for the owner:
 
 1. **The suppression list.** It is account-wide and written by events
    (bounce, STOP, complaint), and must be exact at send time. That makes
-   it neither static nor delayed. Draft: Cayce keeps the authoritative list
-   in its control-plane PostgreSQL, accepting that it isn't static, and
-   writes each entry into every active workflow space as a host-supplied
-   fact (§14). Send guards then read it inside their own space (D53 c).
+   it neither static nor delayed. Decided (D54): copies live in each
+   workflow space as a Fireweed table, kept current by a background update
+   from Cayce's authoritative list (§14), so send guards read them inside
+   their own space. Where Cayce keeps the authoritative list and its event
+   log is Cayce's choice: its control plane, accepting that the list isn't
+   static.
 2. **Resolved entities, for dedupe.** Mapping a contact to its resolved
    entity is account-level identity resolution: large, and built
    elsewhere. Draft: Cayce resolves the entity when it admits a contact,
@@ -548,11 +552,9 @@ own design, and each is drafted here for the owner:
    this entity" (§14). Where the resolution graph itself lives, and how
    fresh it must be at admission, is Cayce's design.
 3. **Per-contact send caps.** These are high-rate, real-time counters
-   shared across a tenant's workflows. The owner kept them in Dragonfly
-   (D45, Cayce ADR-015), which is neither the control plane nor Niflheim.
-   That makes Dragonfly the one existing third store, and D53's "design
-   for it carefully" applies to it. The owner should confirm Dragonfly as
-   that design.
+   shared across a tenant's workflows. Their configuration (limits and
+   windows) lives in the control plane (D55). Where the counters live is
+   question 43.
 
 ### 14. Guards and host-supplied facts
 
@@ -602,6 +604,51 @@ beside a send orders as if the send ran first.
 Across spaces there is no atomicity. Cayce writes each active workflow
 space separately, and seeds a new workflow space from its own record when
 the space is created.
+
+**Suppression propagation (D54).** This is the "background update" that
+keeps every workflow space's suppression copy current. Cayce runs it with
+ordinary programs; Fireweed needs nothing new.
+
+- **The source.** Cayce's authoritative list records each change
+  (suppress, lift) as an event with a per-account sequence number `seq`
+  that only increases.
+- **The copy.** Each workflow space declares two tables:
+  - `suppression`, keyed by contact address: `reasons` (text_set,
+    `add_only`), `lifted_at`, and `seq` (int, `non_decreasing`), the last
+    event applied to that row;
+  - `host_cursors`, keyed by source: `seq` (`non_decreasing`), the last
+    event applied to the whole space.
+- **One step.** A background worker reads the space's cursor, takes the
+  next events after it (up to 1,000), and writes them in one program:
+  - the rows;
+  - the cursor, advanced to the batch's last `seq`.
+
+  Its `request_id` is (space, source, last `seq`), so a retried step
+  replays. Rows and cursor commit together, so a crash never leaves a gap.
+- **Convergence.** Applying a batch twice, or two batches out of order,
+  ends in the same state:
+  - a suppress event adds its reason, and `add_only` refuses removals;
+  - every row write is guarded by `where: {lt: [seq, <event seq>]}` with
+    `expect.on_unmet: report`, so an older event than the row has seen is
+    a no-op;
+  - a lift is the one write with `override_merge: true`. It clears the
+    reasons and sets `lifted_at`, under the same `seq` guard, so a later
+    suppress event re-adds a reason.
+- **A new space.** When Cayce creates a workflow space, it loads a
+  snapshot of the account's current list in steps (1,000 rows per insert),
+  then sets the cursor to the snapshot's `seq`, and propagation continues
+  from there. Cayce doesn't activate the workflow, so nothing sends, until
+  the cursor is set.
+- **Lag.** Between a suppression reaching the authoritative list and its
+  copy reaching a space, a send isn't blocked. That lag is the residual
+  window D54 accepts for send-time performance. It is bounded by the
+  worker: Cayce sets its target, for example a few seconds at p99, and
+  alerts on cursors that fall behind the source. If a space's cursor falls
+  too far behind, Cayce can `pause` its send queue until the cursor
+  catches up, failing closed.
+- **Cost.** Each event is written once per active workflow space of the
+  account. A bulk import of suppressions is that many rows times the
+  number of active workflows, in bounded steps.
 
 ## Alternatives
 
@@ -667,12 +714,9 @@ the space is created.
 
 Questions 1 to 4, 6 to 24 and 26 to 36 were resolved in revisions 7 and 8
 (D13 to D40). Question 5 (counters) is closed: tenant-wide counters are not
-Fireweed's (D45, D49).
+Fireweed's (D45, D49), pending question 43. Question 25 (suppression) is
+resolved by D54.
 
-25. **Suppression.** Draft, following D53 (c): the authoritative list is
-    Cayce's (§13, item 1), and copies are written into each workflow space
-    as host-supplied facts (§14), so guards read them in-space. Owner to
-    confirm, together with where Cayce keeps the authoritative list.
 31. **PostgreSQL layout.** Each space gets its own tables, or spaces share
     tables with the space id leading every key and index. Both are being
     measured (D36):
@@ -737,6 +781,27 @@ Fireweed's (D45, D49).
 
     The run layout measurement (question 31) decides between bounded
     deletes and partitions.
+
+43. **Where per-contact cap counters live (D55).** The owner moved cap
+    configuration to the control plane: "the configuratino should be in
+    the control plane, so I think that means no." That answers whether
+    caps stay in Dragonfly, and it can be read two ways:
+    - **(A)** configuration moves to the control plane, and the counters
+      stay in Dragonfly, as Cayce ADR-015 has them;
+    - **(B)** the counters also leave Dragonfly.
+
+    Under (B), the counters fit neither home. The control plane is small
+    and static, while caps are high-rate writes. Niflheim is delayed,
+    while caps must be exact at send time. The options are:
+    - **(B1)** a per-workflow counter row in each workflow space. That's
+      exact within one workflow, but a cap that spans workflows can be
+      exceeded once per workflow.
+    - **(B2)** a Fireweed space per account for tenant-scope counters. That
+      contradicts D53 (b), "account level state is in the control plane /
+      niflheim", and needs the owner's ruling.
+    - **(B3)** a new store, which is Dragonfly under another name.
+
+    Draft: (A).
 
 ## Risks
 

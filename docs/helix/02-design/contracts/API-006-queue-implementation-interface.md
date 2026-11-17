@@ -648,7 +648,7 @@ index rule and step through `(run, id)`.
 | State | In the DSL |
 |-------|-----------|
 | Per-recipient lifecycle | Queue items with indexed fields (campaign, step, domain, status) |
-| Suppression | Host-supplied fact table in each workflow space, written by Cayce (ADR-025 §13, §14), with `reasons: text_set, merge: add_only`. A send's claim excludes suppressed contacts with `not exists`, or a send's program runs `assert` on the address with `expect: {max: 0}`. |
+| Suppression | A copy in each workflow space (ADR-025 D54): a `suppression` table (`reasons` add_only, `lifted_at`, `seq` non_decreasing) and a `host_cursors` table, kept current by Cayce's background propagation (ADR-025 §14). A send's claim excludes suppressed contacts with `not exists`, or a send's program runs `assert` on the address with `expect: {max: 0}`. |
 | Dedupe by resolved entity | Cayce stamps an indexed `entity` field at admission. Guard: `not exists` an item with the same entity in a done state (ADR-025 §14). |
 | Caps and rate windows | Not Fireweed's (ADR-025 D49) |
 | Delivery and engagement events | Queue items keyed by provider id; a sequenced table for timelines |
