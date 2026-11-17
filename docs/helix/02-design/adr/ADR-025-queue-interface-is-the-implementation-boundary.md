@@ -181,6 +181,7 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D55 | Asked "do per-account caps stay in Cayce's Dragonfly (your D45/D49)?": "the configuratino should be in the control plane, so I think that means no." | Owner via the Cayce session, 2026-11-16 | Resolved by D56: only the configuration moves; the counters stay in Dragonfly. |
 | D56 | Asked whether D55 means only the configuration leaves Dragonfly, or the counters too: "Config only, counters stay" | Owner, 2026-11-16 | Adopted. Resolves question 43 as (A). Cap configuration (limits and windows) lives in the control plane. The counters stay in Dragonfly (D45, Cayce ADR-015), outside Fireweed (D49). |
 | D57 | "Fireweed is not really appropriate for a tenant data plane, it's designed for short lifecycle scale-out data (lots of workflows with lots of runs) not a large scale centralized data store. Niflheim is generally that -- entity resolution, profiles and enrichment are all tenant wide and managed by nifleheim." Then: "I think suppression list masters *could* be in the control plane, they aren't high rate of change and they aren't that large." | Owner, 2026-11-16 | Adopted. Fireweed has no tenant data plane. Entity resolution, profiles and enrichment are Niflheim's. The suppression master lives in the control plane, as the source of D54's propagation. |
+| D58 | "Policies across workflows are the definition of what the dragonfly data plane is used to enforce. The policy values themselves should come from the control plane." | Owner, 2026-11-16 | Adopted. Resolves question 44. Cross-workflow policies, such as send caps and any concurrency or holdout rules, are enforced in Dragonfly, with their values from the control plane. All of it is outside Fireweed (D49, D57). |
 
 ## Decision
 
@@ -551,11 +552,12 @@ own design, and each is drafted here for the owner:
    entity when it admits a contact, and stamps it on the item as an
    indexed `entity` field. The dedupe guard then reads only its space,
    for example "no completed item with this entity" (§14).
-3. **Per-contact send caps.** These are high-rate, real-time counters
-   shared across a tenant's workflows. Their configuration (limits and
-   windows) lives in the control plane, and the counters stay in Dragonfly
-   (D45, D56): the one store beside the control plane and Niflheim, and
-   outside Fireweed (D49).
+3. **Policies across workflows.** Dragonfly enforces policies that span a
+   tenant's workflows (D58). Per-contact send caps are one; concurrency
+   limits and holdouts would be others. Each policy's values (limits and
+   windows) come from the control plane, and its live counters are in
+   Dragonfly (D45, D56). Dragonfly is the one store beside the control
+   plane and Niflheim, and it is outside Fireweed (D49).
 
 ### 14. Guards and host-supplied facts
 
@@ -716,7 +718,8 @@ ordinary programs; Fireweed needs nothing new.
 Questions 1 to 4, 6 to 24 and 26 to 36 were resolved in revisions 7 and 8
 (D13 to D40). Question 5 (counters) is closed: tenant-wide counters are not
 Fireweed's: configuration in the control plane, counters in Dragonfly
-(D45, D49, D56). Question 25 (suppression) is resolved by D54.
+(D45, D49, D56). Question 25 (suppression) is resolved by D54, and
+question 44 (policies across workflows) by D58.
 
 31. **PostgreSQL layout.** Each space gets its own tables, or spaces share
     tables with the space id leading every key and index. Both are being
@@ -783,12 +786,6 @@ Fireweed's: configuration in the control plane, counters in Dragonfly
     The run layout measurement (question 31) decides between bounded
     deletes and partitions.
 
-44. **Policies across workflows.** Rules such as "a contact is in at most
-    N campaigns at once", a global holdout group, or "don't enrol someone
-    already in a competing journey" need tenant-wide state that is current
-    at admission. No Snorri or Cayce need asks for them today. Draft: none
-    in v1. If the owner wants them, they are the one reason to design
-    live tenant-wide state, outside Fireweed (D57).
 45. **Routing contact-keyed inbound events.** A provider event about a
     sent message reaches its space without lookups, because each send tags
     the provider message with its workflow, space and instance. An inbound
