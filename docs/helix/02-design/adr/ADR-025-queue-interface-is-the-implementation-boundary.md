@@ -178,7 +178,8 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D52 | "it's definitely not one space per run, shard. Snorri doesn't need to know about shards. Shards are only necessary from a tenant / workflow load balancing standpoint across nodes, which means they are a cayce level concern, not snorri (single workflow) and fireweed (single space)" | Owner via the Cayce session, 2026-11-16 | Adopted with D50. Fireweed sees one space at a time and Snorri one workflow; neither has shards. Placing workflows' spaces onto nodes is Cayce's load balancing, done through the control plane that grants a space's writer (D15). Rechecked against shards: D13 (atomicity per workflow or campaign), D29 (now D51), D30 and D31 assume none. |
 | D53 | "Fix up *all* the relevant specs, comments, and implementatinos so we stop getting wound around this axle. a) i think we can debate workflow per space vs. run per space. Given there are workflow specific tables to be stored, I think we can get away with per-workflow until proven otherwise, and put some constraint on number of runs, etc. b) account level state is in the control plane (fast, small, static) / niflheim (large, slow, delayed). If we need state that fits neither model we must design for it carefully. c) A guard should be able to access anything in the space it needs. But if there are technical constraints or limitations, we can address them. We will definitely need guards like "suppress contacts in the suppression list" and "dedupe by resolved entity" d) We need to figure this out, it should be part of the direct snorri AND OR fireweed DSL" | Owner via the Cayce session, 2026-11-16 | Adopted:<br>(a) one space per workflow until measurement shows otherwise, with a limit on open runs (§3);<br>(b) account-level state lives in the control plane or Niflheim, never in a Fireweed space, and §13 lists what fits neither;<br>(c) guards read any object in their space through indexed `exists` lookups (§14, API-006 §Lookups);<br>(d) host-supplied facts are written with ordinary DSL programs into the workflow space (§14). |
 | D54 | Asked "suppression: (a) copies into each workflow space or (b) Cayce-side check at dispatch?": "copies in for performance with a background update of some variety" | Owner via the Cayce session, 2026-11-16 | Adopted. Resolves question 25 as (a). Copies live in each workflow space as Fireweed tables, and Cayce keeps them current from its authoritative list with the propagation in §14. |
-| D55 | Asked "do per-account caps stay in Cayce's Dragonfly (your D45/D49)?": "the configuratino should be in the control plane, so I think that means no." | Owner via the Cayce session, 2026-11-16 | Cap configuration (limits and windows) lives in the control plane. Whether the counters also leave Dragonfly is unclear. D45 and D49 stand until the owner says which is meant (question 43). |
+| D55 | Asked "do per-account caps stay in Cayce's Dragonfly (your D45/D49)?": "the configuratino should be in the control plane, so I think that means no." | Owner via the Cayce session, 2026-11-16 | Resolved by D56: only the configuration moves; the counters stay in Dragonfly. |
+| D56 | Asked whether D55 means only the configuration leaves Dragonfly, or the counters too: "Config only, counters stay" | Owner, 2026-11-16 | Adopted. Resolves question 43 as (A). Cap configuration (limits and windows) lives in the control plane. The counters stay in Dragonfly (D45, Cayce ADR-015), outside Fireweed (D49). |
 
 ## Decision
 
@@ -553,8 +554,9 @@ own design, and each is drafted here for the owner:
    fresh it must be at admission, is Cayce's design.
 3. **Per-contact send caps.** These are high-rate, real-time counters
    shared across a tenant's workflows. Their configuration (limits and
-   windows) lives in the control plane (D55). Where the counters live is
-   question 43.
+   windows) lives in the control plane, and the counters stay in Dragonfly
+   (D45, D56): the one store beside the control plane and Niflheim, and
+   outside Fireweed (D49).
 
 ### 14. Guards and host-supplied facts
 
@@ -714,8 +716,8 @@ ordinary programs; Fireweed needs nothing new.
 
 Questions 1 to 4, 6 to 24 and 26 to 36 were resolved in revisions 7 and 8
 (D13 to D40). Question 5 (counters) is closed: tenant-wide counters are not
-Fireweed's (D45, D49), pending question 43. Question 25 (suppression) is
-resolved by D54.
+Fireweed's: configuration in the control plane, counters in Dragonfly
+(D45, D49, D56). Question 25 (suppression) is resolved by D54.
 
 31. **PostgreSQL layout.** Each space gets its own tables, or spaces share
     tables with the space id leading every key and index. Both are being
@@ -781,27 +783,6 @@ resolved by D54.
 
     The run layout measurement (question 31) decides between bounded
     deletes and partitions.
-
-43. **Where per-contact cap counters live (D55).** The owner moved cap
-    configuration to the control plane: "the configuratino should be in
-    the control plane, so I think that means no." That answers whether
-    caps stay in Dragonfly, and it can be read two ways:
-    - **(A)** configuration moves to the control plane, and the counters
-      stay in Dragonfly, as Cayce ADR-015 has them;
-    - **(B)** the counters also leave Dragonfly.
-
-    Under (B), the counters fit neither home. The control plane is small
-    and static, while caps are high-rate writes. Niflheim is delayed,
-    while caps must be exact at send time. The options are:
-    - **(B1)** a per-workflow counter row in each workflow space. That's
-      exact within one workflow, but a cap that spans workflows can be
-      exceeded once per workflow.
-    - **(B2)** a Fireweed space per account for tenant-scope counters. That
-      contradicts D53 (b), "account level state is in the control plane /
-      niflheim", and needs the owner's ruling.
-    - **(B3)** a new store, which is Dragonfly under another name.
-
-    Draft: (A).
 
 ## Risks
 
