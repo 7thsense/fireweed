@@ -182,6 +182,7 @@ about 100 recipients/s against Cayce's target of about 17,000/s.
 | D56 | Asked whether D55 means only the configuration leaves Dragonfly, or the counters too: "Config only, counters stay" | Owner, 2026-11-16 | Adopted. Resolves question 43 as (A). Cap configuration (limits and windows) lives in the control plane. The counters stay in Dragonfly (D45, Cayce ADR-015), outside Fireweed (D49). |
 | D57 | "Fireweed is not really appropriate for a tenant data plane, it's designed for short lifecycle scale-out data (lots of workflows with lots of runs) not a large scale centralized data store. Niflheim is generally that -- entity resolution, profiles and enrichment are all tenant wide and managed by nifleheim." Then: "I think suppression list masters *could* be in the control plane, they aren't high rate of change and they aren't that large." | Owner, 2026-11-16 | Adopted. Fireweed has no tenant data plane. Entity resolution, profiles and enrichment are Niflheim's. The suppression master lives in the control plane, as the source of D54's propagation. |
 | D58 | "Policies across workflows are the definition of what the dragonfly data plane is used to enforce. The policy values themselves should come from the control plane." | Owner, 2026-11-16 | Adopted. Resolves question 44. Cross-workflow policies, such as send caps and any concurrency or holdout rules, are enforced in Dragonfly, with their values from the control plane. All of it is outside Fireweed (D49, D57). |
+| D59 | "inbound events that arrived keyed only by contact go to niflheim, not a workflow. if for some reason, there could be a workflow that receives \"default\" events but right now I don't even know what that would be." | Owner, 2026-11-16 | Adopted. Resolves question 45. Contact-keyed inbound events (a reply, a STOP) go to Niflheim and are routed to no workflow space, so there's no fan-out and no routing index. A suppression they imply reaches the control-plane master through Cayce, then the workflow spaces (D54, D57). A workflow for "default" events may come later. Events about a sent message still reach their space through the send's tag. |
 
 ## Decision
 
@@ -719,7 +720,8 @@ Questions 1 to 4, 6 to 24 and 26 to 36 were resolved in revisions 7 and 8
 (D13 to D40). Question 5 (counters) is closed: tenant-wide counters are not
 Fireweed's: configuration in the control plane, counters in Dragonfly
 (D45, D49, D56). Question 25 (suppression) is resolved by D54, and
-question 44 (policies across workflows) by D58.
+question 44 (policies across workflows) by D58. Question 45 (routing
+contact-keyed inbound events) is resolved by D59: they go to Niflheim.
 
 31. **PostgreSQL layout.** Each space gets its own tables, or spaces share
     tables with the space id leading every key and index. Both are being
@@ -785,21 +787,6 @@ question 44 (policies across workflows) by D58.
 
     The run layout measurement (question 31) decides between bounded
     deletes and partitions.
-
-45. **Routing contact-keyed inbound events.** A provider event about a
-    sent message reaches its space without lookups, because each send tags
-    the provider message with its workflow, space and instance. An inbound
-    reply or STOP, though, arrives keyed only by contact, and may be
-    awaited by instances in several workflows. The options:
-    - **(a) fan-out:** offer the event to each of the tenant's active
-      workflow spaces, where an indexed await field selects the instances.
-      There's no stored routing state, and the cost grows with the number
-      of active workflows.
-    - **(b) a routing index:** contact to spaces with live instances. It
-      changes with every enrolment and exit, and fits neither the control
-      plane nor Niflheim.
-
-    Draft: (a), measured before considering (b).
 
 ## Risks
 
