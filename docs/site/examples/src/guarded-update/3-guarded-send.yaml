@@ -1,0 +1,12 @@
+# Enqueue a send only if the address is not suppressed. The assert and the
+# insert commit together, or neither does.
+request_id: c7-enqueue-dee
+issued_at: 2026-11-16T09:31:10Z
+statements:
+  - assert:
+      target: suppression
+      keys: [{address: dee@example.com}]
+      expect: {max: 0}
+  - insert:
+      into: sends
+      rows: [{key: c7-dee, campaign: c7, address: dee@example.com, body: {template: welcome}}]

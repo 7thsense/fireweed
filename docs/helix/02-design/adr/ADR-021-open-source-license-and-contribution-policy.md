@@ -1,10 +1,6 @@
 ---
 ddx:
   id: adr-021-open-source-license-and-contribution-policy
-  depends_on:
-    - adr-023-pre-release-fireweed-namespace-cutover
-  links:
-    - {kind: informed_by, to: adr-023-pre-release-fireweed-namespace-cutover}
   status: accepted
 ---
 
@@ -12,14 +8,14 @@ ddx:
 
 | Date | Status | Deciders | Related |
 |------|--------|----------|---------|
-| 2026-07-23 | Accepted | Project maintainers | ADR-023, public-namespace-migration |
+| 2026-07-23 | Accepted | Project maintainers | CONTRIBUTING.md, SUPPORT.md, SECURITY.md |
 
 ## Context
 
 Fireweed is being published as a maintainer-developed open-source project.
 The repository metadata already selects the dual-license expression
-`MIT OR Apache-2.0`, and the public preview boundary treats the project as an
-externally named product with a controlled support posture.
+`MIT OR Apache-2.0`, and the project is published with a controlled support
+posture.
 
 The project needs a clear outbound license and a contribution policy that match
 the current operating model:

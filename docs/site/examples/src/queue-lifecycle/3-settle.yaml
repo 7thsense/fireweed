@@ -1,0 +1,22 @@
+# Ana's send went out; Bo's provider timed out, so retry in 5 minutes.
+# The ids and tokens are the ones the claim returned.
+request_id: w1-settle-1
+issued_at: 2026-11-16T09:30:02Z
+params:
+  ana: 1
+  ana_token: "<token from the claim>"
+  bo: 2
+  bo_token: "<token from the claim>"
+statements:
+  - settle:
+      queue: sends
+      outcome: complete
+      items: [{id: {param: ana}, token: {param: ana_token}}]
+      set: {step: 1}
+      body:
+        - {set: /sent_at, value: "2026-11-16T09:30:02Z"}
+  - settle:
+      queue: sends
+      outcome: retry
+      after: 5m
+      items: [{id: {param: bo}, token: {param: bo_token}}]

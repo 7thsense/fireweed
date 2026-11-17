@@ -1,0 +1,34 @@
+# One space for a campaign: a queue of sends, a keyed table of admission
+# chunks, a suppression table and a declared read.
+version: 1
+queues:
+  sends:
+    max_attempts: 5
+    retention: 7d
+    fields:
+      campaign: {type: text, index: true}
+      address:  {type: text, index: true}
+      step:     {type: int}
+tables:
+  chunks:
+    key: [run, chunk]
+    fields:
+      run:    {type: text}
+      chunk:  {type: int}
+      cursor: {type: int, merge: non_decreasing}
+  suppression:
+    key: [address]
+    fields:
+      address: {type: text}
+      reasons: {type: text_set, merge: add_only}
+reads:
+  - name: campaign_depth
+    version: 1
+    params: {campaign: text}
+    select:
+      from: sends
+      where: {eq: [campaign, {param: campaign}]}
+      aggregate: {n: count}
+      group_by: [state]
+      order_by: [{field: state}]
+      limit: 4

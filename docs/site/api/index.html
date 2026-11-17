@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="A durable priority queue for ordered, recoverable execution." />
-    <title>API — Fireweed Queue</title>
+    <meta name="description" content="Schema and program documents: keys, statements, rejections and limits." />
+    <title>DSL reference — Fireweed</title>
     <link rel="stylesheet" href="../assets/site.css" />
   </head>
   <body>
@@ -17,8 +17,8 @@
             <circle cx="18" cy="38" r="5" fill="#0f766e"/>
             <circle cx="62" cy="29" r="5" fill="#92ad61"/>
           </svg>
-          <h1>Fireweed Queue</h1>
-          <span>v0.30.0</span>
+          <h1>Fireweed</h1>
+          <span>data-plane DSL</span>
         </a>
         <nav class="site-nav" aria-label="Primary">
         <a href="../index.html">Home</a>
@@ -26,66 +26,120 @@
         <a href="../concepts.html">Concepts</a>
         <a href="../get-started.html">Get started</a>
         <a href="../examples/index.html">Examples</a>
-        <a href="index.html" aria-current="page">API</a>
+        <a href="index.html" aria-current="page">Reference</a>
         <a href="../support.html">Support</a>
         </nav>
       </header>
       <main>
 
         <div class="page-intro">
-          <h2>API documentation</h2>
+          <h2>DSL reference</h2>
           <p>
-            Fireweed exposes one public API: <code>Queue</code> in the Rust
-            <code>fireweed</code> crate.
+            A summary of the schema and program documents. The full specification,
+            with every rule and the SQL each statement becomes, is
+            <a href="https://github.com/7thsense/fireweed/blob/main/docs/helix/02-design/contracts/API-008-data-plane-dsl.md">API-008</a>. For the Rust functions, see
+            <a href="rust.html">Rust crates</a>.
           </p>
         </div>
-        <div class="grid-2">
-          <article class="card card-body">
-            <h3>Rust API</h3>
-            <p>
-              The <code>Queue</code> handle: constructors and the ten operations.
-            </p>
-            <p><a href="rust.html">Rust API guide →</a></p>
-          </article>
-          <article class="card card-body">
-            <h3>Types</h3>
-            <p>
-              Request and result types re-exported through <code>fireweed::queue</code>.
-            </p>
-            <p><a href="types.html">Type catalog →</a></p>
-          </article>
-          <article class="card card-body">
-            <h3>Generated rustdoc</h3>
-            <p>
-              For field-level signatures, generate local docs (crates.io deferred):
-            </p>
-            <p><code>cargo doc -p fireweed --no-deps --open</code></p>
-          </article>
-        </div>
-        <div class="callout">
+        <div class="prose">
           <p>
-            Adapter crates (<code>fireweed-turso</code>, <code>fireweed-objectlog</code>, …)
-            implement storage; they are not standalone public APIs. Depend on
-            <code>fireweed</code> only for embedding.
+            Both documents are YAML or JSON; unknown keys are refused. Object, field,
+            parameter and read names match <code>[a-z][a-z0-9_]{0,47}</code>.
+            Durations are a string with a unit (<code>250ms</code>, <code>30s</code>,
+            <code>5m</code>, <code>2h</code>, <code>7d</code>) or milliseconds.
           </p>
+          <h2>Schema document</h2>
         </div>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>version</code></td><td>Increases with every change. <code>apply_schema</code> takes the version it expects to replace.</td></tr>
+            <tr><td><code>request_retention</code></td><td>How long request ids are remembered. Default <code>1d</code>.</td></tr>
+            <tr><td><code>queues.&lt;name&gt;</code></td><td><code>max_attempts</code> (default 10, or <code>unlimited</code>), <code>retention</code> of finished items (default <code>7d</code>), <code>priority</code> (<code>asc</code> or <code>desc</code>), <code>fields</code>.</td></tr>
+            <tr><td><code>tables.&lt;name&gt;</code></td><td><code>key</code> (fields that identify a row), or <code>sequenced: true</code>; <code>expire_after_write</code>; <code>fields</code>.</td></tr>
+            <tr><td><code>fields.&lt;name&gt;</code></td><td><code>type</code>; <code>index: true</code>; <code>merge</code> (<code>add_only</code> or <code>non_decreasing</code>).</td></tr>
+            <tr><td><code>reads</code></td><td>Named, versioned <code>select</code>s with typed <code>params</code>. A name and version, once declared, never change.</td></tr>
+          </tbody>
+        </table></div>
+        <div class="prose">
+          <h2>Program document</h2>
+        </div>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><code>request_id</code></td><td>Required if any statement writes. A replay returns the recorded response.</td></tr>
+            <tr><td><code>issued_at</code></td><td>Required with <code>request_id</code>: when the caller created it. Resent unchanged on every retry.</td></tr>
+            <tr><td><code>durability</code></td><td><code>durable</code> (default) or <code>fire_and_forget</code>.</td></tr>
+            <tr><td><code>params</code></td><td>Values the statements refer to as <code>{param: name}</code>.</td></tr>
+            <tr><td><code>statements</code></td><td>Run in order, as one transaction. The response has one result per statement.</td></tr>
+          </tbody>
+        </table></div>
+        <div class="prose">
+          <h2>Statements</h2>
+        </div>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>Statement</th><th>Does</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td><code>insert</code></td><td>Adds queue items or table rows. <code>on_conflict</code>: <code>skip</code> (default), <code>reject</code>, or <code>update</code> on tables.</td><td><code>[{id, key?, status}]</code></td></tr>
+            <tr><td><code>claim</code></td><td>Leases up to <code>limit</code> due items for <code>lease</code>, in claim order, skipping rows other transactions hold.</td><td>Items with <code>token</code></td></tr>
+            <tr><td><code>settle</code></td><td>Ends leases as <code>complete</code>, <code>fail</code>, <code>retry</code> or <code>release</code>, with <code>set</code> and <code>body</code> patches.</td><td><code>[{id, status: ok | stale}]</code></td></tr>
+            <tr><td><code>renew</code></td><td>Extends unexpired leases.</td><td>As <code>settle</code></td></tr>
+            <tr><td><code>update</code></td><td>Changes matched rows. <code>expect</code> bounds the match count; <code>on_limit: step</code> pages large changes; <code>leased</code> picks how leased items are treated.</td><td><code>{matched, met?, more?, last?}</code></td></tr>
+            <tr><td><code>delete</code></td><td>Deletes matched rows.</td><td><code>{matched, met?}</code></td></tr>
+            <tr><td><code>assert</code></td><td>Counts matched rows against <code>expect</code>; writes nothing.</td><td><code>{matched, met}</code></td></tr>
+            <tr><td><code>select</code></td><td>Reads <code>fields</code>, or an <code>aggregate</code> with <code>group_by</code>; <code>order_by</code>; <code>limit</code> required.</td><td>Row objects</td></tr>
+            <tr><td><code>read</code></td><td>Runs a declared read with its parameters.</td><td>Row objects</td></tr>
+            <tr><td><code>pause</code>, <code>resume</code></td><td>A paused queue's claims return nothing.</td><td><code>{}</code></td></tr>
+          </tbody>
+        </table></div>
+        <div class="prose">
+          <h2>Inside a statement</h2>
+          <ul>
+            <li><strong>Operands:</strong> a column, <code>{field: name}</code>, <code>{param: name}</code>, <code>{value: v}</code>, <code>{now: "-5m"}</code>, <code>{path: /a/b, type: text}</code> into a queue item's body. No implicit casts.</li>
+            <li><strong>Predicates:</strong> <code>and</code>, <code>or</code>, <code>not</code>; <code>eq</code>, <code>ne</code>, <code>lt</code>, <code>le</code>, <code>gt</code>, <code>ge</code>; <code>in</code>; <code>contains</code>; <code>is_null</code>, <code>not_null</code>; <code>exists</code>, a lookup in another object of the space.</li>
+            <li><strong>Assignments:</strong> a value or operand, <code>add</code>, <code>sub</code>, <code>coalesce</code>, <code>set_add</code>, <code>set_remove</code>.</li>
+            <li><strong>Body patches:</strong> <code>set</code>, <code>remove</code>, <code>append</code> with <code>keep_last</code>, <code>replace</code>.</li>
+          </ul>
+          <h2>Rejections and errors</h2>
+          <p>
+            A rejection rolls back every statement, keeps the request record and
+            reports the statement and reason: <code>key_conflict</code>,
+            <code>stale_lease</code>, <code>limit_exceeded</code>,
+            <code>expect_unmet</code>, <code>merge_violation</code>. Errors change
+            nothing and are not recorded: <code>invalid</code>,
+            <code>space_not_found</code>, <code>schema_conflict</code>,
+            <code>request_id_conflict</code>, <code>request_expired</code>,
+            <code>contention</code>, <code>unavailable</code>.
+          </p>
+          <h2>Limits</h2>
+        </div>
+        <div class="table-wrap"><table class="data">
+          <thead><tr><th>Limit</th><th>Value</th></tr></thead>
+          <tbody>
+            <tr><td>Statements per program</td><td>64</td></tr>
+            <tr><td>Rows per <code>insert</code>; items per <code>settle</code> or <code>renew</code></td><td>1,000</td></tr>
+            <tr><td><code>claim</code> limit</td><td>1,000</td></tr>
+            <tr><td><code>update</code>, <code>delete</code> and <code>select</code> limit</td><td>10,000</td></tr>
+            <tr><td>Program size</td><td>8 MiB</td></tr>
+            <tr><td>Programs per <code>execute_batch</code></td><td>64</td></tr>
+            <tr><td>Statement timeout</td><td>5 s</td></tr>
+          </tbody>
+        </table></div>
 
       </main>
       <footer class="site-footer">
         <p>
-          Fireweed Queue v0.30.0 · source release ·
-          crates.io deferred ·
+          Fireweed · source only ·
           issues welcome · code contributions not accepted ·
           MIT OR Apache-2.0.
         </p>
         <p>
-          Static docs in the repository.
-          Open <code>docs/site/index.html</code> from a clone, or browse
+          Source and documents:
           <a href="https://github.com/7thsense/fireweed">github.com/7thsense/fireweed</a>.
-          Brand voice and style:
-          <a href="../DESIGN.md">DESIGN.md</a>.
+          Full DSL reference: <a href="https://github.com/7thsense/fireweed/blob/main/docs/helix/02-design/contracts/API-008-data-plane-dsl.md">API-008</a>.
+          Voice and style: <a href="../DESIGN.md">DESIGN.md</a>.
           See <a href="../contribute.html">contribute</a> and
-          <a href="../support.html">support boundary</a>.
+          <a href="../support.html">support</a>.
         </p>
       </footer>
     </div>

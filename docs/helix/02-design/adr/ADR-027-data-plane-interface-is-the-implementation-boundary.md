@@ -2,20 +2,7 @@
 ddx:
   id: adr-data-plane-interface-implementation-boundary
   depends_on:
-    - api-native-client-interface
-    - adr-hexagonal-architecture-and-two-interfaces
-    - adr-queue-as-shard-unit-and-projection-families
-    - adr-orthogonal-log-projection-composition
-    - adr-log-single-source-of-truth
-    - adr-concrete-fireweed-facade-and-optional-controls
-    - adr-s3-turso-public-cell
-    - td-postgres-native-reference-mode
-  links:
-    - {kind: informed_by, to: adr-hexagonal-architecture-and-two-interfaces}
-    - {kind: informed_by, to: adr-queue-as-shard-unit-and-projection-families}
-    - {kind: informed_by, to: adr-orthogonal-log-projection-composition}
-    - {kind: informed_by, to: adr-log-single-source-of-truth}
-    - {kind: informed_by, to: adr-s3-turso-public-cell}
+    - prd
   status: accepted
 ---
 
@@ -23,7 +10,7 @@ ddx:
 
 | Date | Status | Deciders | Related | Confidence |
 |------|--------|----------|---------|------------|
-| 2026-11-16 | Accepted (D64) | Project owner | API-001, API-002, API-003, API-004, API-008, ADR-007, ADR-008, ADR-009, ADR-010, ADR-011, ADR-012, ADR-013, ADR-014, ADR-018, TD-002, TD-003, TD-006, TD-007, TD-008 | Medium |
+| 2026-11-16 | Accepted (D64) | Project owner | API-008 | Medium |
 
 Consumers describe their data in a **schema** document: queues, tables,
 fields, indexes and named reads. They change it with **programs**: lists
@@ -98,8 +85,8 @@ The owner's statements of intent, in order:
 | D21 | "all high-volume ops should be in the data plane, not control plane." | Owner, 2026-11-15 | Kept: admission chunk state is a table row. |
 | D22 | "no need for complex schema changes. these spaces will not have infinite lifetime" | Owner, 2026-11-15 | Kept: schema changes only add (§3). |
 | D23 | Exact percentile: "agree." Names: "these are ok". | Owner, 2026-11-15 | Kept. |
-| D24 | "object-log can be deprecated assuming we can implement the logs-to-s3 without it." | Owner, 2026-11-15 | Kept (§10). |
-| D25 | "deprecate RESP for now in favor of the DSL"; "drop protubuf unless required for the DSL". | Owner, 2026-11-15 | Kept. |
+| D24 | "object-log can be deprecated assuming we can implement the logs-to-s3 without it." | Owner, 2026-11-15 | Done: the object-log runtime is removed (D65). |
+| D25 | "deprecate RESP for now in favor of the DSL"; "drop protubuf unless required for the DSL". | Owner, 2026-11-15 | Done: RESP is removed (D65). |
 | D26 | "no need to migrate spaces"; "we don't need a migration path". | Owner, 2026-11-15 | Kept. |
 | D27 | "we do need to ensure that the dsl can be fully implemented on this model". | Owner via the Turso-queue session, 2026-11-15 | Kept: API-008's Snorri inventory maps each construct to a statement. |
 | D28 | "crashes can be handled by the control plane via the embedder (snorri/cayce)". | Owner via the Turso-queue session, 2026-11-15 | Kept. |
@@ -136,6 +123,7 @@ The owner's statements of intent, in order:
 | D62 | Asked whether to batch independent programs: "Add execute_batch" | Owner, 2026-11-16 | Adopted. `execute_batch` sends many independent programs in one round trip; each commits or rejects on its own and gets its own response. |
 | D63 | Asked how a consumer counts a queue: "Why can't we run an aggregate query on the table? Why can't we add indices on the necessary columns so it doesn't require a full table scan?" On the 100,000-row cap: "how in the hell would a count stop at 100k rows? That seems stupid." | Owner, 2026-11-16 | Adopted. No row cap. An aggregate whose columns one btree index holds needs no equality term and reads that index; queues get a `(state, due_at, attempts)` index for counts by state. Programs run with sequential scans off (§9, API-008 §Index rule). |
 | D64 | Asked when ADR-027 takes effect: "Accept now, scrub docs" | Owner, 2026-11-16 | Adopted. ADR-027 is accepted. |
+| D65 | Asked whether to remove the pre-DSL implementation and its documents now or at the cutover: "Remove it now" | Owner, 2026-11-16 | Adopted. The repository holds the DSL and its PostgreSQL executor only. The earlier queue crates, their documents, formal models, CI lanes and release tooling are removed. |
 
 ## Decision
 
@@ -305,7 +293,7 @@ Only `claim`, `settle` and `renew` write an item's lease columns. An
 leased, which gives bulk reschedule, reprioritise and cancel. A `settle` or
 `renew` whose token is stale, or whose lease has expired, reports that item
 `stale` and leaves the others alone (D6). `update` on a queue skips leased
-items unless it asks to preserve or break the lease (API-002).
+items unless it asks to preserve or break the lease.
 
 Each statement is one round trip. Queries are sent unprepared with text
 parameters, so nothing is prepared or cached per connection. A program
@@ -461,9 +449,8 @@ timer that charges nothing is a `release` settle with `after` (D39).
 | Backend | Status | Sharing |
 |---------|--------|---------|
 | PostgreSQL 18 | First, and production-supported (D44). Snorri and Cayce build against it. | Many processes per space; row locks order writers. |
-| Turso on NVMe with an S3 log | The local engine (Turso-queue plan, phases L0 to L4). Gates B1 to B4 apply here, and need re-checking now that one writer serves a whole workflow (D50). One database per space. | One writer per space. |
+| Turso on NVMe with an S3 log | The local engine. Gates B1 to B4 (D9) apply here, and need re-checking now that one writer serves a whole workflow (D50). One database per space. | One writer per space. |
 | SQLite | The local engine's comparison arm; in memory for consumers' tests. | One writer per space. |
-| Object log × Turso (current runtime) | Deprecated once the local engine's S3 log passes (D24). | — |
 
 **Local-engine ownership.** The embedder's control plane decides which node
 writes a space and fences old writers (D15, D28). The engine opens a space
@@ -490,12 +477,12 @@ the results and the rows left behind. They cover:
 
 The SQLite and Turso executors run the same documents.
 
-### 12. The facade
+### 12. Consumer helpers
 
-The `fireweed` crate's public type wraps an executor and keeps helpers
-that build common programs: enqueue, claim, complete and renew. RESP is deprecated (D25).
-Maintenance belongs to each executor: sweeps, index builds, S3 shipping
-and ownership.
+Consumers call an executor's functions with schema and program documents.
+Helpers that build common programs (enqueue, claim, complete and renew)
+can sit beside the executor. Maintenance belongs to each executor: sweeps,
+index builds, S3 shipping and ownership.
 
 ### 13. Account-level state
 
@@ -651,33 +638,13 @@ ordinary programs; Fireweed needs nothing new.
 | Negative | Every selection needs an index-backed condition, which limits ad-hoc queries. |
 | Negative | v1 leaves out cohorts, group ordering, gates and recurrence (API-008 §Not in v1). |
 
-### Documents this ADR changes
-
-| Document | Change |
-|----------|--------|
-| API-008 | New: the DSL reference and the PostgreSQL executor's rules. |
-| ADR-007 | The driven side is the data-plane interface. |
-| ADR-008, ADR-012, ADR-013, ADR-016, ADR-017 | Rescoped to the object-log runtime until it is retired (D24). |
-| ADR-009 | The facade wraps an executor; maintenance leaves it. |
-| ADR-010, ADR-011 | Restated as schema declarations. |
-| ADR-014 | The Kafka consumer surface reads sequenced tables. |
-| ADR-018 | Exact ensure becomes `apply_schema` with an expected version. |
-| API-001 | Restated without storage or an owner node. Adds `eligible_at`, lease policies on `update`, lease expiry charging `max_attempts` (D17) and recorded rejections. Removes cohorts until question 37 is ruled. |
-| API-002 | Operator actions become statements: pause is `pause`; redrive and repair are `update` with `leased: break`; purge is `delete`. |
-| API-004 | Replaced by declared reads. |
-| TD-002 | Replaced by §3 and §4. |
-| TD-006 | Retired with RESP (D25). |
-
 ### Migration order
 
 1. `fireweed-dsl` and the PostgreSQL executor `fireweed-dsl-postgres`, with
-   tests against PostgreSQL.
-2. Cut the `fireweed` crate over to the executor. Snorri and Cayce adopt the DSL on
-   PostgreSQL.
+   tests against PostgreSQL 18. Done.
+2. Snorri and Cayce adopt the DSL on PostgreSQL.
 3. The SQLite and Turso executor, running the same test documents, and
-   gates B1 to B4.
-4. Deprecate object-log (D24) and RESP (D25), and apply the document
-   changes above.
+   gates B1 to B4 (D9).
 
 ## Open questions for the owner
 
@@ -703,7 +670,7 @@ contact-keyed inbound events) is resolved by D59: they go to Niflheim.
     compares that delete with PostgreSQL 18 partitioning of queue and
     table by `run`, where a run is retired by detaching and dropping its
     partition.
-37. **Cohorts.** API-001's cohorts (claim a group whole, fail it at a
+37. **Cohorts.** Cohorts (claim a group whole, fail it at a
     deadline) are in no Snorri or Cayce inventory item, and no
     implementation supports them. Draft: leave them out of v1.
 38. **Time ordering.** Request time isn't ordered across conflicting
@@ -779,10 +746,7 @@ contact-keyed inbound events) is resolved by D59: they go to Niflheim.
 
 ## References
 
-- `docs/helix/02-design/contracts/API-001-native-client-interface.md`
 - `docs/helix/02-design/contracts/API-008-data-plane-dsl.md`
-- `docs/helix/02-design/adr/ADR-007-hexagonal-architecture-and-two-interfaces.md`
-- `docs/helix/02-design/technical-designs/TD-002-postgres-native-reference-mode.md`
 - `docs/helix/04-build/turso-queue-implementation-plan.md` (branch
   `claude/fireweed-sqlite-s3-logs-37f26c`)
 - Snorri `CONTRACT-005-workflow-state-store-port.md`; Snorri TD-012 §3.7

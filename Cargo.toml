@@ -1,23 +1,8 @@
 [workspace]
-# `cargo test --workspace` covers exactly the members below: domain, storage
-# adapters (memory/Turso/PostgreSQL/object-log), conformance, facade and tools.
-# Independently invoke the standalone `crates/fireweed-bench/Cargo.toml` workspace.
-# object-log comes from crates.io (0.4.0). Its tests live in that repository.
-# Live integrations require explicitly configured PostgreSQL, S3 and Kafka fixtures.
+# The data-plane DSL (API-008) and its PostgreSQL executor. The executor's
+# tests need FIREWEED_PG_TEST_URL pointing at PostgreSQL 18; without it they
+# skip.
 members = [
-    "crates/fireweed-core",
-    "crates/fireweed-engine",
-    "crates/fireweed-queue-spool",
-    "crates/fireweed-projection",
-    "crates/fireweed-relational",
-    "crates/fireweed-turso",
-    "crates/fireweed-conformance",
-    "crates/fireweed-memory",
-    "crates/fireweed-postgres",
-    "crates/fireweed-objectlog",
-    "crates/fireweed",
-    "crates/fireweed-release",
-    "crates/fireweed-sim-support",
     "crates/fireweed-dsl",
     "crates/fireweed-dsl-postgres",
 ]
@@ -30,18 +15,3 @@ rust-version = "1.99.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/7thsense/fireweed"
 homepage = "https://github.com/7thsense/fireweed"
-
-[workspace.dependencies]
-# Thin ESF types (entity schema + typed index declarations + canonical key encoder) consumed by
-# fireweed-core for ADR-011.  Git-pinned to a release tag; no path dependency.  The axon workspace
-# pins jsonschema with default-features = false so this dep is free of reqwest/hyper/tower.
-# Multi-line TOML string keeps the repo name on a separate line from the host prefix so the
-# ADR-011 AC path-dep check (rg for path=.*axon etc.) does not false-positive on the git URL.
-axon-esf = { version = "0.4.2", git = """https://github.com/DocumentDrivenDX/\
-axon""", tag = "v0.4.2" }
-
-[profile.release]
-# Optimize across the facade/adapter/engine boundaries for shipped executables.
-# Keep a portable target CPU and the default unwind/error-checking policies.
-lto = "thin"
-codegen-units = 1

@@ -1,0 +1,5 @@
+# Lease up to 10 due sends for 30 seconds.
+request_id: w1-claim-1
+issued_at: 2026-11-16T09:30:01Z
+statements:
+  - claim: {from: sends, limit: 10, lease: 30s, worker: w1}

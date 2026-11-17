@@ -5,6 +5,8 @@
 //! YAML or JSON. [`check::resolve`] checks a program against a schema and
 //! returns the resolved statements an executor lowers to SQL.
 
+#![forbid(unsafe_code)]
+
 pub mod check;
 mod doc;
 

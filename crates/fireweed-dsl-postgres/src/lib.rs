@@ -10,6 +10,8 @@
 //! checks the program against it, and runs it. Queries are sent unprepared
 //! with text parameters (`query_typed`), so each costs one round trip.
 
+#![forbid(unsafe_code)]
+
 mod ddl;
 mod lower;
 mod run;

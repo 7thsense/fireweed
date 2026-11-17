@@ -1,7 +1,6 @@
 /*
- * Fireweed Queue microsite tokens.
+ * Fireweed microsite tokens.
  * Brand voice and visual rules: docs/site/DESIGN.md (source of truth).
- * Naming/positioning research: docs/helix/00-discover/name-and-positioning-analysis.md
  * Mood: field notebook after the burn — pioneer recovery, not floral decoration.
  * Change DESIGN.md first when evolving color, type, or component families.
  */
@@ -531,47 +530,6 @@ td code,
   color: #f8f5eb;
 }
 
-.operator-grid {
-  display: grid;
-  grid-template-columns: 1.25fr 0.75fr;
-  gap: 18px;
-  min-height: auto;
-}
-
-.storage-axis-list,
-.status-list,
-.doc-list,
-.commands {
-  display: grid;
-  gap: 12px;
-  padding: 16px;
-}
-
-.storage-axis,
-.status-row,
-.doc-row {
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 12px;
-  background: var(--panel);
-}
-
-.storage-axis h3,
-.status-row h3,
-.doc-row h3 {
-  margin: 0 0 7px;
-  font-size: 16px;
-}
-
-.storage-axis p,
-.status-row p,
-.doc-row p {
-  margin: 0;
-  color: var(--muted);
-  line-height: 1.45;
-  font-size: 14px;
-}
-
 .split {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -684,7 +642,6 @@ footer.site-footer a {
 @media (max-width: 960px) {
   .grid-3,
   .grid-2,
-  .operator-grid,
   .split,
   .hero-home {
     grid-template-columns: 1fr;

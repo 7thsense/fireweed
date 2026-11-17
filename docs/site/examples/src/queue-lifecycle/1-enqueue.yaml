@@ -1,0 +1,10 @@
+# Three sends. The third is due in an hour.
+request_id: c7-enqueue-1
+issued_at: 2026-11-16T09:30:00Z
+statements:
+  - insert:
+      into: sends
+      rows:
+        - {key: c7-ana, priority: 1, campaign: c7, address: ana@example.com, body: {template: welcome}}
+        - {key: c7-bo,  priority: 2, campaign: c7, address: bo@example.com,  body: {template: welcome}}
+        - {key: c7-cy,  campaign: c7, address: cy@example.com, after: 1h, body: {template: reminder}}

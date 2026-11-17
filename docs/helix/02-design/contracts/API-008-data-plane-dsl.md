@@ -2,12 +2,7 @@
 ddx:
   id: api-data-plane-dsl
   depends_on:
-    - api-native-client-interface
     - adr-data-plane-interface-implementation-boundary
-    - api-hot-projection-query-surface
-    - api-operator-repair-contract
-    - api-workload-integration-profiles
-    - td-resp-wire-adapter
   status: accepted
 ---
 
@@ -16,7 +11,7 @@ ddx:
 **Type**: Document language (schemas and programs) and its PostgreSQL executor
 **Version**: v1
 **Status**: accepted (ADR-027 D64).
-**Related**: API-001, API-002, ADR-027, TD-002
+**Related**: ADR-027
 
 A consumer works with Fireweed in two kinds of documents:
 - a **schema** declares a space's queues, tables and reads, and the
@@ -415,7 +410,7 @@ On queues, leased items with unexpired leases are:
 - skipped (`skip`);
 - included, keeping the lease (`preserve`);
 - included and returned to `pending` with the lease cleared (`break`, for
-  operator repair; API-002).
+  operator repair).
 
 If more than `limit` rows match:
 - `reject` rejects with `limit_exceeded`;

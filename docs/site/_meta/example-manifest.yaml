@@ -1,39 +1,84 @@
-# Curated microsite examples extracted from the compiled queue_lifecycle example.
-# Regenerate with: python3 scripts/site/extract_examples.py
-# Verify with:     python3 scripts/site/check_example_provenance.py
+# Microsite examples. Every document is a file under docs/site/examples/src/
+# and is shown on its page unchanged.
+#
+# Render with: python3 scripts/site/render_site.py
+# Check with:  python3 scripts/site/check_example_provenance.py
+#
+# The check parses every document, validates it against API-008's grammar and
+# the shared schema, and fails if a page doesn't match what render_site.py
+# produces from these files.
+
+schema: schema.yaml
+
+snippets:
+  - embed.rs
 
 examples:
-  - slug: basic-lifecycle
-    title: Provision, insert, claim, commit
+  - slug: queue-lifecycle
+    title: Enqueue, claim, settle
     summary: >
-      Open a throwaway Queue, provision a schema, insert two items, claim in
-      priority order, complete each with a commit and read the stats.
-    tags: [embed, lifecycle, beginner]
-    category: embed
-    sources:
-      - path: crates/fireweed/examples/queue_lifecycle.rs
-        symbol: schema
-      - path: crates/fireweed/examples/queue_lifecycle.rs
-        symbol: push_claim_complete
+      Insert three sends, lease the due ones in claim order, then complete one
+      and retry the other in the same program.
+    tags: [queue, claim, settle, retry]
+    category: queue
+    documents:
+      - path: queue-lifecycle/1-enqueue.yaml
+        note: >
+          The result has one entry per row: id, key and status `inserted`.
+          Sending the same program again returns the recorded response with
+          `replayed: true`, and inserts nothing.
+      - path: queue-lifecycle/2-claim.yaml
+        note: >
+          Returns `c7-ana`, then `c7-bo`. Both became due at the same instant, so
+          priority 1 comes first; `c7-cy` is not due for an hour. Each item
+          comes back with its lease token, attempts (1), version, body and
+          declared fields.
+      - path: queue-lifecycle/3-settle.yaml
+        note: >
+          Each settle returns `status: ok` per item. A wrong token or a lapsed
+          lease reports `stale` and leaves the item alone; `require_all: true`
+          would reject the program instead. The retry keeps Bo's attempt
+          charged: with `max_attempts: 5`, once five attempts are used a retry
+          leaves the item `failed`.
 
-  - slug: scheduled-delivery
-    title: Scheduled delivery and retry
+  - slug: guarded-update
+    title: Guarded updates with expect
     summary: >
-      Work stays ineligible until available_at; a claimed item is sent back with
-      Disposition::RetryAt and becomes claimable again once its time passes.
-    tags: [eligibility, scheduling, retry]
-    category: eligibility
-    sources:
-      - path: crates/fireweed/examples/queue_lifecycle.rs
-        symbol: retry_and_schedule
+      Create a keyed row once, advance it with compare-and-set on its version,
+      and enqueue a send only when a guard finds no suppression row.
+    tags: [table, expect, assert, guard]
+    category: table
+    documents:
+      - path: guarded-update/1-create-chunk.yaml
+        note: >
+          The first program inserts the row. Another program inserting the same
+          key is rejected with `key_conflict`, and none of its statements commit.
+      - path: guarded-update/2-advance-cursor.yaml
+        note: >
+          Returns `matched: 1` and `met: true`. If another writer changed the row
+          first, its version differs, nothing matches, and the program is
+          rejected with `expect_unmet`. The cursor is `non_decreasing`, so setting
+          it lower is rejected with `merge_violation`.
+      - path: guarded-update/3-guarded-send.yaml
+        note: >
+          With no suppression row, the assert matches 0 rows and the insert
+          commits. Once `dee@example.com` is in `suppression`, the same program is
+          rejected at statement 0 with `expect_unmet`, and no send is enqueued.
 
-  - slug: durable-open
-    title: Open the production queue
+  - slug: indexed-count
+    title: Indexed counts
     summary: >
-      Queue::s3_turso with an S3 object log, a local Turso cache directory and
-      PostgreSQL queue leases.
-    tags: [durable, construction]
-    category: construction
-    sources:
-      - path: crates/fireweed/examples/queue_lifecycle.rs
-        symbol: open_production
+      Count a queue by state and by campaign with no where clause, and run the
+      same count for one campaign through a declared read.
+    tags: [select, aggregate, read]
+    category: read
+    documents:
+      - path: indexed-count/1-counts.yaml
+        note: >
+          After the other examples this returns `complete` 1 and `pending` 3, then
+          `c7` with 4, then the per-state counts for c7. Each aggregate reads one
+          btree index, `(state, due_at, attempts)` or `(campaign, id)`, so the rows
+          counted are not capped. A lease that has expired counts as `pending`
+          without a write. A count grouped by an unindexed field such as `step`
+          has no index to read and is refused unless its `where` has an access
+          term.

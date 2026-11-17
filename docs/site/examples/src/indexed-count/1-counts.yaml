@@ -1,0 +1,16 @@
+# Queue depth by state and by campaign, then the same count for one
+# campaign through the declared read. Reads only, so no request id.
+statements:
+  - select:
+      from: sends
+      aggregate: {n: count}
+      group_by: [state]
+      order_by: [{field: state}]
+      limit: 4
+  - select:
+      from: sends
+      aggregate: {n: count}
+      group_by: [campaign]
+      order_by: [{field: campaign}]
+      limit: 100
+  - read: {name: campaign_depth, version: 1, params: {campaign: c7}}

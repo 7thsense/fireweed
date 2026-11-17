@@ -9,8 +9,8 @@ form: open this repository's **Security** tab, select **Advisories**, then
 
 Include, when available:
 
-- the affected Fireweed Queue version or commit;
-- the affected configuration or storage backend;
+- the affected Fireweed version or commit;
+- the affected configuration and PostgreSQL version;
 - impact and prerequisites;
 - minimal reproduction steps; and
 - suggested mitigations or disclosure constraints.
@@ -28,9 +28,8 @@ allow maintainers to assess the report and coordinate disclosure before making
 details public. Submitting a report does not create a bounty, payment, or
 support obligation.
 
-Only versions identified as supported in published release documentation are
-eligible for security fixes. A report against another version is still useful,
-but maintainers may address it only in a newer release.
+Fixes land on `main`. A report against an older commit is still useful, but
+maintainers may address it only on `main`.
 
 Ordinary bugs, usage questions, documentation problems, and compatibility
 reports belong in public issues; see [SUPPORT.md](SUPPORT.md).

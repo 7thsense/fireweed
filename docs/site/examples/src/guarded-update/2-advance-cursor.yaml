@@ -1,0 +1,13 @@
+# Compare-and-set: move the cursor only if the row still has the version
+# this admitter read. Anything else rejects with expect_unmet.
+request_id: r1-chunk-3-advance-1
+issued_at: 2026-11-16T09:31:05Z
+params:
+  seen_version: 7
+statements:
+  - update:
+      target: chunks
+      keys: [{run: r1, chunk: 3}]
+      where: {eq: [version, {param: seen_version}]}
+      set: {cursor: 1200}
+      expect: {min: 1, max: 1}

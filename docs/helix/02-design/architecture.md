@@ -8,126 +8,59 @@ ddx:
     - kind: informed_by
       to: prd
     - kind: informs
-      to: api-queue-claim-commit-contract
+      to: api-data-plane-dsl
 ---
-
-This is the target design and its acceptance contract. The public PostgreSQL path is implemented; S3/Turso assembly and the single Snorri adapter cutover remain pending. PostgreSQL construction validates limits, pool size, parsed URLs and checked admission/scratch multipliers before connection or DDL, with credential-redaction and no-I/O negative tests. Typed custom capacities reach PostgreSQL admission and scratch execution. S3/Turso construction remains an implementation gate. Existing code is not qualified merely by this specification.
-
 
 # Fireweed architecture
 
 ## Scope
 
-ADR-027 and API-008 govern. Consumers declare queues and tables in a
-schema document and change them with programs of typed statements, one
-transaction each. An executor creates real tables and indexes and runs each
-statement as plain SQL; PostgreSQL 18 is first, the local engine follows.
-Workflow state and new work commit with claimed updates.
+ADR-027 and API-008 govern. Consumers declare queues and tables in a schema
+document and change them with programs of typed statements, one transaction
+each. An executor creates real tables and indexes and runs each statement as
+one SQL statement. PostgreSQL 18 is the first executor; the local engine
+follows.
 
-## Level 1: System Context
+## System context
 
-| Element | Purpose | Protocol |
-|---|---|---|
-| Snorri and application hosts | Dispatch work; maintain workflow state, audit and follow-up work | One typed asynchronous queue interface |
-| PostgreSQL | Atomic reference persistence and native indexed selection | Native PostgreSQL driver |
-| S3 object-log | Authoritative ordered publication and writer fencing | Conditional object publication |
-| Turso | Rebuildable indexed work/state/receipt projection | Stock embedded database |
-| Host instrumentation | Safe diagnostic capture and export | Diagnostics Contract |
+| Element | Role | Talks to Fireweed through |
+|---------|------|---------------------------|
+| Snorri | Workflow execution: instance heads, await keys, effects, idempotency | Programs over its workflow's space |
+| Cayce | Campaign execution and its UI: recipients, admission chunks, suppression copies, timelines | Programs and declared reads |
+| Control plane | Tenants, definitions, configuration, suppression masters | Not Fireweed; consumers read it themselves |
+| Dragonfly | Tenant-wide counters and cross-workflow policies | Not Fireweed (ADR-027 D45, D58) |
+| Niflheim | Exhaust, entity resolution, profiles | Not Fireweed (D57) |
 
-## Level 2: Container Diagram
+## Modules
 
-| Container | Technology | Responsibility | Communication |
-|---|---|---|---|
-| Application/worker process | Rust 1.99, Tokio | Own queue construction, business workflow and bounded execution | Queue facade and caller-owned instrumentation |
-| PostgreSQL baseline | PostgreSQL 16 | Atomically persist work, state, receipts, leases and versions | PostgreSQL SQL transactions |
-| S3 persistence | AWS S3 or a qualified compatible endpoint; object-log | Durable checksummed publication and conditional authority | Object-log adapter |
-| Derived projection | Stock Turso 0.8.2, ordinary WAL | Native filtering, exact committed progress, atomic apply and rebuild | Turso adapter |
+| Crate | Responsibility | Public API | Depends on | Must not depend on |
+|-------|----------------|------------|------------|--------------------|
+| `fireweed-dsl` | Schema and program documents, the checker that resolves a program against a schema, limits and fingerprints | `Schema`, `Program`, `Statement`, `Response`, `check`, `from_yaml` | serde, YAML and JSON parsing, SHA-256 | Any database driver or executor |
+| `fireweed-dsl-postgres` | The PostgreSQL executor: DDL from a schema, one SQL statement per DSL statement, request records, sweep | `apply_schema`, `get_schema`, `execute`, `execute_batch`, `sweep` | `fireweed-dsl`, `tokio-postgres` | In-process state between calls |
 
-## Module Boundaries
+## Running a program
 
-**Source Applicability**: source; handwritten Rust protocol, adapters and Python gates.
+1. One pipelined flight sets the transaction's settings, opens the space
+   (its schema row and request record) and sets savepoints.
+2. The program is checked against the space's schema in Rust.
+3. Each statement runs as one SQL statement.
+4. The response is recorded with the request id, and the transaction
+   commits.
 
-| Module | Responsibility / Owned Types | Public API | Allowed Dependencies | Forbidden Dependencies |
-|---|---|---|---|---|
-| `fireweed-dsl` | API-008 schema and program documents, checks against the schema, limits and fingerprints | API-008 types, `check` | Serialization, hashing, YAML/JSON parsing | Database drivers and executors |
-| `fireweed-dsl-postgres` | The PostgreSQL executor: DDL from a schema, one SQL statement per DSL statement, request records, sweep | `apply_schema`, `get_schema`, `execute`, `execute_batch`, `sweep` | `fireweed-dsl`, PostgreSQL driver | In-process state between calls; the queue crates below |
-| `fireweed-core` | Queue values, schemas, limits, validation and fingerprints | API-007 DTOs | Serialization, bytes, hashing, pure schema libraries | Backend crates, SQL/object-store SDKs, facade and conformance |
-| `fireweed-engine` | Pure planners, resolved deltas, wire codecs, admission invariants and internal ports | Backend-neutral internal queue port | Core and pure computational/protocol libraries | Facade, PostgreSQL/Turso/S3 drivers and persistence adapters |
-| `fireweed-queue-spool` | Bounded scratch storage and whole-worker ownership | Internal admitted spool/worker primitives | Core, engine and local execution/filesystem primitives | Consumer business rules and backend SDKs |
-| `fireweed-postgres` | Native baseline SQL, filtered locking, atomic persistence and recovery | Internal mandatory queue adapter | Core, engine, spool and PostgreSQL driver | Turso/S3 runtime and duplicated queue policy |
-| `fireweed-turso` | Native projection, indexed selection, snapshot reads and atomic apply | Internal projection adapter | Core, engine, spool, relational translation and Turso SDK | Consumer workflow policy and object-log authority redefinition |
-| `fireweed-objectlog` | Full-address namespace, bounded record transport, authoritative head/fence and publication | Internal log adapter | Core, engine, object-log/S3 integration and admitted workers | PostgreSQL/Turso SQL policy and consumer workflow rules |
-| `fireweed` queue facade | Concrete construction and delegation; shared clone/shutdown ownership | API-007 and construction Contract | Internal mandatory port and selected adapters | Public vendor/session handles, optional ordinary-operation guarantees and direct database work in `queue.rs` |
-| `fireweed-conformance` | Shared scenarios, workload generation and outcome oracles | Mandatory tests for both constructors | Core, engine and backend-neutral future combinators for owned workload cleanup; adapters only in test fixtures | Backend-dependent skipped semantics or weaker baseline assertions |
-| Snorri adapter | Workflow mapping, definition pins, transition/await state versions | Snorri integration Contract | Concrete queue facade and Snorri domain | Storage SDKs, broad claim/client filter and consumer side-record APIs |
+API-008 §The PostgreSQL executor gives the layout (one PostgreSQL schema per
+space, one table per queue and table) and each statement's SQL.
 
-**Integration Owners**: PostgreSQL → `fireweed-postgres`; Turso → `fireweed-turso`;
-S3/object-log → `fireweed-objectlog`; telemetry exporters → application host.
-Drivers translate vendor representations and errors at those owning boundaries.
+## Quality attributes
 
-**Construction Policy**: `fireweed/src/queue.rs` wires a private mandatory port
-behind one concrete handle. Hosts supply typed configuration, operational clock
-and diagnostics. Core/planners do not discover environment or construct services.
+| Attribute | How it is met | How it is checked |
+|-----------|---------------|-------------------|
+| Work bounded by indexes | The index rule; sequential scans off in program transactions | Tests assert no sequential scan and few index reads over thousands of items |
+| No in-process state | Every call reads the schema and request record from the database | Code review; the crates hold no statics or caches |
+| Exact replay | Request records written in the program's transaction; horizon refusal | Replay, conflict and expiry tests |
+| Concurrency | Row locks, `SKIP LOCKED` claims, deadlock retries | Several connections claiming one queue without leasing an item twice |
 
-**Boundary Check**: `python3 scripts/ci/check_queue_boundaries.py --controls`.
-Local, pre-commit and CI use the same command. Production dependency cycles and
-forbidden edges fail; supported allowed/forbidden controls exercise the actual
-checker. Rust visibility protects private ownership. Semantic review additionally
-checks invariant bypass, DTO/SDK leakage and policy duplication.
+## Decisions
 
-Fireweed is pre-release and keeps no compatibility with data or formats from
-earlier builds; old data is refused. The pre-`Queue` facade has been retired; `Queue` is the only public entry point.
-No legacy-edge exceptions remain: any adapter dependency outside the allowed set fails
-the boundary check. Test-only adapter→`Queue` edges may exercise public conformance;
-they do not permit a production cycle.
-
-## Deployment
-
-| Component | Infrastructure | Instances / scaling | Backup / recovery |
-|---|---|---|---|
-| Baseline qualification | Isolated PostgreSQL 16 and Rust workers | One database; controlled concurrent worker count | Database WAL, physical process/server loss and reopen |
-| Log/projection qualification | Qualified S3 endpoint and stock Turso files | One fenced writer per queue; bounded shared workers and connections | Exact original genesis and contiguous authoritative log replay |
-| Production hosts | Host-selected process/container infrastructure | Scale queue owners under the measured capacity envelope | Durable authority survives worker loss; local projection is rebuildable |
-
-Production availability/capacity claims require the actual endpoint, topology
-and resource limits in the qualification record. No benchmark result transfers
-from an unqualified provider or custom Turso fork.
-
-## Data Flow
-
-Insert durably publishes work and its request identity. Claim selects only the
-matching eligible prefix in declared order and durably publishes those leases.
-Commit validates current credentials/versions, atomically updates workflow/audit
-state and new work, and publishes its immutable result. Reads and claims cover
-acknowledged authority before returning. Projection lag is internal; application
-code does not poll it to obtain the promised result.
-
-## Quality Attributes
-
-| Attribute | Target | Strategy | Verification |
-|---|---|---|---|
-| Durability | Zero loss of acknowledged work/state/receipts within the declared provider failure model | Atomic PostgreSQL persistence; conditional durable log publication | Real process loss, ambiguous replies, reopen and rebuild |
-| Lease safety | Zero simultaneous valid leases per item; stale credentials have zero effects | Current token/expiry/version and writer-fence checks | Same mandatory suite plus adversarial interleavings |
-| Atomicity | Zero partial effects in a rejected group | One atomic work/state/new-work/result boundary | Late failure and restart checks on both stores |
-| Scale | 10M resident hot work; 1000 cold queues plus hot queue | Native indexed selection, bounded shared resources and bounded log metadata | Settled matched release workloads and density/progress cases |
-| Performance | Published p50/p95/p99, useful settled rate, memory, drain debt and cost for the same workload | Comparable durable semantics and workload generator | PostgreSQL baseline versus S3/Turso; correctness gates rates |
-| Diagnostic privacy | Zero secrets, tokens or raw work/state bodies in any sink | Allowlist before emission/capture/export | Traced/untraced receiver, redaction and outage controls |
-
-## Decisions and Tradeoffs
-
-ADR-027 makes the data-plane DSL (API-008) the interface, with PostgreSQL
-as the first executor.
-A shared semantic planner avoids duplicated business rules; native SQL and log
-mechanisms remain backend-owned. A derived Turso projection is replaceable cache
-state, while S3 publication is authority. Both constructors must satisfy the same
-observable guarantees. Formal analysis checks named properties under explicit
-bounds and assumptions; it does not prove provider durability or Rust refinement.
-
-### Scoped existing dependency exception
-
-`fireweed-postgres` currently depends on `fireweed-objectlog` solely for
-`src/async_objectlog_postgres.rs` and the legacy AsyncObjectLogPostgresBackend.
-Owner: PostgreSQL adapter maintainer. Removal trigger: retire that composed
-backend during API-007 cutover. The checker forbids this import in any new
-PostgreSQL source file; the native queue store must remain independent of its
-runtime. This exception does not permit PostgreSQL→Turso or direct S3 SDK edges.
+ADR-027 records the decision and the owner's rulings. Its open questions
+(PostgreSQL layout, cohorts, UMF schema documents, a narrow lease table, run
+retirement) are the remaining design work.
