@@ -1,0 +1,24 @@
+[package]
+name = "fireweed-umf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Fireweed space schemas as UMF core 0.10 documents: the fireweed.space extension, its loader and exporter (ADR-027 question 39)."
+
+[dependencies]
+fireweed-dsl = { path = "../fireweed-dsl" }
+serde_json = "1"
+sha2 = "0.11"
+# The json/set, jsonb/array/GIN/partial-index, float8, fillfactor and identity
+# support Fireweed needs isn't in a crates.io release yet. Default features
+# are off: tables need none of umf-core's embedded adapters (JSON-LD, RDF),
+# whose dependencies deny.toml rejects.
+umf-core = { git = "https://github.com/DocumentDrivenDX/umf", rev = "0b2ca30e479ddcb50c9b43db71458a837769c41a", default-features = false, features = ["full-core"] }
+umf-codegen = { git = "https://github.com/DocumentDrivenDX/umf", rev = "0b2ca30e479ddcb50c9b43db71458a837769c41a", default-features = false }
+
+[dev-dependencies]
+fireweed-dsl-postgres = { path = "../fireweed-dsl-postgres" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-postgres = "0.7"
