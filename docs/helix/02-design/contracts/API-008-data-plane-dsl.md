@@ -634,6 +634,12 @@ database.
 
   Whether spaces should instead share tables is ADR-027 question 31.
 
+  Queue and table DDL matches what UMF's `umf.tables` compiler renders for
+  the same objects (API-009): text columns use `COLLATE "C"`, and partial
+  predicates are written as UMF writes them. `text_set` values are kept in
+  code-point order (`fireweed.text_set` sorts with `COLLATE "C"`), which is
+  UMF's canonical set order.
+
 **Running a program.**
 1. BEGIN.
 2. In one pipelined flight, set the timeouts, set a savepoint, call

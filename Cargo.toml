@@ -1,10 +1,11 @@
 [workspace]
-# The data-plane DSL (API-008) and its PostgreSQL executor. The executor's
-# tests need FIREWEED_PG_TEST_URL pointing at PostgreSQL 18; without it they
-# skip.
+# The data-plane DSL (API-008), its PostgreSQL executor, and space schemas as
+# UMF documents (API-009). The PostgreSQL tests need FIREWEED_PG_TEST_URL
+# pointing at PostgreSQL 18; without it they skip.
 members = [
     "crates/fireweed-dsl",
     "crates/fireweed-dsl-postgres",
+    "crates/fireweed-umf",
 ]
 resolver = "3"
 
@@ -15,3 +16,4 @@ rust-version = "1.99.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/7thsense/fireweed"
 homepage = "https://github.com/7thsense/fireweed"
+

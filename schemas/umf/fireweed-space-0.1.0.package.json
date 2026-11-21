@@ -1,0 +1,221 @@
+{
+  "id": "fireweed.space",
+  "version": "0.1.0",
+  "coreVersion": "0.10.0",
+  "description": "Fireweed queue, table and read semantics for a space schema whose physical tables are umf.tables declarations",
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:fireweed:space:0.1.0",
+    "title": "Fireweed space semantics for a UMF core 0.10 document",
+    "oneOf": [
+      {
+        "$ref": "#/$defs/space"
+      },
+      {
+        "$ref": "#/$defs/field"
+      }
+    ],
+    "$defs": {
+      "ref": {
+        "type": "object",
+        "properties": {
+          "module": {
+            "type": "string",
+            "minLength": 1
+          },
+          "element": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "module",
+          "element"
+        ],
+        "additionalProperties": false
+      },
+      "space": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "version",
+          "requestRetention",
+          "queues",
+          "tables",
+          "reads"
+        ],
+        "properties": {
+          "kind": {
+            "const": "space"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "requestRetention": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "queues": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,47}$"
+            },
+            "additionalProperties": {
+              "$ref": "#/$defs/queue"
+            }
+          },
+          "tables": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,47}$"
+            },
+            "additionalProperties": {
+              "$ref": "#/$defs/table"
+            }
+          },
+          "reads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/read"
+            }
+          }
+        }
+      },
+      "queue": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "record",
+          "maxAttempts",
+          "retention",
+          "priority"
+        ],
+        "properties": {
+          "record": {
+            "$ref": "#/$defs/ref"
+          },
+          "maxAttempts": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              },
+              {
+                "const": "unlimited"
+              }
+            ]
+          },
+          "retention": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "priority": {
+            "enum": [
+              "asc",
+              "desc"
+            ]
+          }
+        }
+      },
+      "table": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "record",
+          "sequenced"
+        ],
+        "properties": {
+          "record": {
+            "$ref": "#/$defs/ref"
+          },
+          "sequenced": {
+            "type": "boolean"
+          },
+          "expireAfterWrite": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "read": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "version",
+          "params",
+          "select"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,47}$"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "params": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,47}$"
+            },
+            "additionalProperties": {
+              "enum": [
+                "text",
+                "int",
+                "float",
+                "bool",
+                "timestamp",
+                "json",
+                "text_set"
+              ]
+            }
+          },
+          "select": {
+            "type": "object",
+            "description": "An API-008 select document; checked against the space by the host"
+          }
+        }
+      },
+      "field": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "merge"
+        ],
+        "properties": {
+          "kind": {
+            "const": "field"
+          },
+          "merge": {
+            "enum": [
+              "add_only",
+              "non_decreasing"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "semantics": "Fireweed API-009. Validated by fireweed-umf's host capabilities, which derive the API-008 schema and run its checks.",
+  "scopes": [
+    "module",
+    "element"
+  ],
+  "capabilities": {
+    "validation": "semantic",
+    "directions": [],
+    "evidence": [
+      "crates/fireweed-umf/tests/umf.rs"
+    ]
+  }
+}
