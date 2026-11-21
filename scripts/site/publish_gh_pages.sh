@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publish the staged microsite to the gh-pages branch (legacy GitHub Pages source).
+# Publish the staged microsite to the gh-pages branch (branch-based GitHub Pages source).
 # Used when GitHub Actions is unavailable at the org, or for a manual cut.
 #
 # Prefer .github/workflows/pages.yml once org Actions is enabled (workflow deploys
@@ -11,8 +11,7 @@ OUT="${ROOT}/target/site-pages"
 REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-gh-pages}"
 
-python3 "${ROOT}/scripts/site/stage_pages.py" "${OUT}"
-python3 "${ROOT}/scripts/site/check_links.py"
+MICROSITE_STAGE_DIR="${OUT}" bash "${ROOT}/scripts/ci/microsite-gate.sh"
 
 WORKDIR="$(mktemp -d)"
 cleanup() { rm -rf "${WORKDIR}"; }

@@ -85,6 +85,5 @@ or example paths linked from the site, run:**
 bash scripts/ci/microsite-gate.sh
 ```
 
-That is the same check used by `pr-gate` bootstrap and the pages build job
-(`check_links` + example provenance + stage validation). Do not ship docs/site
-edits that fail this gate.
+That is the same check the pages build job runs. Do not ship docs/site edits
+that fail this gate.

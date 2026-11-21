@@ -1,11 +1,9 @@
 {
-  "product": "Fireweed Queue",
-  "short_name": "Fireweed",
-  "version": "0.30.0",
-  "status": "source release",
-  "descriptor": "A durable priority queue for ordered, recoverable execution.",
+  "product": "Fireweed",
+  "badge": "data-plane DSL",
+  "descriptor": "Queues and tables for durable workflow data, changed by typed programs that run as plain SQL.",
+  "status": "source only",
   "repository": "https://github.com/7thsense/fireweed",
   "license": "MIT OR Apache-2.0",
-  "contribution": "issues-only",
-  "deferred": ["crates.io", "GHCR"]
+  "contribution": "issues-only"
 }

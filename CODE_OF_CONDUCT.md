@@ -1,6 +1,6 @@
 # Code of conduct
 
-Fireweed Queue project spaces are for constructive, technical collaboration.
+Fireweed project spaces are for constructive, technical collaboration.
 This policy applies to issues, project discussions, and other interactions
 managed by the project maintainers.
 

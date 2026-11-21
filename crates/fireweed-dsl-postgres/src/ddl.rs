@@ -1,0 +1,256 @@
+//! DDL: the catalog, and the tables and indexes a space schema needs
+//! (API-008 §The PostgreSQL executor).
+
+use fireweed_dsl::{FieldDecl, FieldType, QueueDecl, Schema, TableDecl};
+
+/// Objects shared by every space. Idempotent; run under the catalog lock.
+pub const CATALOG: &str = r#"
+CREATE SCHEMA IF NOT EXISTS fireweed;
+CREATE TABLE IF NOT EXISTS fireweed.spaces (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant text NOT NULL,
+  space text NOT NULL,
+  version bigint NOT NULL,
+  schema_doc jsonb NOT NULL,
+  -- Request records issued before the horizon may be gone, so requests
+  -- issued before it are refused (API-008 §Request ids).
+  horizon timestamptz,
+  UNIQUE (tenant, space));
+ALTER TABLE fireweed.spaces ADD COLUMN IF NOT EXISTS horizon timestamptz;
+CREATE OR REPLACE FUNCTION fireweed.open_space(p_tenant text, p_space text, p_request text, p_fingerprint text,
+  p_issued timestamptz,
+  OUT space_id bigint, OUT schema_doc text, OUT fingerprint text, OUT response text, OUT fresh boolean,
+  OUT expired boolean)
+LANGUAGE plpgsql AS $$
+DECLARE retention bigint; hz timestamptz;
+BEGIN
+  expired := false;
+  SELECT s.id, s.schema_doc::text, (s.schema_doc->>'request_retention')::bigint, s.horizon
+    INTO space_id, schema_doc, retention, hz
+    FROM fireweed.spaces s WHERE s.tenant = p_tenant AND s.space = p_space;
+  IF NOT FOUND OR p_request IS NULL THEN
+    fresh := true;
+    RETURN;
+  END IF;
+  IF p_issued > fireweed.now() + interval '5 minutes' THEN
+    RAISE EXCEPTION 'issued_at is more than 5 minutes ahead of the clock' USING ERRCODE = '22023';
+  END IF;
+  IF p_issued < greatest(hz, fireweed.now() - retention * interval '1 millisecond') THEN
+    expired := true;
+    RETURN;
+  END IF;
+  -- Record the request. An existing record, or a concurrent first run once
+  -- it commits, means replay. A record is never taken over.
+  EXECUTE format('INSERT INTO %I.fw_requests (request_id, fingerprint, response, issued_at)
+      VALUES ($1, $2, NULL, $3) ON CONFLICT (request_id) DO NOTHING RETURNING true', 'fws_' || space_id)
+    INTO fresh USING p_request, p_fingerprint, p_issued;
+  IF fresh THEN
+    -- A sweep may have advanced the horizon and removed this id's record
+    -- after the check above; the horizon commits with the removal.
+    SELECT s.horizon INTO hz FROM fireweed.spaces s WHERE s.id = space_id;
+    IF p_issued < hz THEN
+      expired := true;
+    END IF;
+    RETURN;
+  END IF;
+  IF fresh IS NULL THEN
+    fresh := false;
+    EXECUTE format('SELECT fingerprint, response::text FROM %I.fw_requests WHERE request_id = $1', 'fws_' || space_id)
+      INTO fingerprint, response USING p_request;
+  END IF;
+END $$;
+CREATE OR REPLACE FUNCTION fireweed.now() RETURNS timestamptz LANGUAGE sql STABLE AS
+$$ SELECT coalesce(nullif(current_setting('fireweed.now', true), '')::timestamptz, now()) $$;
+CREATE OR REPLACE FUNCTION fireweed.text_set(j jsonb) RETURNS text[] LANGUAGE sql IMMUTABLE AS
+$$ SELECT CASE WHEN j IS NULL OR jsonb_typeof(j) = 'null' THEN NULL
+  ELSE coalesce((SELECT array_agg(DISTINCT x ORDER BY x) FROM jsonb_array_elements_text(j) x), '{}') END $$;
+CREATE OR REPLACE FUNCTION fireweed.json_set(j jsonb, p text[], v jsonb) RETURNS jsonb LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE i int;
+BEGIN
+  j := coalesce(j, '{}'::jsonb);
+  FOR i IN 1 .. coalesce(array_length(p, 1), 0) - 1 LOOP
+    IF jsonb_typeof(j #> p[1:i]) IS DISTINCT FROM 'object' THEN
+      j := jsonb_set(j, p[1:i], '{}'::jsonb, true);
+    END IF;
+  END LOOP;
+  RETURN jsonb_set(j, p, v, true);
+END $$;
+CREATE OR REPLACE FUNCTION fireweed.json_append(j jsonb, p text[], v jsonb, keep int) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+  SELECT fireweed.json_set(j, p, CASE WHEN keep IS NULL THEN a
+    ELSE jsonb_path_query_array(a, '$[$from to last]', jsonb_build_object('from', greatest(jsonb_array_length(a) - keep, 0))) END)
+  FROM (SELECT CASE WHEN jsonb_typeof(j #> p) = 'array' THEN j #> p ELSE '[]'::jsonb END || jsonb_build_array(v) AS a) x
+$$;
+"#;
+
+pub fn schema_name(space_id: i64) -> String {
+    format!("fws_{space_id}")
+}
+
+pub fn queue_table(schema: &str, name: &str) -> String {
+    format!("\"{schema}\".\"q_{name}\"")
+}
+
+pub fn table_table(schema: &str, name: &str) -> String {
+    format!("\"{schema}\".\"t_{name}\"")
+}
+
+pub fn column_type(t: FieldType) -> &'static str {
+    match t {
+        FieldType::Text => "text COLLATE \"C\"",
+        FieldType::Int => "bigint",
+        FieldType::Float => "double precision",
+        FieldType::Bool => "boolean",
+        FieldType::Timestamp => "timestamptz",
+        FieldType::Json => "jsonb",
+        FieldType::TextSet => "text[]",
+    }
+}
+
+/// A field's index. A btree index carries `id`, so a selection on the field
+/// steps through it in id order (API-008 §update).
+fn index(table: &str, field: &str, f: &FieldDecl) -> String {
+    if f.ty == FieldType::TextSet {
+        format!("CREATE INDEX ON {table} USING gin (\"f_{field}\");\n")
+    } else {
+        format!("CREATE INDEX ON {table} (\"f_{field}\", id);\n")
+    }
+}
+
+fn queue(schema: &str, name: &str, q: &QueueDecl) -> String {
+    let t = queue_table(schema, name);
+    let desc = if q.priority == fireweed_dsl::PriorityOrder::Desc {
+        " DESC"
+    } else {
+        ""
+    };
+    let mut cols = String::new();
+    for (f, d) in &q.fields {
+        cols.push_str(&format!(",\n  \"f_{f}\" {}", column_type(d.ty)));
+    }
+    let mut sql = format!(
+        "CREATE TABLE {t} (
+  id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  key text COLLATE \"C\",
+  state text NOT NULL,
+  priority bigint NOT NULL,
+  due_at timestamptz NOT NULL,
+  attempts bigint NOT NULL,
+  version bigint NOT NULL,
+  lease_owner text,
+  lease_token text,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  finished_at timestamptz,
+  body jsonb{cols})
+  WITH (fillfactor = 80);
+CREATE UNIQUE INDEX ON {t} (key);
+CREATE INDEX ON {t} (due_at, priority{desc}, id) WHERE state IN ('pending', 'leased');
+CREATE INDEX ON {t} (finished_at) WHERE finished_at IS NOT NULL;
+CREATE INDEX ON {t} (state, due_at, attempts);
+"
+    );
+    for (f, d) in q.fields.iter().filter(|(_, d)| d.index) {
+        sql.push_str(&index(&t, f, d));
+    }
+    sql
+}
+
+fn table(schema: &str, name: &str, d: &TableDecl) -> String {
+    let t = table_table(schema, name);
+    let mut cols = String::new();
+    for (f, fd) in &d.fields {
+        let not_null = if d.key.contains(f) { " NOT NULL" } else { "" };
+        cols.push_str(&format!(",\n  \"f_{f}\" {}{not_null}", column_type(fd.ty)));
+    }
+    let mut sql = format!(
+        "CREATE TABLE {t} (
+  id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  version bigint NOT NULL,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  expires_at timestamptz{cols});
+CREATE INDEX ON {t} (expires_at) WHERE expires_at IS NOT NULL;
+"
+    );
+    if !d.key.is_empty() {
+        let key: Vec<String> = d.key.iter().map(|k| format!("\"f_{k}\"")).collect();
+        sql.push_str(&format!(
+            "CREATE UNIQUE INDEX ON {t} ({});\n",
+            key.join(", ")
+        ));
+    }
+    if d.sequenced {
+        sql.push_str(&format!(
+            "INSERT INTO \"{schema}\".fw_sequences (tbl, last) VALUES ('{name}', 0);\n"
+        ));
+    }
+    for (f, fd) in d
+        .fields
+        .iter()
+        .filter(|(f, fd)| fd.index && d.key.first() != Some(*f))
+    {
+        sql.push_str(&index(&t, f, fd));
+    }
+    sql
+}
+
+/// DDL for a new space.
+pub fn create(schema: &str, s: &Schema) -> String {
+    let mut sql = format!(
+        "CREATE SCHEMA \"{schema}\";
+CREATE TABLE \"{schema}\".fw_requests (
+  request_id text COLLATE \"C\" PRIMARY KEY,
+  fingerprint text NOT NULL,
+  response jsonb,
+  issued_at timestamptz NOT NULL);
+CREATE INDEX ON \"{schema}\".fw_requests (issued_at);
+CREATE SEQUENCE \"{schema}\".fw_versions;
+CREATE TABLE \"{schema}\".fw_queue_state (queue text PRIMARY KEY, paused boolean NOT NULL);
+CREATE TABLE \"{schema}\".fw_sequences (tbl text PRIMARY KEY, last bigint NOT NULL);
+"
+    );
+    for (n, q) in &s.queues {
+        sql.push_str(&queue(schema, n, q));
+    }
+    for (n, t) in &s.tables {
+        sql.push_str(&table(schema, n, t));
+    }
+    sql
+}
+
+/// DDL that takes a space from `old` to `new`, which only adds (checked by
+/// `fireweed_dsl::check::change`).
+pub fn change(schema: &str, old: &Schema, new: &Schema) -> String {
+    let mut sql = String::new();
+    for (n, q) in &new.queues {
+        match old.queues.get(n) {
+            None => sql.push_str(&queue(schema, n, q)),
+            Some(o) => sql.push_str(&fields(&queue_table(schema, n), &o.fields, &q.fields)),
+        }
+    }
+    for (n, t) in &new.tables {
+        match old.tables.get(n) {
+            None => sql.push_str(&table(schema, n, t)),
+            Some(o) => sql.push_str(&fields(&table_table(schema, n), &o.fields, &t.fields)),
+        }
+    }
+    sql
+}
+
+fn fields(
+    t: &str,
+    old: &std::collections::BTreeMap<String, FieldDecl>,
+    new: &std::collections::BTreeMap<String, FieldDecl>,
+) -> String {
+    // New fields on an existing object are unindexed (checked), so adding one
+    // is a catalog-only ALTER that doesn't rewrite or scan the table.
+    new.iter()
+        .filter(|(f, _)| !old.contains_key(*f))
+        .map(|(f, d)| {
+            format!(
+                "ALTER TABLE {t} ADD COLUMN \"f_{f}\" {};\n",
+                column_type(d.ty)
+            )
+        })
+        .collect()
+}

@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Microsite gate: link check + example provenance + stage validation.
+# Microsite gate: link check + example documents + stage validation.
 #
-# Invoked by:
-#   - .github/workflows/pages.yml (build job)
-#   - scripts/ci/pr-gate.sh (bootstrap)
-#   - agent harness pre-commit / pre-push expectations (see AGENTS.md)
+# Invoked by .github/workflows/pages.yml (build job) and by agents before
+# committing site changes (see AGENTS.md). Needs python3 with PyYAML.
 #
 # Fail closed on broken local hrefs so GitHub Pages cannot stay stale behind a
 # red pages workflow.
@@ -16,7 +14,7 @@ cd "${ROOT}"
 echo "--- microsite: check links ---"
 python3 scripts/site/check_links.py
 
-echo "--- microsite: example provenance ---"
+echo "--- microsite: example documents and rendered pages ---"
 python3 scripts/site/check_example_provenance.py
 
 echo "--- microsite: stage + validate Pages tree ---"

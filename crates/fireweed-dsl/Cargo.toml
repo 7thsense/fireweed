@@ -1,0 +1,14 @@
+[package]
+name = "fireweed-dsl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Fireweed's data-plane DSL (API-008): schema and program documents, and the checker that resolves a program against a schema."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_norway = "0.9"
+sha2 = "0.11"

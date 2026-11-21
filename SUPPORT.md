@@ -1,6 +1,6 @@
 # Support
 
-Fireweed Queue is maintained on a best-effort basis. The project does not offer
+Fireweed is maintained on a best-effort basis. The project does not offer
 a service-level agreement, guaranteed response time, emergency support, or a
 promise that any reported problem will be fixed.
 
@@ -15,9 +15,9 @@ issues are the channel for:
 - documentation problems; and
 - compatibility reports.
 
-Include the Fireweed Queue version, deployment context, relevant storage
-backend, expected result, actual result, and a minimal reproduction when
-possible. Remove credentials, secrets, personal data, and unrelated logs.
+Include the Fireweed commit, PostgreSQL version, the schema and program
+documents involved, expected result, actual result, and a minimal
+reproduction when possible. Remove credentials, secrets, personal data, and unrelated logs.
 
 Issues may be closed when they lack enough information, duplicate existing
 work, fall outside the project's scope, or cannot be reproduced. Maintainers

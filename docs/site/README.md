@@ -1,11 +1,11 @@
-# Fireweed product microsite
+# Fireweed microsite
 
-Openable static site for marketing, technical concepts, curated examples, API
-guides, and the operator deploy console.
+Static pages describing Fireweed's data-plane DSL and its PostgreSQL executor:
+overview, concepts, getting started, examples and a reference summary. The
+full DSL reference is
+[API-008](../helix/02-design/contracts/API-008-data-plane-dsl.md).
 
-**Brand voice and visual system:** [DESIGN.md](DESIGN.md) — source of truth for
-copy tone, claims discipline, color tokens, typography, and components.
-`assets/site.css` and site copy must follow it.
+**Voice and visual system:** [DESIGN.md](DESIGN.md).
 
 ## Open locally
 
@@ -18,65 +18,75 @@ xdg-open docs/site/index.html   # or open / start as appropriate
 
 | Path | Role |
 |------|------|
-| `DESIGN.md` | Brand voice and design system (source of truth) |
-| `index.html` | Product home |
-| `why.html` | Fireweed vs stream |
-| `concepts.html` | Technical specification |
-| `get-started.html` | Embed path |
-| `examples/` | Gallery + per-example pages |
-| `examples/src/*.rs` | Provenance-tracked excerpts |
-| `api/` | Rust / types |
-| `support.html` | Support matrix |
+| `DESIGN.md` | Voice and design system |
+| `index.html` | Home |
+| `why.html` | What Fireweed holds, and what stays outside it |
+| `concepts.html` | Shapes, leases, index rule, time, transactions |
+| `get-started.html` | Clone, test, run a program from Rust |
+| `examples/` | Example index and one page per example |
+| `examples/src/` | The example documents: `schema.yaml`, one folder of programs per example, and `embed.rs` |
+| `api/index.html` | DSL reference summary |
+| `api/rust.html` | Executor functions and DSL types |
+| `support.html` | Status, test coverage, not in v1 |
 | `contribute.html` | Issues-only policy |
-| `_meta/` | site version + example manifest |
-| `assets/` | Shared CSS/JS |
+| `_meta/site-meta.json` | Name, descriptor, status, repository |
+| `_meta/example-manifest.yaml` | Examples: titles, documents, notes |
+| `assets/` | Shared CSS and JS |
 
-## Regenerate
+## Regenerate and check
+
+The HTML is generated; edit `scripts/site/render_site.py`, the manifest or the
+documents under `examples/src/`, then:
 
 ```sh
-python3 scripts/site/extract_examples.py
 python3 scripts/site/render_site.py
-python3 scripts/site/check_example_provenance.py
-python3 scripts/site/check_links.py
+bash scripts/ci/microsite-gate.sh
 ```
 
-Committed HTML is the source of truth for browsing offline. Re-run the
-scripts after editing content in `scripts/site/render_site.py` or the example
-manifest.
+The scripts need Python 3 with PyYAML. The gate runs:
+
+1. `check_links.py`: every local `href` in the HTML resolves.
+2. `check_example_provenance.py`: every file under `examples/src/` is listed in
+   the manifest and every listed file exists; each document parses and follows
+   API-008's grammar (known keys and statements, objects and reads declared in
+   `schema.yaml`, `request_id` and `issued_at` on programs that write); and
+   every committed page equals what `render_site.py` renders, so each page
+   shows its documents unchanged.
+3. `stage_pages.py`: stages the Pages tree and checks that every relative link
+   stays inside it.
+
+The gate doesn't run documents against PostgreSQL. When you change an example,
+run it against a PostgreSQL 18 server before committing, for example with a
+program like `examples/src/embed.rs`.
 
 ## GitHub Pages deployment
 
 Workflow: [`.github/workflows/pages.yml`](../../.github/workflows/pages.yml)
 
-On push to `main` (site-related paths) or `workflow_dispatch`:
+On push to `main` (site paths) or `workflow_dispatch`:
 
-1. Validate source links + example provenance  
-2. Stage a Pages tree with `scripts/site/stage_pages.py` and run Playwright
-   screenshot/layout verification against that staged artifact
-   (`site/`, `helix/`, `deployment/`, `operator/`, root policy files)  
-3. Deploy via `actions/deploy-pages`  
-4. Playwright post-deploy: screenshots at common viewports + link crawl  
+1. Run `scripts/ci/microsite-gate.sh`, which stages the tree at
+   `target/site-pages` (`site/` plus a root redirect).
+2. Run Playwright screenshot and layout checks against the staged tree.
+3. Deploy with `actions/deploy-pages`.
+4. Run Playwright again against the live site: screenshots at common
+   viewports and a link crawl.
 
-Published URL (project Pages):  
-**https://7thsense.github.io/fireweed/** → redirects to `/site/`.
+Published URL: **https://7thsense.github.io/fireweed/**, which redirects to
+`/site/`.
 
-If organization policy blocks repository Actions, publish with the fallback:
+If organization policy blocks repository Actions, publish with:
 
 ```sh
 bash scripts/site/publish_gh_pages.sh
 ```
 
-That force-updates the `gh-pages` branch (legacy Pages source). When Actions is
-enabled, switch the Pages build type to **GitHub Actions** so `pages.yml` owns
-deploy + Playwright verification.
+That runs the gate and force-updates the `gh-pages` branch.
 
 ### Local stage + Playwright
 
 ```sh
-# Stage the same artifact CI deploys
 python3 scripts/site/stage_pages.py target/site-pages
-
-# Serve (mimics Pages layout)
 python3 -m http.server 4173 --bind 127.0.0.1 --directory target/site-pages
 
 # In another shell:
@@ -86,5 +96,5 @@ npx playwright install chromium
 BASE_URL=http://127.0.0.1:4173 SITE_PREFIX=/site npm run verify
 ```
 
-Screenshots land in `target/site-verify/screenshots/`; report in
+Screenshots land in `target/site-verify/screenshots/`; the report in
 `target/site-verify/report.json`.

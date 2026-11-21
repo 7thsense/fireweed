@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="A durable priority queue for ordered, recoverable execution." />
-    <title>Examples — Fireweed Queue</title>
+    <meta name="description" content="Queues and tables for durable workflow data, changed by typed programs that run as plain SQL." />
+    <title>Examples — Fireweed</title>
     <link rel="stylesheet" href="../assets/site.css" />
   </head>
   <body>
@@ -17,8 +17,8 @@
             <circle cx="18" cy="38" r="5" fill="#0f766e"/>
             <circle cx="62" cy="29" r="5" fill="#92ad61"/>
           </svg>
-          <h1>Fireweed Queue</h1>
-          <span>v0.30.0</span>
+          <h1>Fireweed</h1>
+          <span>data-plane DSL</span>
         </a>
         <nav class="site-nav" aria-label="Primary">
         <a href="../index.html">Home</a>
@@ -26,7 +26,7 @@
         <a href="../concepts.html">Concepts</a>
         <a href="../get-started.html">Get started</a>
         <a href="index.html" aria-current="page">Examples</a>
-        <a href="../api/index.html">API</a>
+        <a href="../api/index.html">Reference</a>
         <a href="../support.html">Support</a>
         </nav>
       </header>
@@ -35,45 +35,83 @@
         <div class="page-intro">
           <h2>Examples</h2>
           <p>
-            Excerpts of the compiled <code>queue_lifecycle</code> example. Every code block
-            is regenerated from source symbols; if the example moves, provenance checks fail.
+            Every example runs against one space, declared by the shared schema
+            below. Each document on these pages is a file under
+            <code>docs/site/examples/src/</code>, shown unchanged; the site gate
+            checks it against the schema and API-008's grammar.
           </p>
         </div>
-        <div class="grid-2">
+        <div class="grid-3">
           
           <article class="card card-body">
-            <h3><a href="basic-lifecycle.html">Provision, insert, claim, commit</a></h3>
-            <p>Open a throwaway Queue, provision a schema, insert two items, claim in priority order, complete each with a commit and read the stats.</p>
-            <div class="tag-list"><span class="tag">embed</span><span class="tag">lifecycle</span><span class="tag">beginner</span></div>
+            <h3><a href="queue-lifecycle.html">Enqueue, claim, settle</a></h3>
+            <p>Insert three sends, lease the due ones in claim order, then complete one and retry the other in the same program.</p>
+            <div class="tag-list"><span class="tag">queue</span><span class="tag">claim</span><span class="tag">settle</span><span class="tag">retry</span></div>
           </article>
           <article class="card card-body">
-            <h3><a href="scheduled-delivery.html">Scheduled delivery and retry</a></h3>
-            <p>Work stays ineligible until available_at; a claimed item is sent back with Disposition::RetryAt and becomes claimable again once its time passes.</p>
-            <div class="tag-list"><span class="tag">eligibility</span><span class="tag">scheduling</span><span class="tag">retry</span></div>
+            <h3><a href="guarded-update.html">Guarded updates with expect</a></h3>
+            <p>Create a keyed row once, advance it with compare-and-set on its version, and enqueue a send only when a guard finds no suppression row.</p>
+            <div class="tag-list"><span class="tag">table</span><span class="tag">expect</span><span class="tag">assert</span><span class="tag">guard</span></div>
           </article>
           <article class="card card-body">
-            <h3><a href="durable-open.html">Open the production queue</a></h3>
-            <p>Queue::s3_turso with an S3 object log, a local Turso cache directory and PostgreSQL queue leases.</p>
-            <div class="tag-list"><span class="tag">durable</span><span class="tag">construction</span></div>
+            <h3><a href="indexed-count.html">Indexed counts</a></h3>
+            <p>Count a queue by state and by campaign with no where clause, and run the same count for one campaign through a declared read.</p>
+            <div class="tag-list"><span class="tag">select</span><span class="tag">aggregate</span><span class="tag">read</span></div>
           </article>
         </div>
+        <div class="section-title"><h2>Shared schema</h2></div>
+        <div class="code-block">
+  <div class="label"><span>docs/site/examples/src/schema.yaml</span><span>yaml</span></div>
+  <pre><code># One space for a campaign: a queue of sends, a keyed table of admission
+# chunks, a suppression table and a declared read.
+version: 1
+queues:
+  sends:
+    max_attempts: 5
+    retention: 7d
+    fields:
+      campaign: {type: text, index: true}
+      address:  {type: text, index: true}
+      step:     {type: int}
+tables:
+  chunks:
+    key: [run, chunk]
+    fields:
+      run:    {type: text}
+      chunk:  {type: int}
+      cursor: {type: int, merge: non_decreasing}
+  suppression:
+    key: [address]
+    fields:
+      address: {type: text}
+      reasons: {type: text_set, merge: add_only}
+reads:
+  - name: campaign_depth
+    version: 1
+    params: {campaign: text}
+    select:
+      from: sends
+      where: {eq: [campaign, {param: campaign}]}
+      aggregate: {n: count}
+      group_by: [state]
+      order_by: [{field: state}]
+      limit: 4</code></pre>
+</div>
 
       </main>
       <footer class="site-footer">
         <p>
-          Fireweed Queue v0.30.0 · source release ·
-          crates.io deferred ·
+          Fireweed · source only ·
           issues welcome · code contributions not accepted ·
           MIT OR Apache-2.0.
         </p>
         <p>
-          Static docs in the repository.
-          Open <code>docs/site/index.html</code> from a clone, or browse
+          Source and documents:
           <a href="https://github.com/7thsense/fireweed">github.com/7thsense/fireweed</a>.
-          Brand voice and style:
-          <a href="../DESIGN.md">DESIGN.md</a>.
+          Full DSL reference: <a href="https://github.com/7thsense/fireweed/blob/main/docs/helix/02-design/contracts/API-008-data-plane-dsl.md">API-008</a>.
+          Voice and style: <a href="../DESIGN.md">DESIGN.md</a>.
           See <a href="../contribute.html">contribute</a> and
-          <a href="../support.html">support boundary</a>.
+          <a href="../support.html">support</a>.
         </p>
       </footer>
     </div>

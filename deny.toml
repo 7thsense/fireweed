@@ -1,13 +1,6 @@
 [advisories]
 version = 2
 yanked = "deny"
-# RUSTSEC-2026-0441 is an informational unmaintained advisory for pin-utils,
-# which the AWS SDK still uses transitively. Fireweed does not use its macros
-# directly. Version 0.1.1 is the final upstream release; there is no maintained
-# compatible replacement until the SDK moves to core::pin or pin-project-lite.
-# Retain this narrowly identified maintenance exception while keeping actual
-# vulnerability and yanked-release checks enabled. Review on each SDK update.
-ignore = ["RUSTSEC-2026-0441"]
 
 [bans]
 multiple-versions = "warn"
@@ -17,17 +10,9 @@ workspace-default-features = "allow"
 
 [licenses]
 version = 2
-# Permissive licenses only. ISC/BSD-3-Clause/MIT-0 enter via the rustls/aws-lc TLS stack
-# (hyper-rustls <- metrics-exporter-prometheus <- heimq). All are OSI permissive.
+# Permissive licenses only.
 allow = ["MIT", "Apache-2.0", "ISC", "BSD-3-Clause", "MIT-0", "Unicode-3.0", "Zlib"]
 confidence-threshold = 0.8
-# webpki-roots and webpki-root-certs 1.x redistribute Mozilla's root-certificate dataset under
-# CDLA-Permissive-2.0. Permit that data license only for this package and major
-# version; other crates using the license remain denied and require review.
-exceptions = [
-    { allow = ["CDLA-Permissive-2.0"], name = "webpki-roots", version = ">=1.0.0, <2.0.0" },
-    { allow = ["CDLA-Permissive-2.0"], name = "webpki-root-certs", version = ">=1.0.0, <2.0.0" },
-]
 
 [sources]
 unknown-registry = "warn"

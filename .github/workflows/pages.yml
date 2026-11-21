@@ -11,18 +11,9 @@ on:
       - main
     paths:
       - "docs/site/**"
-      - "docs/helix/**"
-      - "docs/operator/**"
       - "scripts/site/**"
+      - "scripts/ci/microsite-gate.sh"
       - ".github/workflows/pages.yml"
-      - "SECURITY.md"
-      - "CONTRIBUTING.md"
-      - "SUPPORT.md"
-      - "LICENSE-MIT"
-      - "LICENSE-APACHE"
-      - "CODE_OF_CONDUCT.md"
-      - "NOTICE"
-      - "README.md"
   workflow_dispatch:
 
 permissions:
@@ -40,6 +31,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+
+      - name: Install PyYAML for the site scripts
+        run: python3 -c 'import yaml' 2>/dev/null || (sudo apt-get update && sudo apt-get install -y python3-yaml)
 
       - name: Validate and stage microsite (fail closed on broken links)
         run: bash scripts/ci/microsite-gate.sh

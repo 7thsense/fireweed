@@ -1,308 +1,118 @@
-# Fireweed Queue — Brand voice & design system
+# Fireweed — voice and design system
 
-**Status:** active · **Applies to:** product microsite, README, release notes,
-announcements, and any external-facing Fireweed surface  
-**Visual implementation:** [`assets/site.css`](assets/site.css)  
-**Version badge source:** [`_meta/site-meta.json`](_meta/site-meta.json)
+**Applies to:** the microsite under `docs/site/` and any external-facing
+Fireweed page.
+**Visual implementation:** [`assets/site.css`](assets/site.css)
+**Site metadata:** [`_meta/site-meta.json`](_meta/site-meta.json)
 
-This document is the source of truth for how Fireweed *sounds* and *looks*.
-The microsite must follow it. Copy and UI that conflict with this guide are
-bugs—not stylistic preference.
+This document sets how the microsite sounds and looks. Copy and UI that
+conflict with it are bugs.
 
-### Research lineage (do not invent a second brand story)
-
-Voice and identity are **downstream of naming and positioning research**, not a
-fresh marketing exercise:
-
-| Artifact | What it contributes |
-|----------|---------------------|
-| [name-and-positioning-analysis](../helix/00-discover/name-and-positioning-analysis.md) | Selected name, descriptor, identifier map, anti-positions, reject lessons, trademark caveat |
-| [product-vision](../helix/00-discover/product-vision.md) | Mission, north star, audience, value props |
-| [public-preview-boundary](../helix/00-discover/public-preview-boundary.md) | Current support posture and deferred profiles |
-| [choosing-fireweed](../helix/01-frame/guides/choosing-fireweed.md) | Fireweed vs stream decision language |
-
-When this file and those artifacts disagree on **identity or claims**, update
-this file to match the governing discovery/design docs—do not “win” in DESIGN.
+What the site may say about the product comes from two documents:
+[ADR-027](../helix/02-design/adr/ADR-027-data-plane-interface-is-the-implementation-boundary.md)
+(the decision) and
+[API-008](../helix/02-design/contracts/API-008-data-plane-dsl.md) (the DSL
+reference), and from the code in `crates/fireweed-dsl` and
+`crates/fireweed-dsl-postgres`. When this file and those disagree, they win.
 
 ---
 
-## 1. Brand essence (from the naming decision)
+## 1. Identity
 
-### Decision snapshot
+- **Name:** Fireweed. The header wordmark and first reference use it.
+- **Descriptor (home and meta description):**
 
-From the 2026-07-23 naming decision (`pqueue-1dd9158f`):
+  > Queues and tables for durable workflow data, changed by typed programs
+  > that run as plain SQL.
 
-- **Working public name:** Fireweed Queue (legal clearance may still be pending—
-  do not imply trademark finality).
-- **Public descriptor (required first reference):**
+- **What it is:** a data-plane language. A schema document declares a space's
+  queues, tables and reads; a program document is a list of typed statements
+  that run as one transaction. The PostgreSQL 18 executor creates real tables
+  from the schema and runs each statement as one SQL statement.
+- **Who it serves:** Snorri and Cayce, which keep their durable workflow
+  data in it.
+- **What it is not:** a SQL interface for consumers, a control plane, a log
+  or analytics store, a holder of tenant-wide counters, or a blob store.
 
-  > A durable priority queue for ordered, recoverable execution.
+### Metaphor
 
-- **Reserve fallback only if clearance fails:** Taskcairn  
-- **Historical only (never current identity):** Queueyard, `pqueue`  
-- **Rejected for public use:** Workspool, Queuewright, Ledgerail, Taskweir  
-
-### Product semantics the name must carry
-
-Fireweed is a **durable priority queue**. Its priority-queue contract includes
-the durable work lifecycle:
-
-acceptance → configurable ordering → eligibility → grouping → claims & leases →
-retries → idempotency → terminal state → recovery across log × projection combinations.
-
-It is **not** a workflow engine and does **not** define dependency graphs.
-
-The name and all public copy must support that broader contract **without**
-promising:
-
-- FIFO-only behavior,
-- a generic message broker,
-- a worker pool, or
-- a workflow-DAG engine.
-
-### Identifier map (authoritative)
-
-Use these forms exactly. The map is naming input for packaging and docs; it is
-not a license to reintroduce historical stems.
-
-| Surface | Value | Public use |
-|---------|-------|------------|
-| Display name | **Fireweed Queue** | First reference, titles, legal, packaging display |
-| Short name | **Fireweed** | Subsequent prose, short labels |
-| Repository stem | `fireweed` | Clone URLs, monorepo identity |
-| Package stem | `fireweed-queue` | Package coordinates |
-| CLI | `fireweed` | Commands |
-| Rust crate stem | `fireweed` | Embed surface (`fireweed` crate, `Queue` API) |
-| Environment prefix | `FIREWEED_` | Config |
-| Informal abbreviation | **FWQ** | Chat/internal only—not hero, legal, or first reference |
-
-### Why “Fireweed” (selection rationale → brand personality)
-
-The scorecard optimized for **semantic fit**, **distinctiveness**, **identifier
-ergonomics**, and **collision risk**. Fireweed was selected as the working
-public identity because it keeps durable-work semantics while staying
-**short and packagable** for announcement—unlike longer or noisier candidates.
-
-Translate those selection criteria into brand personality:
-
-| Naming criterion | Brand implication |
-|------------------|-------------------|
-| **Semantic fit** | Copy leads with priority-queue semantics, then the lifecycle that makes priority durable |
-| **Distinctiveness** | Prefer a clear, slightly natural-world name over generic infra mashups |
-| **Identifier ergonomics** | Short stems; easy to say and type (`fireweed`, `FIREWEED_`); no clever misspellings |
-| **Collision risk** | Avoid names that parse as adjacent products, industrial jargon, or physical-queue businesses |
-
-### Lessons from rejected and historical names (anti-patterns)
-
-The reject list is free brand research. Do not recreate these problems in voice
-or metaphor:
-
-| Candidate | Why it failed / limited | Do not import into Fireweed voice |
-|-----------|-------------------------|-----------------------------------|
-| **Workspool** | Collision with WorkPool; “WorksPool” spoken parse; oil-field “work spool”; generic work-pool pattern; Spooling.ai noise | No “spool”, “pool”, or job-pool metaphors; no near-competitor sound-alikes |
-| **Ledgerail** | Active SaaS already using the name | No “ledger product for documents” framing; durability ≠ accounting SaaS |
-| **Queuewright** | Longer, easier to misspell; domain already taken at check time | No ornate “wright/craftsman” persona; keep identifiers short |
-| **Taskcairn** | Distinctive but reads as durable *markers*, not ordering/dispatch | Do not brand as monuments, markers, or memorials of work |
-| **Queueyard** | Strong fit historically; generic searches surface physical yard / vehicle-queue management | Do not lean parking-lot, freight-yard, or “yard management” imagery |
-| **pqueue** | Pre-cutover technical identity | Lineage only; never as current public name |
-
-### North star (from product vision)
-
-> Every accepted item is durably executed according to its queue’s priority and
-> progress guarantees, with no lost work, no concurrent execution of the same
-> claim, and an explicit final state.
-
-Public copy should orbit this sentence. Throughput and scale claims are
-secondary and evidence-bound.
-
-### Audience (from product vision)
-
-**Who:** engineers building durable, high-volume async work systems  
-**Pain:** FIFO queues and ad hoc scheduler tables do not model priority,
-eligibility, leases, batching, and retries as one contract  
-**Switch reason:** those concerns belong in the queue primitive, on infrastructure
-teams already operate—not in every worker’s bespoke glue
-
-Write for that reader. Do not write for “anyone with a backlog.”
-
-### Metaphor: fireweed as pioneer, not decoration
-
-*Fireweed* (pioneer plant after disturbance) is a useful **restraint rail**, not
-a campaign theme:
-
-| Lean into | Stay away from |
-|-----------|----------------|
-| Establishes after disruption | Wildflower lifestyle branding |
-| Holds ground under harsh conditions | “Blazing fast” / fire puns (conflicts with anti-hype) |
-| Durable recovery of work state | Mascots, petals, garden growth metaphors |
-| Quiet toughness | Apocalypse / burn-it-down swagger |
-
-**Rule:** at most **one** optional metaphor line in long-form marketing. Prefer
-lifecycle verbs. Never: stock flower photography, “grow your queue,” or
-emoji flora.
+*Fireweed* (a pioneer plant after disturbance) is a restraint, not a theme. At
+most one metaphor line in long-form copy. Never flower photography, mascots,
+flame gradients or "blazing" puns.
 
 ---
 
-## 2. Brand voice
+## 2. Voice
 
-### Character (named after the research, not a mood board)
-
-| Trait | Grounding | In practice |
-|-------|-----------|-------------|
-| **Priority-precise** | Product semantics list in naming analysis | Lead with priority; use claim, lease, finalize, eligibility, request identity—not soft synonyms |
-| **Contract-first** | Vision external transaction contract | Success durable+visible; rejection no effect; ambiguity via `request_id` |
-| **Operator-honest** | Support boundary | Supported / deferred / experimental / dev-only said early |
-| **Engineer-first** | Target market table | Explain why a primitive exists; no motivational fluff |
-| **Ergonomic** | Identifier ergonomics score | Short names, scannable tables, no ornamental prose |
-| **Collision-aware** | Naming diligence | No claims that invite confusion with brokers, pools, or streams |
-| **Fail-loud** | Storage axes philosophy | Celebrate explicit failure of unsupported pairings |
-
-### Voice spectrum
-
-```
-❌  Hype / generic infra             ✅  Fireweed (research-aligned)
-    "Unlock next-gen throughput"         "Claim eligible work under a lease"
-    "Seamless job pool at scale"         "Group-aware claims for downstream batches"
-    "Blazing priority queue"             "A durable priority queue where priority and eligibility are separate"
-    "Your workflow engine"               "Not a workflow DAG—work-state lifecycle"
-    "Production-ready everything"        "Support is evidence-bound by storage profile"
-    "Just works™"                        "Unsupported pairings fail at startup"
-```
-
-### What we always sound like (pillars from vision value props)
-
-Use these as **value pillars** on home and get-started—worded as contracts, not
-slogans:
-
-1. **Priority ordering** — the primary queue contract, without rewriting workers
-2. **Bounded progress guarantees** — relaxation without starving eligible work  
-3. **Durable execution lifecycle** — recoverable across worker/process failure  
-4. **Batch and group-aware claims** — downstream-compatible batches  
-5. **Backend-independent transaction integrity** — same external contract across log × projection cells  
-6. **Tunable durability economics** — commit-latency bound vs object-log cost (ops tone)  
-
-Pillars 1–5 are default marketing. Pillar 6 is for operator-facing surfaces.
+| Trait | In practice |
+|-------|-------------|
+| **Precise** | Use the DSL's words: space, queue, table, program, statement, claim, settle, lease, token, `expect`, request id. |
+| **Contract-first** | Say what a program does and what comes back: committed, rejected with a reason, or an error that changes nothing. |
+| **Honest about status** | PostgreSQL 18 is the first and currently only executor. The crates are not on crates.io. Say so early. |
+| **Engineer-first** | Explain why a rule exists (for example, every `where` needs an index). No motivational copy. |
+| **Short** | Tables and lists over paragraphs. One idea per sentence. |
 
 ### Point of view
 
-- **Second person** for guides (“Create a queue, then claim a batch”).
-- **Product subject** for specs (“Fireweed retains request identity for replay”).
-- **We** only for maintainer policy (“We do not accept code PRs”).
-- Never cheerful-bot, corporate-family, or growth-hacker register.
-
-### Register by surface
-
-| Surface | Register | Research cue |
-|---------|----------|--------------|
-| Microsite home | Priority-queue descriptor + pillars + status badges | Naming descriptor + vision props |
-| Why | Decision tables vs streams | choosing-fireweed |
-| Concepts | Definitions, out-of-scope | Product semantics list |
-| Examples | What it proves + provenance | Engineer-first honesty |
-| API | Normative families; public vs internal | Identifier map + `Queue` boundary |
-| Contribute | Issues-only; security private | ADR-021 (policy), not naming |
-| Release notes | Past-tense deltas + deferred | Support boundary |
+- Second person for guides ("Declare a queue, then claim from it").
+- Product subject for specs ("The executor keeps nothing in the process").
+- "We" only for maintainer policy ("We do not accept code pull requests").
 
 ---
 
 ## 3. Vocabulary
 
-### Preferred terms
-
-| Prefer | Avoid in public copy | Why (research-linked) |
-|--------|----------------------|------------------------|
-| work item / item | message (except broker comparison) | Not a generic broker |
-| claim | consume / dequeue | Lease-based model |
-| lease | lock | Different semantics |
-| finalize / complete / retry / release / fail | “process” as whole lifecycle | Explicit terminal outcomes (north star) |
-| eligible / eligibility | “ready” alone | Distinct from priority |
-| projection | “cache” as the model | Durable composition axis |
-| command log / durable log | “the stream” for internal log | Workers do not consume the log as an app stream |
-| durable priority queue | workflow engine / DAG | Product identity and explicit anti-position |
-| supported | production-ready (unless certified) | Evidence-bound support language |
-| construction / `open_*` | “backend type parameter” as public model | `Queue` constructors |
-
-### Public surface vocabulary
-
-- Rust: concrete **`Fireweed`** handle; crate **`fireweed`** only for embedders  
-- Say **the Rust library**, not “SDK ecosystem”  
-- Historical: **pqueue / Queueyard** only in lineage footnotes  
+| Prefer | Avoid | Why |
+|--------|-------|-----|
+| space | database, namespace | A space is the atomic domain a program runs in |
+| program | request, batch (except `execute_batch`) | A program is one transaction |
+| statement | operation, verb, method | Programs are lists of statements |
+| claim / settle / renew | dequeue / ack / heartbeat | The DSL's statement names |
+| lease, token | lock | A lease is fenced by its token |
+| rejected (with a reason) | failed | A rejection is recorded and replays; an error is not |
+| executor | backend, engine, driver | The crate that runs documents |
+| declared read | view, query endpoint | Named, versioned `select` |
 
 ### Claims discipline
 
-**May claim** (with support framing where relevant)
+**May claim** (each is in ADR-027, API-008 or the crates):
 
-- Durable priority-queue semantics and lifecycle ownership
-- Priority/eligibility selection; leased claim; complete/retry/release/fail  
-- External transaction contract on **supported durable** Class A cells  
+- Schema and program documents in YAML or JSON, checked against the schema.
+- One program runs as one transaction; rejections roll back and replay.
+- Every selection uses an index; every statement has a limit.
+- Time-driven state is computed from stored times and the database clock.
+- PostgreSQL 18 is the first and currently only executor.
 
-- Log × projection axes; fail-loud unsupported pairings  
-- Source release; dual license; issues-only contributions  
-- Value props above, without universal capacity numbers  
+**Must not claim:**
 
-**Must not claim**
-
-- FIFO-only product, generic broker, worker pool, workflow DAG
-- Production readiness for every compiled pairing  
-- Universal latency/throughput leadership  
-- crates.io / GHCR as default install while deferred  
-- Internal log as application event stream  
-- Community code PR program  
-- Trademark-cleared finality of the name while diligence says clearance pending  
-
-When unsure → [support boundary](../helix/00-discover/public-preview-boundary.md).
+- Executors, features or statements that API-008 doesn't define.
+- Throughput or latency numbers.
+- crates.io packages or any install path other than the repository.
+- Joins, cohorts, group ordering or anything API-008 lists as not in v1.
+- A community code contribution program.
 
 ---
 
 ## 4. Writing patterns
 
-### Hero formula
-
-1. Status badges (priority queue · version · source release)
-2. **Exact descriptor** from naming analysis  
-3. Lede: audience + lifecycle capabilities + “priority or eligibility, not append order”  
-4. CTAs: Get started · Why not a stream? · Examples  
-
-### Anti-hero (never)
-
-- “The priority queue for everyone”  
-- “Kafka alternative” as identity  
-- Botanical taglines without the descriptor  
-
-### Comparison copy
-
-Use **when / when not** tables (choosing-fireweed). Compare **primitives**, not
-vendors. The naming research forbids worker-pool and DAG framing; the choosing
-guide forbids stream-as-consumption-model confusion.
-
-### Code and examples
-
-- Real tests/examples only, with provenance  
-- “What this proves” in lifecycle language from §1 semantics  
-- No idealized snippets that hide construction or leases  
-
-### Footers (always-on honesty)
-
-- version + source release
-- crates.io / GHCR deferred (while true)  
-- issues welcome · code contributions not accepted  
-- MIT OR Apache-2.0  
-- link to this DESIGN.md  
-
-### Inclusive language
-
-- No gendered engineer defaults  
-- Status not color-only  
-- Clearance caveat: do not assert exclusive trademark rights in marketing  
+- **Hero:** badges (data-plane DSL · PostgreSQL 18 · source only), the
+  descriptor, a lede naming schema, program and executor, then CTAs (Get
+  started · Why Fireweed · Examples).
+- **Examples:** real documents from `docs/site/examples/src/`, shown unchanged,
+  each followed by what comes back. No idealized snippets.
+- **Footers:** status, issues welcome, code contributions not accepted,
+  `MIT OR Apache-2.0`, a link to API-008 and to this file.
+- **Inclusive language:** no gendered defaults; status never by color alone.
 
 ---
 
 ## 5. Visual design system
 
-### Mood (derived from name + product, not a generic SaaS kit)
+### Mood
 
 **Field notebook after the burn:** warm paper, sharp ink, measured grid—pioneer
-establishment, not startup purple. The product is recovery-minded infrastructure;
-the UI should feel **legible under stress**, not decorative.
+establishment, not startup purple. The product is infrastructure; the UI should
+feel **legible under stress**, not decorative.
 
 Fireweed-the-plant cues are **structural**, not illustrative:
 
@@ -339,19 +149,18 @@ Names match `assets/site.css`. Change this table and CSS together.
 **Badge surfaces:** `.ok` `#dcefe4` · `.warn` `#fff0d8` · `.blocked` `#fde2e2` ·
 `.neutral` `#ebe7dc`
 
-**Rules:** light theme canonical for v1; never status-by-color-alone; no second
+**Rules:** the light theme is canonical; never status-by-color-alone; no second
 accent family without revising this document and the naming mood section.
 
 ### Typography
 
 | Role | Stack | Why |
 |------|-------|-----|
-| UI / body | Aptos, Segoe UI, Liberation Sans, system-ui, sans-serif | Operator legibility |
+| UI / body | Aptos, Segoe UI, Liberation Sans, system-ui, sans-serif | Legibility |
 | Display / brand | Georgia, Times New Roman, serif | Editorial seriousness; durable “notebook” authority |
 | Code | SFMono, Consolas, Liberation Mono, Menlo, monospace | Specs and excerpts |
 
-Ergonomics from the naming scorecard: brand wordmark short (**Fireweed Queue**),
-not a long crafted phrase in the header.
+The header wordmark is the short name (**Fireweed**), not a crafted phrase.
 
 ### Layout & components
 
@@ -370,91 +179,58 @@ Canonical classes: `.badge`, `.card`, `.callout`, `table.data`, `.code-block`,
 
 ### Imagery
 
-- Topology SVG and tables over icon packs  
+- Tables and SVG diagrams over icon packs
 - **Branch Signal** is the canonical Fireweed mark: a central durable spine with
-  branching priority paths and sparse state nodes. Use the full SVG in the home
+  branching paths and sparse state nodes. Use the full SVG in the home
   hero and a simplified version in the header; never substitute a literal flower,
   leaf, flame, or mascot.
-- No stock photos, no generative mascots  
-- Diagrams reuse ink/panel/ok/warn fills  
+- No stock photos, no generative mascots
+- Diagrams reuse ink/panel/ok/warn fills
 
 ### Motion
 
-- None required; copy-button feedback only  
+- None required; copy-button feedback only
 - No carousels, parallax, autoplay  
 
 ### Accessibility
 
-- Ink-on-paper and panel-on-ink contrast  
-- Semantic landmarks; `aria-current`  
-- Horizontal scroll for code, not clipped content  
+- Ink-on-paper and panel-on-ink contrast
+- Semantic landmarks; `aria-current`
+- Horizontal scroll for code, not clipped content
 
 ---
 
 ## 6. Microsite application
 
-### IA voice map
-
 | Route | Must include | Must not |
 |-------|--------------|----------|
-| Home | Priority-queue descriptor, pillars, support honesty | Broker/DAG identity |
-| Why | Stream decision table | Vendor dunking |
-| Concepts | Lifecycle list from naming semantics | Full helix dump |
-| Get started | Source-clone path; deferred registries | Fake crates.io install |
-| Examples | Provenance to real tests | Idealized rewrite of product semantics |
-| API | Public `fireweed` only | Internal crates as SDKs |
-| Support | Support matrix | Silent overclaim |
-| Contribute | Issues-only | PR welcome |
+| Home | Descriptor, the two documents, executor status | Unsupported claims |
+| Why | What Fireweed holds and what stays outside it | Vendor comparisons |
+| Concepts | Shapes, leases, index rule, time, transactions | A copy of API-008 |
+| Get started | Clone, test against PostgreSQL 18, run from Rust | A crates.io install |
+| Examples | Documents from `examples/src/`, shown unchanged | Hand-edited excerpts |
+| Reference | Summary tables and a link to API-008 | Statements API-008 lacks |
+| Support | Status, test coverage, not-in-v1 list | Silent overclaim |
+| Contribute | Issues only; private security reports | "Open a PR" |
 
 ### Pipeline
 
-1. Naming / vision / support boundary (governing)
-2. **This DESIGN.md** (voice + visual)  
-3. `render_site.py` + example manifest  
-4. `site.css` tokens  
-5. Link + provenance gates  
-
-### Anti-patterns (compiled)
-
-- Omitting support status on entry pages
-- Using Queueyard/pqueue as current identity  
-- Spool/pool/yard/cairn metaphors  
-- Examples without provenance  
-- Glassmorphism / purple SaaS skin  
-- “Open a PR” / Discord-first community  
+1. ADR-027, API-008 and the crates (governing).
+2. This file (voice and visuals).
+3. `scripts/site/render_site.py`, the example manifest and
+   `docs/site/examples/src/`.
+4. `assets/site.css`.
+5. `scripts/ci/microsite-gate.sh`: links, example documents, rendered pages,
+   staging.
 
 ---
 
 ## 7. Quick copy checks
 
-1. **Name:** Fireweed Queue first; short Fireweed after; no historical-as-current  
-2. **Descriptor:** exact line on major entry surfaces  
-3. **Anti-positions:** not FIFO product, broker, pool, or DAG  
-4. **Status:** source release + version visible
-5. **Deferred:** crates.io / GHCR while deferred  
-6. **North star:** no lost work, no dual active claims, explicit final state  
-7. **Clearance:** no “trademark secured” language while caveat holds  
-8. **CTA:** issues, not code PRs  
-9. **Visual:** system tokens; labeled badges  
-10. **Examples:** provenance intact  
-
----
-
-## 8. Change control
-
-| Change | Requires |
-|--------|----------|
-| Tone tweak inside this voice | Ordinary review |
-| New public name or descriptor | Update naming analysis **first**, then this file |
-| New claim class / install path | Support boundary + this file |
-| Color / type / component family | §5 + `site.css` together |
-| Fallback rename to Taskcairn | Naming decision + full identity pass (out of band) |
-
-**Owner:** project maintainers  
-
-**Governing inputs:**  
-[name-and-positioning-analysis](../helix/00-discover/name-and-positioning-analysis.md) ·
-[product-vision](../helix/00-discover/product-vision.md) ·
-[public-preview-boundary](../helix/00-discover/public-preview-boundary.md) ·
-[choosing-fireweed](../helix/01-frame/guides/choosing-fireweed.md) ·
-[ADR-021](../helix/02-design/adr/ADR-021-open-source-license-and-contribution-policy.md)
+1. Name is Fireweed; descriptor on the home page.
+2. Every claim traces to ADR-027, API-008 or the crates.
+3. PostgreSQL 18 named as the first and currently only executor.
+4. No crates.io install path.
+5. Examples come from `docs/site/examples/src/` and pass the gate.
+6. Issues, not code pull requests.
+7. System tokens; labeled badges.

@@ -62,7 +62,7 @@ const SCREENSHOT_ROUTES = [
   { id: "concepts", path: "/concepts.html" },
   { id: "get-started", path: "/get-started.html" },
   { id: "examples", path: "/examples/" },
-  { id: "example-basic", path: "/examples/basic-lifecycle.html" },
+  { id: "example-queue", path: "/examples/queue-lifecycle.html" },
   { id: "api", path: "/api/" },
   { id: "api-rust", path: "/api/rust.html" },
   { id: "support", path: "/support.html" },
@@ -112,8 +112,8 @@ async function headOrGetOk(page, url) {
 }
 
 /**
- * Crawl only microsite HTML. Staged markdown/policy links are checked as leaves
- * (status only) so we do not walk the entire helix tree.
+ * Crawl only microsite HTML. Other same-origin links (YAML sources, DESIGN.md)
+ * are checked as leaves (status only).
  */
 async function crawlSite(page) {
   const start = siteUrl("/");
@@ -172,7 +172,7 @@ async function crawlSite(page) {
         continue;
       }
 
-      // Leaf assets / staged docs / policy files linked from the site
+      // Leaf assets and documents linked from the site
       if (leafChecked.has(n)) continue;
       leafChecked.add(n);
       const leaf = await headOrGetOk(page, bare);

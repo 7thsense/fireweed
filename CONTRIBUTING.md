@@ -1,6 +1,6 @@
-# Contributing to Fireweed Queue
+# Contributing to Fireweed
 
-Fireweed Queue is a maintainer-developed open-source project. We welcome
+Fireweed is a maintainer-developed open-source project. We welcome
 issues, but we do not accept pull requests, patches, or other code
 contributions.
 
@@ -22,7 +22,7 @@ not have permission to share.
 
 Unless you explicitly state otherwise, small original snippets or authorized
 reproduction snippets that you intentionally submit in an issue for possible
-incorporation into Fireweed Queue are offered under the repository's
+incorporation into Fireweed are offered under the repository's
 `MIT OR Apache-2.0` license, without additional terms or conditions.
 
 ## Code contributions are closed
@@ -37,8 +37,8 @@ No Contributor License Agreement (CLA) or Developer Certificate of Origin
 ## Questions and support
 
 Search the documentation and existing issues first. If they do not answer your
-question, open an issue with the Fireweed Queue version, the relevant storage
-backend, what you expected, and what happened. Support is provided on a
+question, open an issue with the Fireweed commit, the PostgreSQL version,
+what you expected, and what happened. Support is provided on a
 best-effort basis; maintainers do not guarantee a response or resolution time.
 
 See [SUPPORT.md](SUPPORT.md) for the support boundary. Follow

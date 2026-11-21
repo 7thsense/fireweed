@@ -1,0 +1,8 @@
+# Admission chunk 3 of run r1. A second admitter gets key_conflict.
+request_id: r1-chunk-3
+issued_at: 2026-11-16T09:31:00Z
+statements:
+  - insert:
+      into: chunks
+      rows: [{run: r1, chunk: 3, cursor: 0}]
+      on_conflict: reject
