@@ -17,7 +17,8 @@ ddx:
 
 ADR-027 and API-008 govern. Consumers declare queues and tables in a schema
 document and change them with programs of typed statements, one transaction
-each. An executor creates real tables and indexes and runs each statement as
+each. A schema can also be a UMF document with Fireweed's extension
+(API-009). An executor creates real tables and indexes and runs each statement as
 one SQL statement. PostgreSQL 18 is the first executor; the local engine
 follows.
 
@@ -62,5 +63,5 @@ space, one table per queue and table) and each statement's SQL.
 ## Decisions
 
 ADR-027 records the decision and the owner's rulings. Its open questions
-(PostgreSQL layout, cohorts, UMF schema documents, a narrow lease table, run
-retirement) are the remaining design work.
+(PostgreSQL layout, cohorts, a narrow lease table, run retirement) are the
+remaining design work; UMF schema documents are proposed in API-009.

@@ -102,7 +102,7 @@ The owner's statements of intent, in order:
 | D40 | Extract shared crates from weft and evolve weft's tooling with them. | Owner, 2026-11-16 | Done: DocumentDrivenDX/weft#70, merged. |
 | D41 | "This really shouldn't be much more than some sql to manipulate groups of rows in the database. If there are a bunch of in memory stores, caches, memos, or full table scans, the design is broken." | Owner, 2026-11-16 | Adopted (§4). |
 | D42 | "Fix them all", on the review findings, with claims ordered by due time and priority breaking ties, as recommended. | Owner, 2026-11-16 | Adopted (§3, §4, §5, §9). |
-| D43 | "Full UMF documents"; "there is no reason I can see that fireweed schemas shouldn't be UMF schemas"; "if we need umf improvements we should get them." | Owner, 2026-11-16 | Accepted, in progress (question 39). A space schema becomes a UMF core 0.10 document. Its physical tables are `umf.tables` (UMF CONTRACT-081), and the queue semantics go in a Fireweed extension. |
+| D43 | "Full UMF documents"; "there is no reason I can see that fireweed schemas shouldn't be UMF schemas"; "if we need umf improvements we should get them." | Owner, 2026-11-16 | Accepted; proposed in API-009 (question 39). A space schema can be a UMF core 0.10 document. Its physical tables are `umf.tables` (UMF CONTRACT-081), and the queue semantics are the Fireweed extension `fireweed.space`. |
 | D44 | "We should be targetting postgres 18." "The additional types and additions to umf tables should go straight to core." Asked whether the extension must live in UMF: it may live in Fireweed, registered through `umf-core`'s registry. | Owner, 2026-11-16 | Adopted. PostgreSQL 18 is the target, matching `umf.tables`' `postgresql18/0.1` profile, and the executor's tests run on PostgreSQL 18.7. The JSON value, string sets, `jsonb` and array columns, GIN, and partial and descending indexes go into UMF core and `umf.tables` (DocumentDrivenDX/umf#172, rewritten). |
 | D45 | "We need the counters in dragonfly because they need to be cross run, campaign, list, and everything else. They are universal per tenant." "just check dragonfly in real time, it's stupidly fast and selected for this purpose because of that property." | Owner, 2026-11-16 | Adopted: Fireweed holds no tenant-wide counters. Resolves question 5. |
 | D46 | "Dragonfly is part of the dataplane. That said, we should think about how to integrate it properly in the snorri model. It probably should be 'hidden' behind an effect handler." | Owner, 2026-11-16 | Snorri and Cayce design; outside Fireweed (D49). |
@@ -189,9 +189,9 @@ Then each statement lowers to a fixed SQL shape with bound parameters
 
 The schema's types (`text`, `int`, `float`, `bool`, `timestamp`, `json`,
 `text_set`) are a subset of UMF's scalar types. In v1 the schema is
-Fireweed's own small document. Reading UMF documents with the
-Fireweed extension (D34, D43, D44) comes later, as a loader that produces
-the same schema (question 39).
+Fireweed's own small document. It can also be written as a UMF document
+with the Fireweed extension (D34, D43, D44), which `fireweed-umf` loads
+into the same schema (API-009, question 39).
 
 ### 3. Spaces and shapes
 
@@ -676,14 +676,19 @@ contact-keyed inbound events) is resolved by D59: they go to Niflheim.
 38. **Time ordering.** Request time isn't ordered across conflicting
     programs (§7). Draft: accept, since tokens
     fence leases.
-39. **UMF schema documents.** v1 schemas are Fireweed's own small document,
-    with UMF's scalar types (§2). Draft: add a loader from a UMF document
-    with Fireweed's extension (D34, D43, D44) once a consumer keeps its
-    schemas in UMF.
+39. **UMF schema documents.** Proposed in API-009. A space schema can be a
+    UMF core 0.10 document: core Records and Fields, `umf.tables` for the
+    physical tables, and Fireweed's `fireweed.space` extension, registered
+    through `umf-codegen`'s registry (D34, D43, D44). `fireweed-umf` exports
+    a schema to its canonical document and loads a document back. A loaded
+    document must be canonical, so its `umf.tables` declaration always
+    describes the executor's tables. A PostgreSQL 18 test shows UMF's DDL
+    and the executor's create the same catalog. The executor still installs
+    its own DDL, and Fireweed's own document stays accepted.
     - **Where index choices live.** UMF keeps them out of the logical field,
-      in a physical binding (CONTRACT-042), and the loader takes them from
-      there into `index: true`. Fireweed's own document keeps `index` on
-      the field.
+      in the `umf.tables` declaration, and the loader takes them from there
+      into `index: true`. Fireweed's own document keeps `index` on the
+      field.
     - **weft.** Its shared crates have no `json` or set types, and no `not`,
       `in` or `contains`, so v1 doesn't use them. Its PostgreSQL identifier
       and parameter helpers (`weft-postgresql-emit`) fit. weft#71 set up
