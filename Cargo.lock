@@ -783,7 +783,7 @@ checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
 [[package]]
 name = "saphyr-parser"
 version = "0.1.0"
-source = "git+https://github.com/DocumentDrivenDX/umf?rev=0b2ca30e479ddcb50c9b43db71458a837769c41a#0b2ca30e479ddcb50c9b43db71458a837769c41a"
+source = "git+https://github.com/DocumentDrivenDX/umf?rev=321d759c77a05b7e4d21e31f10ffc3840d4ff538#321d759c77a05b7e4d21e31f10ffc3840d4ff538"
 dependencies = [
  "arraydeque",
  "thiserror",
@@ -1057,7 +1057,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 [[package]]
 name = "umf-codegen"
 version = "0.10.13"
-source = "git+https://github.com/DocumentDrivenDX/umf?rev=0b2ca30e479ddcb50c9b43db71458a837769c41a#0b2ca30e479ddcb50c9b43db71458a837769c41a"
+source = "git+https://github.com/DocumentDrivenDX/umf?rev=321d759c77a05b7e4d21e31f10ffc3840d4ff538#321d759c77a05b7e4d21e31f10ffc3840d4ff538"
 dependencies = [
  "num-bigint",
  "sha2 0.10.9",
@@ -1067,7 +1067,7 @@ dependencies = [
 [[package]]
 name = "umf-core"
 version = "0.10.13"
-source = "git+https://github.com/DocumentDrivenDX/umf?rev=0b2ca30e479ddcb50c9b43db71458a837769c41a#0b2ca30e479ddcb50c9b43db71458a837769c41a"
+source = "git+https://github.com/DocumentDrivenDX/umf?rev=321d759c77a05b7e4d21e31f10ffc3840d4ff538#321d759c77a05b7e4d21e31f10ffc3840d4ff538"
 dependencies = [
  "base64",
  "num-bigint",

@@ -15,8 +15,8 @@ sha2 = "0.11"
 # support Fireweed needs isn't in a crates.io release yet. Default features
 # are off: tables need none of umf-core's embedded adapters (JSON-LD, RDF),
 # whose dependencies deny.toml rejects.
-umf-core = { git = "https://github.com/DocumentDrivenDX/umf", rev = "0b2ca30e479ddcb50c9b43db71458a837769c41a", default-features = false, features = ["full-core"] }
-umf-codegen = { git = "https://github.com/DocumentDrivenDX/umf", rev = "0b2ca30e479ddcb50c9b43db71458a837769c41a", default-features = false }
+umf-core = { git = "https://github.com/DocumentDrivenDX/umf", rev = "321d759c77a05b7e4d21e31f10ffc3840d4ff538", default-features = false, features = ["full-core"] }
+umf-codegen = { git = "https://github.com/DocumentDrivenDX/umf", rev = "321d759c77a05b7e4d21e31f10ffc3840d4ff538", default-features = false }
 
 [dev-dependencies]
 fireweed-dsl-postgres = { path = "../fireweed-dsl-postgres" }
